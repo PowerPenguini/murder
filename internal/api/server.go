@@ -81,6 +81,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tenants/{name}/resume", s.suspend(false))
 	mux.HandleFunc("POST /v1/tenants/{name}/archive", s.archive)
 	mux.HandleFunc("GET /v1/tenants/{name}/secrets/{key}", s.secret)
+	mux.HandleFunc("POST /v1/tenants/{name}/secrets/{key}/rotate", s.rotate)
 	mux.HandleFunc("GET /v1/tenants/{name}/logs", s.logs)
 	mux.HandleFunc("GET /v1/archive", s.listArchived)
 	mux.HandleFunc("POST /v1/archive/{name}/restore", s.restore)
@@ -198,7 +199,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	// with the check for leftover data.
 	err = s.reconciler.Exclusive(func() error {
 		if err := r.Context().Err(); err != nil {
-			return fmt.Errorf("the client gave up while waiting; nothing was created: %w", err)
+			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err))
 		}
 		if _, err := s.store.Get(tenant.Name); err == nil {
 			return store.ErrExists
@@ -261,7 +262,7 @@ func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 	}
 	record, err := s.store.Update(name, func(record *store.Record) error {
 		if err := r.Context().Err(); err != nil {
-			return fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)
+			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err))
 		}
 		sealed, err := s.sealMissing(tenant, record.Sealed)
 		if err != nil {
@@ -394,6 +395,38 @@ func (s *Server) secret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, SecretValue{Value: value})
 }
 
+// rotate gives one secret of the spec a new value; the container is
+// replaced with it. Values are otherwise generated once and kept, even when
+// a secret leaves the spec and comes back.
+func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
+	name, key := r.PathValue("name"), r.PathValue("key")
+	record, err := s.store.Update(name, func(record *store.Record) error {
+		secret, ok := record.Spec.Secrets[key]
+		if !ok {
+			return notFound(fmt.Errorf("tenant %s has no secret %s in its spec", name, key))
+		}
+		plain, err := secrets.Generate(secret)
+		if err != nil {
+			return err
+		}
+		sealed, err := s.key.Seal(secrets.Context(name, key), plain)
+		if err != nil {
+			return err
+		}
+		if record.Sealed == nil {
+			record.Sealed = map[string]string{}
+		}
+		record.Sealed[key] = sealed
+		return nil
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.log.Info("secret rotated", "tenant", name, "secret", key, "generation", record.Generation)
+	writeJSON(w, http.StatusOK, s.view(record))
+}
+
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if _, err := s.store.Get(name); err != nil {
@@ -456,6 +489,10 @@ func (e statusError) Unwrap() error { return e.err }
 
 func badRequest(err error) error { return statusError{http.StatusBadRequest, err} }
 func notFound(err error) error   { return statusError{http.StatusNotFound, err} }
+
+// clientGone marks work refused because the client disconnected: nginx's 499,
+// not a server failure.
+func clientGone(err error) error { return statusError{499, err} }
 
 type errorBody struct {
 	Error string `json:"error"`

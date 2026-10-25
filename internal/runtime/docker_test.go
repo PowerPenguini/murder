@@ -62,6 +62,10 @@ func TestImagePresenceAndPull(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires authentication") {
 		t.Fatalf("a pull whose stream reports an error = %v", err)
 	}
+	// A tag next to the digest is only a label; the digest is pulled.
+	if err := docker.PullImage(ctx, "ghcr.io/x/app:1.4@sha256:abc"); err == nil || !strings.Contains(err.Error(), "requires authentication") {
+		t.Fatalf("repo:tag@digest = %v", err)
+	}
 	if err := docker.PullImage(ctx, "ghcr.io/x/app:latest"); err == nil {
 		t.Fatal("pulled a mutable tag")
 	}

@@ -15,8 +15,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/PowerPenguini/corral/internal/api"
+	"github.com/PowerPenguini/corral/internal/reconcile"
 	"github.com/PowerPenguini/corral/internal/spec"
 )
 
@@ -68,6 +70,11 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.tenants[tenant.Name] = tenant
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(api.Applied{Tenant: api.Tenant{Spec: tenant}, Changed: true})
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tenants/"):
+		// "slow" never becomes healthy; everything else already is.
+		name := strings.TrimPrefix(r.URL.Path, "/v1/tenants/")
+		status := &reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: name != "slow", Message: "health check: HTTP 500", CheckedAt: time.Now()}
+		_ = json.NewEncoder(w).Encode(api.Tenant{Spec: a.tenants[name], Status: status})
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/tenants/"):
 		var tenant spec.Tenant
 		_ = json.NewDecoder(r.Body).Decode(&tenant)
@@ -140,6 +147,44 @@ tenants:
 	}
 	if fresh, ok := agent.tenants["fresh"]; !ok || fresh.Image != pin("app:1") {
 		t.Fatalf("fresh tenant = %+v, %v", fresh, ok)
+	}
+}
+
+// One unhealthy tenant fails the apply but does not use up the wait of the
+// others, and unchanged tenants are waited for too.
+func TestApplyWaitsForEveryTenantSideBySide(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "agent.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &fakeAgent{tenants: map[string]spec.Tenant{
+		"slow": spec.Tenant{Name: "slow", Image: pin("app:1"), User: "1:1"}.WithDefaults(),
+	}}
+	server := &http.Server{Handler: agent}
+	go server.Serve(listener)
+	defer server.Close()
+	fleetFile := filepath.Join(dir, "fleet.yaml")
+	if err := os.WriteFile(fleetFile, []byte(`
+apps:
+  app: {image: "app:1", user: "1:1"}
+tenants:
+  slow: {app: app}
+  a: {app: app}
+  b: {app: app}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	stdout = &out
+	defer func() { stdout = os.Stdout }()
+	err = runApply([]string{fleetFile, "-socket", socket, "-wait", "2s"})
+	if err == nil || !strings.Contains(err.Error(), "1 problem(s)") || !strings.Contains(err.Error(), "slow did not become healthy within 2s: health check: HTTP 500") {
+		t.Fatalf("apply = %v", err)
+	}
+	if !strings.Contains(out.String(), "a is healthy") || !strings.Contains(out.String(), "b is healthy") {
+		t.Fatalf("output:\n%s", out.String())
 	}
 }
 

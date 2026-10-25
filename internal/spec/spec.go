@@ -174,6 +174,7 @@ const maxNameLength = 40
 const repositoryName = `(?:` + registryHost + `/)?` + pathComponent + `(?:/` + pathComponent + `)*`
 
 const (
+	imageTag      = `:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`
 	pathComponent = `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*`
 	hostComponent = `(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])`
 	registryHost  = `(?:(?:` + hostComponent + `(?:\.` + hostComponent + `)+|localhost)(?::[0-9]+)?|` + hostComponent + `:[0-9]+)`
@@ -184,9 +185,9 @@ var (
 	envPattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	userPattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,9})$`)
 	maxID       = int64(1)<<31 - 1
-	digestRef   = regexp.MustCompile(`^` + repositoryName + `@sha256:[a-f0-9]{64}$`)
+	digestRef   = regexp.MustCompile(`^` + repositoryName + `(?:` + imageTag + `)?@sha256:[a-f0-9]{64}$`)
 	imageID     = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
-	tagRef      = regexp.MustCompile(`^` + repositoryName + `(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$`)
+	tagRef      = regexp.MustCompile(`^` + repositoryName + `(?:` + imageTag + `)?$`)
 	placeholder = regexp.MustCompile(`\{\{[^}]*\}\}`)
 	knownHolder = map[string]bool{"{{name}}": true, "{{host}}": true, "{{url}}": true, "{{network}}": true}
 	reserved    = map[string]bool{"www": true, "api": true, "admin": true, "corral": true, "mail": true}

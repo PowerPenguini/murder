@@ -32,7 +32,12 @@ func Decode(data []byte, out any) error {
 // decoder's strictness. Aliases are expanded first, so anchors defined
 // elsewhere in the file still resolve.
 func DecodeNode(node *yaml.Node, out any) error {
-	encoded, err := yaml.Marshal(expand(node))
+	budget := maxNodes
+	expanded, err := expand(node, map[*yaml.Node]bool{}, &budget)
+	if err != nil {
+		return err
+	}
+	encoded, err := yaml.Marshal(expanded)
 	if err != nil {
 		return err
 	}
@@ -41,17 +46,33 @@ func DecodeNode(node *yaml.Node, out any) error {
 	return decoder.Decode(out)
 }
 
+// maxNodes bounds alias expansion, so a few nested aliases cannot expand
+// into gigabytes.
+const maxNodes = 100_000
+
 // expand returns a copy of node with every alias replaced by what it refers
-// to and no anchors left.
-func expand(node *yaml.Node) *yaml.Node {
+// to and no anchors left. An alias to an enclosing node is an error.
+func expand(node *yaml.Node, enclosing map[*yaml.Node]bool, budget *int) (*yaml.Node, error) {
 	for node.Kind == yaml.AliasNode {
 		node = node.Alias
 	}
+	if enclosing[node] {
+		return nil, errors.New("an alias refers to a node that contains it")
+	}
+	if *budget--; *budget < 0 {
+		return nil, errors.New("aliases expand to too large a document")
+	}
+	enclosing[node] = true
+	defer delete(enclosing, node)
 	copied := *node
 	copied.Anchor = ""
 	copied.Content = make([]*yaml.Node, len(node.Content))
 	for i, child := range node.Content {
-		copied.Content[i] = expand(child)
+		expandedChild, err := expand(child, enclosing, budget)
+		if err != nil {
+			return nil, err
+		}
+		copied.Content[i] = expandedChild
 	}
-	return &copied
+	return &copied, nil
 }

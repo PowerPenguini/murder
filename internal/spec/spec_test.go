@@ -138,7 +138,7 @@ func TestUserMustBeNumericAndNotRoot(t *testing.T) {
 
 func TestImageReferences(t *testing.T) {
 	for _, ref := range []string{"nginx", "nginx:1.27", "ghcr.io/org/app:v1.4.2", "registry.local:5000/team/app", "ghcr.io/org/app@" + digest, digest,
-		"ghcr.io/org/my__app:1", "ghcr.io/org/my--app:1", "Registry.Example.com/app:1", "localhost/app", "registry:5000/app:1", "localhost:5000/app@" + digest} {
+		"ghcr.io/org/my__app:1", "ghcr.io/org/my--app:1", "Registry.Example.com/app:1", "localhost/app", "registry:5000/app:1", "localhost:5000/app@" + digest, "nginx:1.27@" + digest} {
 		if err := ValidReference(ref); err != nil {
 			t.Errorf("ValidReference(%q) = %v", ref, err)
 		}
@@ -149,7 +149,7 @@ func TestImageReferences(t *testing.T) {
 			t.Errorf("ValidReference(%q) accepted", ref)
 		}
 	}
-	if Pinned("nginx:1.27") || !Pinned(digest) || !Pinned("nginx@"+digest) {
+	if Pinned("nginx:1.27") || !Pinned(digest) || !Pinned("nginx@"+digest) || !Pinned("nginx:1.27@"+digest) {
 		t.Fatal("Pinned misjudges references")
 	}
 }

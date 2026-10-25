@@ -155,6 +155,12 @@ func (c *Client) Secret(ctx context.Context, name, key string) (string, error) {
 	return secret.Value, err
 }
 
+// Rotate gives one of a tenant's secrets a new value.
+func (c *Client) Rotate(ctx context.Context, name, key string) (Tenant, error) {
+	var tenant Tenant
+	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+"/secrets/"+url.PathEscape(key)+"/rotate", nil, &tenant)
+}
+
 func (c *Client) Logs(ctx context.Context, name string, tail int) ([]byte, error) {
 	var output []byte
 	return output, c.do(ctx, http.MethodGet, tenantPath(name)+"/logs?tail="+strconv.Itoa(tail), nil, &output)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -28,14 +29,27 @@ const tenantUsage = `Usage: corral tenant <command> [options]
   restore NAME           bring an archived tenant back as it was
   purge NAME -yes        delete an archived tenant and its data for good
   secret NAME KEY        print one generated secret
+  rotate NAME KEY        give a secret a new value (the container restarts)
   logs NAME [-tail N]    print the container's recent output
 
 Tenants are created and changed with "corral apply FLEET.yaml".
 Every command accepts -socket (default $CORRAL_SOCKET or /run/corral/agent.sock).
-resume and restore accept -wait to block until the tenant is healthy.
+resume, restore and rotate accept -wait to block until the tenant is healthy.
 `
 
 var stdout io.Writer = os.Stdout
+
+// lockedWriter lets tenants that are waited for side by side report.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
 
 func socketPath(flags *flag.FlagSet) *string {
 	fallback := os.Getenv("CORRAL_SOCKET")
@@ -162,11 +176,20 @@ func runApply(args []string) error {
 	}
 	// Every applied tenant is waited for, not only changed ones: a retry
 	// after a failed rollout must not pass while the tenant is unhealthy.
+	// They are watched side by side, so a slow one cannot use up the time
+	// of the others.
 	if *wait > 0 {
 		waitCtx, cancel := context.WithTimeout(ctx, *wait)
 		defer cancel()
-		for _, tenant := range applied {
-			if err := waitFor(waitCtx, client, tenant, *wait); err != nil {
+		results := make([]error, len(applied))
+		out := &lockedWriter{w: stdout}
+		var group sync.WaitGroup
+		for i, tenant := range applied {
+			group.Go(func() { results[i] = waitFor(waitCtx, client, tenant, *wait, out) })
+		}
+		group.Wait()
+		for _, err := range results {
+			if err != nil {
 				failures = append(failures, err.Error())
 			}
 		}
@@ -288,6 +311,16 @@ func runTenant(args []string) error {
 		}
 		fmt.Fprintln(stdout, value)
 		return nil
+	case "rotate":
+		if err := need(2); err != nil {
+			return err
+		}
+		result, err := client.Rotate(ctx, positional[0], positional[1])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s %s rotated; the container restarts with the new value\n", positional[0], positional[1])
+		return waitHealthy(ctx, client, result, *wait)
 	case "logs":
 		if err := need(1); err != nil {
 			return err
@@ -328,13 +361,13 @@ func waitHealthy(ctx context.Context, client *api.Client, tenant api.Tenant, tim
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return waitFor(ctx, client, tenant, timeout)
+	return waitFor(ctx, client, tenant, timeout, stdout)
 }
 
 // waitFor polls until the agent reports the tenant's current generation
 // running and healthy, or suspended (there is nothing more to wait for), or
 // failed, or ctx ends. timeout only labels the error.
-func waitFor(ctx context.Context, client *api.Client, tenant api.Tenant, timeout time.Duration) error {
+func waitFor(ctx context.Context, client *api.Client, tenant api.Tenant, timeout time.Duration, out io.Writer) error {
 	last := ""
 	for {
 		current, err := client.Get(ctx, tenant.Spec.Name)
@@ -349,10 +382,10 @@ func waitFor(ctx context.Context, client *api.Client, tenant api.Tenant, timeout
 		if status := current.Status; status != nil && status.Generation >= tenant.Generation && status.CheckedAt.After(tenant.UpdatedAt) {
 			switch {
 			case status.Phase == reconcile.PhaseRunning && status.Healthy:
-				fmt.Fprintf(stdout, "%s is healthy\n", tenant.Spec.Name)
+				fmt.Fprintf(out, "%s is healthy\n", tenant.Spec.Name)
 				return nil
 			case status.Phase == reconcile.PhaseSuspended:
-				fmt.Fprintf(stdout, "%s is suspended\n", tenant.Spec.Name)
+				fmt.Fprintf(out, "%s is suspended\n", tenant.Spec.Name)
 				return nil
 			case status.Phase == reconcile.PhaseFailed:
 				return fmt.Errorf("%s failed: %s", tenant.Spec.Name, status.Message)

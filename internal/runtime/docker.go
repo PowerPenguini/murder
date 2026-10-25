@@ -175,6 +175,8 @@ func (d *Docker) PullImage(ctx context.Context, ref string) error {
 	if !ok {
 		return fmt.Errorf("pull %s: only digest-pinned references can be pulled; a local image ID must already be present", ref)
 	}
+	// In repo:tag@digest the digest decides; the tag is only a label.
+	repository, _ = splitTag(repository)
 	return d.pull(ctx, repository, digest)
 }
 
@@ -248,7 +250,7 @@ func (d *Docker) Resolve(ctx context.Context, ref string) (string, string, error
 // docker.io/library/postgres and index.docker.io/library/postgres are
 // postgres.
 func familiar(repository string) string {
-	for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
+	for _, prefix := range []string{"docker.io/", "index.docker.io/"} {
 		if rest, ok := strings.CutPrefix(repository, prefix); ok {
 			repository = rest
 			break

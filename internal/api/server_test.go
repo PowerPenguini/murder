@@ -301,6 +301,17 @@ func TestReplaceKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
 	if again, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); err != nil || again != password {
 		t.Fatalf("a secret removed and added back changed its value: %v", err)
 	}
+	// Rotation is the way to a new value, and it rolls the container.
+	rotated, err := f.client.Rotate(ctx, "acme", "ADMIN_PASSWORD")
+	if err != nil || rotated.Generation <= replaced.Tenant.Generation {
+		t.Fatalf("rotate = %+v, %v", rotated, err)
+	}
+	if fresh, _ := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); fresh == password || len(fresh) != 20 {
+		t.Fatal("rotate kept the old value")
+	}
+	if _, err := f.client.Rotate(ctx, "acme", "NOT_IN_SPEC"); !IsNotFound(err) {
+		t.Fatalf("rotating a secret outside the spec = %v", err)
+	}
 	// A new tag means a new pinned image.
 	upgraded := appSpec("acme")
 	upgraded.Image = "ghcr.io/example/app:1.5"

@@ -73,11 +73,12 @@ corral apply fleet.yaml -wait 3m     # create missing tenants, update changed on
 `apply` checks the whole file before it changes anything, pins each image
 once, and reports each tenant as created, updated or unchanged. It never
 removes a tenant: one that is missing from the file is only reported. An
-archived tenant listed in the file has to be restored first. Secrets removed
-from a spec keep their values until a purge, so a mistaken edit cannot lose
-them. `-wait` is one budget for the whole fleet; it waits for every tenant in
-the file, so a retry after a failed rollout fails until the tenants are
-healthy.
+archived tenant listed in the file has to be restored first. A secret's value
+is generated once and kept, even if the secret leaves the spec and comes
+back, so a mistaken edit cannot lose it; `corral tenant rotate` gives it a
+new value. `-wait` is one budget for the whole fleet. It watches every
+tenant in the file side by side, so a retry after a failed rollout fails
+until the tenants are healthy.
 
 An app spec needs only an image and a user; everything else has a default:
 
@@ -116,6 +117,7 @@ Day-to-day operations:
 corral tenant list                      # state, health, image, URL
 corral tenant show acme
 corral tenant secret acme ADMIN_PASSWORD
+corral tenant rotate acme ADMIN_PASSWORD -wait 3m   # new value; the container restarts
 corral tenant logs acme -tail 100
 corral tenant suspend acme              # stop it, keep its address (visitors get 503)
 corral tenant resume acme -wait 3m
