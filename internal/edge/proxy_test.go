@@ -45,6 +45,11 @@ func TestProxyRoutesAndForwardsHeaders(t *testing.T) {
 		w.Header().Set("X-Seen-Host", r.Host)
 		w.Header().Set("X-Seen-For", r.Header.Get("X-Forwarded-For"))
 		w.Header().Set("X-Seen-Proto", r.Header.Get("X-Forwarded-Proto"))
+		for name := range r.Header {
+			if r.Header.Get(name) == "spoofed" {
+				w.Header().Add("X-Leaked", name)
+			}
+		}
 		_, _ = io.WriteString(w, "hello from "+r.URL.Path)
 	}))
 	defer backend.Close()
@@ -59,6 +64,9 @@ func TestProxyRoutesAndForwardsHeaders(t *testing.T) {
 	request, _ := http.NewRequest(http.MethodGet, proxy.URL+"/api/me", nil)
 	request.Host = "acme.example.com"
 	request.Header.Set("X-Forwarded-For", "6.6.6.6")
+	for _, name := range spoofable {
+		request.Header.Set(name, "spoofed")
+	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +78,9 @@ func TestProxyRoutesAndForwardsHeaders(t *testing.T) {
 	}
 	if response.Header.Get("X-Seen-Host") != "acme.example.com" || response.Header.Get("X-Seen-Proto") != "http" {
 		t.Errorf("backend saw host %q proto %q", response.Header.Get("X-Seen-Host"), response.Header.Get("X-Seen-Proto"))
+	}
+	if leaked := response.Header.Values("X-Leaked"); len(leaked) > 0 {
+		t.Errorf("client-sent proxy headers reached the app: %v", leaked)
 	}
 	if seen := response.Header.Get("X-Seen-For"); seen != "127.0.0.1" {
 		t.Errorf("backend saw X-Forwarded-For %q; a client-supplied value must be replaced", seen)
@@ -127,8 +138,15 @@ func TestProxyStreamsEvents(t *testing.T) {
 }
 
 func TestRedirectToHTTPS(t *testing.T) {
-	handler := NewProxy("example.com", nil, quietLog()).RedirectToHTTPS()
+	ready := false
+	handler := NewProxy("example.com", nil, quietLog()).RedirectToHTTPS(func() bool { return ready })
 	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://acme.example.com/login", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("before HTTPS is ready = %d, want 503 rather than a redirect to a closed port", recorder.Code)
+	}
+	ready = true
+	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://acme.example.com:80/login?next=%2F", nil))
 	if recorder.Code != http.StatusPermanentRedirect || recorder.Header().Get("Location") != "https://acme.example.com/login?next=%2F" {
 		t.Fatalf("redirect = %d %q", recorder.Code, recorder.Header().Get("Location"))

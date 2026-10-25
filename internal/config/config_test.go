@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,9 @@ func TestParseFillsDefaults(t *testing.T) {
 	}
 	if agent.Scheme() != "http" {
 		t.Fatalf("scheme with TLS off = %q", agent.Scheme())
+	}
+	if host, _ := os.Hostname(); agent.Node != host || agent.NetworkPool != "10.240.0.0/16" {
+		t.Fatalf("node = %q, pool = %q", agent.Node, agent.NetworkPool)
 	}
 }
 
@@ -47,6 +51,10 @@ func TestParseRejectsBadConfig(t *testing.T) {
 		"acme partial":  "baseDomain: example.com\nedge: {tls: {mode: acme}}\n",
 		"interval":      "baseDomain: example.com\nreconcileInterval: 10ms\n",
 		"duration":      "baseDomain: example.com\nreconcileInterval: soon\n",
+		"pool":          "baseDomain: example.com\nnetworkPool: 10.0.0.0/28\n",
+		"node":          "baseDomain: example.com\nnode: \"a b\"\n",
+		"dns provider":  "baseDomain: example.com\nedge: {tls: {mode: acme, email: a@b.c, dnsTokenFile: /t, dnsProvider: cloudflare}}\n",
+		"tls storage":   "baseDomain: example.com\nedge: {tls: {mode: internal, storage: \"\"}}\n",
 	} {
 		if _, err := Parse([]byte(document)); err == nil {
 			t.Errorf("%s: accepted", name)

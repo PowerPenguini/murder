@@ -18,11 +18,18 @@ import (
 // ErrSnapshotsUnsupported is returned by drivers that cannot snapshot.
 var ErrSnapshotsUnsupported = errors.New("volume driver does not support snapshots")
 
-// Volumes manages tenant data directories.
+// Volumes manages tenant data directories. The directories above them are
+// private to root, so no host user can reach into a tenant's data; a setuid
+// file a tenant writes there is useless to them.
 type Volumes interface {
 	// Ensure creates the tenant's data directory if needed, owned by uid:gid,
-	// and returns its host path.
-	Ensure(ctx context.Context, tenant string, uid, gid int) (string, error)
+	// and returns its host path. mounted reports that the data had to be
+	// mounted just now, so a container started earlier sees the empty
+	// directory underneath and must be recreated.
+	Ensure(ctx context.Context, tenant string, uid, gid int) (path string, mounted bool, err error)
+	// Exists reports whether the tenant has data, for example left behind by
+	// a deleted tenant of the same name.
+	Exists(ctx context.Context, tenant string) (bool, error)
 	// Snapshot records the data as it is now and returns the snapshot name.
 	Snapshot(ctx context.Context, tenant, reason string) (string, error)
 	// Remove deletes the tenant's data and snapshots.
@@ -38,18 +45,29 @@ type Dir struct {
 
 func (d Dir) path(tenant string) string { return filepath.Join(d.Root, tenant) }
 
-func (d Dir) Ensure(_ context.Context, tenant string, uid, gid int) (string, error) {
+func (d Dir) Ensure(_ context.Context, tenant string, uid, gid int) (string, bool, error) {
 	if err := checkTenant(tenant); err != nil {
-		return "", err
+		return "", false, err
 	}
-	if err := os.MkdirAll(d.Root, 0o711); err != nil {
-		return "", err
+	if err := privateDir(d.Root); err != nil {
+		return "", false, err
 	}
 	path := d.path(tenant)
 	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return "", err
+		return "", false, err
 	}
-	return path, chownIfNeeded(path, uid, gid)
+	return path, false, chownIfNeeded(path, uid, gid)
+}
+
+func (d Dir) Exists(_ context.Context, tenant string) (bool, error) {
+	if err := checkTenant(tenant); err != nil {
+		return false, err
+	}
+	_, err := os.Stat(d.path(tenant))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (d Dir) Snapshot(context.Context, string, string) (string, error) {
@@ -61,6 +79,14 @@ func (d Dir) Remove(_ context.Context, tenant string) error {
 		return err
 	}
 	return os.RemoveAll(d.path(tenant))
+}
+
+// privateDir creates dir if needed and makes it accessible to its owner only.
+func privateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(dir, 0o700)
 }
 
 // chownIfNeeded hands the directory root to the app's user. Only the
@@ -82,14 +108,20 @@ func chownIfNeeded(path string, uid, gid int) error {
 // Runner runs a command and returns its combined output.
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
-// Exec runs commands on the host.
+// Exec runs commands on the host, giving each at most five minutes.
 func Exec(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	output, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
 		return output, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return output, nil
 }
+
+// ownerProperty marks datasets Corral created; Corral never touches a
+// dataset without it, even below its own parent.
+const ownerProperty = "io.corral:tenant"
 
 // ZFS keeps each tenant in a dataset below Parent, mounted below MountRoot.
 type ZFS struct {
@@ -108,46 +140,76 @@ func (z ZFS) now() time.Time {
 	return time.Now()
 }
 
-func (z ZFS) exists(ctx context.Context, dataset string) (bool, error) {
-	output, err := z.Run(ctx, "zfs", "list", "-H", "-o", "name", dataset)
-	if err == nil {
-		return true, nil
+// properties returns the dataset's owner, mounted state and mountpoint, or
+// ok=false if the dataset does not exist.
+func (z ZFS) properties(ctx context.Context, dataset string) (owner, mounted, mountpoint string, ok bool, err error) {
+	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", ownerProperty+",mounted,mountpoint", dataset)
+	if err != nil {
+		if strings.Contains(string(output), "does not exist") {
+			return "", "", "", false, nil
+		}
+		return "", "", "", false, err
 	}
-	if strings.Contains(string(output), "does not exist") {
-		return false, nil
+	values := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
+	if len(values) != 3 {
+		return "", "", "", false, fmt.Errorf("zfs get %s: unexpected output %q", dataset, output)
 	}
-	return false, err
+	return values[0], values[1], values[2], true, nil
 }
 
-func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid int) (string, error) {
+// owned checks that dataset was made by Corral for tenant and is mounted
+// where Corral expects; anything else is refused rather than used.
+func (z ZFS) owned(tenant, owner, mountpoint string) error {
+	want := filepath.Join(z.MountRoot, tenant)
+	if owner != tenant {
+		return fmt.Errorf("dataset %s was not created by corral for tenant %s (%s=%q)", z.dataset(tenant), tenant, ownerProperty, owner)
+	}
+	if mountpoint != want {
+		return fmt.Errorf("dataset %s is mounted at %s, want %s", z.dataset(tenant), mountpoint, want)
+	}
+	return nil
+}
+
+func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid int) (string, bool, error) {
 	if err := checkTenant(tenant); err != nil {
-		return "", err
+		return "", false, err
+	}
+	if err := privateDir(z.MountRoot); err != nil {
+		return "", false, err
 	}
 	dataset := z.dataset(tenant)
 	mountpoint := filepath.Join(z.MountRoot, tenant)
-	exists, err := z.exists(ctx, dataset)
+	owner, mounted, current, exists, err := z.properties(ctx, dataset)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if !exists {
-		if _, err := z.Run(ctx, "zfs", "create", "-p", "-o", "mountpoint="+mountpoint, dataset); err != nil {
-			return "", err
+		if _, err := z.Run(ctx, "zfs", "create", "-p",
+			"-o", "mountpoint="+mountpoint, "-o", "setuid=off", "-o", "devices=off",
+			"-o", ownerProperty+"="+tenant, dataset); err != nil {
+			return "", false, err
 		}
+		return mountpoint, false, chownIfNeeded(mountpoint, uid, gid)
 	}
-	mounted, err := z.Run(ctx, "zfs", "get", "-H", "-o", "value", "mounted,mountpoint", dataset)
-	if err != nil {
-		return "", err
+	if err := z.owned(tenant, owner, current); err != nil {
+		return "", false, err
 	}
-	values := strings.Fields(string(mounted))
-	if len(values) != 2 || values[1] != mountpoint {
-		return "", fmt.Errorf("dataset %s is mounted at %v, want %s", dataset, values, mountpoint)
-	}
-	if values[0] != "yes" {
+	mountedNow := false
+	if mounted != "yes" {
 		if _, err := z.Run(ctx, "zfs", "mount", dataset); err != nil {
-			return "", err
+			return "", false, err
 		}
+		mountedNow = true
 	}
-	return mountpoint, chownIfNeeded(mountpoint, uid, gid)
+	return mountpoint, mountedNow, chownIfNeeded(mountpoint, uid, gid)
+}
+
+func (z ZFS) Exists(ctx context.Context, tenant string) (bool, error) {
+	if err := checkTenant(tenant); err != nil {
+		return false, err
+	}
+	_, _, _, exists, err := z.properties(ctx, z.dataset(tenant))
+	return exists, err
 }
 
 // Snapshot names snapshots "corral-<reason>-<UTC time>" so they sort by time.
@@ -177,15 +239,19 @@ func snapshotReason(reason string) bool {
 	return true
 }
 
+// Remove destroys the tenant's dataset only if Corral created it for this
+// tenant and it is mounted where Corral put it.
 func (z ZFS) Remove(ctx context.Context, tenant string) error {
 	if err := checkTenant(tenant); err != nil {
 		return err
 	}
-	dataset := z.dataset(tenant)
-	exists, err := z.exists(ctx, dataset)
+	owner, _, mountpoint, exists, err := z.properties(ctx, z.dataset(tenant))
 	if err != nil || !exists {
 		return err
 	}
-	_, err = z.Run(ctx, "zfs", "destroy", "-r", dataset)
+	if err := z.owned(tenant, owner, mountpoint); err != nil {
+		return err
+	}
+	_, err = z.Run(ctx, "zfs", "destroy", "-r", z.dataset(tenant))
 	return err
 }

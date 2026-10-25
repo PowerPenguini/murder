@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,10 +32,13 @@ type memoryRuntime struct {
 
 func (m *memoryRuntime) HasImage(context.Context, string) (bool, error) { return true, nil }
 func (m *memoryRuntime) PullImage(context.Context, string) error        { return nil }
-func (m *memoryRuntime) EnsureNetwork(context.Context, string, map[string]string) (string, error) {
-	return "172.30.0.0/16", nil
+func (m *memoryRuntime) EnsureNetwork(context.Context, string, string, map[string]string) error {
+	return nil
 }
 func (m *memoryRuntime) RemoveNetwork(context.Context, string) error { return nil }
+func (m *memoryRuntime) ListNetworks(context.Context) ([]runtime.Network, error) {
+	return nil, nil
+}
 func (m *memoryRuntime) List(context.Context) ([]runtime.Container, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -81,10 +85,15 @@ type apiFixture struct {
 
 func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
-	st, err := store.OpenFile(filepath.Join(t.TempDir(), "state.json"), 20000, 20100)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := store.InitFile(statePath); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.OpenFile(statePath, store.Options{PortFrom: 20000, PortTo: 20100, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	keyPath := filepath.Join(t.TempDir(), "master.key")
 	if err := secrets.CreateKey(keyPath); err != nil {
 		t.Fatal(err)
@@ -110,7 +119,7 @@ func appSpec(name string) spec.Tenant {
 func TestCreateGeneratesSecretsWithoutShowingThem(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	created, err := f.client.Create(ctx, appSpec("acme"))
+	created, err := f.client.Create(ctx, appSpec("acme"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +147,7 @@ func TestCreateGeneratesSecretsWithoutShowingThem(t *testing.T) {
 func TestErrorsMapToStatusCodes(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
 		t.Fatal(err)
 	}
 	check := func(name string, err error, status int) {
@@ -148,7 +157,7 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 			t.Errorf("%s: error %v, want HTTP %d", name, err, status)
 		}
 	}
-	_, err := f.client.Create(ctx, appSpec("acme"))
+	_, err := f.client.Create(ctx, appSpec("acme"), false)
 	check("duplicate", err, 409)
 	_, err = f.client.Get(ctx, "nobody")
 	check("missing", err, 404)
@@ -157,9 +166,9 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	}
 	bad := appSpec("bad")
 	bad.Port = 0
-	_, err = f.client.Create(ctx, bad)
+	_, err = f.client.Create(ctx, bad, false)
 	check("invalid spec", err, 400)
-	_, err = f.client.Create(ctx, appSpec("www"))
+	_, err = f.client.Create(ctx, appSpec("www"), false)
 	check("reserved name", err, 400)
 	_, err = f.client.SetImage(ctx, "acme", "nginx:latest")
 	check("unpinned image", err, 400)
@@ -168,12 +177,76 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	renamed := appSpec("other")
 	_, err = f.client.Replace(ctx, renamed)
 	check("replace missing", err, 404)
+	// A bad secret in a replacement is a client error, checked before any
+	// value is generated.
+	huge := appSpec("acme")
+	huge.Secrets["HUGE"] = spec.Secret{Kind: "password", Bytes: 3_000_000}
+	_, err = f.client.Replace(ctx, huge)
+	check("oversized secret", err, 400)
+	odd := appSpec("acme")
+	odd.Secrets["ODD"] = spec.Secret{Kind: "rot13", Bytes: 32}
+	_, err = f.client.Replace(ctx, odd)
+	check("unknown secret kind", err, 400)
+	root := appSpec("acme")
+	root.User = "0"
+	_, err = f.client.Replace(ctx, root)
+	check("root user", err, 400)
+	err = f.client.PurgeData(ctx, "acme")
+	check("purge data of a live tenant", err, 409)
+}
+
+func TestApplyKeepsSuspension(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Suspend(ctx, "acme", true); err != nil {
+		t.Fatal(err)
+	}
+	next := appSpec("acme")
+	next.Env = map[string]string{"MODE": "prod"}
+	replaced, err := f.client.Replace(ctx, next)
+	if err != nil || !replaced.Spec.Suspended {
+		t.Fatalf("applying an app spec resumed a suspended tenant: %+v, %v", replaced.Spec, err)
+	}
+}
+
+func TestDeletedTenantDataIsNotSilentlyReused(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.client.Reconcile(ctx)
+	if err := os.WriteFile(filepath.Join(f.dataRoot, "acme", "data.db"), []byte("old customer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.Delete(ctx, "acme", false); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.client.Create(ctx, appSpec("acme"), false)
+	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "data of a deleted tenant") {
+		t.Fatalf("create over leftover data = %v", err)
+	}
+	if _, err := f.client.Create(ctx, appSpec("acme"), true); err != nil {
+		t.Fatalf("explicit adoption = %v", err)
+	}
+	if err := f.client.Delete(ctx, "acme", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.PurgeData(ctx, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+		t.Fatalf("create after purge-data = %v", err)
+	}
 }
 
 func TestReplaceKeepsAndAddsSecrets(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
@@ -203,7 +276,7 @@ func TestReplaceKeepsAndAddsSecrets(t *testing.T) {
 func TestImageSuspendLogsAndDeleteWithPurge(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
 		t.Fatal(err)
 	}
 	changed, err := f.client.SetImage(ctx, "acme", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -234,11 +307,14 @@ func TestImageSuspendLogsAndDeleteWithPurge(t *testing.T) {
 	if err := f.client.Delete(ctx, "acme", false); !IsNotFound(err) {
 		t.Fatalf("second delete = %v", err)
 	}
+	if routes := (Routes{Store: f.store}); func() bool { _, ok := routes.Route("acme"); return ok }() {
+		t.Fatal("a deleted tenant still has a route")
+	}
 }
 
 func TestRoutesFollowTheStore(t *testing.T) {
 	f := newAPIFixture(t)
-	if _, err := f.client.Create(context.Background(), appSpec("acme")); err != nil {
+	if _, err := f.client.Create(context.Background(), appSpec("acme"), false); err != nil {
 		t.Fatal(err)
 	}
 	routes := Routes{Store: f.store}

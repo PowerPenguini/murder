@@ -28,7 +28,9 @@ type Tenant struct {
 	// DataUID and DataGID own the data directory, matching the app's user.
 	DataUID int `json:"dataUID" yaml:"dataUID"`
 	DataGID int `json:"dataGID" yaml:"dataGID"`
-	// User optionally overrides the image's user ("uid" or "uid:gid").
+	// User optionally overrides the image's user ("uid" or "uid:gid"); it may
+	// not be root. Without it the image's own user runs, so images must not
+	// default to root.
 	User string `json:"user,omitempty" yaml:"user,omitempty"`
 	// Env holds plain environment values. Values may use the placeholders
 	// {{name}}, {{host}}, {{url}} and {{network}}; see Render.
@@ -122,8 +124,13 @@ func (t Tenant) Validate() error {
 	if !absoluteClean(t.DataPath) || t.DataPath == "/" {
 		problems = append(problems, fmt.Sprintf("data path %q must be an absolute path below /", t.DataPath))
 	}
-	if t.DataUID < 0 || t.DataGID < 0 {
-		problems = append(problems, "data owner ids must not be negative")
+	// Tenants never run as root: root in the container owns the data
+	// directory and is a step from root on the host.
+	if t.DataUID <= 0 || t.DataGID <= 0 {
+		problems = append(problems, "data owner ids must be positive (tenants never run as root)")
+	}
+	if rootUser(t.User) {
+		problems = append(problems, fmt.Sprintf("user %q is root; tenants never run as root", t.User))
 	}
 	for key, value := range t.Env {
 		if !envPattern.MatchString(key) {
@@ -171,6 +178,11 @@ type ValidationError struct {
 
 func (e *ValidationError) Error() string {
 	return "invalid tenant: " + strings.Join(e.Problems, "; ")
+}
+
+func rootUser(user string) bool {
+	name, group, _ := strings.Cut(user, ":")
+	return name == "0" || name == "root" || group == "0" || group == "root"
 }
 
 func absoluteClean(p string) bool {

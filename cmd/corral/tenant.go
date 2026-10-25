@@ -24,11 +24,12 @@ const tenantUsage = `Usage: corral tenant <command> [options]
 
   list                          list tenants and their state
   show NAME                     print a tenant as JSON
-  create NAME -file APP.yaml    create a tenant from an app spec
+  create NAME -file APP.yaml    create a tenant from an app spec [-adopt-data]
   apply NAME -file APP.yaml     replace a tenant's spec (secrets are kept)
   set-image NAME IMAGE          run a different pinned image
   suspend NAME | resume NAME    stop or restart a tenant, keeping its data
   delete NAME -yes [-purge]     remove a tenant; -purge also deletes its data
+  purge-data NAME -yes          delete data a tenant deleted without -purge left behind
   secret NAME KEY               print one generated secret
   logs NAME [-tail N]           print the container's recent output
 
@@ -70,6 +71,7 @@ func runTenant(args []string) error {
 	purge := flags.Bool("purge", false, "with delete: also delete the tenant's data")
 	tail := flags.Int("tail", 200, "with logs: number of lines")
 	asJSON := flags.Bool("json", false, "with list: print JSON")
+	adoptData := flags.Bool("adopt-data", false, "with create: take over data a deleted tenant of the same name left behind")
 	// Allow options after positional arguments: "create acme -file app.yaml".
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
@@ -115,7 +117,7 @@ func runTenant(args []string) error {
 		}
 		var result api.Tenant
 		if command == "create" {
-			result, err = client.Create(ctx, tenant)
+			result, err = client.Create(ctx, tenant, *adoptData)
 		} else {
 			result, err = client.Replace(ctx, tenant)
 		}
@@ -162,6 +164,18 @@ func runTenant(args []string) error {
 		} else {
 			fmt.Fprintf(stdout, "%s deleted; its data is kept\n", positional[0])
 		}
+		return nil
+	case "purge-data":
+		if err := need(1); err != nil {
+			return err
+		}
+		if !*yes {
+			return errors.New("purge-data deletes a deleted tenant's leftover data for good; add -yes to confirm")
+		}
+		if err := client.PurgeData(ctx, positional[0]); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "leftover data of %s deleted\n", positional[0])
 		return nil
 	case "secret":
 		if err := need(2); err != nil {
@@ -260,7 +274,9 @@ func waitHealthy(ctx context.Context, client *api.Client, tenant api.Tenant, tim
 		if err != nil {
 			return err
 		}
-		if status := current.Status; status != nil && status.Generation >= tenant.Generation {
+		// Only a pass that started after the change counts; a tenant of the
+		// same name deleted earlier may have left an old status behind.
+		if status := current.Status; status != nil && status.Generation >= tenant.Generation && status.CheckedAt.After(tenant.UpdatedAt) {
 			switch {
 			case status.Phase == reconcile.PhaseRunning && status.Healthy:
 				fmt.Fprintf(stdout, "%s is healthy\n", tenant.Spec.Name)

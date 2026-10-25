@@ -29,7 +29,6 @@ const (
 	PhaseRunning   = "running"
 	PhaseSuspended = "suspended"
 	PhaseFailed    = "failed"
-	PhasePending   = "pending"
 )
 
 // Status is the observed state of one tenant.
@@ -63,6 +62,7 @@ type Reconciler struct {
 	log     *slog.Logger
 	health  *http.Client
 
+	// pass serializes reconcile passes and the removal of tenants.
 	pass     sync.Mutex
 	mu       sync.RWMutex
 	statuses map[string]Status
@@ -113,6 +113,10 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 func (r *Reconciler) Reconcile(ctx context.Context) error {
 	r.pass.Lock()
 	defer r.pass.Unlock()
+	return r.reconcile(ctx)
+}
+
+func (r *Reconciler) reconcile(ctx context.Context) error {
 	containers, err := r.runtime.List(ctx)
 	if err != nil {
 		return fmt.Errorf("list containers: %w", err)
@@ -146,17 +150,48 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("remove containers of deleted tenant %q: %w", tenant, err))
 			continue
 		}
-		if tenant != "" {
-			if err := r.runtime.RemoveNetwork(ctx, NetworkName(tenant)); err != nil {
-				errs = append(errs, fmt.Errorf("remove network of deleted tenant %q: %w", tenant, err))
-			}
-		}
-		r.log.Info("removed deleted tenant's containers", "tenant", tenant)
+		r.log.Info("removed a deleted tenant's containers", "tenant", tenant)
+	}
+	if err := r.removeOrphanNetworks(ctx, wanted); err != nil {
+		errs = append(errs, err)
 	}
 	r.mu.Lock()
 	r.statuses = statuses
 	r.mu.Unlock()
 	return errors.Join(errs...)
+}
+
+// removeOrphanNetworks removes the networks of tenants that no longer exist,
+// whether or not they still had containers.
+func (r *Reconciler) removeOrphanNetworks(ctx context.Context, wanted map[string]bool) error {
+	networks, err := r.runtime.ListNetworks(ctx)
+	if err != nil {
+		return fmt.Errorf("list networks: %w", err)
+	}
+	remaining, err := r.runtime.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list containers: %w", err)
+	}
+	var errs []error
+	for _, network := range networks {
+		tenant := network.Labels[runtime.LabelTenant]
+		if wanted[tenant] || hasTenant(remaining, tenant) {
+			continue // a live tenant, or containers this pass could not remove
+		}
+		if err := r.runtime.RemoveNetwork(ctx, network.Name); err != nil {
+			errs = append(errs, fmt.Errorf("remove network %s: %w", network.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func hasTenant(containers []runtime.Container, tenant string) bool {
+	for _, container := range containers {
+		if container.Labels[runtime.LabelTenant] == tenant {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, existing []runtime.Container) (Status, error) {
@@ -167,78 +202,109 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		}
 		return Status{Phase: PhaseSuspended}, nil
 	}
-	dataPath, err := r.volumes.Ensure(ctx, tenant.Name, tenant.DataUID, tenant.DataGID)
+	dataPath, mountedNow, err := r.volumes.Ensure(ctx, tenant.Name, tenant.DataUID, tenant.DataGID)
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
 	}
-	subnet, err := r.runtime.EnsureNetwork(ctx, NetworkName(tenant.Name), map[string]string{runtime.LabelManaged: "true", runtime.LabelTenant: tenant.Name})
-	if err != nil {
+	if err := r.runtime.EnsureNetwork(ctx, NetworkName(tenant.Name), record.Subnet, map[string]string{runtime.LabelTenant: tenant.Name}); err != nil {
 		return Status{}, fmt.Errorf("network: %w", err)
 	}
-	desired, err := r.containerSpec(record, dataPath, subnet)
+	desired, err := r.containerSpec(record, dataPath)
 	if err != nil {
 		return Status{}, err
 	}
 	var current *runtime.Container
-	var extra []runtime.Container
+	var outdated []runtime.Container
 	for i := range existing {
-		if current == nil && existing[i].Labels[runtime.LabelHash] == desired.Labels[runtime.LabelHash] {
+		// A container started before its dataset was mounted runs on the
+		// empty directory underneath; it is replaced, not adopted.
+		if current == nil && !mountedNow && existing[i].Labels[runtime.LabelHash] == desired.Labels[runtime.LabelHash] {
 			current = &existing[i]
 			continue
 		}
-		extra = append(extra, existing[i])
-	}
-	if len(extra) > 0 {
-		if current == nil && imageChanged(extra, tenant.Image) {
-			r.snapshotBeforeChange(ctx, tenant.Name)
-		}
-		if err := r.removeContainers(ctx, extra); err != nil {
-			return Status{}, err
-		}
+		outdated = append(outdated, existing[i])
 	}
 	if current == nil {
-		if err := r.ensureImage(ctx, tenant.Image); err != nil {
-			return Status{}, err
-		}
-		id, err := r.runtime.Create(ctx, desired)
+		id, err := r.replace(ctx, record, desired, outdated)
 		if err != nil {
 			return Status{}, err
 		}
-		if err := r.runtime.Start(ctx, id); err != nil {
-			return Status{}, fmt.Errorf("start: %w", err)
-		}
-		r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
 		current = &runtime.Container{ID: id, Running: true}
-	} else if !current.Running {
-		if err := r.runtime.Start(ctx, current.ID); err != nil {
-			return Status{}, fmt.Errorf("start: %w", err)
+	} else {
+		if err := r.removeContainers(ctx, outdated); err != nil {
+			return Status{}, err
 		}
-		r.log.Info("restarted stopped tenant container", "tenant", tenant.Name, "container", current.ID)
+		if !current.Running {
+			if err := r.runtime.Start(ctx, current.ID); err != nil {
+				return Status{}, fmt.Errorf("start: %w", err)
+			}
+			r.log.Info("restarted stopped tenant container", "tenant", tenant.Name, "container", current.ID)
+		}
 	}
 	status := Status{Phase: PhaseRunning, ContainerID: current.ID}
 	status.Healthy, status.Message = r.checkHealth(ctx, record)
 	return status, nil
 }
 
-func imageChanged(containers []runtime.Container, image string) bool {
-	for _, container := range containers {
-		if container.Labels[runtime.LabelImage] != image {
-			return true
+// replace starts the desired container in place of outdated ones. The new
+// image is fetched while the old container still serves; the old container
+// is stopped before the data is snapshotted, so the snapshot is consistent;
+// a failed snapshot restarts the old container and blocks the change.
+func (r *Reconciler) replace(ctx context.Context, record store.Record, desired runtime.ContainerSpec, outdated []runtime.Container) (string, error) {
+	tenant := record.Spec
+	if err := r.ensureImage(ctx, tenant.Image); err != nil {
+		return "", err
+	}
+	var stopped []runtime.Container
+	for _, container := range outdated {
+		if !container.Running {
+			continue
+		}
+		if err := r.runtime.Stop(ctx, container.ID, r.config.StopTimeout); err != nil {
+			r.restart(ctx, stopped)
+			return "", fmt.Errorf("stop %s: %w", container.Name, err)
+		}
+		stopped = append(stopped, container)
+	}
+	if record.DataImage != "" && record.DataImage != tenant.Image {
+		name, err := r.volumes.Snapshot(ctx, tenant.Name, "image-change")
+		switch {
+		case errors.Is(err, volume.ErrSnapshotsUnsupported):
+		case err != nil:
+			r.restart(ctx, stopped)
+			return "", fmt.Errorf("snapshot before the image change (the old container keeps running): %w", err)
+		default:
+			r.log.Info("snapshot before image change", "tenant", tenant.Name, "snapshot", name, "from", record.DataImage, "to", tenant.Image)
 		}
 	}
-	return false
+	// From here on the data belongs to the new image: a later pass must not
+	// snapshot again for the same change.
+	if err := r.store.Observe(tenant.Name, tenant.Image); err != nil {
+		r.restart(ctx, stopped)
+		return "", fmt.Errorf("record the data's image: %w", err)
+	}
+	for _, container := range outdated {
+		if err := r.runtime.Remove(ctx, container.ID); err != nil {
+			return "", fmt.Errorf("remove %s: %w", container.Name, err)
+		}
+	}
+	id, err := r.runtime.Create(ctx, desired)
+	if err != nil {
+		return "", err
+	}
+	if err := r.runtime.Start(ctx, id); err != nil {
+		return "", fmt.Errorf("start: %w", err)
+	}
+	r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
+	return id, nil
 }
 
-// snapshotBeforeChange keeps the data as the old image left it, so a failed
-// upgrade can be rolled back. Drivers without snapshots skip it.
-func (r *Reconciler) snapshotBeforeChange(ctx context.Context, tenant string) {
-	name, err := r.volumes.Snapshot(ctx, tenant, "image-change")
-	switch {
-	case errors.Is(err, volume.ErrSnapshotsUnsupported):
-	case err != nil:
-		r.log.Error("snapshot before image change", "tenant", tenant, "error", err)
-	default:
-		r.log.Info("snapshot before image change", "tenant", tenant, "snapshot", name)
+// restart brings back containers stopped for a change that did not go ahead.
+func (r *Reconciler) restart(ctx context.Context, containers []runtime.Container) {
+	for _, container := range containers {
+		if err := r.runtime.Start(ctx, container.ID); err != nil {
+			r.log.Error("restart the old container after a failed change", "container", container.Name, "error", err)
+		}
 	}
 }
 
@@ -250,10 +316,7 @@ func (r *Reconciler) ensureImage(ctx context.Context, image string) error {
 	if present {
 		return nil
 	}
-	if err := r.runtime.PullImage(ctx, image); err != nil {
-		return err
-	}
-	return nil
+	return r.runtime.PullImage(ctx, image)
 }
 
 func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.Container) error {
@@ -276,9 +339,9 @@ func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.
 func (r *Reconciler) Host(tenant string) string { return tenant + "." + r.config.BaseDomain }
 func (r *Reconciler) URL(tenant string) string  { return r.config.Scheme + "://" + r.Host(tenant) }
 
-func (r *Reconciler) containerSpec(record store.Record, dataPath, subnet string) (runtime.ContainerSpec, error) {
+func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtime.ContainerSpec, error) {
 	tenant := record.Spec
-	env := tenant.Render(spec.Values{Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Network: subnet})
+	env := tenant.Render(spec.Values{Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Network: record.Subnet})
 	for name := range tenant.Secrets {
 		sealed, ok := record.Sealed[name]
 		if !ok {
@@ -304,6 +367,10 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath, subnet string)
 	if limits.PIDs == 0 {
 		limits.PIDs = r.config.DefaultLimits.PIDs
 	}
+	var tmpfs map[string]string
+	if len(tenant.Tmpfs) > 0 {
+		tmpfs = maps.Clone(tenant.Tmpfs)
+	}
 	desired := runtime.ContainerSpec{
 		Name:          ContainerName(tenant.Name),
 		Image:         tenant.Image,
@@ -317,11 +384,10 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath, subnet string)
 		NanoCPUs:      int64(limits.CPUs * 1e9),
 		PIDs:          int64(limits.PIDs),
 		ReadOnlyRoot:  tenant.ReadOnlyRoot,
-		Tmpfs:         maps.Clone(tenant.Tmpfs),
+		Tmpfs:         tmpfs,
 		Labels: map[string]string{
-			runtime.LabelManaged: "true",
-			runtime.LabelTenant:  tenant.Name,
-			runtime.LabelImage:   tenant.Image,
+			runtime.LabelTenant: tenant.Name,
+			runtime.LabelImage:  tenant.Image,
 		},
 	}
 	hash, err := specHash(desired)
@@ -370,26 +436,77 @@ func (r *Reconciler) Status(tenant string) (Status, bool) {
 	return status, ok
 }
 
-// Purge deletes a removed tenant's data once no container of it remains.
-func (r *Reconciler) Purge(ctx context.Context, tenant string) error {
-	if _, err := r.store.Get(tenant); err == nil {
-		return fmt.Errorf("tenant %s still exists; delete it first", tenant)
+// DataExists reports whether a tenant name still has data on this node.
+func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error) {
+	return r.volumes.Exists(ctx, tenant)
+}
+
+// RemoveTenant takes a tenant out of service and deletes its record, and
+// with purge its data. Each step must succeed before the next one runs, and
+// the record goes last, so a failure leaves a suspended tenant the operator
+// can delete again; its host port and subnet are only reused once nothing
+// holds them.
+func (r *Reconciler) RemoveTenant(ctx context.Context, name string, purge bool) error {
+	if _, err := r.store.Update(name, func(record *store.Record) error {
+		record.Spec.Suspended = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	r.pass.Lock()
+	defer r.pass.Unlock()
+	if err := r.reconcile(ctx); err != nil {
+		r.log.Warn("reconcile while removing a tenant", "tenant", name, "error", err)
+	}
+	if err := r.clearRuntime(ctx, name); err != nil {
+		return err
+	}
+	if purge {
+		if err := r.volumes.Remove(ctx, name); err != nil {
+			return fmt.Errorf("delete data: %w", err)
+		}
+	}
+	if err := r.store.Delete(name); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	delete(r.statuses, name)
+	r.mu.Unlock()
+	return nil
+}
+
+// PurgeData deletes data left behind by a tenant deleted without purge.
+func (r *Reconciler) PurgeData(ctx context.Context, name string) error {
+	r.pass.Lock()
+	defer r.pass.Unlock()
+	if _, err := r.store.Get(name); err == nil {
+		return fmt.Errorf("%w: delete tenant %s with purge instead", store.ErrExists, name)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	// Another tenant's failure must not block the purge; what matters is
-	// that this tenant's containers are gone, checked below.
-	if err := r.Reconcile(ctx); err != nil {
-		r.log.Warn("reconcile before purge", "tenant", tenant, "error", err)
+	if err := r.clearRuntime(ctx, name); err != nil {
+		return err
 	}
+	return r.volumes.Remove(ctx, name)
+}
+
+// clearRuntime makes sure no container or network of the tenant remains.
+func (r *Reconciler) clearRuntime(ctx context.Context, name string) error {
 	containers, err := r.runtime.List(ctx)
 	if err != nil {
 		return err
 	}
+	var own []runtime.Container
 	for _, container := range containers {
-		if container.Labels[runtime.LabelTenant] == tenant {
-			return fmt.Errorf("container %s of tenant %s still exists", container.Name, tenant)
+		if container.Labels[runtime.LabelTenant] == name {
+			own = append(own, container)
 		}
 	}
-	return r.volumes.Remove(ctx, tenant)
+	if err := r.removeContainers(ctx, own); err != nil {
+		return fmt.Errorf("remove containers: %w", err)
+	}
+	if err := r.runtime.RemoveNetwork(ctx, NetworkName(name)); err != nil {
+		return fmt.Errorf("remove network: %w", err)
+	}
+	return nil
 }

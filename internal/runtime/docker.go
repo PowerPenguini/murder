@@ -3,14 +3,17 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -20,26 +23,47 @@ import (
 // (Docker 25 and later) and that has every field used here.
 const apiVersion = "v1.44"
 
-// Docker talks to the Docker Engine API over its unix socket.
-type Docker struct {
-	client *http.Client
-	base   string
+// Call deadlines for engine requests whose context has none.
+const (
+	callTimeout = time.Minute
+	pullTimeout = 15 * time.Minute
+)
+
+// DockerOptions configures the Docker runtime.
+type DockerOptions struct {
+	// Socket is the engine's unix socket.
+	Socket string
+	// Node labels every object this agent creates and limits List and
+	// ListNetworks to them.
+	Node string
+	// RegistryAuthFile, if set, is a Docker config.json whose "auths" entries
+	// hold registry credentials ("auth" is base64 of user:password).
+	// Credential helpers are not supported.
+	RegistryAuthFile string
 }
 
-// NewDocker returns a client for the engine listening on socket.
-func NewDocker(socket string) *Docker {
+// Docker talks to the Docker Engine API over its unix socket.
+type Docker struct {
+	client   *http.Client
+	base     string
+	node     string
+	authFile string
+}
+
+// NewDocker returns a client for the engine described by options.
+func NewDocker(options DockerOptions) *Docker {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var dialer net.Dialer
-			return dialer.DialContext(ctx, "unix", socket)
+			return dialer.DialContext(ctx, "unix", options.Socket)
 		},
 	}
-	return &Docker{client: &http.Client{Transport: transport}, base: "http://docker/" + apiVersion}
+	return &Docker{client: &http.Client{Transport: transport}, base: "http://docker/" + apiVersion, node: options.Node, authFile: options.RegistryAuthFile}
 }
 
 // newDockerForURL points the client at an HTTP server; tests use it.
-func newDockerForURL(base string, client *http.Client) *Docker {
-	return &Docker{client: client, base: strings.TrimSuffix(base, "/") + "/" + apiVersion}
+func newDockerForURL(base string, client *http.Client, node string) *Docker {
+	return &Docker{client: client, base: strings.TrimSuffix(base, "/") + "/" + apiVersion, node: node}
 }
 
 // apiError is a non-2xx Engine API answer.
@@ -50,27 +74,45 @@ type apiError struct {
 
 func (e *apiError) Error() string { return fmt.Sprintf("docker: %d %s", e.Status, e.Message) }
 
-func (d *Docker) do(ctx context.Context, method, path string, query url.Values, body any, out any) error {
+type request struct {
+	method, path string
+	query        url.Values
+	body         any
+	header       http.Header
+	timeout      time.Duration
+}
+
+func (d *Docker) do(ctx context.Context, call request, out any) error {
+	if _, ok := ctx.Deadline(); !ok {
+		timeout := call.timeout
+		if timeout == 0 {
+			timeout = callTimeout
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	var reader io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
+	if call.body != nil {
+		encoded, err := json.Marshal(call.body)
 		if err != nil {
 			return err
 		}
 		reader = bytes.NewReader(encoded)
 	}
-	target := d.base + path
-	if len(query) > 0 {
-		target += "?" + query.Encode()
+	target := d.base + call.path
+	if len(call.query) > 0 {
+		target += "?" + call.query.Encode()
 	}
-	request, err := http.NewRequestWithContext(ctx, method, target, reader)
+	httpRequest, err := http.NewRequestWithContext(ctx, call.method, target, reader)
 	if err != nil {
 		return err
 	}
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
+	maps.Copy(httpRequest.Header, call.header)
+	if call.body != nil {
+		httpRequest.Header.Set("Content-Type", "application/json")
 	}
-	response, err := d.client.Do(request)
+	response, err := d.client.Do(httpRequest)
 	if err != nil {
 		return err
 	}
@@ -103,8 +145,24 @@ func (d *Docker) do(ctx context.Context, method, path string, query url.Values, 
 	}
 }
 
+// ownLabels adds the managed and node labels to labels.
+func (d *Docker) ownLabels(labels map[string]string) map[string]string {
+	owned := maps.Clone(labels)
+	if owned == nil {
+		owned = map[string]string{}
+	}
+	owned[LabelManaged] = "true"
+	owned[LabelNode] = d.node
+	return owned
+}
+
+func (d *Docker) ownFilter() string {
+	filters, _ := json.Marshal(map[string][]string{"label": {LabelManaged + "=true", LabelNode + "=" + d.node}})
+	return string(filters)
+}
+
 func (d *Docker) HasImage(ctx context.Context, ref string) (bool, error) {
-	err := d.do(ctx, http.MethodGet, "/images/"+url.PathEscape(ref)+"/json", nil, nil, nil)
+	err := d.do(ctx, request{method: http.MethodGet, path: "/images/" + url.PathEscape(ref) + "/json"}, nil)
 	if errors.Is(err, ErrNotFound) {
 		return false, nil
 	}
@@ -116,10 +174,17 @@ func (d *Docker) HasImage(ctx context.Context, ref string) (bool, error) {
 func (d *Docker) PullImage(ctx context.Context, ref string) error {
 	repository, digest, ok := strings.Cut(ref, "@")
 	if !ok {
-		return fmt.Errorf("pull %s: only digest-pinned references can be pulled", ref)
+		return fmt.Errorf("pull %s: only digest-pinned references can be pulled; a local image ID must already be present", ref)
+	}
+	header := http.Header{}
+	if auth, err := d.registryAuth(repository); err != nil {
+		return fmt.Errorf("pull %s: %w", ref, err)
+	} else if auth != "" {
+		header.Set("X-Registry-Auth", auth)
 	}
 	var stream []byte
-	if err := d.do(ctx, http.MethodPost, "/images/create", url.Values{"fromImage": {repository}, "tag": {digest}}, nil, &stream); err != nil {
+	call := request{method: http.MethodPost, path: "/images/create", query: url.Values{"fromImage": {repository}, "tag": {digest}}, header: header, timeout: pullTimeout}
+	if err := d.do(ctx, call, &stream); err != nil {
 		return fmt.Errorf("pull %s: %w", ref, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(stream))
@@ -139,27 +204,73 @@ func (d *Docker) PullImage(ctx context.Context, ref string) error {
 	}
 }
 
-func (d *Docker) EnsureNetwork(ctx context.Context, name string, labels map[string]string) (string, error) {
-	subnet, err := d.networkSubnet(ctx, name)
-	if err == nil {
-		return subnet, nil
+// registryAuth returns the X-Registry-Auth value for repository's registry,
+// or "" when no credentials are configured for it. The engine does not read
+// the credentials "docker login" saves; the client must send them.
+func (d *Docker) registryAuth(repository string) (string, error) {
+	if d.authFile == "" {
+		return "", nil
 	}
-	if !errors.Is(err, ErrNotFound) {
-		return "", err
+	data, err := os.ReadFile(d.authFile)
+	if err != nil {
+		return "", fmt.Errorf("read registry auth: %w", err)
+	}
+	var config struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return "", fmt.Errorf("parse registry auth %s: %w", d.authFile, err)
+	}
+	registry := "docker.io"
+	if first, _, ok := strings.Cut(repository, "/"); ok && (strings.ContainsAny(first, ".:") || first == "localhost") {
+		registry = first
+	}
+	for host, entry := range config.Auths {
+		host = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://"), "/")
+		if host == registry || (registry == "docker.io" && strings.HasPrefix(host, "index.docker.io")) {
+			decoded, err := base64.StdEncoding.DecodeString(entry.Auth)
+			if err != nil {
+				return "", fmt.Errorf("registry auth for %s is not base64", host)
+			}
+			user, password, ok := strings.Cut(string(decoded), ":")
+			if !ok {
+				return "", fmt.Errorf("registry auth for %s is not user:password", host)
+			}
+			encoded, _ := json.Marshal(map[string]string{"username": user, "password": password, "serveraddress": registry})
+			return base64.URLEncoding.EncodeToString(encoded), nil
+		}
+	}
+	return "", nil
+}
+
+func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels map[string]string) error {
+	existing, err := d.networkSubnet(ctx, name)
+	switch {
+	case err == nil && existing == subnet:
+		return nil
+	case err == nil:
+		return fmt.Errorf("network %s has subnet %s, want %s", name, existing, subnet)
+	case !errors.Is(err, ErrNotFound):
+		return err
 	}
 	create := map[string]any{
 		"Name":           name,
 		"Driver":         "bridge",
 		"CheckDuplicate": true,
-		"Labels":         labels,
+		"Labels":         d.ownLabels(labels),
+		// Corral assigns each tenant a small subnet from its own pool, so the
+		// engine's default pools (about thirty networks) are never used up.
+		"IPAM": map[string]any{"Driver": "default", "Config": []map[string]string{{"Subnet": subnet}}},
 		// Containers on one tenant network cannot reach each other; the edge
 		// proxy reaches the tenant through its published loopback port.
 		"Options": map[string]string{"com.docker.network.bridge.enable_icc": "false"},
 	}
-	if err := d.do(ctx, http.MethodPost, "/networks/create", nil, create, nil); err != nil {
-		return "", fmt.Errorf("create network %s: %w", name, err)
+	if err := d.do(ctx, request{method: http.MethodPost, path: "/networks/create", body: create}, nil); err != nil {
+		return fmt.Errorf("create network %s: %w", name, err)
 	}
-	return d.networkSubnet(ctx, name)
+	return nil
 }
 
 func (d *Docker) networkSubnet(ctx context.Context, name string) (string, error) {
@@ -170,7 +281,7 @@ func (d *Docker) networkSubnet(ctx context.Context, name string) (string, error)
 			} `json:"Config"`
 		} `json:"IPAM"`
 	}
-	if err := d.do(ctx, http.MethodGet, "/networks/"+url.PathEscape(name), nil, nil, &network); err != nil {
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/networks/" + url.PathEscape(name)}, &network); err != nil {
 		return "", err
 	}
 	for _, config := range network.IPAM.Config {
@@ -182,22 +293,36 @@ func (d *Docker) networkSubnet(ctx context.Context, name string) (string, error)
 }
 
 func (d *Docker) RemoveNetwork(ctx context.Context, name string) error {
-	err := d.do(ctx, http.MethodDelete, "/networks/"+url.PathEscape(name), nil, nil, nil)
+	err := d.do(ctx, request{method: http.MethodDelete, path: "/networks/" + url.PathEscape(name)}, nil)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
 	return err
 }
 
+func (d *Docker) ListNetworks(ctx context.Context) ([]Network, error) {
+	var listed []struct {
+		Name   string            `json:"Name"`
+		Labels map[string]string `json:"Labels"`
+	}
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/networks", query: url.Values{"filters": {d.ownFilter()}}}, &listed); err != nil {
+		return nil, err
+	}
+	networks := make([]Network, 0, len(listed))
+	for _, item := range listed {
+		networks = append(networks, Network{Name: item.Name, Labels: item.Labels})
+	}
+	return networks, nil
+}
+
 func (d *Docker) List(ctx context.Context) ([]Container, error) {
-	filters, _ := json.Marshal(map[string][]string{"label": {LabelManaged + "=true"}})
 	var listed []struct {
 		ID     string            `json:"Id"`
 		Names  []string          `json:"Names"`
 		State  string            `json:"State"`
 		Labels map[string]string `json:"Labels"`
 	}
-	if err := d.do(ctx, http.MethodGet, "/containers/json", url.Values{"all": {"true"}, "filters": {string(filters)}}, nil, &listed); err != nil {
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/containers/json", query: url.Values{"all": {"true"}, "filters": {d.ownFilter()}}}, &listed); err != nil {
 		return nil, err
 	}
 	containers := make([]Container, 0, len(listed))
@@ -235,7 +360,7 @@ func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error)
 		"Image":            spec.Image,
 		"Env":              spec.Env,
 		"User":             spec.User,
-		"Labels":           spec.Labels,
+		"Labels":           d.ownLabels(spec.Labels),
 		"ExposedPorts":     map[string]any{port: map[string]any{}},
 		"HostConfig":       host,
 		"NetworkingConfig": map[string]any{"EndpointsConfig": map[string]any{spec.Network: map[string]any{}}},
@@ -243,27 +368,29 @@ func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error)
 	var created struct {
 		ID string `json:"Id"`
 	}
-	if err := d.do(ctx, http.MethodPost, "/containers/create", url.Values{"name": {spec.Name}}, body, &created); err != nil {
+	if err := d.do(ctx, request{method: http.MethodPost, path: "/containers/create", query: url.Values{"name": {spec.Name}}, body: body}, &created); err != nil {
 		return "", fmt.Errorf("create container %s: %w", spec.Name, err)
 	}
 	return created.ID, nil
 }
 
 func (d *Docker) Start(ctx context.Context, id string) error {
-	return d.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(id)+"/start", nil, nil, nil)
+	return d.do(ctx, request{method: http.MethodPost, path: "/containers/" + url.PathEscape(id) + "/start"}, nil)
 }
 
 func (d *Docker) Stop(ctx context.Context, id string, timeout time.Duration) error {
 	seconds := strconv.Itoa(int(timeout.Seconds()))
-	err := d.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(id)+"/stop", url.Values{"t": {seconds}}, nil, nil)
+	err := d.do(ctx, request{method: http.MethodPost, path: "/containers/" + url.PathEscape(id) + "/stop", query: url.Values{"t": {seconds}}, timeout: timeout + callTimeout}, nil)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
 	return err
 }
 
+// Remove deletes the container and the anonymous volumes Docker made for the
+// image's VOLUME paths, which would otherwise outlive every replacement.
 func (d *Docker) Remove(ctx context.Context, id string) error {
-	err := d.do(ctx, http.MethodDelete, "/containers/"+url.PathEscape(id), url.Values{"force": {"true"}}, nil, nil)
+	err := d.do(ctx, request{method: http.MethodDelete, path: "/containers/" + url.PathEscape(id), query: url.Values{"force": {"true"}, "v": {"true"}}}, nil)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
@@ -273,7 +400,7 @@ func (d *Docker) Remove(ctx context.Context, id string) error {
 func (d *Docker) Logs(ctx context.Context, id string, tail int) ([]byte, error) {
 	var stream []byte
 	query := url.Values{"stdout": {"true"}, "stderr": {"true"}, "tail": {strconv.Itoa(tail)}}
-	if err := d.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(id)+"/logs", query, nil, &stream); err != nil {
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/containers/" + url.PathEscape(id) + "/logs", query: query}, &stream); err != nil {
 		return nil, err
 	}
 	return demultiplex(stream), nil

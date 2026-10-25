@@ -24,6 +24,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// DNSProviders are the DNS-01 providers acme mode supports.
+var DNSProviders = []string{"hetzner", "namecheap"}
+
 // TLS modes.
 const (
 	TLSOff      = "off"
@@ -84,7 +87,11 @@ func acmeTLS(ctx context.Context, config TLSConfig, names []string, log *slog.Lo
 	cache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return magic, nil },
 	})
-	logger := zap.NewNop()
+	// certmagic logs renewals and their failures; keep them.
+	logger, err := zap.NewProduction()
+	if err != nil {
+		return nil, err
+	}
 	magic = certmagic.New(cache, certmagic.Config{Storage: &certmagic.FileStorage{Path: config.Storage}, Logger: logger})
 	issuer := certmagic.NewACMEIssuer(magic, certmagic.ACMEIssuer{
 		CA:                      ca,
@@ -162,7 +169,12 @@ func internalCertificate(dir string, names []string) (tls.Certificate, error) {
 
 func loadOrCreateCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	certPath, keyPath := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")
-	if certPEM, err := os.ReadFile(certPath); err == nil {
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Never replace a CA clients already trust because of a read error.
+		return nil, nil, err
+	}
+	if err == nil {
 		keyPEM, err := os.ReadFile(keyPath)
 		if err != nil {
 			return nil, nil, err

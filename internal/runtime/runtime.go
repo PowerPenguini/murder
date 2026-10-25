@@ -11,9 +11,11 @@ import (
 // ErrNotFound reports a missing container, network or image.
 var ErrNotFound = errors.New("not found")
 
-// Labels Corral puts on everything it creates.
+// Labels Corral puts on everything it creates. LabelNode marks which node's
+// agent owns an object; an agent never touches another node's objects.
 const (
 	LabelManaged = "io.corral.managed"
+	LabelNode    = "io.corral.node"
 	LabelTenant  = "io.corral.tenant"
 	LabelHash    = "io.corral.spec-hash"
 	LabelImage   = "io.corral.image"
@@ -24,11 +26,13 @@ type Runtime interface {
 	// HasImage reports whether ref is present locally; PullImage fetches it.
 	HasImage(ctx context.Context, ref string) (bool, error)
 	PullImage(ctx context.Context, ref string) error
-	// EnsureNetwork creates the isolated network if needed and returns its
-	// subnet in CIDR notation.
-	EnsureNetwork(ctx context.Context, name string, labels map[string]string) (string, error)
+	// EnsureNetwork creates the isolated network with the given IPv4 subnet
+	// if it is missing. An existing network with another subnet is an error.
+	EnsureNetwork(ctx context.Context, name, subnet string, labels map[string]string) error
 	RemoveNetwork(ctx context.Context, name string) error
-	// List returns every container labelled as managed by Corral.
+	// ListNetworks and List return this node's managed networks and
+	// containers.
+	ListNetworks(ctx context.Context) ([]Network, error)
 	List(ctx context.Context) ([]Container, error)
 	Create(ctx context.Context, spec ContainerSpec) (string, error)
 	Start(ctx context.Context, id string) error
@@ -45,6 +49,12 @@ type Container struct {
 	Running bool
 	State   string
 	Labels  map[string]string
+}
+
+// Network is the observed state of one managed network.
+type Network struct {
+	Name   string
+	Labels map[string]string
 }
 
 // Mount binds a host directory into the container.

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,11 +34,13 @@ type fakeRuntime struct {
 	mu         sync.Mutex
 	images     map[string]bool
 	containers map[string]*fakeContainer
-	networks   map[string]bool
+	networks   map[string]map[string]string // name → labels
 	pulled     []string
 	next       int
 	events     []string
 	failCreate error
+	failPull   error
+	failRemove error
 }
 
 type fakeContainer struct {
@@ -46,8 +49,10 @@ type fakeContainer struct {
 }
 
 func newFakeRuntime() *fakeRuntime {
-	return &fakeRuntime{images: map[string]bool{imageA: true}, containers: map[string]*fakeContainer{}, networks: map[string]bool{}}
+	return &fakeRuntime{images: map[string]bool{imageA: true}, containers: map[string]*fakeContainer{}, networks: map[string]map[string]string{}}
 }
+
+func (f *fakeRuntime) record(event string) { f.events = append(f.events, event) }
 
 func (f *fakeRuntime) HasImage(_ context.Context, ref string) (bool, error) {
 	f.mu.Lock()
@@ -59,23 +64,38 @@ func (f *fakeRuntime) PullImage(_ context.Context, ref string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pulled = append(f.pulled, ref)
+	if f.failPull != nil {
+		return f.failPull
+	}
 	f.images[ref] = true
 	return nil
 }
 
-func (f *fakeRuntime) EnsureNetwork(_ context.Context, name string, _ map[string]string) (string, error) {
+func (f *fakeRuntime) EnsureNetwork(_ context.Context, name, _ string, labels map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.networks[name] = true
-	return "172.30.0.0/16", nil
+	f.networks[name] = labels
+	return nil
 }
 
 func (f *fakeRuntime) RemoveNetwork(_ context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if _, ok := f.networks[name]; ok {
+		f.record("remove-network " + name)
+	}
 	delete(f.networks, name)
-	f.events = append(f.events, "remove-network "+name)
 	return nil
+}
+
+func (f *fakeRuntime) ListNetworks(context.Context) ([]runtime.Network, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []runtime.Network
+	for name, labels := range f.networks {
+		out = append(out, runtime.Network{Name: name, Labels: labels})
+	}
+	return out, nil
 }
 
 func (f *fakeRuntime) List(context.Context) ([]runtime.Container, error) {
@@ -101,7 +121,7 @@ func (f *fakeRuntime) Create(_ context.Context, spec runtime.ContainerSpec) (str
 	f.next++
 	id := fmt.Sprintf("c%d", f.next)
 	f.containers[id] = &fakeContainer{Container: runtime.Container{ID: id, Name: spec.Name, State: "created", Labels: spec.Labels}, spec: spec}
-	f.events = append(f.events, "create "+id)
+	f.record("create " + id)
 	return id, nil
 }
 
@@ -109,7 +129,7 @@ func (f *fakeRuntime) Start(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.containers[id].Running, f.containers[id].State = true, "running"
-	f.events = append(f.events, "start "+id)
+	f.record("start " + id)
 	return nil
 }
 
@@ -117,15 +137,18 @@ func (f *fakeRuntime) Stop(_ context.Context, id string, _ time.Duration) error 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.containers[id].Running, f.containers[id].State = false, "exited"
-	f.events = append(f.events, "stop "+id)
+	f.record("stop " + id)
 	return nil
 }
 
 func (f *fakeRuntime) Remove(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failRemove != nil {
+		return f.failRemove
+	}
 	delete(f.containers, id)
-	f.events = append(f.events, "remove "+id)
+	f.record("remove " + id)
 	return nil
 }
 
@@ -144,6 +167,12 @@ func (f *fakeRuntime) only(t *testing.T) *fakeContainer {
 	return nil
 }
 
+func (f *fakeRuntime) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.containers)
+}
+
 func (f *fakeRuntime) takeEvents() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -155,11 +184,23 @@ func (f *fakeRuntime) takeEvents() []string {
 // fakeVolumes records snapshots and keeps directories below a temp root.
 type fakeVolumes struct {
 	volume.Dir
-	snapshots []string
-	removed   []string
+	snapshots    []string
+	removed      []string
+	failSnapshot error
+	mountNext    bool
+}
+
+func (f *fakeVolumes) Ensure(ctx context.Context, tenant string, uid, gid int) (string, bool, error) {
+	path, _, err := f.Dir.Ensure(ctx, tenant, uid, gid)
+	mounted := f.mountNext
+	f.mountNext = false
+	return path, mounted, err
 }
 
 func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string, error) {
+	if f.failSnapshot != nil {
+		return "", f.failSnapshot
+	}
 	f.snapshots = append(f.snapshots, tenant+"@"+reason)
 	return tenant + "@" + reason, nil
 }
@@ -175,7 +216,6 @@ type fixture struct {
 	volumes    *fakeVolumes
 	key        *secrets.Key
 	reconciler *Reconciler
-	health     net.Listener
 }
 
 // newFixture serves a health endpoint on the single host port the store can
@@ -196,10 +236,15 @@ func newFixture(t *testing.T) *fixture {
 	})}
 	go server.Serve(listener)
 	t.Cleanup(func() { _ = server.Close() })
-	st, err := store.OpenFile(filepath.Join(t.TempDir(), "state.json"), port, port)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := store.InitFile(statePath); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.OpenFile(statePath, store.Options{PortFrom: port, PortTo: port, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	keyPath := filepath.Join(t.TempDir(), "master.key")
 	if err := secrets.CreateKey(keyPath); err != nil {
 		t.Fatal(err)
@@ -212,7 +257,7 @@ func newFixture(t *testing.T) *fixture {
 	volumes := &fakeVolumes{Dir: volume.Dir{Root: filepath.Join(t.TempDir(), "tenants")}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := New(st, rt, volumes, key, Config{BaseDomain: "example.test", DefaultLimits: spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128}}, log)
-	return &fixture{store: st, runtime: rt, volumes: volumes, key: key, reconciler: reconciler, health: listener}
+	return &fixture{store: st, runtime: rt, volumes: volumes, key: key, reconciler: reconciler}
 }
 
 func (f *fixture) create(t *testing.T, name string) store.Record {
@@ -234,6 +279,13 @@ func (f *fixture) create(t *testing.T, name string) store.Record {
 	return record
 }
 
+func (f *fixture) update(t *testing.T, name string, change func(*store.Record)) {
+	t.Helper()
+	if _, err := f.store.Update(name, func(r *store.Record) error { change(r); return nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (f *fixture) reconcile(t *testing.T) {
 	t.Helper()
 	if err := f.reconciler.Reconcile(context.Background()); err != nil {
@@ -243,14 +295,14 @@ func (f *fixture) reconcile(t *testing.T) {
 
 func TestNewTenantGetsAHealthyContainer(t *testing.T) {
 	f := newFixture(t)
-	f.create(t, "acme")
+	record := f.create(t, "acme")
 	f.reconcile(t)
 	container := f.runtime.only(t)
 	if !container.Running || container.Name != "corral-acme" || container.spec.Network != "corral-acme" {
 		t.Fatalf("container = %+v", container)
 	}
 	env := strings.Join(container.spec.Env, "\n")
-	for _, want := range []string{"PUBLIC_URL=https://acme.example.test", "TRUSTED_PROXIES=172.30.0.0/16", "SESSION_SECRET=the-secret"} {
+	for _, want := range []string{"PUBLIC_URL=https://acme.example.test", "TRUSTED_PROXIES=" + record.Subnet, "SESSION_SECRET=the-secret"} {
 		if !strings.Contains(env, want) {
 			t.Errorf("env lacks %q:\n%s", want, env)
 		}
@@ -264,6 +316,12 @@ func TestNewTenantGetsAHealthyContainer(t *testing.T) {
 	status, ok := f.reconciler.Status("acme")
 	if !ok || status.Phase != PhaseRunning || !status.Healthy || status.Generation != 1 {
 		t.Fatalf("status = %+v", status)
+	}
+	if got, _ := f.store.Get("acme"); got.DataImage != imageA {
+		t.Fatalf("data image after the first start = %q", got.DataImage)
+	}
+	if len(f.volumes.snapshots) != 0 {
+		t.Fatalf("the first start took a snapshot: %v", f.volumes.snapshots)
 	}
 }
 
@@ -282,60 +340,116 @@ func TestUnchangedTenantIsLeftAlone(t *testing.T) {
 	}
 }
 
-func TestImageChangeSnapshotsAndReplaces(t *testing.T) {
+func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
 	old := f.runtime.only(t).ID
-	if _, err := f.store.Update("acme", func(r *store.Record) error { r.Spec.Image = imageB; return nil }); err != nil {
-		t.Fatal(err)
-	}
+	f.update(t, "acme", func(r *store.Record) { r.Spec.Image = imageB })
 	f.runtime.takeEvents()
 	f.reconcile(t)
 	replacement := f.runtime.only(t)
 	if replacement.ID == old || replacement.spec.Image != imageB || !replacement.Running {
 		t.Fatalf("container after image change = %+v", replacement)
 	}
-	if !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) {
-		t.Fatalf("snapshots = %v", f.volumes.snapshots)
+	if !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) || !slices.Equal(f.runtime.pulled, []string{imageB}) {
+		t.Fatalf("snapshots = %v, pulled = %v", f.volumes.snapshots, f.runtime.pulled)
 	}
-	if !slices.Equal(f.runtime.pulled, []string{imageB}) {
-		t.Fatalf("pulled = %v", f.runtime.pulled)
-	}
-	events := f.runtime.takeEvents()
-	if strings.Join(events, ",") != fmt.Sprintf("stop %s,remove %s,create %s,start %s", old, old, replacement.ID, replacement.ID) {
+	events := strings.Join(f.runtime.takeEvents(), ",")
+	if events != fmt.Sprintf("stop %s,remove %s,create %s,start %s", old, old, replacement.ID, replacement.ID) {
 		t.Fatalf("events = %v", events)
 	}
-	// An env change replaces the container without a snapshot.
-	if _, err := f.store.Update("acme", func(r *store.Record) error { r.Spec.Env["EXTRA"] = "1"; return nil }); err != nil {
-		t.Fatal(err)
+	if got, _ := f.store.Get("acme"); got.DataImage != imageB {
+		t.Fatalf("data image = %q", got.DataImage)
 	}
+	// An env change replaces the container without a snapshot.
+	f.update(t, "acme", func(r *store.Record) { r.Spec.Env["EXTRA"] = "1" })
 	f.reconcile(t)
 	if len(f.volumes.snapshots) != 1 {
 		t.Fatalf("an env change took a snapshot: %v", f.volumes.snapshots)
 	}
 }
 
-func TestSuspendStopsAndResumeStarts(t *testing.T) {
+// A new image that cannot be fetched must not take the running tenant down.
+func TestFailedPullKeepsTheOldContainer(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	if _, err := f.store.Update("acme", func(r *store.Record) error { r.Spec.Suspended = true; return nil }); err != nil {
-		t.Fatal(err)
+	old := f.runtime.only(t).ID
+	f.runtime.failPull = errors.New("manifest unknown")
+	f.update(t, "acme", func(r *store.Record) { r.Spec.Image = imageB })
+	f.runtime.takeEvents()
+	for range 3 {
+		if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "manifest unknown") {
+			t.Fatalf("Reconcile = %v", err)
+		}
 	}
+	if container := f.runtime.only(t); container.ID != old || !container.Running {
+		t.Fatalf("the old container did not keep serving: %+v", container)
+	}
+	if events := f.runtime.takeEvents(); len(events) != 0 {
+		t.Fatalf("a failed pull touched containers: %v", events)
+	}
+	if len(f.volumes.snapshots) != 0 {
+		t.Fatalf("snapshots taken for a change that never happened: %v", f.volumes.snapshots)
+	}
+}
+
+func TestFailedSnapshotBlocksTheChangeAndRestartsTheOldContainer(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
 	f.reconcile(t)
-	if containers, _ := f.runtime.List(context.Background()); len(containers) != 0 {
-		t.Fatalf("suspended tenant still has containers: %v", containers)
+	old := f.runtime.only(t).ID
+	f.volumes.failSnapshot = errors.New("pool is full")
+	f.update(t, "acme", func(r *store.Record) { r.Spec.Image = imageB })
+	if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "pool is full") {
+		t.Fatalf("Reconcile = %v", err)
+	}
+	if container := f.runtime.only(t); container.ID != old || !container.Running || container.spec.Image != imageA {
+		t.Fatalf("after a failed snapshot = %+v", container)
+	}
+	if got, _ := f.store.Get("acme"); got.DataImage != imageA {
+		t.Fatalf("data image moved without a snapshot: %q", got.DataImage)
+	}
+	f.volumes.failSnapshot = nil
+	f.reconcile(t)
+	if f.runtime.only(t).spec.Image != imageB || len(f.volumes.snapshots) != 1 {
+		t.Fatal("the change did not go ahead once the snapshot worked")
+	}
+}
+
+// The snapshot follows the data, not the containers that happen to exist.
+func TestImageChangedWhileSuspendedIsSnapshottedOnResume(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.update(t, "acme", func(r *store.Record) { r.Spec.Suspended = true })
+	f.reconcile(t)
+	if f.runtime.count() != 0 {
+		t.Fatal("suspended tenant still has containers")
 	}
 	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseSuspended {
 		t.Fatalf("status = %+v", status)
 	}
-	if _, err := f.store.Update("acme", func(r *store.Record) error { r.Spec.Suspended = false; return nil }); err != nil {
-		t.Fatal(err)
-	}
+	f.update(t, "acme", func(r *store.Record) { r.Spec.Image = imageB })
+	f.update(t, "acme", func(r *store.Record) { r.Spec.Suspended = false })
 	f.reconcile(t)
-	if !f.runtime.only(t).Running {
-		t.Fatal("resumed tenant is not running")
+	if f.runtime.only(t).spec.Image != imageB || !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) {
+		t.Fatalf("resume with a new image: snapshots = %v", f.volumes.snapshots)
+	}
+}
+
+// A container started before its dataset was mounted sees the empty
+// directory underneath; it must be replaced, not adopted.
+func TestContainerIsRecreatedWhenItsDataWasMountedLate(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	f.volumes.mountNext = true
+	f.reconcile(t)
+	if container := f.runtime.only(t); container.ID == old || !container.Running {
+		t.Fatalf("container after a late mount = %+v", container)
 	}
 }
 
@@ -352,30 +466,88 @@ func TestStoppedContainerIsStartedAgain(t *testing.T) {
 	}
 }
 
-func TestDeletedTenantIsCleanedUpAndPurged(t *testing.T) {
+func TestRemoveTenantClearsEverythingBeforeTheRecord(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	if err := f.reconciler.Purge(context.Background(), "acme"); err == nil {
-		t.Fatal("purged a tenant that still exists")
-	}
-	if err := f.store.Delete("acme"); err != nil {
+	if err := f.reconciler.RemoveTenant(context.Background(), "acme", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.reconciler.Purge(context.Background(), "acme"); err != nil {
-		t.Fatal(err)
-	}
-	if containers, _ := f.runtime.List(context.Background()); len(containers) != 0 {
-		t.Fatalf("containers left: %v", containers)
-	}
-	if f.runtime.networks["corral-acme"] {
-		t.Fatal("network left behind")
+	if f.runtime.count() != 0 || f.runtime.networks["corral-acme"] != nil {
+		t.Fatalf("left behind: %d containers, networks %v", f.runtime.count(), f.runtime.networks)
 	}
 	if !slices.Equal(f.volumes.removed, []string{"acme"}) {
 		t.Fatalf("removed volumes = %v", f.volumes.removed)
 	}
+	if _, err := f.store.Get("acme"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("record after removal = %v", err)
+	}
 	if _, ok := f.reconciler.Status("acme"); ok {
 		t.Fatal("status kept for a deleted tenant")
+	}
+}
+
+// A failure leaves the tenant suspended and its record (with its port and
+// subnet) in place, so the delete can be repeated and nothing is reused early.
+func TestFailedRemoveTenantCanBeRepeated(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.runtime.failRemove = errors.New("device busy")
+	if err := f.reconciler.RemoveTenant(context.Background(), "acme", true); err == nil {
+		t.Fatal("RemoveTenant reported success while the container remained")
+	}
+	record, err := f.store.Get("acme")
+	if err != nil || !record.Spec.Suspended {
+		t.Fatalf("record after a failed delete = %+v, %v", record, err)
+	}
+	if len(f.volumes.removed) != 0 {
+		t.Fatal("data deleted while the container still existed")
+	}
+	f.runtime.failRemove = nil
+	if err := f.reconciler.RemoveTenant(context.Background(), "acme", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeletedSuspendedTenantLosesItsNetwork(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.update(t, "acme", func(r *store.Record) { r.Spec.Suspended = true })
+	f.reconcile(t)
+	if f.runtime.networks["corral-acme"] == nil {
+		t.Fatal("a suspended tenant keeps its network")
+	}
+	// The record disappears without RemoveTenant, as after restoring an
+	// older state file: the next pass still removes the network.
+	if err := f.store.Delete("acme"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if f.runtime.networks["corral-acme"] != nil {
+		t.Fatal("the network of a deleted tenant without containers was left behind")
+	}
+}
+
+func TestPurgeDataOnlyForDeletedTenants(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	if err := f.reconciler.PurgeData(context.Background(), "acme"); err == nil {
+		t.Fatal("purged the data of a live tenant")
+	}
+	if err := f.reconciler.RemoveTenant(context.Background(), "acme", false); err != nil {
+		t.Fatal(err)
+	}
+	if exists, _ := f.reconciler.DataExists(context.Background(), "acme"); !exists {
+		t.Fatal("delete without purge removed the data")
+	}
+	if err := f.reconciler.PurgeData(context.Background(), "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if exists, _ := f.reconciler.DataExists(context.Background(), "acme"); exists {
+		t.Fatal("PurgeData left the data")
 	}
 }
 
@@ -396,18 +568,24 @@ func TestFailuresAreReportedPerTenant(t *testing.T) {
 func TestSpecHashIsStable(t *testing.T) {
 	f := newFixture(t)
 	record := f.create(t, "acme")
-	first, err := f.reconciler.containerSpec(record, "/srv/acme", "172.30.0.0/16")
+	first, err := f.reconciler.containerSpec(record, "/srv/acme")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range 20 {
-		again, _ := f.reconciler.containerSpec(record, "/srv/acme", "172.30.0.0/16")
+		again, _ := f.reconciler.containerSpec(record, "/srv/acme")
 		if again.Labels[runtime.LabelHash] != first.Labels[runtime.LabelHash] {
 			t.Fatal("the same spec hashed differently")
 		}
 	}
-	moved, _ := f.reconciler.containerSpec(record, "/srv/acme", "172.31.0.0/16")
+	record.Spec.Tmpfs = map[string]string{}
+	empty, _ := f.reconciler.containerSpec(record, "/srv/acme")
+	if empty.Labels[runtime.LabelHash] != first.Labels[runtime.LabelHash] {
+		t.Fatal("an empty tmpfs map hashed differently from none")
+	}
+	record.Subnet = "10.240.0.32/28"
+	moved, _ := f.reconciler.containerSpec(record, "/srv/acme")
 	if moved.Labels[runtime.LabelHash] == first.Labels[runtime.LabelHash] {
-		t.Fatal("a different network range kept the same hash")
+		t.Fatal("a different subnet kept the same hash")
 	}
 }

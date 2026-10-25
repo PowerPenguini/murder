@@ -56,9 +56,9 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	volumes := ZFS{Parent: pool + "/corral/tenants", MountRoot: mountRoot, Run: Exec}
 	ctx := context.Background()
 
-	path, err := volumes.Ensure(ctx, "acme", 10001, 10002)
-	if err != nil {
-		t.Fatal(err)
+	path, mounted, err := volumes.Ensure(ctx, "acme", 10001, 10002)
+	if err != nil || mounted {
+		t.Fatalf("Ensure = %v, %v", mounted, err)
 	}
 	if path != filepath.Join(mountRoot, "acme") {
 		t.Fatalf("path = %q", path)
@@ -70,8 +70,11 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	if stat := info.Sys().(*syscall.Stat_t); stat.Uid != 10001 || stat.Gid != 10002 {
 		t.Fatalf("data directory owned by %d:%d, want 10001:10002", stat.Uid, stat.Gid)
 	}
-	if got := strings.TrimSpace(zfsOutput(t, "get", "-H", "-o", "value", "mountpoint", pool+"/corral/tenants/acme")); got != path {
-		t.Fatalf("mountpoint property = %q", got)
+	if got := strings.Fields(zfsOutput(t, "get", "-H", "-o", "value", "mountpoint,setuid,devices,"+ownerProperty, pool+"/corral/tenants/acme")); strings.Join(got, " ") != path+" off off acme" {
+		t.Fatalf("dataset properties = %v", got)
+	}
+	if info, err := os.Stat(mountRoot); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("mount root = %v, %v", info.Mode().Perm(), err)
 	}
 	if err := os.WriteFile(filepath.Join(path, "data.db"), []byte("before"), 0o600); err != nil {
 		t.Fatal(err)
@@ -96,12 +99,26 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	// An unmounted dataset (as after a reboot that skipped zfs-mount) is
 	// mounted again, with its data.
 	zfsOutput(t, "unmount", pool+"/corral/tenants/acme")
-	if _, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil {
-		t.Fatal(err)
+	if _, mounted, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil || !mounted {
+		t.Fatalf("Ensure of an unmounted dataset = %v, %v", mounted, err)
 	}
 	if data, err := os.ReadFile(filepath.Join(path, "data.db")); err != nil || string(data) != "after" {
 		t.Fatalf("data after remount = %q, %v", data, err)
 	}
+
+	if exists, err := volumes.Exists(ctx, "acme"); err != nil || !exists {
+		t.Fatalf("Exists = %v, %v", exists, err)
+	}
+
+	// A dataset made by hand below the parent is neither used nor destroyed.
+	zfsOutput(t, "create", "-o", "mountpoint="+filepath.Join(mountRoot, "manual"), pool+"/corral/tenants/manual")
+	if _, _, err := volumes.Ensure(ctx, "manual", 10001, 10002); err == nil {
+		t.Fatal("Ensure adopted a dataset corral did not create")
+	}
+	if err := volumes.Remove(ctx, "manual"); err == nil {
+		t.Fatal("Remove destroyed a dataset corral did not create")
+	}
+	zfsOutput(t, "list", pool+"/corral/tenants/manual")
 
 	if err := volumes.Remove(ctx, "acme"); err != nil {
 		t.Fatal(err)

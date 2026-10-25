@@ -100,9 +100,11 @@ func (c *Client) Get(ctx context.Context, name string) (Tenant, error) {
 	return tenant, c.do(ctx, http.MethodGet, tenantPath(name), nil, &tenant)
 }
 
-func (c *Client) Create(ctx context.Context, tenant spec.Tenant) (Tenant, error) {
+// Create adds a tenant. adoptData lets it take over data a deleted tenant
+// of the same name left on the node.
+func (c *Client) Create(ctx context.Context, tenant spec.Tenant, adoptData bool) (Tenant, error) {
 	var created Tenant
-	return created, c.do(ctx, http.MethodPost, "/v1/tenants", tenant, &created)
+	return created, c.do(ctx, http.MethodPost, "/v1/tenants?adoptData="+strconv.FormatBool(adoptData), tenant, &created)
 }
 
 func (c *Client) Replace(ctx context.Context, tenant spec.Tenant) (Tenant, error) {
@@ -126,6 +128,11 @@ func (c *Client) Suspend(ctx context.Context, name string, suspended bool) (Tena
 
 func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 	return c.do(ctx, http.MethodDelete, tenantPath(name)+"?purge="+strconv.FormatBool(purge), nil, nil)
+}
+
+// PurgeData deletes data a deleted tenant left behind.
+func (c *Client) PurgeData(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/data/"+url.PathEscape(name), nil, nil)
 }
 
 func (c *Client) Secret(ctx context.Context, name, key string) (string, error) {

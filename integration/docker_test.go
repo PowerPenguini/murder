@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,14 +86,20 @@ type node struct {
 	edgeURL    string
 }
 
-func newNode(t *testing.T) *node {
+func newNode(t *testing.T, name string) *node {
 	t.Helper()
 	dir := t.TempDir()
 	port := freePort(t)
-	st, err := store.OpenFile(filepath.Join(dir, "state.json"), port, port)
+	statePath := filepath.Join(dir, "state.json")
+	if err := store.InitFile(statePath); err != nil {
+		t.Fatal(err)
+	}
+	// A pool unlikely to collide with the host's networks.
+	st, err := store.OpenFile(statePath, store.Options{PortFrom: port, PortTo: port, NetworkPool: netip.MustParsePrefix("10.253.0.0/24")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	keyPath := filepath.Join(dir, "master.key")
 	if err := secrets.CreateKey(keyPath); err != nil {
 		t.Fatal(err)
@@ -101,7 +108,9 @@ func newNode(t *testing.T) *node {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := &node{store: st, docker: runtime.NewDocker(dockerSocket()), volumes: volume.Dir{Root: filepath.Join(dir, "tenants")}, key: key, log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
+	// A node name of its own keeps this test away from any agent running on
+	// the same engine, and that agent away from this test's objects.
+	n := &node{store: st, docker: runtime.NewDocker(runtime.DockerOptions{Socket: dockerSocket(), Node: name + "-it"}), volumes: volume.Dir{Root: filepath.Join(dir, "tenants")}, key: key, log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
 	n.reconciler = n.newReconciler()
 	apiServer := httptest.NewServer(api.NewServer(st, n.reconciler, n.docker, key, n.log).Handler())
 	t.Cleanup(apiServer.Close)
@@ -177,7 +186,7 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 	_, _ = rand.Read(suffix)
 	tenant := "it-" + hex.EncodeToString(suffix)
 	cleanupTenant(t, tenant)
-	n := newNode(t)
+	n := newNode(t, tenant)
 	ctx := context.Background()
 
 	uid, gid := os.Getuid(), os.Getgid()
@@ -189,7 +198,7 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 		ReadOnlyRoot: true,
 		Tmpfs:        map[string]string{"/tmp": "rw,noexec,nosuid,size=16m"},
 		Limits:       spec.Limits{MemoryMB: 64, CPUs: 0.5, PIDs: 64},
-	})
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,10 +264,8 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 	if _, value := n.request(t, http.MethodGet, tenant, "/value", ""); value != "kept" {
 		t.Fatalf("data after resume = %q", value)
 	}
-	if logs, err := n.client.Logs(ctx, tenant, 20); err != nil {
+	if _, err := n.client.Logs(ctx, tenant, 20); err != nil {
 		t.Fatalf("logs: %v", err)
-	} else {
-		_ = logs
 	}
 
 	// Delete with purge removes the container, the network and the data.

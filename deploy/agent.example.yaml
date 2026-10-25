@@ -1,10 +1,13 @@
 # /etc/corral/agent.yaml
+node: node-fsn-1                   # defaults to the host name; labels this node's Docker objects
 baseDomain: example.com            # tenants live at <tenant>.example.com
 stateFile: /var/lib/corral/state.json
 masterKeyFile: /etc/corral/master.key
 socket: /run/corral/agent.sock
-socketGroup: corral                # members may run the corral CLI without root
+socketGroup: corral                # members may run the corral CLI without root (they control every tenant)
 dockerSocket: /var/run/docker.sock
+registryAuthFile: /etc/corral/registry.json   # docker config.json with "auths" for private registries
+networkPool: 10.240.0.0/16         # one /28 per tenant network; must not overlap host or Docker networks
 
 volumes:
   driver: zfs                      # or: driver: dir, root: /srv/corral/tenants

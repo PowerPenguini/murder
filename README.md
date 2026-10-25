@@ -35,13 +35,20 @@ Stage 2 — a single server — is what this code does today.
 sudo install -m 0755 corral /usr/local/bin/corral
 sudo install -d -m 0755 /etc/corral
 sudo install -m 0644 deploy/agent.example.yaml /etc/corral/agent.yaml   # then edit it
-sudo corral init                       # creates /etc/corral/master.key; store a copy offline
+sudo corral init                       # creates the master key (store a copy offline) and an empty state
 sudo install -m 0644 deploy/corral-agent.service /etc/systemd/system/
 sudo systemctl enable --now corral-agent
 ```
 
 With the `zfs` driver, create the parent dataset first, for example
-`zfs create -p tank/corral/tenants`.
+`zfs create -p tank/corral/tenants`, and make Docker start after ZFS has mounted
+everything (`systemctl edit docker` → `[Unit]` `After=zfs-mount.service`). If a
+dataset still mounts late, the agent replaces the container that started on
+the empty directory underneath.
+
+The agent refuses to start without its state file. A new node gets one from
+`corral init`; on an existing node a missing file means a broken mount or a
+lost disk, and starting from an empty state would remove every tenant.
 
 ## Run tenants
 
@@ -53,15 +60,40 @@ corral tenant set-image acme ghcr.io/example/app@sha256:<new digest> -wait 3m
 corral tenant logs acme -tail 100
 corral tenant suspend acme && corral tenant resume acme -wait 3m
 corral tenant delete acme -yes            # keeps the data; add -purge to delete it
+corral tenant purge-data acme -yes        # delete data a deleted tenant left behind
 ```
+
+A new tenant with the name of a deleted one whose data was kept is refused
+until that data is purged or deliberately taken over with `create -adopt-data`.
+A delete that fails leaves the tenant suspended; run it again.
 
 **Images:**
 - Images must be pinned by digest, or be a local `sha256:` image ID.
-- Private registries need `docker login` on the node.
+- Private registries need credentials in `registryAuthFile`, a Docker
+  `config.json` with an `auths` entry per registry. Credential helpers are not
+  supported. The Docker engine never reads what `docker login` saved; the
+  client has to send it.
 
 **Env placeholders:** values may use `{{name}}`, `{{host}}`, `{{url}}` and
 `{{network}}`. `{{network}}` is the tenant network's CIDR; the edge proxy
 connects from it, so trust it for proxy headers.
+
+## Security model
+
+- **The CLI is root-equivalent.** Anyone who can use the API socket (root, or
+  members of `socketGroup`) controls every tenant on the node, including its
+  secrets and data.
+- **Tenants never run as root.** Specs that set user or data owner 0 are
+  refused, and images must not default to root.
+- **Every container is locked down.** It drops all capabilities, runs with
+  `no-new-privileges`, has resource limits and publishes its port on loopback
+  only.
+- **Tenant data is out of reach of host users.** Data directories sit below a
+  root-only (`0700`) directory, and ZFS datasets are created with `setuid=off`
+  and `devices=off`. A setuid file a tenant writes there is useless to host
+  users.
+- **Optional extra isolation:** enabling Docker's `userns-remap` also maps
+  container users away from host users.
 
 ## Develop
 
@@ -86,3 +118,5 @@ through Corral's real components:
   containers keep running.
 - **Single node.** State is one local file; stage 3 replaces it with a
   replicated log.
+- **Failing pulls.** A pull that keeps failing is retried on every pass,
+  without backoff.

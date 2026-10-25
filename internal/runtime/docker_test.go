@@ -2,11 +2,14 @@ package runtime
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +27,7 @@ func newFakeEngine(t *testing.T) (*fakeEngine, *Docker) {
 	engine := &fakeEngine{t: t, handlers: map[string]http.HandlerFunc{}}
 	server := httptest.NewServer(engine)
 	t.Cleanup(server.Close)
-	return engine, newDockerForURL(server.URL, server.Client())
+	return engine, newDockerForURL(server.URL, server.Client(), "node-1")
 }
 
 func (e *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -77,7 +80,7 @@ func TestCreateSendsHardenedContainer(t *testing.T) {
 		Name: "corral-acme", Image: "sha256:img", Env: []string{"A=1"}, User: "10001", Network: "corral-acme",
 		ContainerPort: 8080, HostPort: 20001, Mounts: []Mount{{Source: "/srv/acme", Target: "/data"}},
 		MemoryBytes: 512 << 20, NanoCPUs: 1e9, PIDs: 256, ReadOnlyRoot: true, Tmpfs: map[string]string{"/tmp": "size=64m"},
-		Labels: map[string]string{LabelManaged: "true"},
+		Labels: map[string]string{LabelTenant: "acme"},
 	})
 	if err != nil || id != "c1" {
 		t.Fatalf("Create = %q, %v", id, err)
@@ -99,13 +102,18 @@ func TestCreateSendsHardenedContainer(t *testing.T) {
 	if mount := host["Mounts"].([]any)[0].(map[string]any); mount["Source"] != "/srv/acme" || mount["Target"] != "/data" || mount["Type"] != "bind" {
 		t.Errorf("mount = %v", mount)
 	}
+	labels := engine.created["Labels"].(map[string]any)
+	if labels[LabelManaged] != "true" || labels[LabelNode] != "node-1" || labels[LabelTenant] != "acme" {
+		t.Errorf("labels = %v", labels)
+	}
 }
 
 func TestListStopRemoveAndNetwork(t *testing.T) {
 	engine, docker := newFakeEngine(t)
 	ctx := context.Background()
 	engine.handlers["GET /containers/json"] = func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.URL.Query().Get("filters"), LabelManaged+"=true") || r.URL.Query().Get("all") != "true" {
+		filters := r.URL.Query().Get("filters")
+		if !strings.Contains(filters, LabelManaged+"=true") || !strings.Contains(filters, LabelNode+"=node-1") || r.URL.Query().Get("all") != "true" {
 			t.Errorf("list query = %s", r.URL.RawQuery)
 		}
 		_, _ = w.Write([]byte(`[{"Id":"c1","Names":["/corral-acme"],"State":"running","Labels":{"io.corral.tenant":"acme"}},{"Id":"c2","Names":["/corral-beta"],"State":"exited","Labels":{}}]`))
@@ -130,21 +138,80 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write([]byte(`{"IPAM":{"Config":[{"Subnet":"fd00::/64"},{"Subnet":"172.21.0.0/16"}]}}`))
+		_, _ = w.Write([]byte(`{"IPAM":{"Config":[{"Subnet":"fd00::/64"},{"Subnet":"10.240.0.16/28"}]}}`))
 	}
 	engine.handlers["POST /networks/create"] = func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body["Name"] != "corral-acme" || body["Options"].(map[string]any)["com.docker.network.bridge.enable_icc"] != "false" {
+		subnet := body["IPAM"].(map[string]any)["Config"].([]any)[0].(map[string]any)["Subnet"]
+		labels := body["Labels"].(map[string]any)
+		if body["Name"] != "corral-acme" || subnet != "10.240.0.16/28" || labels[LabelNode] != "node-1" || body["Options"].(map[string]any)["com.docker.network.bridge.enable_icc"] != "false" {
 			t.Errorf("network create = %v", body)
 		}
 		created = true
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"Id":"n1"}`))
 	}
-	subnet, err := docker.EnsureNetwork(ctx, "corral-acme", nil)
-	if err != nil || subnet != "172.21.0.0/16" {
-		t.Fatalf("EnsureNetwork = %q, %v", subnet, err)
+	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.16/28", map[string]string{LabelTenant: "acme"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.16/28", nil); err != nil {
+		t.Fatalf("an existing network with the right subnet = %v", err)
+	}
+	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.32/28", nil); err == nil {
+		t.Fatal("an existing network with another subnet was accepted")
+	}
+	engine.handlers["GET /networks"] = func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Query().Get("filters"), LabelNode+"=node-1") {
+			t.Errorf("network list filters = %s", r.URL.Query().Get("filters"))
+		}
+		_, _ = w.Write([]byte(`[{"Name":"corral-acme","Labels":{"io.corral.tenant":"acme"}}]`))
+	}
+	networks, err := docker.ListNetworks(ctx)
+	if err != nil || len(networks) != 1 || networks[0].Labels[LabelTenant] != "acme" {
+		t.Fatalf("ListNetworks = %+v, %v", networks, err)
+	}
+	engine.handlers["DELETE /containers/c9"] = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("v") != "true" || r.URL.Query().Get("force") != "true" {
+			t.Errorf("remove query = %s", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+	if err := docker.Remove(ctx, "c9"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPullSendsRegistryCredentials(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	authFile := filepath.Join(t.TempDir(), "config.json")
+	credentials := base64.StdEncoding.EncodeToString([]byte("robot:s3cret"))
+	if err := os.WriteFile(authFile, []byte(`{"auths":{"https://ghcr.io":{"auth":"`+credentials+`"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docker.authFile = authFile
+	var sent string
+	engine.handlers["POST /images/create"] = func(w http.ResponseWriter, r *http.Request) {
+		sent = r.Header.Get("X-Registry-Auth")
+		_, _ = w.Write([]byte(`{"status":"done"}`))
+	}
+	if err := docker.PullImage(context.Background(), "ghcr.io/org/app@sha256:abc"); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.URLEncoding.DecodeString(sent)
+	if err != nil {
+		t.Fatalf("X-Registry-Auth %q is not base64url: %v", sent, err)
+	}
+	var auth map[string]string
+	if err := json.Unmarshal(decoded, &auth); err != nil || auth["username"] != "robot" || auth["password"] != "s3cret" || auth["serveraddress"] != "ghcr.io" {
+		t.Fatalf("auth = %v, %v", auth, err)
+	}
+	sent = "unchanged"
+	if err := docker.PullImage(context.Background(), "quay.io/org/app@sha256:abc"); err != nil {
+		t.Fatal(err)
+	}
+	if sent != "" {
+		t.Fatalf("credentials for ghcr.io were sent to quay.io: %q", sent)
 	}
 }
 

@@ -67,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tenants/{name}/suspend", s.suspend(true))
 	mux.HandleFunc("POST /v1/tenants/{name}/resume", s.suspend(false))
 	mux.HandleFunc("DELETE /v1/tenants/{name}", s.delete)
+	mux.HandleFunc("DELETE /v1/data/{name}", s.purgeData)
 	mux.HandleFunc("GET /v1/tenants/{name}/secrets/{key}", s.secret)
 	mux.HandleFunc("GET /v1/tenants/{name}/logs", s.logs)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
@@ -115,6 +116,18 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(err))
 		return
 	}
+	// A deleted tenant's kept data must not silently become a new tenant's.
+	if r.URL.Query().Get("adoptData") != "true" {
+		exists, err := s.reconciler.DataExists(r.Context(), tenant.Name)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if exists {
+			writeError(w, statusError{http.StatusConflict, fmt.Errorf("data of a deleted tenant %s is still on this node; adopt it (adoptData=true) or purge it first", tenant.Name)})
+			return
+		}
+	}
 	sealed, err := s.sealMissing(tenant, nil)
 	if err != nil {
 		writeError(w, err)
@@ -129,8 +142,9 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, s.view(record))
 }
 
-// replace swaps the whole spec. Secrets keep their values; new secret names
-// get generated values and removed ones are forgotten.
+// replace swaps the spec. Secrets keep their values; new secret names get
+// generated values and removed ones are forgotten. Suspension is operational
+// state, not part of an app spec, so it is kept as it was.
 func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var tenant spec.Tenant
@@ -141,11 +155,16 @@ func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(fmt.Errorf("spec name %q does not match tenant %q", tenant.Name, name)))
 		return
 	}
+	if err := tenant.Validate(); err != nil {
+		writeError(w, badRequest(err))
+		return
+	}
 	record, err := s.store.Update(name, func(record *store.Record) error {
 		sealed, err := s.sealMissing(tenant, record.Sealed)
 		if err != nil {
 			return err
 		}
+		tenant.Suspended = record.Spec.Suspended
 		record.Spec, record.Sealed = tenant, sealed
 		return nil
 	})
@@ -211,23 +230,43 @@ func (s *Server) suspend(suspended bool) http.HandlerFunc {
 	}
 }
 
-// delete removes the tenant and its containers. Its data stays unless
-// purge=true, which deletes the data volume too.
+// delete removes the tenant, its containers and network. Its data stays
+// unless purge=true. A failed delete leaves the tenant suspended and can be
+// repeated.
 func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := s.store.Delete(name); err != nil {
+	purge := r.URL.Query().Get("purge") == "true"
+	ctx, cancel := detached(r)
+	defer cancel()
+	if err := s.reconciler.RemoveTenant(ctx, name, purge); err != nil {
 		writeError(w, err)
 		return
 	}
-	s.log.Info("tenant deleted", "tenant", name)
-	if r.URL.Query().Get("purge") == "true" {
-		if err := s.reconciler.Purge(r.Context(), name); err != nil {
-			writeError(w, fmt.Errorf("tenant deleted but its data was not purged: %w", err))
-			return
-		}
-		s.log.Info("tenant data purged", "tenant", name)
-	}
+	s.log.Info("tenant deleted", "tenant", name, "purged", purge)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// purgeData deletes data a tenant deleted without purge left behind.
+func (s *Server) purgeData(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := spec.ValidLabel(name); err != nil {
+		writeError(w, badRequest(err))
+		return
+	}
+	ctx, cancel := detached(r)
+	defer cancel()
+	if err := s.reconciler.PurgeData(ctx, name); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.log.Info("leftover tenant data purged", "tenant", name)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// detached gives work that changes the runtime its own deadline, so a client
+// that disconnects cannot leave it half done.
+func detached(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Minute)
 }
 
 func (s *Server) secret(w http.ResponseWriter, r *http.Request) {
@@ -281,7 +320,9 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reconcileNow(w http.ResponseWriter, r *http.Request) {
-	if err := s.reconciler.Reconcile(r.Context()); err != nil {
+	ctx, cancel := detached(r)
+	defer cancel()
+	if err := s.reconciler.Reconcile(ctx); err != nil {
 		writeError(w, err)
 		return
 	}

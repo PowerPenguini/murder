@@ -13,6 +13,14 @@ import (
 	"time"
 )
 
+// spoofable are client-settable headers that proxies and frameworks use to
+// pass on the client's address or the public URL.
+var spoofable = []string{
+	"X-Real-Ip", "True-Client-Ip", "X-Client-Ip", "Cf-Connecting-Ip", "Fastly-Client-Ip", "X-Cluster-Client-Ip",
+	"X-Forwarded", "Forwarded-For", "X-Forwarded-Port", "X-Forwarded-Prefix", "X-Forwarded-Ssl", "X-Forwarded-Scheme",
+	"X-Forwarded-Server", "X-Forwarded-Uri", "X-Forwarded-Path", "X-Original-Url", "X-Original-Host", "X-Rewrite-Url", "X-Url-Scheme",
+}
+
 // Route says where a tenant's traffic goes.
 type Route struct {
 	// Backend is the host:port the tenant container is published on.
@@ -77,9 +85,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	backend := &url.URL{Scheme: "http", Host: route.Backend}
 	proxy := &httputil.ReverseProxy{
-		// Rewrite drops any X-Forwarded-* the client sent, so the app sees
-		// only what this proxy observed.
+		// The app sees only what this proxy observed: Rewrite drops
+		// Forwarded and X-Forwarded-For/-Host/-Proto, and every other header
+		// apps read a client address or URL from is dropped here.
 		Rewrite: func(out *httputil.ProxyRequest) {
+			for _, name := range spoofable {
+				out.Out.Header.Del(name)
+			}
 			out.SetURL(backend)
 			out.SetXForwarded()
 			out.Out.Host = out.In.Host
@@ -99,11 +111,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-// RedirectToHTTPS sends plain HTTP requests for tenant hosts to HTTPS.
-func (p *Proxy) RedirectToHTTPS() http.Handler {
+// RedirectToHTTPS sends plain HTTP requests for tenant hosts to HTTPS once
+// ready reports that the HTTPS listener serves; until then it answers 503
+// instead of redirecting to a port that does not answer.
+func (p *Proxy) RedirectToHTTPS(ready func() bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := p.Tenant(r.Host); !ok {
 			http.Error(w, "unknown host", http.StatusNotFound)
+			return
+		}
+		if !ready() {
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "the secure endpoint is starting; try again shortly", http.StatusServiceUnavailable)
 			return
 		}
 		host := r.Host

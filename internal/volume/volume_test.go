@@ -10,32 +10,40 @@ import (
 	"time"
 )
 
-func TestDirEnsureIsIdempotentAndRemoves(t *testing.T) {
+func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "tenants")
 	dir := Dir{Root: root}
 	ctx := context.Background()
 	uid, gid := os.Getuid(), os.Getgid()
-	path, err := dir.Ensure(ctx, "acme", uid, gid)
-	if err != nil || path != filepath.Join(root, "acme") {
-		t.Fatalf("Ensure = %q, %v", path, err)
+	if exists, err := dir.Exists(ctx, "acme"); err != nil || exists {
+		t.Fatalf("Exists before Ensure = %v, %v", exists, err)
+	}
+	path, mounted, err := dir.Ensure(ctx, "acme", uid, gid)
+	if err != nil || path != filepath.Join(root, "acme") || mounted {
+		t.Fatalf("Ensure = %q, %v, %v", path, mounted, err)
+	}
+	if exists, err := dir.Exists(ctx, "acme"); err != nil || !exists {
+		t.Fatalf("Exists after Ensure = %v, %v", exists, err)
+	}
+	if info, _ := os.Stat(root); info.Mode().Perm() != 0o700 {
+		t.Fatalf("tenants root mode = %v; host users must not reach tenant data", info.Mode().Perm())
 	}
 	if err := os.WriteFile(filepath.Join(path, "data.db"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if again, err := dir.Ensure(ctx, "acme", uid, gid); err != nil || again != path {
+	if again, _, err := dir.Ensure(ctx, "acme", uid, gid); err != nil || again != path {
 		t.Fatalf("second Ensure = %q, %v", again, err)
 	}
 	if _, err := os.Stat(filepath.Join(path, "data.db")); err != nil {
 		t.Fatal("Ensure lost existing data")
 	}
-	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0o700 {
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o700 {
 		t.Fatalf("data dir mode = %v", info.Mode().Perm())
 	}
 	if _, err := dir.Snapshot(ctx, "acme", "image-change"); !errors.Is(err, ErrSnapshotsUnsupported) {
 		t.Fatalf("Snapshot = %v", err)
 	}
-	if _, err := dir.Ensure(ctx, "../etc", uid, gid); err == nil {
+	if _, _, err := dir.Ensure(ctx, "../etc", uid, gid); err == nil {
 		t.Fatal("Ensure accepted a path-like tenant name")
 	}
 	if err := dir.Remove(ctx, "acme"); err != nil {
@@ -46,64 +54,93 @@ func TestDirEnsureIsIdempotentAndRemoves(t *testing.T) {
 	}
 }
 
+type fakeDataset struct {
+	owner, mountpoint string
+	mounted           bool
+}
+
 // fakeZFS answers zfs commands from an in-memory set of datasets.
 type fakeZFS struct {
-	datasets map[string]string // dataset → mountpoint
-	mounted  map[string]bool
+	datasets map[string]*fakeDataset
 	calls    []string
-	mountDir string
 }
 
 func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, error) {
 	call := name + " " + strings.Join(args, " ")
 	f.calls = append(f.calls, call)
-	switch {
-	case args[0] == "list":
-		if _, ok := f.datasets[args[len(args)-1]]; ok {
-			return []byte(args[len(args)-1] + "\n"), nil
+	dataset := args[len(args)-1]
+	switch args[0] {
+	case "get":
+		d, ok := f.datasets[dataset]
+		if !ok {
+			return []byte("cannot open '" + dataset + "': dataset does not exist\n"), errors.New("exit status 1")
 		}
-		return []byte("cannot open '" + args[len(args)-1] + "': dataset does not exist\n"), errors.New("exit status 1")
-	case args[0] == "create":
-		mountpoint := strings.TrimPrefix(args[3], "mountpoint=")
-		f.datasets[args[4]] = mountpoint
-		f.mounted[args[4]] = true
-		return nil, os.MkdirAll(mountpoint, 0o700)
-	case args[0] == "get":
-		dataset := args[len(args)-1]
 		mounted := "no"
-		if f.mounted[dataset] {
+		if d.mounted {
 			mounted = "yes"
 		}
-		return []byte(mounted + "\n" + f.datasets[dataset] + "\n"), nil
-	case args[0] == "mount":
-		f.mounted[args[1]] = true
+		owner := d.owner
+		if owner == "" {
+			owner = "-"
+		}
+		return []byte(owner + "\n" + mounted + "\n" + d.mountpoint + "\n"), nil
+	case "create":
+		d := &fakeDataset{mounted: true}
+		for i, arg := range args {
+			if arg != "-o" {
+				continue
+			}
+			key, value, _ := strings.Cut(args[i+1], "=")
+			switch key {
+			case "mountpoint":
+				d.mountpoint = value
+			case ownerProperty:
+				d.owner = value
+			}
+		}
+		f.datasets[dataset] = d
+		return nil, os.MkdirAll(d.mountpoint, 0o700)
+	case "mount":
+		f.datasets[dataset].mounted = true
 		return nil, nil
-	case args[0] == "snapshot", args[0] == "destroy":
+	case "snapshot", "destroy":
 		return nil, nil
 	}
 	return nil, errors.New("unexpected command " + call)
 }
 
+func (f *fakeZFS) ran(fragment string) bool {
+	return strings.Contains(strings.Join(f.calls, "\n"), fragment)
+}
+
 func TestZFSEnsureSnapshotRemove(t *testing.T) {
-	fake := &fakeZFS{datasets: map[string]string{}, mounted: map[string]bool{}}
+	fake := &fakeZFS{datasets: map[string]*fakeDataset{}}
 	mountRoot := filepath.Join(t.TempDir(), "mnt")
 	volumes := ZFS{Parent: "tank/corral", MountRoot: mountRoot, Run: fake.run, Now: func() time.Time { return time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC) }}
 	ctx := context.Background()
-	path, err := volumes.Ensure(ctx, "acme", os.Getuid(), os.Getgid())
-	if err != nil || path != filepath.Join(mountRoot, "acme") {
-		t.Fatalf("Ensure = %q, %v", path, err)
+	uid, gid := os.Getuid(), os.Getgid()
+	path, mounted, err := volumes.Ensure(ctx, "acme", uid, gid)
+	if err != nil || path != filepath.Join(mountRoot, "acme") || mounted {
+		t.Fatalf("Ensure = %q, %v, %v", path, mounted, err)
 	}
-	if !strings.Contains(strings.Join(fake.calls, "\n"), "zfs create -p -o mountpoint="+filepath.Join(mountRoot, "acme")+" tank/corral/acme") {
+	if !fake.ran("zfs create -p -o mountpoint=" + path + " -o setuid=off -o devices=off -o " + ownerProperty + "=acme tank/corral/acme") {
 		t.Fatalf("calls = %v", fake.calls)
 	}
-	// An existing but unmounted dataset is mounted, not recreated.
-	fake.mounted["tank/corral/acme"] = false
+	if info, _ := os.Stat(mountRoot); info.Mode().Perm() != 0o700 {
+		t.Fatalf("mount root mode = %v", info.Mode().Perm())
+	}
+	// An existing but unmounted dataset is mounted, not recreated, and the
+	// caller learns that it was.
+	fake.datasets["tank/corral/acme"].mounted = false
 	fake.calls = nil
-	if _, err := volumes.Ensure(ctx, "acme", os.Getuid(), os.Getgid()); err != nil {
-		t.Fatal(err)
+	if _, mounted, err := volumes.Ensure(ctx, "acme", uid, gid); err != nil || !mounted {
+		t.Fatalf("Ensure of an unmounted dataset = %v, %v", mounted, err)
 	}
-	if got := strings.Join(fake.calls, "\n"); strings.Contains(got, "create") || !strings.Contains(got, "zfs mount tank/corral/acme") {
+	if fake.ran("create") || !fake.ran("zfs mount tank/corral/acme") {
 		t.Fatalf("calls = %v", fake.calls)
+	}
+	if exists, err := volumes.Exists(ctx, "acme"); err != nil || !exists {
+		t.Fatalf("Exists = %v, %v", exists, err)
 	}
 	name, err := volumes.Snapshot(ctx, "acme", "image-change")
 	if err != nil || name != "tank/corral/acme@corral-image-change-20261025T120000.000Z" {
@@ -112,20 +149,38 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	if _, err := volumes.Snapshot(ctx, "acme", "Bad Reason"); err == nil {
 		t.Fatal("accepted an unsafe snapshot reason")
 	}
-	// A dataset mounted somewhere else is refused rather than used.
-	fake.datasets["tank/corral/beta"] = "/elsewhere"
-	fake.mounted["tank/corral/beta"] = true
-	if _, err := volumes.Ensure(ctx, "beta", os.Getuid(), os.Getgid()); err == nil {
-		t.Fatal("used a dataset with a foreign mountpoint")
-	}
 	fake.calls = nil
 	if err := volumes.Remove(ctx, "acme"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(fake.calls, "\n"), "zfs destroy -r tank/corral/acme") {
+	if !fake.ran("zfs destroy -r tank/corral/acme") {
 		t.Fatalf("calls = %v", fake.calls)
 	}
 	if err := volumes.Remove(ctx, "never-existed"); err != nil {
 		t.Fatalf("removing a missing dataset = %v", err)
+	}
+}
+
+// A dataset Corral did not create for the tenant is never used or destroyed,
+// even when its name matches.
+func TestZFSRefusesForeignDatasets(t *testing.T) {
+	mountRoot := filepath.Join(t.TempDir(), "mnt")
+	fake := &fakeZFS{datasets: map[string]*fakeDataset{
+		"tank/home":  {owner: "", mountpoint: "/home", mounted: true},
+		"tank/other": {owner: "someone", mountpoint: filepath.Join(mountRoot, "other"), mounted: true},
+		"tank/moved": {owner: "moved", mountpoint: "/elsewhere", mounted: true},
+	}}
+	volumes := ZFS{Parent: "tank", MountRoot: mountRoot, Run: fake.run}
+	ctx := context.Background()
+	for _, tenant := range []string{"home", "other", "moved"} {
+		if _, _, err := volumes.Ensure(ctx, tenant, 1000, 1000); err == nil {
+			t.Errorf("Ensure used foreign dataset tank/%s", tenant)
+		}
+		if err := volumes.Remove(ctx, tenant); err == nil {
+			t.Errorf("Remove destroyed foreign dataset tank/%s", tenant)
+		}
+	}
+	if fake.ran("destroy") || fake.ran("mount ") {
+		t.Fatalf("a foreign dataset was touched: %v", fake.calls)
 	}
 }

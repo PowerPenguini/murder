@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,18 +20,27 @@ import (
 
 // Agent configures one node's agent.
 type Agent struct {
+	// Node names this node; the agent only manages Docker objects carrying
+	// its node label. Defaults to the host name.
+	Node string `yaml:"node"`
 	// BaseDomain is the domain tenants live below: <tenant>.<BaseDomain>.
 	BaseDomain    string `yaml:"baseDomain"`
 	StateFile     string `yaml:"stateFile"`
 	MasterKeyFile string `yaml:"masterKeyFile"`
 	// Socket is the local API the CLI talks to. SocketGroup, if set, may use
 	// it besides root.
-	Socket       string  `yaml:"socket"`
-	SocketGroup  string  `yaml:"socketGroup"`
-	DockerSocket string  `yaml:"dockerSocket"`
-	Volumes      Volumes `yaml:"volumes"`
-	Ports        Ports   `yaml:"ports"`
-	Edge         Edge    `yaml:"edge"`
+	Socket       string `yaml:"socket"`
+	SocketGroup  string `yaml:"socketGroup"`
+	DockerSocket string `yaml:"dockerSocket"`
+	// RegistryAuthFile is a Docker config.json with credentials for private
+	// registries (as written by "docker login" without a credential helper).
+	RegistryAuthFile string `yaml:"registryAuthFile"`
+	// NetworkPool is split into one /28 per tenant network. It must not
+	// overlap networks the host or Docker already use.
+	NetworkPool string  `yaml:"networkPool"`
+	Volumes     Volumes `yaml:"volumes"`
+	Ports       Ports   `yaml:"ports"`
+	Edge        Edge    `yaml:"edge"`
 	// Defaults fill in tenant limits left at zero.
 	Defaults          spec.Limits `yaml:"defaults"`
 	ReconcileInterval Duration    `yaml:"reconcileInterval"`
@@ -88,6 +99,7 @@ func Parse(data []byte) (Agent, error) {
 		DockerSocket:      "/var/run/docker.sock",
 		Volumes:           Volumes{Driver: "dir", Root: "/srv/corral/tenants"},
 		Ports:             Ports{From: 20000, To: 29999},
+		NetworkPool:       "10.240.0.0/16",
 		Edge:              Edge{HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/corral/certs"}},
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
@@ -98,6 +110,13 @@ func Parse(data []byte) (Agent, error) {
 	// missing base domain.
 	if err := decoder.Decode(&agent); err != nil && !errors.Is(err, io.EOF) {
 		return Agent{}, fmt.Errorf("parse config: %w", err)
+	}
+	if agent.Node == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			return Agent{}, fmt.Errorf("node is not set and the host name is unknown: %w", err)
+		}
+		agent.Node = host
 	}
 	return agent, agent.Validate()
 }
@@ -123,13 +142,27 @@ func (a Agent) Validate() error {
 	if a.Ports.From < 1024 || a.Ports.To > 65535 || a.Ports.From > a.Ports.To {
 		problems = append(problems, "ports must be a range within 1024-65535")
 	}
+	if pool, err := netip.ParsePrefix(a.NetworkPool); err != nil || !pool.Addr().Is4() || pool.Bits() > 24 {
+		problems = append(problems, "networkPool must be an IPv4 prefix of /24 or larger")
+	}
+	if a.Node == "" || strings.ContainsAny(a.Node, " \t\n=") {
+		problems = append(problems, "node must be a name without spaces or '='")
+	}
 	switch a.Edge.TLS.Mode {
 	case edge.TLSOff, edge.TLSInternal, edge.TLSACME:
 	default:
 		problems = append(problems, fmt.Sprintf("unknown edge.tls.mode %q", a.Edge.TLS.Mode))
 	}
-	if a.Edge.TLS.Mode == edge.TLSACME && (a.Edge.TLS.Email == "" || a.Edge.TLS.DNSProvider == "" || a.Edge.TLS.DNSTokenFile == "") {
-		problems = append(problems, "acme TLS needs email, dnsProvider and dnsTokenFile")
+	if a.Edge.TLS.Mode != edge.TLSOff && !strings.HasPrefix(a.Edge.TLS.Storage, "/") {
+		problems = append(problems, "edge.tls.storage must be an absolute path")
+	}
+	if a.Edge.TLS.Mode == edge.TLSACME {
+		if a.Edge.TLS.Email == "" || a.Edge.TLS.DNSTokenFile == "" {
+			problems = append(problems, "acme TLS needs email and dnsTokenFile")
+		}
+		if !slices.Contains(edge.DNSProviders, a.Edge.TLS.DNSProvider) {
+			problems = append(problems, fmt.Sprintf("edge.tls.dnsProvider must be one of %v", edge.DNSProviders))
+		}
 	}
 	if a.ReconcileInterval.Duration < time.Second {
 		problems = append(problems, "reconcileInterval must be at least 1s")
