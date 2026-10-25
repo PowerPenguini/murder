@@ -198,7 +198,7 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 		ReadOnlyRoot: true,
 		Tmpfs:        map[string]string{"/tmp": "rw,noexec,nosuid,size=16m"},
 		Limits:       spec.Limits{MemoryMB: 64, CPUs: 0.5, PIDs: 64},
-	}, false)
+	}, api.AdoptNone)
 	if err != nil {
 		t.Fatal(err)
 	}

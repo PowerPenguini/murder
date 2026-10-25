@@ -24,7 +24,7 @@ const tenantUsage = `Usage: corral tenant <command> [options]
 
   list                          list tenants and their state
   show NAME                     print a tenant as JSON
-  create NAME -file APP.yaml    create a tenant from an app spec [-adopt-data]
+  create NAME -file APP.yaml    create a tenant from an app spec [-adopt-data [-force-new-secrets]]
   apply NAME -file APP.yaml     replace a tenant's spec (secrets are kept)
   set-image NAME IMAGE          run a different pinned image
   suspend NAME | resume NAME    stop or restart a tenant, keeping its data
@@ -71,7 +71,8 @@ func runTenant(args []string) error {
 	purge := flags.Bool("purge", false, "with delete: also delete the tenant's data")
 	tail := flags.Int("tail", 200, "with logs: number of lines")
 	asJSON := flags.Bool("json", false, "with list: print JSON")
-	adoptData := flags.Bool("adopt-data", false, "with create: take over data a deleted tenant of the same name left behind")
+	adoptData := flags.Bool("adopt-data", false, "with create: restore a deleted tenant of the same name over its kept data")
+	forceNewSecrets := flags.Bool("force-new-secrets", false, "with -adopt-data: accept fresh secrets when none were saved")
 	// Allow options after positional arguments: "create acme -file app.yaml".
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
@@ -117,7 +118,14 @@ func runTenant(args []string) error {
 		}
 		var result api.Tenant
 		if command == "create" {
-			result, err = client.Create(ctx, tenant, *adoptData)
+			adopt := api.AdoptNone
+			if *adoptData {
+				adopt = api.AdoptData
+				if *forceNewSecrets {
+					adopt = api.AdoptForce
+				}
+			}
+			result, err = client.Create(ctx, tenant, adopt)
 		} else {
 			result, err = client.Replace(ctx, tenant)
 		}

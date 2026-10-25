@@ -128,8 +128,10 @@ func (t Tenant) Validate() error {
 	}
 	// Tenants never run as root: root in the container owns the data
 	// directory and is a step from root on the host.
-	if t.DataUID <= 0 || t.DataGID <= 0 || int64(t.DataUID) > maxID || int64(t.DataGID) > maxID {
+	if t.DataUID <= 0 || t.DataGID <= 0 {
 		problems = append(problems, "data owner ids must be positive (tenants never run as root)")
+	} else if int64(t.DataUID) > maxID || int64(t.DataGID) > maxID {
+		problems = append(problems, fmt.Sprintf("data owner ids must be at most %d", maxID))
 	}
 	if err := checkUser(t.User); err != nil {
 		problems = append(problems, err.Error())

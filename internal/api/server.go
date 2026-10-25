@@ -116,11 +116,20 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(err))
 		return
 	}
-	adopt := r.URL.Query().Get("adoptData") == "true"
+	// adoptData=true restores a deleted tenant over its kept data with its
+	// saved secrets; adoptData=force also accepts fresh secrets when none
+	// were saved (the operator vouches that the data does not depend on them).
+	adoptMode := r.URL.Query().Get("adoptData")
+	adopt := adoptMode == "true" || adoptMode == "force"
+	ctx, cancel := detached(r)
+	defer cancel()
 	var record store.Record
 	// Under the reconciler's lock, so a concurrent purge-data cannot delete
 	// the data this create checks or adopts.
 	err := s.reconciler.Exclusive(func() error {
+		if err := r.Context().Err(); err != nil {
+			return fmt.Errorf("the client gave up while waiting; nothing was created: %w", err)
+		}
 		if _, err := s.store.Get(tenant.Name); err == nil {
 			return store.ErrExists
 		}
@@ -130,24 +139,20 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		if adopt {
 			// Restoring over kept data restores the deleted tenant's
 			// secrets too: the data may be encrypted or signed with them.
-			if !hasRetired {
-				return statusError{http.StatusConflict, fmt.Errorf("no saved secrets for a deleted tenant %s; its data may be unreadable with new ones, so it cannot be adopted", tenant.Name)}
+			if !hasRetired && len(tenant.Secrets) > 0 && adoptMode != "force" {
+				return statusError{http.StatusConflict, fmt.Errorf("no saved secrets for a deleted tenant %s; its data may be unreadable with new ones (adopt with -force-new-secrets if it is not)", tenant.Name)}
 			}
 			previous, dataImage = retired.Sealed, retired.DataImage
 		} else {
-			exists, err := s.reconciler.DataExists(r.Context(), tenant.Name)
+			exists, err := s.reconciler.DataExists(ctx, tenant.Name)
 			if err != nil {
 				return err
 			}
 			if exists {
 				return statusError{http.StatusConflict, fmt.Errorf("data of a deleted tenant %s is still on this node; restore it with create -adopt-data or delete it with purge-data", tenant.Name)}
 			}
-			if hasRetired {
-				// Its data is gone, so its saved secrets are of no use.
-				if err := s.store.Forget(tenant.Name); err != nil {
-					return err
-				}
-			}
+			// Saved secrets of a tenant whose data is gone are of no use;
+			// Create drops the retired entry.
 		}
 		sealed, err := s.sealMissing(tenant, previous)
 		if err != nil {

@@ -100,11 +100,18 @@ func (c *Client) Get(ctx context.Context, name string) (Tenant, error) {
 	return tenant, c.do(ctx, http.MethodGet, tenantPath(name), nil, &tenant)
 }
 
-// Create adds a tenant. adoptData lets it take over data a deleted tenant
-// of the same name left on the node.
-func (c *Client) Create(ctx context.Context, tenant spec.Tenant, adoptData bool) (Tenant, error) {
+// Adoption modes for Create.
+const (
+	AdoptNone  = ""
+	AdoptData  = "true"  // restore over kept data with the saved secrets
+	AdoptForce = "force" // also accept fresh secrets if none were saved
+)
+
+// Create adds a tenant. adopt lets it take over data a deleted tenant of the
+// same name left on the node.
+func (c *Client) Create(ctx context.Context, tenant spec.Tenant, adopt string) (Tenant, error) {
 	var created Tenant
-	return created, c.do(ctx, http.MethodPost, "/v1/tenants?adoptData="+strconv.FormatBool(adoptData), tenant, &created)
+	return created, c.do(ctx, http.MethodPost, "/v1/tenants?adoptData="+url.QueryEscape(adopt), tenant, &created)
 }
 
 func (c *Client) Replace(ctx context.Context, tenant spec.Tenant) (Tenant, error) {

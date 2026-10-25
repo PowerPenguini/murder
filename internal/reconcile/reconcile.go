@@ -234,6 +234,8 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		switch {
 		case errors.Is(err, runtime.ErrNotRunning):
 			current.Running = false // it exited since List; started below
+		case errors.Is(err, runtime.ErrNotFound):
+			current = nil // it was removed since List; recreated below
 		case err != nil:
 			return Status{}, err
 		case !serving:

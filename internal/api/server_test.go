@@ -120,7 +120,7 @@ func appSpec(name string) spec.Tenant {
 func TestCreateGeneratesSecretsWithoutShowingThem(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	created, err := f.client.Create(ctx, appSpec("acme"), false)
+	created, err := f.client.Create(ctx, appSpec("acme"), AdoptNone)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestCreateGeneratesSecretsWithoutShowingThem(t *testing.T) {
 func TestErrorsMapToStatusCodes(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
 		t.Fatal(err)
 	}
 	check := func(name string, err error, status int) {
@@ -158,7 +158,7 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 			t.Errorf("%s: error %v, want HTTP %d", name, err, status)
 		}
 	}
-	_, err := f.client.Create(ctx, appSpec("acme"), false)
+	_, err := f.client.Create(ctx, appSpec("acme"), AdoptNone)
 	check("duplicate", err, 409)
 	if !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("duplicate create explains %q", err)
@@ -170,9 +170,9 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	}
 	bad := appSpec("bad")
 	bad.Port = 0
-	_, err = f.client.Create(ctx, bad, false)
+	_, err = f.client.Create(ctx, bad, AdoptNone)
 	check("invalid spec", err, 400)
-	_, err = f.client.Create(ctx, appSpec("www"), false)
+	_, err = f.client.Create(ctx, appSpec("www"), AdoptNone)
 	check("reserved name", err, 400)
 	_, err = f.client.SetImage(ctx, "acme", "nginx:latest")
 	check("unpinned image", err, 400)
@@ -202,7 +202,7 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 func TestApplyKeepsSuspension(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.client.Suspend(ctx, "acme", true); err != nil {
@@ -219,7 +219,7 @@ func TestApplyKeepsSuspension(t *testing.T) {
 func TestDeletedTenantDataIsNotSilentlyReused(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
 		t.Fatal(err)
 	}
 	_ = f.client.Reconcile(ctx)
@@ -233,11 +233,11 @@ func TestDeletedTenantDataIsNotSilentlyReused(t *testing.T) {
 	if err := f.client.Delete(ctx, "acme", false); err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.client.Create(ctx, appSpec("acme"), false)
+	_, err = f.client.Create(ctx, appSpec("acme"), AdoptNone)
 	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "data of a deleted tenant") {
 		t.Fatalf("create over leftover data = %v", err)
 	}
-	if _, err := f.client.Create(ctx, appSpec("acme"), true); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptData); err != nil {
 		t.Fatalf("explicit adoption = %v", err)
 	}
 	// The data may be encrypted with the old secrets, so adoption restores them.
@@ -250,10 +250,10 @@ func TestDeletedTenantDataIsNotSilentlyReused(t *testing.T) {
 	if err := f.client.PurgeData(ctx, "acme"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Create(ctx, appSpec("acme"), true); err == nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptData); err == nil {
 		t.Fatal("adopted data without saved secrets")
 	}
-	fresh, err := f.client.Create(ctx, appSpec("acme"), false)
+	fresh, err := f.client.Create(ctx, appSpec("acme"), AdoptNone)
 	if err != nil {
 		t.Fatalf("create after purge-data = %v", err)
 	}
@@ -270,7 +270,7 @@ func TestDeletedTenantDataIsNotSilentlyReused(t *testing.T) {
 func TestFreshCreateDropsStaleRetiredEntry(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
 		t.Fatal(err)
 	}
 	_ = f.client.Reconcile(ctx)
@@ -281,7 +281,7 @@ func TestFreshCreateDropsStaleRetiredEntry(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(f.dataRoot, "acme")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
 		t.Fatal(err)
 	}
 	if fresh, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); fresh == old {
@@ -295,7 +295,7 @@ func TestFreshCreateDropsStaleRetiredEntry(t *testing.T) {
 func TestReplaceKeepsAndAddsSecrets(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
@@ -325,7 +325,7 @@ func TestReplaceKeepsAndAddsSecrets(t *testing.T) {
 func TestImageSuspendLogsAndDeleteWithPurge(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
 		t.Fatal(err)
 	}
 	changed, err := f.client.SetImage(ctx, "acme", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -363,7 +363,7 @@ func TestImageSuspendLogsAndDeleteWithPurge(t *testing.T) {
 
 func TestRoutesFollowTheStore(t *testing.T) {
 	f := newAPIFixture(t)
-	if _, err := f.client.Create(context.Background(), appSpec("acme"), false); err != nil {
+	if _, err := f.client.Create(context.Background(), appSpec("acme"), AdoptNone); err != nil {
 		t.Fatal(err)
 	}
 	routes := Routes{Store: f.store}
@@ -373,5 +373,29 @@ func TestRoutesFollowTheStore(t *testing.T) {
 	}
 	if _, ok := routes.Route("nobody"); ok {
 		t.Fatal("route for a missing tenant")
+	}
+}
+
+// Data without saved secrets (left from before retirement existed, or
+// restored onto a fresh node) can still be adopted when the operator says so.
+func TestAdoptWithoutSavedSecrets(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if err := os.MkdirAll(filepath.Join(f.dataRoot, "acme"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptData); err == nil || !strings.Contains(err.Error(), "force-new-secrets") {
+		t.Fatalf("adopt without saved secrets = %v", err)
+	}
+	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptForce); err != nil {
+		t.Fatalf("forced adoption = %v", err)
+	}
+	plain := appSpec("beta")
+	plain.Secrets = nil
+	if err := os.MkdirAll(filepath.Join(f.dataRoot, "beta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Create(ctx, plain, AdoptData); err != nil {
+		t.Fatalf("adopting data for a spec without secrets = %v", err)
 	}
 }
