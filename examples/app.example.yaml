@@ -1,0 +1,21 @@
+# An app spec: everything a tenant runs, without its name. One file serves
+# every tenant of the app:  corral tenant create acme -file app.yaml -wait 3m
+image: ghcr.io/example/app@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+port: 8080                         # the app's HTTP port inside the container
+healthPath: /api/health            # GET must answer 2xx when the tenant is up
+dataPath: /data                    # the tenant's data directory inside the container
+user: "10001:10001"                # numeric uid:gid the app runs as; never root
+dataUID: 10001                     # owner of the data directory: the app's user
+dataGID: 10001
+env:
+  APP_ENV: production
+  PUBLIC_URL: "{{url}}"            # https://<tenant>.<baseDomain>
+  ADMIN_EMAIL: "admin@{{host}}"    # <tenant>.<baseDomain>
+  TRUSTED_PROXIES: "{{network}}"   # the edge proxy connects from this range
+secrets:                           # generated once, stored encrypted
+  SESSION_SECRET: {kind: hex, bytes: 32}
+  ADMIN_PASSWORD: {kind: password, bytes: 20}
+readOnlyRoot: true
+tmpfs:
+  /tmp: rw,noexec,nosuid,nodev,size=256m
+limits: {memoryMB: 512, cpus: 1, pids: 512}

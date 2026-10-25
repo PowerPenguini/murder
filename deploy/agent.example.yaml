@@ -1,0 +1,30 @@
+# /etc/corral/agent.yaml
+node: node-fsn-1                   # defaults to the host name; labels this node's Docker objects
+baseDomain: example.com            # tenants live at <tenant>.example.com
+stateFile: /var/lib/corral/state.json
+masterKeyFile: /etc/corral/master.key
+socket: /run/corral/agent.sock
+socketGroup: corral                # members may run the corral CLI without root (they control every tenant)
+dockerSocket: /var/run/docker.sock
+registryAuthFile: /etc/corral/registry.json   # docker config.json with "auths" for private registries
+networkPool: 10.240.0.0/16         # one /28 per tenant network; must not overlap host or Docker networks
+
+volumes:
+  driver: zfs                      # or: driver: dir, root: /srv/corral/tenants
+  parent: tank/corral/tenants
+  mountRoot: /srv/corral/tenants
+
+ports: {from: 20000, to: 29999}    # loopback ports tenant containers are published on
+
+edge:
+  http: ":80"
+  https: ":443"
+  tls:
+    mode: acme                     # off | internal | acme
+    storage: /var/lib/corral/certs
+    email: ops@example.com
+    dnsProvider: hetzner           # hetzner (Hetzner Cloud DNS) | namecheap
+    dnsTokenFile: /etc/corral/dns.token
+
+defaults: {memoryMB: 512, cpus: 1, pids: 512}
+reconcileInterval: 10s
