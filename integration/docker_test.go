@@ -1,0 +1,287 @@
+//go:build docker
+
+// Package integration runs Corral's components against a real Docker
+// engine. Run with: go test -tags docker ./integration
+package integration
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/PowerPenguini/corral/internal/api"
+	"github.com/PowerPenguini/corral/internal/edge"
+	"github.com/PowerPenguini/corral/internal/reconcile"
+	"github.com/PowerPenguini/corral/internal/runtime"
+	"github.com/PowerPenguini/corral/internal/secrets"
+	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/corral/internal/store"
+	"github.com/PowerPenguini/corral/internal/volume"
+)
+
+const baseDomain = "corral.test"
+
+func dockerSocket() string {
+	if socket := os.Getenv("CORRAL_DOCKER_SOCKET"); socket != "" {
+		return socket
+	}
+	return "/var/run/docker.sock"
+}
+
+// buildTestImage builds testapp into a scratch image and returns its ID.
+func buildTestImage(t *testing.T, variant string) string {
+	t.Helper()
+	dir := t.TempDir()
+	build := exec.Command("go", "build", "-o", filepath.Join(dir, "testapp"), "./testapp")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build testapp: %v\n%s", err, output)
+	}
+	dockerfile := "FROM scratch\nCOPY testapp /testapp\nENV VARIANT=" + variant + "\nENTRYPOINT [\"/testapp\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("docker", "build", "-q", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker build: %v\n%s", err, output)
+	}
+	id := strings.TrimSpace(string(output))
+	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", id).Run() })
+	return id
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+type node struct {
+	store      *store.File
+	docker     *runtime.Docker
+	volumes    volume.Dir
+	key        *secrets.Key
+	log        *slog.Logger
+	reconciler *reconcile.Reconciler
+	client     *api.Client
+	edgeURL    string
+}
+
+func newNode(t *testing.T) *node {
+	t.Helper()
+	dir := t.TempDir()
+	port := freePort(t)
+	st, err := store.OpenFile(filepath.Join(dir, "state.json"), port, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "master.key")
+	if err := secrets.CreateKey(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	key, err := secrets.LoadKey(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &node{store: st, docker: runtime.NewDocker(dockerSocket()), volumes: volume.Dir{Root: filepath.Join(dir, "tenants")}, key: key, log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
+	n.reconciler = n.newReconciler()
+	apiServer := httptest.NewServer(api.NewServer(st, n.reconciler, n.docker, key, n.log).Handler())
+	t.Cleanup(apiServer.Close)
+	n.client = api.NewClientURL(apiServer.URL)
+	edgeServer := httptest.NewServer(edge.NewProxy(baseDomain, api.Routes{Store: st}, n.log))
+	t.Cleanup(edgeServer.Close)
+	n.edgeURL = edgeServer.URL
+	return n
+}
+
+func (n *node) newReconciler() *reconcile.Reconciler {
+	return reconcile.New(n.store, n.docker, n.volumes, n.key, reconcile.Config{BaseDomain: baseDomain, Scheme: "http", StopTimeout: 5 * time.Second, HealthTimeout: time.Second}, n.log)
+}
+
+// waitHealthy reconciles until the tenant is running and healthy.
+func (n *node) waitHealthy(t *testing.T, reconciler *reconcile.Reconciler, tenant string) reconcile.Status {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	var last reconcile.Status
+	for time.Now().Before(deadline) {
+		err := reconciler.Reconcile(context.Background())
+		last, _ = reconciler.Status(tenant)
+		if err == nil && last.Phase == reconcile.PhaseRunning && last.Healthy {
+			return last
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatalf("tenant %s did not become healthy: %+v", tenant, last)
+	return last
+}
+
+func (n *node) request(t *testing.T, method, tenant, path, body string) (int, string) {
+	t.Helper()
+	request, err := http.NewRequest(method, n.edgeURL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = tenant + "." + baseDomain
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	data, _ := io.ReadAll(response.Body)
+	return response.StatusCode, string(data)
+}
+
+func startedAt(t *testing.T, id string) string {
+	t.Helper()
+	output, err := exec.Command("docker", "inspect", "-f", "{{.State.StartedAt}}", id).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func cleanupTenant(t *testing.T, tenant string) {
+	t.Cleanup(func() {
+		output, _ := exec.Command("docker", "ps", "-aq", "--filter", "label="+runtime.LabelTenant+"="+tenant).Output()
+		for _, id := range strings.Fields(string(output)) {
+			_ = exec.Command("docker", "rm", "-f", id).Run()
+		}
+		_ = exec.Command("docker", "network", "rm", reconcile.NetworkName(tenant)).Run()
+	})
+}
+
+func TestTenantLifecycleOnDocker(t *testing.T) {
+	if _, err := os.Stat(dockerSocket()); err != nil {
+		t.Skipf("no Docker socket: %v", err)
+	}
+	imageV1, imageV2 := buildTestImage(t, "v1"), buildTestImage(t, "v2")
+	suffix := make([]byte, 3)
+	_, _ = rand.Read(suffix)
+	tenant := "it-" + hex.EncodeToString(suffix)
+	cleanupTenant(t, tenant)
+	n := newNode(t)
+	ctx := context.Background()
+
+	uid, gid := os.Getuid(), os.Getgid()
+	created, err := n.client.Create(ctx, spec.Tenant{
+		Name: tenant, Image: imageV1, Port: 8080, HealthPath: "/health", DataPath: "/data",
+		DataUID: uid, DataGID: gid, User: strconv.Itoa(uid) + ":" + strconv.Itoa(gid),
+		Env:          map[string]string{"PUBLIC_URL": "{{url}}", "DATA_DIR": "/data"},
+		Secrets:      map[string]spec.Secret{"APP_SECRET": {Kind: "hex", Bytes: 32}},
+		ReadOnlyRoot: true,
+		Tmpfs:        map[string]string{"/tmp": "rw,noexec,nosuid,size=16m"},
+		Limits:       spec.Limits{MemoryMB: 64, CPUs: 0.5, PIDs: 64},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := n.waitHealthy(t, n.reconciler, tenant)
+
+	status, body := n.request(t, http.MethodGet, tenant, "/info", "")
+	var info struct {
+		Host, ForwardedFor, Proto, PublicURL, Variant string
+		SecretLength, UID                             int
+	}
+	if status != http.StatusOK || json.Unmarshal([]byte(body), &info) != nil {
+		t.Fatalf("/info = %d %s", status, body)
+	}
+	if info.Host != tenant+"."+baseDomain || info.Proto != "http" || info.ForwardedFor == "" || info.PublicURL != created.URL || info.SecretLength != 64 || info.UID != uid || info.Variant != "v1" {
+		t.Fatalf("the app saw %+v", info)
+	}
+	if _, writable := n.request(t, http.MethodGet, tenant, "/root-writable", ""); writable != "false" {
+		t.Fatal("the container's root filesystem is writable")
+	}
+	if status, _ := n.request(t, http.MethodPut, tenant, "/value", "kept"); status != http.StatusNoContent {
+		t.Fatalf("write = %d", status)
+	}
+
+	// A new image replaces the container and keeps the data.
+	if _, err := n.client.SetImage(ctx, tenant, imageV2); err != nil {
+		t.Fatal(err)
+	}
+	second := n.waitHealthy(t, n.reconciler, tenant)
+	if second.ContainerID == first.ContainerID {
+		t.Fatal("the image change kept the old container")
+	}
+	if _, body := n.request(t, http.MethodGet, tenant, "/info", ""); !strings.Contains(body, `"variant":"v2"`) {
+		t.Fatalf("after the image change the app reports %s", body)
+	}
+	if _, value := n.request(t, http.MethodGet, tenant, "/value", ""); value != "kept" {
+		t.Fatalf("data after the image change = %q", value)
+	}
+
+	// A restarted agent adopts the running container without restarting it.
+	started := startedAt(t, second.ContainerID)
+	adopted := n.waitHealthy(t, n.newReconciler(), tenant)
+	if adopted.ContainerID != second.ContainerID || startedAt(t, second.ContainerID) != started {
+		t.Fatal("a restarted agent replaced or restarted a healthy container")
+	}
+
+	// Suspend stops the tenant and answers 503; resume brings the data back.
+	if _, err := n.client.Suspend(ctx, tenant, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := n.request(t, http.MethodGet, tenant, "/health", ""); status != http.StatusServiceUnavailable {
+		t.Fatalf("suspended tenant answered %d", status)
+	}
+	if containers, _ := n.docker.List(ctx); hasTenant(containers, tenant) {
+		t.Fatal("a suspended tenant still has a container")
+	}
+	if _, err := n.client.Suspend(ctx, tenant, false); err != nil {
+		t.Fatal(err)
+	}
+	n.waitHealthy(t, n.reconciler, tenant)
+	if _, value := n.request(t, http.MethodGet, tenant, "/value", ""); value != "kept" {
+		t.Fatalf("data after resume = %q", value)
+	}
+	if logs, err := n.client.Logs(ctx, tenant, 20); err != nil {
+		t.Fatalf("logs: %v", err)
+	} else {
+		_ = logs
+	}
+
+	// Delete with purge removes the container, the network and the data.
+	if err := n.client.Delete(ctx, tenant, true); err != nil {
+		t.Fatal(err)
+	}
+	if containers, _ := n.docker.List(ctx); hasTenant(containers, tenant) {
+		t.Fatal("container left after delete")
+	}
+	if err := exec.Command("docker", "network", "inspect", reconcile.NetworkName(tenant)).Run(); err == nil {
+		t.Fatal("network left after delete")
+	}
+	if _, err := os.Stat(filepath.Join(n.volumes.Root, tenant)); !os.IsNotExist(err) {
+		t.Fatalf("data left after purge: %v", err)
+	}
+	fmt.Fprintln(os.Stderr, "lifecycle passed for", tenant)
+}
+
+func hasTenant(containers []runtime.Container, tenant string) bool {
+	for _, container := range containers {
+		if container.Labels[runtime.LabelTenant] == tenant {
+			return true
+		}
+	}
+	return false
+}
