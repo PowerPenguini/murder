@@ -109,6 +109,18 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	if exists, err := volumes.Exists(ctx, "acme"); err != nil || !exists {
 		t.Fatalf("Exists = %v, %v", exists, err)
 	}
+	// Seen from this process, the path is the dataset while it is mounted
+	// and plain directory once it is not.
+	if serving, err := volumes.Serving(ctx, "acme", os.Getpid(), path); err != nil || !serving {
+		t.Fatalf("Serving while mounted = %v, %v", serving, err)
+	}
+	zfsOutput(t, "unmount", pool+"/corral/tenants/acme")
+	if serving, err := volumes.Serving(ctx, "acme", os.Getpid(), path); err != nil || serving {
+		t.Fatalf("Serving while unmounted = %v, %v", serving, err)
+	}
+	if _, _, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil {
+		t.Fatal(err)
+	}
 
 	// A dataset made by hand below the parent is neither used nor destroyed.
 	zfsOutput(t, "create", "-o", "mountpoint="+filepath.Join(mountRoot, "manual"), pool+"/corral/tenants/manual")

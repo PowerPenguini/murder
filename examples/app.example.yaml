@@ -4,6 +4,7 @@ image: ghcr.io/example/app@sha256:0123456789abcdef0123456789abcdef0123456789abcd
 port: 8080                         # the app's HTTP port inside the container
 healthPath: /api/health            # GET must answer 2xx when the tenant is up
 dataPath: /data                    # the tenant's data directory inside the container
+user: "10001:10001"                # numeric uid:gid the app runs as; never root
 dataUID: 10001                     # owner of the data directory: the app's user
 dataGID: 10001
 env:

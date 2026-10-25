@@ -21,7 +21,9 @@ import (
 // Agent configures one node's agent.
 type Agent struct {
 	// Node names this node; the agent only manages Docker objects carrying
-	// its node label. Defaults to the host name.
+	// its node label. "corral init" stores it in the state (the host name if
+	// unset here); afterwards the state decides and a different value here is
+	// an error, so renaming the host changes nothing.
 	Node string `yaml:"node"`
 	// BaseDomain is the domain tenants live below: <tenant>.<BaseDomain>.
 	BaseDomain    string `yaml:"baseDomain"`
@@ -111,13 +113,6 @@ func Parse(data []byte) (Agent, error) {
 	if err := decoder.Decode(&agent); err != nil && !errors.Is(err, io.EOF) {
 		return Agent{}, fmt.Errorf("parse config: %w", err)
 	}
-	if agent.Node == "" {
-		host, err := os.Hostname()
-		if err != nil {
-			return Agent{}, fmt.Errorf("node is not set and the host name is unknown: %w", err)
-		}
-		agent.Node = host
-	}
 	return agent, agent.Validate()
 }
 
@@ -145,7 +140,7 @@ func (a Agent) Validate() error {
 	if pool, err := netip.ParsePrefix(a.NetworkPool); err != nil || !pool.Addr().Is4() || pool.Bits() > 24 {
 		problems = append(problems, "networkPool must be an IPv4 prefix of /24 or larger")
 	}
-	if a.Node == "" || strings.ContainsAny(a.Node, " \t\n=") {
+	if strings.ContainsAny(a.Node, " \t\n=") {
 		problems = append(problems, "node must be a name without spaces or '='")
 	}
 	switch a.Edge.TLS.Mode {

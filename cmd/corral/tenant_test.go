@@ -13,6 +13,7 @@ const appYAML = `image: ghcr.io/example/app@sha256:0123456789abcdef0123456789abc
 port: 8080
 healthPath: /api/health
 dataPath: /data
+user: "10001:10001"
 dataUID: 10001
 dataGID: 10001
 env:

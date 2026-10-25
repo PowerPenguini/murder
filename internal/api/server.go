@@ -116,19 +116,30 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(err))
 		return
 	}
+	if _, err := s.store.Get(tenant.Name); err == nil {
+		writeError(w, store.ErrExists)
+		return
+	}
 	// A deleted tenant's kept data must not silently become a new tenant's.
-	if r.URL.Query().Get("adoptData") != "true" {
+	// Adopting it restores the deleted tenant's secrets too: the data may be
+	// encrypted or signed with them.
+	var previous map[string]string
+	if r.URL.Query().Get("adoptData") == "true" {
+		if retired, ok := s.store.RetiredTenant(tenant.Name); ok {
+			previous = retired.Sealed
+		}
+	} else {
 		exists, err := s.reconciler.DataExists(r.Context(), tenant.Name)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
 		if exists {
-			writeError(w, statusError{http.StatusConflict, fmt.Errorf("data of a deleted tenant %s is still on this node; adopt it (adoptData=true) or purge it first", tenant.Name)})
+			writeError(w, statusError{http.StatusConflict, fmt.Errorf("data of a deleted tenant %s is still on this node; restore it with create -adopt-data or delete it with purge-data", tenant.Name)})
 			return
 		}
 	}
-	sealed, err := s.sealMissing(tenant, nil)
+	sealed, err := s.sealMissing(tenant, previous)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -217,10 +228,7 @@ func (s *Server) setImage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) suspend(suspended bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		record, err := s.store.Update(r.PathValue("name"), func(record *store.Record) error {
-			record.Spec.Suspended = suspended
-			return nil
-		})
+		record, err := s.store.SetSuspended(r.PathValue("name"), suspended)
 		if err != nil {
 			writeError(w, err)
 			return

@@ -138,7 +138,10 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write([]byte(`{"IPAM":{"Config":[{"Subnet":"fd00::/64"},{"Subnet":"10.240.0.16/28"}]}}`))
+		_, _ = w.Write([]byte(`{"Labels":{"io.corral.managed":"true","io.corral.node":"node-1"},"IPAM":{"Config":[{"Subnet":"fd00::/64"},{"Subnet":"10.240.0.16/28"}]}}`))
+	}
+	engine.handlers["GET /networks/corral-foreign"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Labels":{"io.corral.managed":"true","io.corral.node":"node-2"},"IPAM":{"Config":[{"Subnet":"10.240.0.16/28"}]}}`))
 	}
 	engine.handlers["POST /networks/create"] = func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -160,6 +163,18 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 	}
 	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.32/28", nil); err == nil {
 		t.Fatal("an existing network with another subnet was accepted")
+	}
+	// Another node's network is neither adopted nor removed.
+	if err := docker.EnsureNetwork(ctx, "corral-foreign", "10.240.0.16/28", nil); err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("adopting another node's network = %v", err)
+	}
+	if err := docker.RemoveNetwork(ctx, "corral-foreign"); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range engine.requests {
+		if strings.HasPrefix(request, "DELETE /networks/corral-foreign") {
+			t.Fatal("removed another node's network")
+		}
 	}
 	engine.handlers["GET /networks"] = func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.URL.Query().Get("filters"), LabelNode+"=node-1") {

@@ -27,7 +27,9 @@ type Runtime interface {
 	HasImage(ctx context.Context, ref string) (bool, error)
 	PullImage(ctx context.Context, ref string) error
 	// EnsureNetwork creates the isolated network with the given IPv4 subnet
-	// if it is missing. An existing network with another subnet is an error.
+	// if it is missing. An existing network with another subnet, or one this
+	// node does not own, is an error. RemoveNetwork leaves alone a network
+	// this node does not own.
 	EnsureNetwork(ctx context.Context, name, subnet string, labels map[string]string) error
 	RemoveNetwork(ctx context.Context, name string) error
 	// ListNetworks and List return this node's managed networks and
@@ -40,6 +42,8 @@ type Runtime interface {
 	Remove(ctx context.Context, id string) error
 	// Logs returns the last lines of a container's output.
 	Logs(ctx context.Context, id string, tail int) ([]byte, error)
+	// Pid returns the host PID of a running container's main process.
+	Pid(ctx context.Context, id string) (int, error)
 }
 
 // Container is the observed state of one managed container.

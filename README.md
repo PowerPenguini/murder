@@ -42,9 +42,10 @@ sudo systemctl enable --now corral-agent
 
 With the `zfs` driver, create the parent dataset first, for example
 `zfs create -p tank/corral/tenants`, and make Docker start after ZFS has mounted
-everything (`systemctl edit docker` → `[Unit]` `After=zfs-mount.service`). If a
-dataset still mounts late, the agent replaces the container that started on
-the empty directory underneath.
+everything: install `deploy/docker-after-zfs.conf` as
+`/etc/systemd/system/docker.service.d/corral.conf`. If a dataset still mounts
+late, the agent sees in the container's mount table that it runs on the empty
+directory underneath and replaces it.
 
 The agent refuses to start without its state file. A new node gets one from
 `corral init`; on an existing node a missing file means a broken mount or a

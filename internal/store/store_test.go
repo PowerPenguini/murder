@@ -14,7 +14,7 @@ import (
 func tenant(name string) spec.Tenant {
 	return spec.Tenant{
 		Name: name, Image: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		Port: 8080, HealthPath: "/health", DataPath: "/data", DataUID: 1000, DataGID: 1000,
+		Port: 8080, HealthPath: "/health", DataPath: "/data", DataUID: 1000, DataGID: 1000, User: "1000:1000",
 	}
 }
 
@@ -25,7 +25,7 @@ func options(from, to int) Options {
 func openNew(t *testing.T, opts Options) (*File, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "state", "state.json")
-	if err := InitFile(path); err != nil {
+	if err := InitFile(path, "node-1"); err != nil {
 		t.Fatal(err)
 	}
 	st, err := OpenFile(path, opts)
@@ -122,7 +122,7 @@ func TestOpenRefusesMissingOrLockedState(t *testing.T) {
 	if _, err := OpenFile(path, options(20000, 20010)); err == nil || !strings.Contains(err.Error(), "in use") {
 		t.Fatalf("second open = %v", err)
 	}
-	if err := InitFile(path); err == nil {
+	if err := InitFile(path, "node-1"); err == nil {
 		t.Fatal("InitFile overwrote a state")
 	}
 }
@@ -157,6 +157,81 @@ func TestUpdateGuardsIdentityAndValidity(t *testing.T) {
 	}
 	if _, err := st.Create(Record{Spec: spec.Tenant{Name: "bad"}}); err == nil {
 		t.Fatal("created an invalid tenant")
+	}
+}
+
+// A tenant stored under older rules can still be suspended (and so deleted).
+func TestSetSuspendedIgnoresTodaysValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{"version":1,"node":"node-1","tenants":{"old":{"spec":{"name":"old","image":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","port":8080,"healthPath":"/h","dataPath":"/data","dataUID":0,"dataGID":0,"user":"","limits":{}},"hostPort":20000,"subnet":"10.240.0.0/28","generation":3}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := OpenFile(path, options(20000, 20010))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if st.Node() != "node-1" {
+		t.Fatalf("node = %q", st.Node())
+	}
+	if _, err := st.Update("old", func(*Record) error { return nil }); err == nil {
+		t.Fatal("the legacy spec unexpectedly validates; the test needs an invalid one")
+	}
+	suspended, err := st.SetSuspended("old", true)
+	if err != nil || !suspended.Spec.Suspended || suspended.Generation != 4 {
+		t.Fatalf("SetSuspended = %+v, %v", suspended, err)
+	}
+	if err := st.Delete("old"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRetireKeepsWhatARestoreNeeds(t *testing.T) {
+	st, path := openNew(t, options(20000, 20010))
+	if _, err := st.Create(Record{Spec: tenant("acme"), Sealed: map[string]string{"K": "sealed-k"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Observe("acme", "sha256:data-image"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Retire("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Get("acme"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("retired tenant still listed: %v", err)
+	}
+	retired, ok := st.RetiredTenant("acme")
+	if !ok || retired.Sealed["K"] != "sealed-k" || retired.DataImage != "sha256:data-image" || retired.DeletedAt.IsZero() {
+		t.Fatalf("retired = %+v, %v", retired, ok)
+	}
+	_ = st.Close()
+	reopened, err := OpenFile(path, options(20000, 20010))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, ok := reopened.RetiredTenant("acme"); !ok {
+		t.Fatal("the retired entry did not survive a restart")
+	}
+	restored, err := reopened.Create(Record{Spec: tenant("acme"), Sealed: retired.Sealed})
+	if err != nil || restored.DataImage != "sha256:data-image" {
+		t.Fatalf("restore = %+v, %v", restored, err)
+	}
+	if _, ok := reopened.RetiredTenant("acme"); ok {
+		t.Fatal("Create did not consume the retired entry")
+	}
+	if err := reopened.Retire("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Forget("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.RetiredTenant("acme"); ok {
+		t.Fatal("Forget kept the retired entry")
+	}
+	if err := reopened.Forget("acme"); err != nil {
+		t.Fatalf("forgetting twice = %v", err)
 	}
 }
 

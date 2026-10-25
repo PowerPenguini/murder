@@ -154,6 +154,15 @@ func (f *fakeRuntime) Remove(_ context.Context, id string) error {
 
 func (f *fakeRuntime) Logs(context.Context, string, int) ([]byte, error) { return nil, nil }
 
+func (f *fakeRuntime) Pid(_ context.Context, id string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if container, ok := f.containers[id]; !ok || !container.Running {
+		return 0, fmt.Errorf("container %s is not running", id)
+	}
+	return 4242, nil
+}
+
 func (f *fakeRuntime) only(t *testing.T) *fakeContainer {
 	t.Helper()
 	f.mu.Lock()
@@ -188,6 +197,13 @@ type fakeVolumes struct {
 	removed      []string
 	failSnapshot error
 	mountNext    bool
+	notServing   bool
+}
+
+func (f *fakeVolumes) Serving(context.Context, string, int, string) (bool, error) {
+	serving := !f.notServing
+	f.notServing = false
+	return serving, nil
 }
 
 func (f *fakeVolumes) Ensure(ctx context.Context, tenant string, uid, gid int) (string, bool, error) {
@@ -237,7 +253,7 @@ func newFixture(t *testing.T) *fixture {
 	go server.Serve(listener)
 	t.Cleanup(func() { _ = server.Close() })
 	statePath := filepath.Join(t.TempDir(), "state.json")
-	if err := store.InitFile(statePath); err != nil {
+	if err := store.InitFile(statePath, "test-node"); err != nil {
 		t.Fatal(err)
 	}
 	st, err := store.OpenFile(statePath, store.Options{PortFrom: port, PortTo: port, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")})
@@ -264,7 +280,7 @@ func (f *fixture) create(t *testing.T, name string) store.Record {
 	t.Helper()
 	tenant := spec.Tenant{
 		Name: name, Image: imageA, Port: 8080, HealthPath: "/health", DataPath: "/data",
-		DataUID: os.Getuid(), DataGID: os.Getgid(),
+		DataUID: os.Getuid(), DataGID: os.Getgid(), User: "1000:1000",
 		Env:     map[string]string{"PUBLIC_URL": "{{url}}", "TRUSTED_PROXIES": "{{network}}"},
 		Secrets: map[string]spec.Secret{"SESSION_SECRET": {Kind: "hex", Bytes: 32}},
 	}
@@ -395,15 +411,23 @@ func TestFailedPullKeepsTheOldContainer(t *testing.T) {
 	}
 }
 
-func TestFailedSnapshotBlocksTheChangeAndRestartsTheOldContainer(t *testing.T) {
+// A failing snapshot blocks the change without ever stopping the old
+// container, however many passes it takes.
+func TestFailedSnapshotBlocksTheChangeWithoutAnOutage(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
 	old := f.runtime.only(t).ID
 	f.volumes.failSnapshot = errors.New("pool is full")
 	f.update(t, "acme", func(r *store.Record) { r.Spec.Image = imageB })
-	if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "pool is full") {
-		t.Fatalf("Reconcile = %v", err)
+	f.runtime.takeEvents()
+	for range 3 {
+		if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "pool is full") {
+			t.Fatalf("Reconcile = %v", err)
+		}
+	}
+	if events := f.runtime.takeEvents(); len(events) != 0 {
+		t.Fatalf("a failing snapshot touched the running container: %v", events)
 	}
 	if container := f.runtime.only(t); container.ID != old || !container.Running || container.spec.Image != imageA {
 		t.Fatalf("after a failed snapshot = %+v", container)
@@ -450,6 +474,20 @@ func TestContainerIsRecreatedWhenItsDataWasMountedLate(t *testing.T) {
 	f.reconcile(t)
 	if container := f.runtime.only(t); container.ID == old || !container.Running {
 		t.Fatalf("container after a late mount = %+v", container)
+	}
+}
+
+// A container that sees something other than the tenant's data at its data
+// path (its dataset was mounted after it started) is replaced.
+func TestContainerNotServingTheDataIsReplaced(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	f.volumes.notServing = true
+	f.reconcile(t)
+	if container := f.runtime.only(t); container.ID == old || !container.Running {
+		t.Fatalf("container after a mount check failure = %+v", container)
 	}
 }
 

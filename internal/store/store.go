@@ -52,18 +52,39 @@ func (r Record) clone() Record {
 	return r
 }
 
+// Retired is what a tenant deleted without purging its data leaves behind:
+// enough to restore it over that data later. Its secrets in particular must
+// survive, because the app's data may be encrypted or signed with them.
+type Retired struct {
+	Sealed    map[string]string `json:"sealed,omitempty"`
+	DataImage string            `json:"dataImage,omitempty"`
+	DeletedAt time.Time         `json:"deletedAt"`
+}
+
 // Store is the desired state of all tenants.
 type Store interface {
 	List() []Record
 	Get(name string) (Record, error)
-	// Create adds a tenant, assigning its host port and subnet.
+	// Create adds a tenant, assigning its host port and subnet. A retired
+	// entry of the same name is consumed: its data image carries over (the
+	// caller decides about its secrets, see Retired).
 	Create(record Record) (Record, error)
 	// Update applies change to a copy of the tenant, stores the result and
 	// bumps its generation.
 	Update(name string, change func(*Record) error) (Record, error)
+	// SetSuspended changes only suspension. It does not validate the spec, so
+	// a tenant stored under older rules can still be suspended and deleted.
+	SetSuspended(name string, suspended bool) (Record, error)
 	// Observe records the image that now owns a tenant's data.
 	Observe(name, dataImage string) error
+	// Delete removes a tenant and any retired entry of its name; Retire
+	// removes the tenant but keeps a retired entry; Forget drops only the
+	// retired entry.
 	Delete(name string) error
+	Retire(name string) error
+	Forget(name string) error
+	// RetiredTenant returns the retired entry of a deleted tenant.
+	RetiredTenant(name string) (Retired, bool)
 	// Changed is signalled after every successful change of desired state.
 	Changed() <-chan struct{}
 }
@@ -79,8 +100,12 @@ type Options struct {
 const subnetBits = 28
 
 type fileState struct {
-	Version int               `json:"version"`
-	Tenants map[string]Record `json:"tenants"`
+	Version int `json:"version"`
+	// Node is the node this state belongs to; it labels the node's Docker
+	// objects, so it must survive host renames.
+	Node    string             `json:"node"`
+	Tenants map[string]Record  `json:"tenants"`
+	Retired map[string]Retired `json:"retired,omitempty"`
 }
 
 // File stores the state as JSON in one file, rewritten atomically. Reads
@@ -95,8 +120,11 @@ type File struct {
 	changed chan struct{}
 }
 
-// InitFile writes an empty state at path, refusing to overwrite one.
-func InitFile(path string) error {
+// InitFile writes an empty state for node at path, refusing to overwrite one.
+func InitFile(path, node string) error {
+	if node == "" {
+		return errors.New("a new state needs a node name")
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -104,7 +132,7 @@ func InitFile(path string) error {
 		return fmt.Errorf("state %s already exists", path)
 	}
 	f := &File{path: path}
-	f.state.Store(&fileState{Version: 1, Tenants: map[string]Record{}})
+	f.state.Store(&fileState{Version: 1, Node: node, Tenants: map[string]Record{}, Retired: map[string]Retired{}})
 	return f.save(f.state.Load())
 }
 
@@ -132,8 +160,14 @@ func OpenFile(path string, options Options) (*File, error) {
 	if state.Version != 1 {
 		return nil, fmt.Errorf("state %s has unsupported version %d", path, state.Version)
 	}
+	if state.Node == "" {
+		return nil, fmt.Errorf("state %s names no node", path)
+	}
 	if state.Tenants == nil {
 		state.Tenants = map[string]Record{}
+	}
+	if state.Retired == nil {
+		state.Retired = map[string]Retired{}
 	}
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -150,6 +184,9 @@ func OpenFile(path string, options Options) (*File, error) {
 
 // Close releases the state lock.
 func (f *File) Close() error { return f.lock.Close() }
+
+// Node is the node this state belongs to.
+func (f *File) Node() string { return f.state.Load().Node }
 
 func (f *File) List() []Record {
 	state := f.state.Load()
@@ -189,10 +226,13 @@ func (f *File) Create(record Record) (Record, error) {
 	}
 	now := f.now().UTC()
 	record = record.clone()
-	record.HostPort, record.Subnet, record.DataImage = port, subnet, ""
+	record.HostPort, record.Subnet, record.DataImage = port, subnet, state.Retired[record.Spec.Name].DataImage
 	record.Generation = 1
 	record.CreatedAt, record.UpdatedAt = now, now
-	return record, f.commit(true, func(next *fileState) { next.Tenants[record.Spec.Name] = record })
+	return record, f.commit(true, func(next *fileState) {
+		next.Tenants[record.Spec.Name] = record
+		delete(next.Retired, record.Spec.Name)
+	})
 }
 
 func (f *File) Update(name string, change func(*Record) error) (Record, error) {
@@ -212,6 +252,20 @@ func (f *File) Update(name string, change func(*Record) error) (Record, error) {
 	if err := next.Spec.Validate(); err != nil {
 		return Record{}, err
 	}
+	next.Generation = current.Generation + 1
+	next.UpdatedAt = f.now().UTC()
+	return next, f.commit(true, func(state *fileState) { state.Tenants[name] = next })
+}
+
+func (f *File) SetSuspended(name string, suspended bool) (Record, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	current, ok := f.state.Load().Tenants[name]
+	if !ok {
+		return Record{}, ErrNotFound
+	}
+	next := current.clone()
+	next.Spec.Suspended = suspended
 	next.Generation = current.Generation + 1
 	next.UpdatedAt = f.now().UTC()
 	return next, f.commit(true, func(state *fileState) { state.Tenants[name] = next })
@@ -237,7 +291,41 @@ func (f *File) Delete(name string) error {
 	if _, ok := f.state.Load().Tenants[name]; !ok {
 		return ErrNotFound
 	}
-	return f.commit(true, func(state *fileState) { delete(state.Tenants, name) })
+	return f.commit(true, func(state *fileState) {
+		delete(state.Tenants, name)
+		delete(state.Retired, name)
+	})
+}
+
+func (f *File) Retire(name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	record, ok := f.state.Load().Tenants[name]
+	if !ok {
+		return ErrNotFound
+	}
+	return f.commit(true, func(state *fileState) {
+		delete(state.Tenants, name)
+		state.Retired[name] = Retired{Sealed: maps.Clone(record.Sealed), DataImage: record.DataImage, DeletedAt: f.now().UTC()}
+	})
+}
+
+func (f *File) Forget(name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.state.Load().Retired[name]; !ok {
+		return nil
+	}
+	return f.commit(false, func(state *fileState) { delete(state.Retired, name) })
+}
+
+func (f *File) RetiredTenant(name string) (Retired, bool) {
+	retired, ok := f.state.Load().Retired[name]
+	if !ok {
+		return Retired{}, false
+	}
+	retired.Sealed = maps.Clone(retired.Sealed)
+	return retired, true
 }
 
 func (f *File) Changed() <-chan struct{} { return f.changed }
@@ -279,7 +367,7 @@ func (f *File) freeSubnet(state *fileState) (string, error) {
 // it current, so a failed write leaves memory and disk in agreement.
 func (f *File) commit(signal bool, mutate func(*fileState)) error {
 	current := f.state.Load()
-	next := &fileState{Version: current.Version, Tenants: maps.Clone(current.Tenants)}
+	next := &fileState{Version: current.Version, Node: current.Node, Tenants: maps.Clone(current.Tenants), Retired: maps.Clone(current.Retired)}
 	mutate(next)
 	if err := f.save(next); err != nil {
 		return err

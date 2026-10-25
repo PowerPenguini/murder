@@ -67,6 +67,7 @@ func TestProxyRoutesAndForwardsHeaders(t *testing.T) {
 	for _, name := range spoofable {
 		request.Header.Set(name, "spoofed")
 	}
+	request.Header["X_Forwarded_For"] = []string{"spoofed"}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)

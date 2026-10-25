@@ -28,10 +28,9 @@ type Tenant struct {
 	// DataUID and DataGID own the data directory, matching the app's user.
 	DataUID int `json:"dataUID" yaml:"dataUID"`
 	DataGID int `json:"dataGID" yaml:"dataGID"`
-	// User optionally overrides the image's user ("uid" or "uid:gid"); it may
-	// not be root. Without it the image's own user runs, so images must not
-	// default to root.
-	User string `json:"user,omitempty" yaml:"user,omitempty"`
+	// User is the numeric "uid:gid" the app runs as. It is required, so an
+	// image that defaults to root never runs as root, and neither id may be 0.
+	User string `json:"user" yaml:"user"`
 	// Env holds plain environment values. Values may use the placeholders
 	// {{name}}, {{host}}, {{url}} and {{network}}; see Render.
 	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
@@ -68,6 +67,7 @@ const maxNameLength = 40
 var (
 	namePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 	envPattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	userPattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,9})$`)
 	digestRef   = regexp.MustCompile(`^[a-z0-9]+(?:[._/:-][a-z0-9]+)*@sha256:[a-f0-9]{64}$`)
 	imageID     = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 	placeholder = regexp.MustCompile(`\{\{[^}]*\}\}`)
@@ -129,8 +129,8 @@ func (t Tenant) Validate() error {
 	if t.DataUID <= 0 || t.DataGID <= 0 {
 		problems = append(problems, "data owner ids must be positive (tenants never run as root)")
 	}
-	if rootUser(t.User) {
-		problems = append(problems, fmt.Sprintf("user %q is root; tenants never run as root", t.User))
+	if err := checkUser(t.User); err != nil {
+		problems = append(problems, err.Error())
 	}
 	for key, value := range t.Env {
 		if !envPattern.MatchString(key) {
@@ -180,9 +180,17 @@ func (e *ValidationError) Error() string {
 	return "invalid tenant: " + strings.Join(e.Problems, "; ")
 }
 
-func rootUser(user string) bool {
-	name, group, _ := strings.Cut(user, ":")
-	return name == "0" || name == "root" || group == "0" || group == "root"
+// checkUser accepts only "uid:gid" in plain decimal, both above zero. Names
+// and other spellings are refused: the engine parses "00" or "+0" as root.
+func checkUser(user string) error {
+	if !userPattern.MatchString(user) {
+		return fmt.Errorf("user %q must be a numeric uid:gid such as 10001:10001", user)
+	}
+	uid, gid, _ := strings.Cut(user, ":")
+	if uid == "0" || gid == "0" {
+		return fmt.Errorf("user %q is root; tenants never run as root", user)
+	}
+	return nil
 }
 
 func absoluteClean(p string) bool {

@@ -246,8 +246,10 @@ func (d *Docker) registryAuth(repository string) (string, error) {
 }
 
 func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels map[string]string) error {
-	existing, err := d.networkSubnet(ctx, name)
+	existing, owned, err := d.inspectNetwork(ctx, name)
 	switch {
+	case err == nil && !owned:
+		return fmt.Errorf("network %s exists but is not owned by node %s", name, d.node)
 	case err == nil && existing == subnet:
 		return nil
 	case err == nil:
@@ -273,27 +275,38 @@ func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels 
 	return nil
 }
 
-func (d *Docker) networkSubnet(ctx context.Context, name string) (string, error) {
+// inspectNetwork returns a network's IPv4 subnet ("" if it has none) and
+// whether this node owns it.
+func (d *Docker) inspectNetwork(ctx context.Context, name string) (string, bool, error) {
 	var network struct {
-		IPAM struct {
+		Labels map[string]string `json:"Labels"`
+		IPAM   struct {
 			Config []struct {
 				Subnet string `json:"Subnet"`
 			} `json:"Config"`
 		} `json:"IPAM"`
 	}
 	if err := d.do(ctx, request{method: http.MethodGet, path: "/networks/" + url.PathEscape(name)}, &network); err != nil {
-		return "", err
+		return "", false, err
 	}
+	owned := network.Labels[LabelManaged] == "true" && network.Labels[LabelNode] == d.node
 	for _, config := range network.IPAM.Config {
 		if config.Subnet != "" && !strings.Contains(config.Subnet, ":") {
-			return config.Subnet, nil
+			return config.Subnet, owned, nil
 		}
 	}
-	return "", fmt.Errorf("network %s has no IPv4 subnet", name)
+	return "", owned, nil
 }
 
 func (d *Docker) RemoveNetwork(ctx context.Context, name string) error {
-	err := d.do(ctx, request{method: http.MethodDelete, path: "/networks/" + url.PathEscape(name)}, nil)
+	_, owned, err := d.inspectNetwork(ctx, name)
+	if errors.Is(err, ErrNotFound) || (err == nil && !owned) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = d.do(ctx, request{method: http.MethodDelete, path: "/networks/" + url.PathEscape(name)}, nil)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
@@ -395,6 +408,21 @@ func (d *Docker) Remove(ctx context.Context, id string) error {
 		return nil
 	}
 	return err
+}
+
+func (d *Docker) Pid(ctx context.Context, id string) (int, error) {
+	var inspected struct {
+		State struct {
+			Pid int `json:"Pid"`
+		} `json:"State"`
+	}
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/containers/" + url.PathEscape(id) + "/json"}, &inspected); err != nil {
+		return 0, err
+	}
+	if inspected.State.Pid <= 0 {
+		return 0, fmt.Errorf("container %s is not running", id)
+	}
+	return inspected.State.Pid, nil
 }
 
 func (d *Docker) Logs(ctx context.Context, id string, tail int) ([]byte, error) {

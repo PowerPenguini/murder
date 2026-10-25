@@ -184,3 +184,47 @@ func TestZFSRefusesForeignDatasets(t *testing.T) {
 		t.Fatalf("a foreign dataset was touched: %v", fake.calls)
 	}
 }
+
+func TestMountAtReadsTheLastMountAtTarget(t *testing.T) {
+	mountinfo := "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n" +
+		"100 22 8:2 /srv/corral/tenants/acme /data rw,relatime - ext4 /dev/sda2 rw\n" +
+		"101 100 0:50 / /data rw,noatime - zfs tank/corral/acme rw,xattr\n" +
+		"102 22 0:51 / /with\\040space rw - zfs tank/corral/odd rw\n"
+	if fstype, source, found := mountAt(mountinfo, "/data"); !found || fstype != "zfs" || source != "tank/corral/acme" {
+		t.Fatalf("mountAt(/data) = %q %q %v", fstype, source, found)
+	}
+	if _, source, found := mountAt(mountinfo, "/with space"); !found || source != "tank/corral/odd" {
+		t.Fatalf("escaped mountpoint = %q %v", source, found)
+	}
+	if _, _, found := mountAt(mountinfo, "/missing"); found {
+		t.Fatal("found a mount that is not there")
+	}
+}
+
+func TestZFSServingChecksTheContainersMount(t *testing.T) {
+	proc := t.TempDir()
+	volumes := ZFS{Parent: "tank/corral", ProcRoot: proc}
+	write := func(content string) {
+		if err := os.MkdirAll(filepath.Join(proc, "42"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(proc, "42", "mountinfo"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("100 22 0:50 / /data rw - zfs tank/corral/acme rw\n")
+	if ok, err := volumes.Serving(context.Background(), "acme", 42, "/data"); err != nil || !ok {
+		t.Fatalf("container on its dataset = %v, %v", ok, err)
+	}
+	write("100 22 8:2 /srv/corral/tenants/acme /data rw - ext4 /dev/sda2 rw\n")
+	if ok, _ := volumes.Serving(context.Background(), "acme", 42, "/data"); ok {
+		t.Fatal("a container on the directory under the dataset counted as serving")
+	}
+	write("100 22 0:50 / /data rw - zfs tank/corral/beta rw\n")
+	if ok, _ := volumes.Serving(context.Background(), "acme", 42, "/data"); ok {
+		t.Fatal("another tenant's dataset counted as serving")
+	}
+	if _, err := volumes.Serving(context.Background(), "acme", 7, "/data"); err == nil {
+		t.Fatal("a missing process was not an error")
+	}
+}

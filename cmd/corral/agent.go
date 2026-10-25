@@ -52,10 +52,16 @@ func runInit(args []string) error {
 		fmt.Printf("master key %s already exists\n", cfg.MasterKeyFile)
 	}
 	if _, err := os.Stat(cfg.StateFile); errors.Is(err, os.ErrNotExist) {
-		if err := store.InitFile(cfg.StateFile); err != nil {
+		node := cfg.Node
+		if node == "" {
+			if node, err = os.Hostname(); err != nil {
+				return fmt.Errorf("set node in %s: the host name is unknown: %w", *configPath, err)
+			}
+		}
+		if err := store.InitFile(cfg.StateFile, node); err != nil {
 			return err
 		}
-		fmt.Printf("created empty state %s\n", cfg.StateFile)
+		fmt.Printf("created empty state %s for node %s\n", cfg.StateFile, node)
 	} else if err != nil {
 		return err
 	} else {
@@ -84,7 +90,11 @@ func runAgent(args []string) error {
 		return err
 	}
 	defer st.Close()
-	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: cfg.Node, RegistryAuthFile: cfg.RegistryAuthFile})
+	node := st.Node()
+	if cfg.Node != "" && cfg.Node != node {
+		return fmt.Errorf("config names node %q but the state belongs to node %q", cfg.Node, node)
+	}
+	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: node, RegistryAuthFile: cfg.RegistryAuthFile})
 	volumes, err := newVolumes(cfg.Volumes)
 	if err != nil {
 		return err
@@ -101,11 +111,14 @@ func runAgent(args []string) error {
 	if err != nil {
 		return fmt.Errorf("edge http: %w", err)
 	}
-	var httpsListener net.Listener
 	if cfg.Edge.TLS.Mode != edge.TLSOff {
-		if httpsListener, err = net.Listen("tcp", cfg.Edge.HTTPS); err != nil {
+		// Only check the port now: holding it without a certificate would
+		// leave clients hanging in the accept queue instead of refused.
+		probe, err := net.Listen("tcp", cfg.Edge.HTTPS)
+		if err != nil {
 			return fmt.Errorf("edge https: %w", err)
 		}
+		_ = probe.Close()
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -138,12 +151,17 @@ func runAgent(args []string) error {
 			if tlsConfig == nil {
 				return
 			}
+			listener, err := net.Listen("tcp", cfg.Edge.HTTPS)
+			if err != nil {
+				failed <- fmt.Errorf("edge https: %w", err)
+				return
+			}
 			ready.Store(true)
 			log.Info("edge https ready")
-			serve("edge https", secure, tls.NewListener(httpsListener, tlsConfig))
+			serve("edge https", secure, tls.NewListener(listener, tlsConfig))
 		}()
 	}
-	log.Info("corral agent started", "node", cfg.Node, "baseDomain", cfg.BaseDomain, "volumes", cfg.Volumes.Driver, "tls", cfg.Edge.TLS.Mode)
+	log.Info("corral agent started", "node", node, "baseDomain", cfg.BaseDomain, "volumes", cfg.Volumes.Driver, "tls", cfg.Edge.TLS.Mode)
 	var runErr error
 	select {
 	case <-ctx.Done():

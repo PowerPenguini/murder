@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ func TestParseFillsDefaults(t *testing.T) {
 	if agent.Scheme() != "http" {
 		t.Fatalf("scheme with TLS off = %q", agent.Scheme())
 	}
-	if host, _ := os.Hostname(); agent.Node != host || agent.NetworkPool != "10.240.0.0/16" {
+	if agent.Node != "" || agent.NetworkPool != "10.240.0.0/16" {
 		t.Fatalf("node = %q, pool = %q", agent.Node, agent.NetworkPool)
 	}
 }

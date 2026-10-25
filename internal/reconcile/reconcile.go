@@ -224,6 +224,17 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		}
 		outdated = append(outdated, existing[i])
 	}
+	if current != nil && current.Running {
+		serving, err := r.servesData(ctx, record, current.ID)
+		if err != nil {
+			return Status{}, err
+		}
+		if !serving {
+			r.log.Warn("container does not see the tenant's data; replacing it", "tenant", tenant.Name, "container", current.ID)
+			outdated = append(outdated, *current)
+			current = nil
+		}
+	}
 	if current == nil {
 		id, err := r.replace(ctx, record, desired, outdated)
 		if err != nil {
@@ -246,32 +257,34 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	return status, nil
 }
 
-// replace starts the desired container in place of outdated ones. The new
-// image is fetched while the old container still serves; the old container
-// is stopped before the data is snapshotted, so the snapshot is consistent;
-// a failed snapshot restarts the old container and blocks the change.
+// servesData reports whether a running container sees the tenant's data.
+func (r *Reconciler) servesData(ctx context.Context, record store.Record, id string) (bool, error) {
+	pid, err := r.runtime.Pid(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("inspect container: %w", err)
+	}
+	serving, err := r.volumes.Serving(ctx, record.Spec.Name, pid, record.Spec.DataPath)
+	if err != nil {
+		return false, fmt.Errorf("check the container's data mount: %w", err)
+	}
+	return serving, nil
+}
+
+// replace starts the desired container in place of outdated ones. Nothing is
+// stopped until the new image is present and, after an image change, the
+// data has been snapshotted. The snapshot is taken while the old container
+// runs: apps are only onboarded once they recover from point-in-time
+// snapshots, and a failed snapshot then blocks the change without an outage.
 func (r *Reconciler) replace(ctx context.Context, record store.Record, desired runtime.ContainerSpec, outdated []runtime.Container) (string, error) {
 	tenant := record.Spec
 	if err := r.ensureImage(ctx, tenant.Image); err != nil {
 		return "", err
-	}
-	var stopped []runtime.Container
-	for _, container := range outdated {
-		if !container.Running {
-			continue
-		}
-		if err := r.runtime.Stop(ctx, container.ID, r.config.StopTimeout); err != nil {
-			r.restart(ctx, stopped)
-			return "", fmt.Errorf("stop %s: %w", container.Name, err)
-		}
-		stopped = append(stopped, container)
 	}
 	if record.DataImage != "" && record.DataImage != tenant.Image {
 		name, err := r.volumes.Snapshot(ctx, tenant.Name, "image-change")
 		switch {
 		case errors.Is(err, volume.ErrSnapshotsUnsupported):
 		case err != nil:
-			r.restart(ctx, stopped)
 			return "", fmt.Errorf("snapshot before the image change (the old container keeps running): %w", err)
 		default:
 			r.log.Info("snapshot before image change", "tenant", tenant.Name, "snapshot", name, "from", record.DataImage, "to", tenant.Image)
@@ -280,13 +293,10 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	// From here on the data belongs to the new image: a later pass must not
 	// snapshot again for the same change.
 	if err := r.store.Observe(tenant.Name, tenant.Image); err != nil {
-		r.restart(ctx, stopped)
 		return "", fmt.Errorf("record the data's image: %w", err)
 	}
-	for _, container := range outdated {
-		if err := r.runtime.Remove(ctx, container.ID); err != nil {
-			return "", fmt.Errorf("remove %s: %w", container.Name, err)
-		}
+	if err := r.removeContainers(ctx, outdated); err != nil {
+		return "", err
 	}
 	id, err := r.runtime.Create(ctx, desired)
 	if err != nil {
@@ -297,15 +307,6 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	}
 	r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
 	return id, nil
-}
-
-// restart brings back containers stopped for a change that did not go ahead.
-func (r *Reconciler) restart(ctx context.Context, containers []runtime.Container) {
-	for _, container := range containers {
-		if err := r.runtime.Start(ctx, container.ID); err != nil {
-			r.log.Error("restart the old container after a failed change", "container", container.Name, "error", err)
-		}
-	}
 }
 
 func (r *Reconciler) ensureImage(ctx context.Context, image string) error {
@@ -442,21 +443,18 @@ func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error
 }
 
 // RemoveTenant takes a tenant out of service and deletes its record, and
-// with purge its data. Each step must succeed before the next one runs, and
+// with purge its data. Without purge the record is retired: its secrets and
+// data image stay so the tenant can be restored over its data. Each step must succeed before the next one runs, and
 // the record goes last, so a failure leaves a suspended tenant the operator
 // can delete again; its host port and subnet are only reused once nothing
 // holds them.
 func (r *Reconciler) RemoveTenant(ctx context.Context, name string, purge bool) error {
-	if _, err := r.store.Update(name, func(record *store.Record) error {
-		record.Spec.Suspended = true
-		return nil
-	}); err != nil {
-		return err
-	}
 	r.pass.Lock()
 	defer r.pass.Unlock()
-	if err := r.reconcile(ctx); err != nil {
-		r.log.Warn("reconcile while removing a tenant", "tenant", name, "error", err)
+	// Suspended first, so no pass recreates what is removed below; only
+	// this tenant is touched, whatever the others are doing.
+	if _, err := r.store.SetSuspended(name, true); err != nil {
+		return err
 	}
 	if err := r.clearRuntime(ctx, name); err != nil {
 		return err
@@ -465,8 +463,10 @@ func (r *Reconciler) RemoveTenant(ctx context.Context, name string, purge bool) 
 		if err := r.volumes.Remove(ctx, name); err != nil {
 			return fmt.Errorf("delete data: %w", err)
 		}
-	}
-	if err := r.store.Delete(name); err != nil {
+		if err := r.store.Delete(name); err != nil {
+			return err
+		}
+	} else if err := r.store.Retire(name); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -487,7 +487,10 @@ func (r *Reconciler) PurgeData(ctx context.Context, name string) error {
 	if err := r.clearRuntime(ctx, name); err != nil {
 		return err
 	}
-	return r.volumes.Remove(ctx, name)
+	if err := r.volumes.Remove(ctx, name); err != nil {
+		return err
+	}
+	return r.store.Forget(name)
 }
 
 // clearRuntime makes sure no container or network of the tenant remains.

@@ -19,6 +19,7 @@ var spoofable = []string{
 	"X-Real-Ip", "True-Client-Ip", "X-Client-Ip", "Cf-Connecting-Ip", "Fastly-Client-Ip", "X-Cluster-Client-Ip",
 	"X-Forwarded", "Forwarded-For", "X-Forwarded-Port", "X-Forwarded-Prefix", "X-Forwarded-Ssl", "X-Forwarded-Scheme",
 	"X-Forwarded-Server", "X-Forwarded-Uri", "X-Forwarded-Path", "X-Original-Url", "X-Original-Host", "X-Rewrite-Url", "X-Url-Scheme",
+	"Client-Ip", "Front-End-Https", "X-Arr-Ssl", "X-Arr-Log-Id", "X-Proxyuser-Ip", "Wl-Proxy-Client-Ip",
 }
 
 // Route says where a tenant's traffic goes.
@@ -91,6 +92,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Rewrite: func(out *httputil.ProxyRequest) {
 			for _, name := range spoofable {
 				out.Out.Header.Del(name)
+			}
+			// CGI-style servers map "X_Forwarded_For" to the same variable
+			// as "X-Forwarded-For"; no legitimate client needs underscores.
+			for name := range out.Out.Header {
+				if strings.Contains(name, "_") {
+					out.Out.Header.Del(name)
+				}
 			}
 			out.SetURL(backend)
 			out.SetXForwarded()

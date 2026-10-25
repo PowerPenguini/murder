@@ -91,7 +91,7 @@ func newNode(t *testing.T, name string) *node {
 	dir := t.TempDir()
 	port := freePort(t)
 	statePath := filepath.Join(dir, "state.json")
-	if err := store.InitFile(statePath); err != nil {
+	if err := store.InitFile(statePath, "test-node"); err != nil {
 		t.Fatal(err)
 	}
 	// A pool unlikely to collide with the host's networks.

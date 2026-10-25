@@ -72,6 +72,7 @@ func (m *memoryRuntime) Remove(_ context.Context, id string) error {
 	}
 	return nil
 }
+func (m *memoryRuntime) Pid(context.Context, string) (int, error) { return 1, nil }
 func (m *memoryRuntime) Logs(_ context.Context, id string, tail int) ([]byte, error) {
 	return []byte("logs of " + id + "\n"), nil
 }
@@ -86,7 +87,7 @@ type apiFixture struct {
 func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
 	statePath := filepath.Join(t.TempDir(), "state.json")
-	if err := store.InitFile(statePath); err != nil {
+	if err := store.InitFile(statePath, "test-node"); err != nil {
 		t.Fatal(err)
 	}
 	st, err := store.OpenFile(statePath, store.Options{PortFrom: 20000, PortTo: 20100, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")})
@@ -111,7 +112,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 func appSpec(name string) spec.Tenant {
 	return spec.Tenant{
 		Name: name, Image: image, Port: 8080, HealthPath: "/health", DataPath: "/data",
-		DataUID: os.Getuid(), DataGID: os.Getgid(),
+		DataUID: os.Getuid(), DataGID: os.Getgid(), User: "1000:1000",
 		Secrets: map[string]spec.Secret{"SESSION_SECRET": {Kind: "hex", Bytes: 32}},
 	}
 }
@@ -159,6 +160,9 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	}
 	_, err := f.client.Create(ctx, appSpec("acme"), false)
 	check("duplicate", err, 409)
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("duplicate create explains %q", err)
+	}
 	_, err = f.client.Get(ctx, "nobody")
 	check("missing", err, 404)
 	if !IsNotFound(err) {
@@ -222,15 +226,23 @@ func TestDeletedTenantDataIsNotSilentlyReused(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.dataRoot, "acme", "data.db"), []byte("old customer"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	before, err := f.client.Secret(ctx, "acme", "SESSION_SECRET")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := f.client.Delete(ctx, "acme", false); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.client.Create(ctx, appSpec("acme"), false)
+	_, err = f.client.Create(ctx, appSpec("acme"), false)
 	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "data of a deleted tenant") {
 		t.Fatalf("create over leftover data = %v", err)
 	}
 	if _, err := f.client.Create(ctx, appSpec("acme"), true); err != nil {
 		t.Fatalf("explicit adoption = %v", err)
+	}
+	// The data may be encrypted with the old secrets, so adoption restores them.
+	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
+		t.Fatal("adopting the data generated new secrets instead of restoring the old ones")
 	}
 	if err := f.client.Delete(ctx, "acme", false); err != nil {
 		t.Fatal(err)

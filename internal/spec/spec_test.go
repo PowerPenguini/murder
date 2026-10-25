@@ -17,6 +17,7 @@ func validTenant() Tenant {
 		DataPath:     "/data",
 		DataUID:      10001,
 		DataGID:      10001,
+		User:         "10001:10001",
 		Env:          map[string]string{"PUBLIC_URL": "{{url}}", "TRUSTED_PROXIES": "{{network}}"},
 		Secrets:      map[string]Secret{"SESSION_SECRET": {Kind: "hex", Bytes: 32}},
 		ReadOnlyRoot: true,
@@ -59,6 +60,23 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q:\n%v", want, err)
+		}
+	}
+}
+
+func TestUserMustBeNumericAndNotRoot(t *testing.T) {
+	for _, user := range []string{"10001:10001", "1:1", "4294967:65534"} {
+		tenant := validTenant()
+		tenant.User = user
+		if err := tenant.Validate(); err != nil {
+			t.Errorf("user %q refused: %v", user, err)
+		}
+	}
+	for _, user := range []string{"", "0:0", "10001:0", "0:10001", "00:1", "+0:1", "1:00", "root", "app:app", "10001", " 1:1", "1:1 "} {
+		tenant := validTenant()
+		tenant.User = user
+		if tenant.Validate() == nil {
+			t.Errorf("user %q accepted", user)
 		}
 	}
 }
