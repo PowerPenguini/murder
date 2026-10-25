@@ -31,10 +31,13 @@ type Volumes interface {
 	// Exists reports whether the tenant has data, for example left behind by
 	// a deleted tenant of the same name.
 	Exists(ctx context.Context, tenant string) (bool, error)
-	// Serving reports whether the container process pid sees the tenant's
-	// data at target. A container started before its data was mounted sees
+	// LateMounts reports whether data can be mounted after a container
+	// started (ZFS); only then is Serving worth asking.
+	LateMounts() bool
+	// Serving reports whether the container process pid has the tenant's
+	// data mounted. A container started before its data was mounted holds
 	// the empty directory underneath instead.
-	Serving(ctx context.Context, tenant string, pid int, target string) (bool, error)
+	Serving(ctx context.Context, tenant string, pid int) (bool, error)
 	// Snapshot records the data as it is now and returns the snapshot name.
 	Snapshot(ctx context.Context, tenant, reason string) (string, error)
 	// Remove deletes the tenant's data and snapshots.
@@ -75,8 +78,9 @@ func (d Dir) Exists(_ context.Context, tenant string) (bool, error) {
 	return err == nil, err
 }
 
-// Serving is always true: a plain directory cannot be mounted late.
-func (d Dir) Serving(context.Context, string, int, string) (bool, error) { return true, nil }
+// A plain directory cannot be mounted late.
+func (d Dir) LateMounts() bool                                   { return false }
+func (d Dir) Serving(context.Context, string, int) (bool, error) { return true, nil }
 
 func (d Dir) Snapshot(context.Context, string, string) (string, error) {
 	return "", ErrSnapshotsUnsupported
@@ -222,9 +226,12 @@ func (z ZFS) Exists(ctx context.Context, tenant string) (bool, error) {
 	return exists, err
 }
 
-// Serving reads the container's mount table: the mount at target must be the
-// tenant's dataset.
-func (z ZFS) Serving(_ context.Context, tenant string, pid int, target string) (bool, error) {
+func (z ZFS) LateMounts() bool { return true }
+
+// Serving reads the container's mount table, which must contain the tenant's
+// dataset. It looks for the dataset rather than the data path, because the
+// engine resolves symlinks in mount targets.
+func (z ZFS) Serving(_ context.Context, tenant string, pid int) (bool, error) {
 	if err := checkTenant(tenant); err != nil {
 		return false, err
 	}
@@ -236,27 +243,20 @@ func (z ZFS) Serving(_ context.Context, tenant string, pid int, target string) (
 	if err != nil {
 		return false, fmt.Errorf("read the container's mounts: %w", err)
 	}
-	fstype, source, found := mountAt(string(data), target)
-	if !found {
-		return false, nil
-	}
-	return fstype == "zfs" && source == z.dataset(tenant), nil
+	return mounts(string(data), "zfs", z.dataset(tenant)), nil
 }
 
-// mountAt returns the filesystem type and source of the last mount at
-// target in a mountinfo table (later mounts hide earlier ones).
-func mountAt(mountinfo, target string) (fstype, source string, found bool) {
+// mounts reports whether a mountinfo table has a mount of source with the
+// given filesystem type.
+func mounts(mountinfo, fstype, source string) bool {
 	for _, line := range strings.Split(mountinfo, "\n") {
-		before, after, ok := strings.Cut(line, " - ")
-		fields, tail := strings.Fields(before), strings.Fields(after)
-		if !ok || len(fields) < 5 || len(tail) < 2 {
-			continue
-		}
-		if unescapeMount(fields[4]) == target {
-			fstype, source, found = tail[0], unescapeMount(tail[1]), true
+		_, after, ok := strings.Cut(line, " - ")
+		tail := strings.Fields(after)
+		if ok && len(tail) >= 2 && tail[0] == fstype && unescapeMount(tail[1]) == source {
+			return true
 		}
 	}
-	return fstype, source, found
+	return false
 }
 
 // unescapeMount decodes the octal escapes (\040 for a space) mountinfo uses.

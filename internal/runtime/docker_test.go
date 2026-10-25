@@ -168,8 +168,8 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 	if err := docker.EnsureNetwork(ctx, "corral-foreign", "10.240.0.16/28", nil); err == nil || !strings.Contains(err.Error(), "not owned") {
 		t.Fatalf("adopting another node's network = %v", err)
 	}
-	if err := docker.RemoveNetwork(ctx, "corral-foreign"); err != nil {
-		t.Fatal(err)
+	if err := docker.RemoveNetwork(ctx, "corral-foreign"); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("removing another node's network = %v, want ErrNotOwned", err)
 	}
 	for _, request := range engine.requests {
 		if strings.HasPrefix(request, "DELETE /networks/corral-foreign") {

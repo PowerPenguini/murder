@@ -111,11 +111,11 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	}
 	// Seen from this process, the path is the dataset while it is mounted
 	// and plain directory once it is not.
-	if serving, err := volumes.Serving(ctx, "acme", os.Getpid(), path); err != nil || !serving {
+	if serving, err := volumes.Serving(ctx, "acme", os.Getpid()); err != nil || !serving {
 		t.Fatalf("Serving while mounted = %v, %v", serving, err)
 	}
 	zfsOutput(t, "unmount", pool+"/corral/tenants/acme")
-	if serving, err := volumes.Serving(ctx, "acme", os.Getpid(), path); err != nil || serving {
+	if serving, err := volumes.Serving(ctx, "acme", os.Getpid()); err != nil || serving {
 		t.Fatalf("Serving while unmounted = %v, %v", serving, err)
 	}
 	if _, _, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil {

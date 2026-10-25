@@ -41,6 +41,9 @@ type fakeRuntime struct {
 	failCreate error
 	failPull   error
 	failRemove error
+	// exitBeforeInspect makes the next Pid call see the container gone, as
+	// if it exited between List and the inspection.
+	exitBeforeInspect bool
 }
 
 type fakeContainer struct {
@@ -157,8 +160,9 @@ func (f *fakeRuntime) Logs(context.Context, string, int) ([]byte, error) { retur
 func (f *fakeRuntime) Pid(_ context.Context, id string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if container, ok := f.containers[id]; !ok || !container.Running {
-		return 0, fmt.Errorf("container %s is not running", id)
+	if container, ok := f.containers[id]; !ok || !container.Running || f.exitBeforeInspect {
+		f.exitBeforeInspect = false
+		return 0, fmt.Errorf("container %s: %w", id, runtime.ErrNotRunning)
 	}
 	return 4242, nil
 }
@@ -200,7 +204,9 @@ type fakeVolumes struct {
 	notServing   bool
 }
 
-func (f *fakeVolumes) Serving(context.Context, string, int, string) (bool, error) {
+func (f *fakeVolumes) LateMounts() bool { return true }
+
+func (f *fakeVolumes) Serving(context.Context, string, int) (bool, error) {
 	serving := !f.notServing
 	f.notServing = false
 	return serving, nil
@@ -488,6 +494,41 @@ func TestContainerNotServingTheDataIsReplaced(t *testing.T) {
 	f.reconcile(t)
 	if container := f.runtime.only(t); container.ID == old || !container.Running {
 		t.Fatalf("container after a mount check failure = %+v", container)
+	}
+}
+
+func TestContainerThatExitsDuringThePassIsStarted(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	container := f.runtime.only(t)
+	f.runtime.exitBeforeInspect = true
+	f.runtime.takeEvents()
+	f.reconcile(t)
+	if events := f.runtime.takeEvents(); !slices.Equal(events, []string{"start " + container.ID}) {
+		t.Fatalf("events = %v", events)
+	}
+}
+
+// A spec stored under older, looser rules is reported, not run.
+func TestInvalidStoredSpecIsNotRun(t *testing.T) {
+	f := newFixture(t)
+	path := filepath.Join(t.TempDir(), "legacy.json")
+	legacy := `{"version":1,"node":"n","tenants":{"old":{"spec":{"name":"old","image":"` + imageA + `","port":8080,"healthPath":"/health","dataPath":"/data","dataUID":1000,"dataGID":1000,"user":"","limits":{}},"hostPort":20000,"subnet":"10.240.0.0/28","generation":1}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.OpenFile(path, store.Options{PortFrom: 20000, PortTo: 20010, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	reconciler := New(st, f.runtime, f.volumes, f.key, f.reconciler.config, f.reconciler.log)
+	if err := reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "no longer valid") {
+		t.Fatalf("Reconcile = %v", err)
+	}
+	if f.runtime.count() != 0 {
+		t.Fatal("a container was created for an invalid stored spec")
 	}
 }
 

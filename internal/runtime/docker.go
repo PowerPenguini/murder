@@ -249,7 +249,7 @@ func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels 
 	existing, owned, err := d.inspectNetwork(ctx, name)
 	switch {
 	case err == nil && !owned:
-		return fmt.Errorf("network %s exists but is not owned by node %s", name, d.node)
+		return fmt.Errorf("network %s exists but is %w %s", name, ErrNotOwned, d.node)
 	case err == nil && existing == subnet:
 		return nil
 	case err == nil:
@@ -300,8 +300,11 @@ func (d *Docker) inspectNetwork(ctx context.Context, name string) (string, bool,
 
 func (d *Docker) RemoveNetwork(ctx context.Context, name string) error {
 	_, owned, err := d.inspectNetwork(ctx, name)
-	if errors.Is(err, ErrNotFound) || (err == nil && !owned) {
+	if errors.Is(err, ErrNotFound) {
 		return nil
+	}
+	if err == nil && !owned {
+		return fmt.Errorf("network %s is %w %s; left in place", name, ErrNotOwned, d.node)
 	}
 	if err != nil {
 		return err
@@ -420,7 +423,7 @@ func (d *Docker) Pid(ctx context.Context, id string) (int, error) {
 		return 0, err
 	}
 	if inspected.State.Pid <= 0 {
-		return 0, fmt.Errorf("container %s is not running", id)
+		return 0, fmt.Errorf("container %s: %w", id, ErrNotRunning)
 	}
 	return inspected.State.Pid, nil
 }

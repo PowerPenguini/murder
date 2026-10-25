@@ -65,14 +65,14 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 }
 
 func TestUserMustBeNumericAndNotRoot(t *testing.T) {
-	for _, user := range []string{"10001:10001", "1:1", "4294967:65534"} {
+	for _, user := range []string{"10001:10001", "1:1", "4294967:65534", "2147483647:2147483647"} {
 		tenant := validTenant()
 		tenant.User = user
 		if err := tenant.Validate(); err != nil {
 			t.Errorf("user %q refused: %v", user, err)
 		}
 	}
-	for _, user := range []string{"", "0:0", "10001:0", "0:10001", "00:1", "+0:1", "1:00", "root", "app:app", "10001", " 1:1", "1:1 "} {
+	for _, user := range []string{"", "0:0", "10001:0", "0:10001", "00:1", "+0:1", "1:00", "root", "app:app", "10001", " 1:1", "1:1 ", "4294967295:10001", "10001:2147483648"} {
 		tenant := validTenant()
 		tenant.User = user
 		if tenant.Validate() == nil {

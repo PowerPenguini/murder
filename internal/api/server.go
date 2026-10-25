@@ -116,35 +116,46 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(err))
 		return
 	}
-	if _, err := s.store.Get(tenant.Name); err == nil {
-		writeError(w, store.ErrExists)
-		return
-	}
-	// A deleted tenant's kept data must not silently become a new tenant's.
-	// Adopting it restores the deleted tenant's secrets too: the data may be
-	// encrypted or signed with them.
-	var previous map[string]string
-	if r.URL.Query().Get("adoptData") == "true" {
-		if retired, ok := s.store.RetiredTenant(tenant.Name); ok {
-			previous = retired.Sealed
+	adopt := r.URL.Query().Get("adoptData") == "true"
+	var record store.Record
+	// Under the reconciler's lock, so a concurrent purge-data cannot delete
+	// the data this create checks or adopts.
+	err := s.reconciler.Exclusive(func() error {
+		if _, err := s.store.Get(tenant.Name); err == nil {
+			return store.ErrExists
 		}
-	} else {
-		exists, err := s.reconciler.DataExists(r.Context(), tenant.Name)
+		retired, hasRetired := s.store.RetiredTenant(tenant.Name)
+		var previous map[string]string
+		dataImage := ""
+		if adopt {
+			// Restoring over kept data restores the deleted tenant's
+			// secrets too: the data may be encrypted or signed with them.
+			if !hasRetired {
+				return statusError{http.StatusConflict, fmt.Errorf("no saved secrets for a deleted tenant %s; its data may be unreadable with new ones, so it cannot be adopted", tenant.Name)}
+			}
+			previous, dataImage = retired.Sealed, retired.DataImage
+		} else {
+			exists, err := s.reconciler.DataExists(r.Context(), tenant.Name)
+			if err != nil {
+				return err
+			}
+			if exists {
+				return statusError{http.StatusConflict, fmt.Errorf("data of a deleted tenant %s is still on this node; restore it with create -adopt-data or delete it with purge-data", tenant.Name)}
+			}
+			if hasRetired {
+				// Its data is gone, so its saved secrets are of no use.
+				if err := s.store.Forget(tenant.Name); err != nil {
+					return err
+				}
+			}
+		}
+		sealed, err := s.sealMissing(tenant, previous)
 		if err != nil {
-			writeError(w, err)
-			return
+			return err
 		}
-		if exists {
-			writeError(w, statusError{http.StatusConflict, fmt.Errorf("data of a deleted tenant %s is still on this node; restore it with create -adopt-data or delete it with purge-data", tenant.Name)})
-			return
-		}
-	}
-	sealed, err := s.sealMissing(tenant, previous)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	record, err := s.store.Create(store.Record{Spec: tenant, Sealed: sealed})
+		record, err = s.store.Create(store.Record{Spec: tenant, Sealed: sealed, DataImage: dataImage})
+		return err
+	})
 	if err != nil {
 		writeError(w, err)
 		return

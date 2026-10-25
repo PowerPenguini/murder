@@ -38,7 +38,7 @@ func openNew(t *testing.T, opts Options) (*File, string) {
 
 func TestFileStoreLifecycleAndPersistence(t *testing.T) {
 	st, path := openNew(t, options(20000, 20001))
-	first, err := st.Create(Record{Spec: tenant("acme"), Sealed: map[string]string{"K": "sealed"}, DataImage: "ignored"})
+	first, err := st.Create(Record{Spec: tenant("acme"), Sealed: map[string]string{"K": "sealed"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestRetireKeepsWhatARestoreNeeds(t *testing.T) {
 	if _, ok := reopened.RetiredTenant("acme"); !ok {
 		t.Fatal("the retired entry did not survive a restart")
 	}
-	restored, err := reopened.Create(Record{Spec: tenant("acme"), Sealed: retired.Sealed})
+	restored, err := reopened.Create(Record{Spec: tenant("acme"), Sealed: retired.Sealed, DataImage: retired.DataImage})
 	if err != nil || restored.DataImage != "sha256:data-image" {
 		t.Fatalf("restore = %+v, %v", restored, err)
 	}

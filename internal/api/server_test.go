@@ -250,8 +250,45 @@ func TestDeletedTenantDataIsNotSilentlyReused(t *testing.T) {
 	if err := f.client.PurgeData(ctx, "acme"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme"), true); err == nil {
+		t.Fatal("adopted data without saved secrets")
+	}
+	fresh, err := f.client.Create(ctx, appSpec("acme"), false)
+	if err != nil {
 		t.Fatalf("create after purge-data = %v", err)
+	}
+	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after == before {
+		t.Fatal("a fresh tenant reused a deleted tenant's secret")
+	}
+	if record, _ := f.store.Get(fresh.Spec.Name); record.DataImage != "" {
+		t.Fatalf("a fresh tenant inherited the data image %q", record.DataImage)
+	}
+}
+
+// Saved secrets of a deleted tenant whose data has since gone are dropped
+// by a plain create, not carried over.
+func TestFreshCreateDropsStaleRetiredEntry(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.client.Reconcile(ctx)
+	old, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
+	if err := f.client.Delete(ctx, "acme", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(f.dataRoot, "acme")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Create(ctx, appSpec("acme"), false); err != nil {
+		t.Fatal(err)
+	}
+	if fresh, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); fresh == old {
+		t.Fatal("stale saved secrets were reused")
+	}
+	if _, ok := f.store.RetiredTenant("acme"); ok {
+		t.Fatal("the stale retired entry survived")
 	}
 }
 

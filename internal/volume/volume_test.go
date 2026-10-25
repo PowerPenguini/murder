@@ -185,18 +185,17 @@ func TestZFSRefusesForeignDatasets(t *testing.T) {
 	}
 }
 
-func TestMountAtReadsTheLastMountAtTarget(t *testing.T) {
+func TestMountsFindsASourceAnywhere(t *testing.T) {
 	mountinfo := "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n" +
-		"100 22 8:2 /srv/corral/tenants/acme /data rw,relatime - ext4 /dev/sda2 rw\n" +
-		"101 100 0:50 / /data rw,noatime - zfs tank/corral/acme rw,xattr\n" +
-		"102 22 0:51 / /with\\040space rw - zfs tank/corral/odd rw\n"
-	if fstype, source, found := mountAt(mountinfo, "/data"); !found || fstype != "zfs" || source != "tank/corral/acme" {
-		t.Fatalf("mountAt(/data) = %q %q %v", fstype, source, found)
+		"101 22 0:50 / /var/lib/app rw,noatime - zfs tank/corral/acme rw,xattr\n" +
+		"102 22 0:51 / /odd rw - zfs tank/corral/with\\040space rw\n"
+	if !mounts(mountinfo, "zfs", "tank/corral/acme") {
+		t.Fatal("missed a dataset mounted at a resolved symlink target")
 	}
-	if _, source, found := mountAt(mountinfo, "/with space"); !found || source != "tank/corral/odd" {
-		t.Fatalf("escaped mountpoint = %q %v", source, found)
+	if !mounts(mountinfo, "zfs", "tank/corral/with space") {
+		t.Fatal("missed an escaped source")
 	}
-	if _, _, found := mountAt(mountinfo, "/missing"); found {
+	if mounts(mountinfo, "zfs", "tank/corral/beta") || mounts(mountinfo, "ext4", "tank/corral/acme") {
 		t.Fatal("found a mount that is not there")
 	}
 }
@@ -213,18 +212,21 @@ func TestZFSServingChecksTheContainersMount(t *testing.T) {
 		}
 	}
 	write("100 22 0:50 / /data rw - zfs tank/corral/acme rw\n")
-	if ok, err := volumes.Serving(context.Background(), "acme", 42, "/data"); err != nil || !ok {
+	if ok, err := volumes.Serving(context.Background(), "acme", 42); err != nil || !ok {
 		t.Fatalf("container on its dataset = %v, %v", ok, err)
 	}
 	write("100 22 8:2 /srv/corral/tenants/acme /data rw - ext4 /dev/sda2 rw\n")
-	if ok, _ := volumes.Serving(context.Background(), "acme", 42, "/data"); ok {
+	if ok, _ := volumes.Serving(context.Background(), "acme", 42); ok {
 		t.Fatal("a container on the directory under the dataset counted as serving")
 	}
 	write("100 22 0:50 / /data rw - zfs tank/corral/beta rw\n")
-	if ok, _ := volumes.Serving(context.Background(), "acme", 42, "/data"); ok {
+	if ok, _ := volumes.Serving(context.Background(), "acme", 42); ok {
 		t.Fatal("another tenant's dataset counted as serving")
 	}
-	if _, err := volumes.Serving(context.Background(), "acme", 7, "/data"); err == nil {
+	if _, err := volumes.Serving(context.Background(), "acme", 7); err == nil {
 		t.Fatal("a missing process was not an error")
+	}
+	if !volumes.LateMounts() || (Dir{}).LateMounts() {
+		t.Fatal("LateMounts: only ZFS can mount late")
 	}
 }

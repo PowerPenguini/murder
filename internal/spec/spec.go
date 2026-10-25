@@ -7,6 +7,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -68,6 +69,7 @@ var (
 	namePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 	envPattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	userPattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,9})$`)
+	maxID       = int64(1)<<31 - 1
 	digestRef   = regexp.MustCompile(`^[a-z0-9]+(?:[._/:-][a-z0-9]+)*@sha256:[a-f0-9]{64}$`)
 	imageID     = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 	placeholder = regexp.MustCompile(`\{\{[^}]*\}\}`)
@@ -126,7 +128,7 @@ func (t Tenant) Validate() error {
 	}
 	// Tenants never run as root: root in the container owns the data
 	// directory and is a step from root on the host.
-	if t.DataUID <= 0 || t.DataGID <= 0 {
+	if t.DataUID <= 0 || t.DataGID <= 0 || int64(t.DataUID) > maxID || int64(t.DataGID) > maxID {
 		problems = append(problems, "data owner ids must be positive (tenants never run as root)")
 	}
 	if err := checkUser(t.User); err != nil {
@@ -189,6 +191,11 @@ func checkUser(user string) error {
 	uid, gid, _ := strings.Cut(user, ":")
 	if uid == "0" || gid == "0" {
 		return fmt.Errorf("user %q is root; tenants never run as root", user)
+	}
+	for _, id := range []string{uid, gid} {
+		if value, err := strconv.ParseInt(id, 10, 64); err != nil || value > maxID {
+			return fmt.Errorf("user %q: ids must be at most %d", user, maxID)
+		}
 	}
 	return nil
 }

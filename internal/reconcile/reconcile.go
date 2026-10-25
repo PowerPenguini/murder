@@ -202,6 +202,11 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		}
 		return Status{Phase: PhaseSuspended}, nil
 	}
+	// A spec stored under older, looser rules is not run until fixed; its
+	// running container, if any, is left alone.
+	if err := tenant.Validate(); err != nil {
+		return Status{}, fmt.Errorf("stored spec no longer valid; apply a corrected spec: %w", err)
+	}
 	dataPath, mountedNow, err := r.volumes.Ensure(ctx, tenant.Name, tenant.DataUID, tenant.DataGID)
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
@@ -224,12 +229,14 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		}
 		outdated = append(outdated, existing[i])
 	}
-	if current != nil && current.Running {
+	if current != nil && current.Running && r.volumes.LateMounts() {
 		serving, err := r.servesData(ctx, record, current.ID)
-		if err != nil {
+		switch {
+		case errors.Is(err, runtime.ErrNotRunning):
+			current.Running = false // it exited since List; started below
+		case err != nil:
 			return Status{}, err
-		}
-		if !serving {
+		case !serving:
 			r.log.Warn("container does not see the tenant's data; replacing it", "tenant", tenant.Name, "container", current.ID)
 			outdated = append(outdated, *current)
 			current = nil
@@ -263,7 +270,7 @@ func (r *Reconciler) servesData(ctx context.Context, record store.Record, id str
 	if err != nil {
 		return false, fmt.Errorf("inspect container: %w", err)
 	}
-	serving, err := r.volumes.Serving(ctx, record.Spec.Name, pid, record.Spec.DataPath)
+	serving, err := r.volumes.Serving(ctx, record.Spec.Name, pid)
 	if err != nil {
 		return false, fmt.Errorf("check the container's data mount: %w", err)
 	}
@@ -508,8 +515,19 @@ func (r *Reconciler) clearRuntime(ctx context.Context, name string) error {
 	if err := r.removeContainers(ctx, own); err != nil {
 		return fmt.Errorf("remove containers: %w", err)
 	}
-	if err := r.runtime.RemoveNetwork(ctx, NetworkName(name)); err != nil {
+	if err := r.runtime.RemoveNetwork(ctx, NetworkName(name)); errors.Is(err, runtime.ErrNotOwned) {
+		// Not ours to remove, but it will block a new tenant of this name.
+		r.log.Warn("a network with the tenant's name belongs to someone else", "tenant", name, "error", err)
+	} else if err != nil {
 		return fmt.Errorf("remove network: %w", err)
 	}
 	return nil
+}
+
+// Exclusive runs fn while no reconcile pass, removal or purge runs, so a
+// check and the change based on it cannot interleave with them.
+func (r *Reconciler) Exclusive(fn func() error) error {
+	r.pass.Lock()
+	defer r.pass.Unlock()
+	return fn()
 }

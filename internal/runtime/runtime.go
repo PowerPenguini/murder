@@ -11,6 +11,13 @@ import (
 // ErrNotFound reports a missing container, network or image.
 var ErrNotFound = errors.New("not found")
 
+// ErrNotRunning reports a container that has no running process.
+var ErrNotRunning = errors.New("container is not running")
+
+// ErrNotOwned reports an object with the expected name that this node does
+// not own; Corral leaves it alone.
+var ErrNotOwned = errors.New("not owned by this node")
+
 // Labels Corral puts on everything it creates. LabelNode marks which node's
 // agent owns an object; an agent never touches another node's objects.
 const (
@@ -29,7 +36,7 @@ type Runtime interface {
 	// EnsureNetwork creates the isolated network with the given IPv4 subnet
 	// if it is missing. An existing network with another subnet, or one this
 	// node does not own, is an error. RemoveNetwork leaves alone a network
-	// this node does not own.
+	// this node does not own and reports it with ErrNotOwned.
 	EnsureNetwork(ctx context.Context, name, subnet string, labels map[string]string) error
 	RemoveNetwork(ctx context.Context, name string) error
 	// ListNetworks and List return this node's managed networks and

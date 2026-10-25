@@ -65,9 +65,9 @@ type Retired struct {
 type Store interface {
 	List() []Record
 	Get(name string) (Record, error)
-	// Create adds a tenant, assigning its host port and subnet. A retired
-	// entry of the same name is consumed: its data image carries over (the
-	// caller decides about its secrets, see Retired).
+	// Create adds a tenant, assigning its host port and subnet. DataImage is
+	// kept as given, for a tenant restored over existing data; a retired
+	// entry of the same name is dropped.
 	Create(record Record) (Record, error)
 	// Update applies change to a copy of the tenant, stores the result and
 	// bumps its generation.
@@ -226,7 +226,7 @@ func (f *File) Create(record Record) (Record, error) {
 	}
 	now := f.now().UTC()
 	record = record.clone()
-	record.HostPort, record.Subnet, record.DataImage = port, subnet, state.Retired[record.Spec.Name].DataImage
+	record.HostPort, record.Subnet = port, subnet
 	record.Generation = 1
 	record.CreatedAt, record.UpdatedAt = now, now
 	return record, f.commit(true, func(next *fileState) {
