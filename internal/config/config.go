@@ -51,7 +51,7 @@ type Agent struct {
 // Volumes selects the data volume driver.
 type Volumes struct {
 	// Driver is "dir" (Root/<tenant>) or "zfs" (Parent/<tenant> mounted at
-	// MountRoot/<tenant>).
+	// MountRoot/<tenant>). Root and MountRoot default to /srv/corral/tenants.
 	Driver    string `yaml:"driver"`
 	Root      string `yaml:"root"`
 	Parent    string `yaml:"parent"`
@@ -99,7 +99,7 @@ func Parse(data []byte) (Agent, error) {
 		MasterKeyFile:     "/etc/corral/master.key",
 		Socket:            "/run/corral/agent.sock",
 		DockerSocket:      "/var/run/docker.sock",
-		Volumes:           Volumes{Driver: "dir", Root: "/srv/corral/tenants"},
+		Volumes:           Volumes{Driver: "dir", Root: "/srv/corral/tenants", MountRoot: "/srv/corral/tenants"},
 		Ports:             Ports{From: 20000, To: 29999},
 		NetworkPool:       "10.240.0.0/16",
 		Edge:              Edge{HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/corral/certs"}},

@@ -157,6 +157,10 @@ func (f *fakeRuntime) Remove(_ context.Context, id string) error {
 
 func (f *fakeRuntime) Logs(context.Context, string, int) ([]byte, error) { return nil, nil }
 
+func (f *fakeRuntime) Resolve(_ context.Context, ref string) (string, string, error) {
+	return ref, "", nil
+}
+
 func (f *fakeRuntime) Pid(_ context.Context, id string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -286,7 +290,7 @@ func (f *fixture) create(t *testing.T, name string) store.Record {
 	t.Helper()
 	tenant := spec.Tenant{
 		Name: name, Image: imageA, Port: 8080, HealthPath: "/health", DataPath: "/data",
-		DataUID: os.Getuid(), DataGID: os.Getgid(), User: "1000:1000",
+		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		Env:     map[string]string{"PUBLIC_URL": "{{url}}", "TRUSTED_PROXIES": "{{network}}"},
 		Secrets: map[string]spec.Secret{"SESSION_SECRET": {Kind: "hex", Bytes: 32}},
 	}
@@ -545,51 +549,64 @@ func TestStoppedContainerIsStartedAgain(t *testing.T) {
 	}
 }
 
-func TestRemoveTenantClearsEverythingBeforeTheRecord(t *testing.T) {
+func TestArchiveClearsTheRuntimeAndKeepsTheData(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	if err := f.reconciler.RemoveTenant(context.Background(), "acme", true); err != nil {
+	if err := f.reconciler.Archive(context.Background(), "acme"); err != nil {
 		t.Fatal(err)
 	}
 	if f.runtime.count() != 0 || f.runtime.networks["corral-acme"] != nil {
 		t.Fatalf("left behind: %d containers, networks %v", f.runtime.count(), f.runtime.networks)
 	}
-	if !slices.Equal(f.volumes.removed, []string{"acme"}) {
-		t.Fatalf("removed volumes = %v", f.volumes.removed)
+	if len(f.volumes.removed) != 0 {
+		t.Fatalf("archive removed data: %v", f.volumes.removed)
 	}
 	if _, err := f.store.Get("acme"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("record after removal = %v", err)
+		t.Fatalf("record after archiving = %v", err)
+	}
+	if archived, ok := f.store.ArchivedTenant("acme"); !ok || archived.Record.Spec.Suspended {
+		t.Fatalf("archive entry = %+v, %v", archived, ok)
 	}
 	if _, ok := f.reconciler.Status("acme"); ok {
-		t.Fatal("status kept for a deleted tenant")
+		t.Fatal("status kept for an archived tenant")
+	}
+	// Restored, it runs again on the same data.
+	if _, err := f.store.Restore("acme"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if !f.runtime.only(t).Running {
+		t.Fatal("restored tenant is not running")
 	}
 }
 
 // A failure leaves the tenant suspended and its record (with its port and
-// subnet) in place, so the delete can be repeated and nothing is reused early.
-func TestFailedRemoveTenantCanBeRepeated(t *testing.T) {
+// subnet) in place, so the archive can be repeated and nothing is reused early.
+func TestFailedArchiveCanBeRepeated(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
 	f.runtime.failRemove = errors.New("device busy")
-	if err := f.reconciler.RemoveTenant(context.Background(), "acme", true); err == nil {
-		t.Fatal("RemoveTenant reported success while the container remained")
+	if err := f.reconciler.Archive(context.Background(), "acme"); err == nil {
+		t.Fatal("Archive reported success while the container remained")
 	}
 	record, err := f.store.Get("acme")
 	if err != nil || !record.Spec.Suspended {
-		t.Fatalf("record after a failed delete = %+v, %v", record, err)
-	}
-	if len(f.volumes.removed) != 0 {
-		t.Fatal("data deleted while the container still existed")
+		t.Fatalf("record after a failed archive = %+v, %v", record, err)
 	}
 	f.runtime.failRemove = nil
-	if err := f.reconciler.RemoveTenant(context.Background(), "acme", true); err != nil {
+	if err := f.reconciler.Archive(context.Background(), "acme"); err != nil {
 		t.Fatal(err)
+	}
+	// The archive remembers the tenant as running, as it was before the
+	// first attempt, not as the suspension that attempt left behind.
+	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Spec.Suspended || archived.Record.SuspendedBeforeArchive != nil {
+		t.Fatalf("archived record = %+v", archived.Record)
 	}
 }
 
-func TestDeletedSuspendedTenantLosesItsNetwork(t *testing.T) {
+func TestOrphanNetworkOfAMissingTenantIsRemoved(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
@@ -598,35 +615,38 @@ func TestDeletedSuspendedTenantLosesItsNetwork(t *testing.T) {
 	if f.runtime.networks["corral-acme"] == nil {
 		t.Fatal("a suspended tenant keeps its network")
 	}
-	// The record disappears without RemoveTenant, as after restoring an
-	// older state file: the next pass still removes the network.
-	if err := f.store.Delete("acme"); err != nil {
+	// The record disappears without Archive, as after restoring an older
+	// state file: the next pass still removes the network.
+	if err := f.store.Archive("acme"); err != nil {
 		t.Fatal(err)
 	}
 	f.reconcile(t)
 	if f.runtime.networks["corral-acme"] != nil {
-		t.Fatal("the network of a deleted tenant without containers was left behind")
+		t.Fatal("the network of a tenant without a record was left behind")
 	}
 }
 
-func TestPurgeDataOnlyForDeletedTenants(t *testing.T) {
+func TestPurgeOnlyArchivedTenants(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	if err := f.reconciler.PurgeData(context.Background(), "acme"); err == nil {
-		t.Fatal("purged the data of a live tenant")
+	if err := f.reconciler.Purge(context.Background(), "acme"); err == nil {
+		t.Fatal("purged a live tenant")
 	}
-	if err := f.reconciler.RemoveTenant(context.Background(), "acme", false); err != nil {
+	if err := f.reconciler.Archive(context.Background(), "acme"); err != nil {
 		t.Fatal(err)
 	}
 	if exists, _ := f.reconciler.DataExists(context.Background(), "acme"); !exists {
-		t.Fatal("delete without purge removed the data")
+		t.Fatal("archive removed the data")
 	}
-	if err := f.reconciler.PurgeData(context.Background(), "acme"); err != nil {
+	if err := f.reconciler.Purge(context.Background(), "acme"); err != nil {
 		t.Fatal(err)
 	}
 	if exists, _ := f.reconciler.DataExists(context.Background(), "acme"); exists {
-		t.Fatal("PurgeData left the data")
+		t.Fatal("Purge left the data")
+	}
+	if _, ok := f.store.ArchivedTenant("acme"); ok {
+		t.Fatal("Purge left the archive entry")
 	}
 }
 

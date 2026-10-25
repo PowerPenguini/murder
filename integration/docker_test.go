@@ -43,8 +43,9 @@ func dockerSocket() string {
 	return "/var/run/docker.sock"
 }
 
-// buildTestImage builds testapp into a scratch image and returns its ID.
-func buildTestImage(t *testing.T, variant string) string {
+// buildTestImage builds testapp into a scratch image tagged tag (a local
+// image only, so pinning falls back to its ID) and returns that ID.
+func buildTestImage(t *testing.T, variant, tag string) string {
 	t.Helper()
 	dir := t.TempDir()
 	build := exec.Command("go", "build", "-o", filepath.Join(dir, "testapp"), "./testapp")
@@ -56,12 +57,12 @@ func buildTestImage(t *testing.T, variant string) string {
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	output, err := exec.Command("docker", "build", "-q", dir).CombinedOutput()
+	output, err := exec.Command("docker", "build", "-q", "-t", tag, dir).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker build: %v\n%s", err, output)
 	}
 	id := strings.TrimSpace(string(output))
-	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", id).Run() })
+	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", tag, id).Run() })
 	return id
 }
 
@@ -181,26 +182,33 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 	if _, err := os.Stat(dockerSocket()); err != nil {
 		t.Skipf("no Docker socket: %v", err)
 	}
-	imageV1, imageV2 := buildTestImage(t, "v1"), buildTestImage(t, "v2")
 	suffix := make([]byte, 3)
 	_, _ = rand.Read(suffix)
 	tenant := "it-" + hex.EncodeToString(suffix)
+	repository := "corral-it/" + tenant
+	imageV1, imageV2 := buildTestImage(t, "v1", repository+":v1"), buildTestImage(t, "v2", repository+":v2")
 	cleanupTenant(t, tenant)
 	n := newNode(t, tenant)
 	ctx := context.Background()
 
 	uid, gid := os.Getuid(), os.Getgid()
-	created, err := n.client.Create(ctx, spec.Tenant{
-		Name: tenant, Image: imageV1, Port: 8080, HealthPath: "/health", DataPath: "/data",
-		DataUID: uid, DataGID: gid, User: strconv.Itoa(uid) + ":" + strconv.Itoa(gid),
-		Env:          map[string]string{"PUBLIC_URL": "{{url}}", "DATA_DIR": "/data"},
-		Secrets:      map[string]spec.Secret{"APP_SECRET": {Kind: "hex", Bytes: 32}},
-		ReadOnlyRoot: true,
-		Tmpfs:        map[string]string{"/tmp": "rw,noexec,nosuid,size=16m"},
-		Limits:       spec.Limits{MemoryMB: 64, CPUs: 0.5, PIDs: 64},
-	}, api.AdoptNone)
+	// A minimal spec: everything else is a default, and the tag is pinned.
+	app := spec.Tenant{
+		Name: tenant, Image: repository + ":v1", HealthPath: "/health",
+		User:    strconv.Itoa(uid) + ":" + strconv.Itoa(gid),
+		Env:     map[string]string{"PUBLIC_URL": "{{url}}", "DATA_DIR": "/data"},
+		Secrets: spec.Secrets{"APP_SECRET": {}},
+		Limits:  spec.Limits{MemoryMB: 64, CPUs: 0.5, PIDs: 64},
+	}
+	applied, err := n.client.Create(ctx, app)
 	if err != nil {
 		t.Fatal(err)
+	}
+	created := applied.Tenant
+	// A local-only tag cannot be pulled, so the agent pins the local image:
+	// by ID, or by its content digest where the engine reports one.
+	if !pinnedTo(created.Spec.Image, imageV1) || !strings.Contains(applied.Note, "local image") {
+		t.Fatalf("pinned image = %q (note %q), want the local image %s", created.Spec.Image, applied.Note, imageV1)
 	}
 	first := n.waitHealthy(t, n.reconciler, tenant)
 
@@ -223,8 +231,12 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 	}
 
 	// A new image replaces the container and keeps the data.
-	if _, err := n.client.SetImage(ctx, tenant, imageV2); err != nil {
-		t.Fatal(err)
+	app.Image = repository + ":v2"
+	if upgraded, err := n.client.Replace(ctx, app); err != nil || !upgraded.Changed || !pinnedTo(upgraded.Tenant.Spec.Image, imageV2) {
+		t.Fatalf("upgrade = %+v, %v", upgraded, err)
+	}
+	if same, err := n.client.Replace(ctx, app); err != nil || same.Changed {
+		t.Fatalf("applying the same spec again = %+v, %v", same, err)
 	}
 	second := n.waitHealthy(t, n.reconciler, tenant)
 	if second.ContainerID == first.ContainerID {
@@ -268,20 +280,48 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 		t.Fatalf("logs: %v", err)
 	}
 
-	// Delete with purge removes the container, the network and the data.
-	if err := n.client.Delete(ctx, tenant, true); err != nil {
+	// Archive removes the container and network and keeps the data;
+	// restore brings the tenant back with it.
+	if err := n.client.Archive(ctx, tenant); err != nil {
 		t.Fatal(err)
 	}
 	if containers, _ := n.docker.List(ctx); hasTenant(containers, tenant) {
-		t.Fatal("container left after delete")
+		t.Fatal("container left after archive")
 	}
 	if err := exec.Command("docker", "network", "inspect", reconcile.NetworkName(tenant)).Run(); err == nil {
-		t.Fatal("network left after delete")
+		t.Fatal("network left after archive")
+	}
+	if status, _ := n.request(t, http.MethodGet, tenant, "/health", ""); status != http.StatusNotFound {
+		t.Fatalf("archived tenant answered %d", status)
+	}
+	if _, err := n.client.Restore(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	n.waitHealthy(t, n.reconciler, tenant)
+	if _, value := n.request(t, http.MethodGet, tenant, "/value", ""); value != "kept" {
+		t.Fatalf("data after restore = %q", value)
+	}
+
+	// Purge deletes an archived tenant and its data.
+	if err := n.client.Archive(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.client.Purge(ctx, tenant); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(n.volumes.Root, tenant)); !os.IsNotExist(err) {
 		t.Fatalf("data left after purge: %v", err)
 	}
 	fmt.Fprintln(os.Stderr, "lifecycle passed for", tenant)
+}
+
+// pinnedTo reports whether pinned names the local image id.
+func pinnedTo(pinned, id string) bool {
+	if pinned == id {
+		return true
+	}
+	output, err := exec.Command("docker", "image", "inspect", "-f", "{{.Id}}", pinned).Output()
+	return err == nil && strings.TrimSpace(string(output)) == id
 }
 
 func hasTenant(containers []runtime.Container, tenant string) bool {

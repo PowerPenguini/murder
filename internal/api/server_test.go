@@ -2,7 +2,11 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -21,8 +25,6 @@ import (
 	"github.com/PowerPenguini/corral/internal/store"
 	"github.com/PowerPenguini/corral/internal/volume"
 )
-
-const image = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 // memoryRuntime runs nothing; it only remembers containers.
 type memoryRuntime struct {
@@ -73,6 +75,17 @@ func (m *memoryRuntime) Remove(_ context.Context, id string) error {
 	return nil
 }
 func (m *memoryRuntime) Pid(context.Context, string) (int, error) { return 1, nil }
+
+// Resolve pins tags to a digest derived from the tag; "missing" tags fail.
+func (m *memoryRuntime) Resolve(_ context.Context, ref string) (string, string, error) {
+	if spec.Pinned(ref) {
+		return ref, "", nil
+	}
+	if strings.Contains(ref, "missing") {
+		return "", "", errors.New("manifest unknown")
+	}
+	return pinnedTag(ref), "", nil
+}
 func (m *memoryRuntime) Logs(_ context.Context, id string, tail int) ([]byte, error) {
 	return []byte("logs of " + id + "\n"), nil
 }
@@ -111,21 +124,35 @@ func newAPIFixture(t *testing.T) *apiFixture {
 
 func appSpec(name string) spec.Tenant {
 	return spec.Tenant{
-		Name: name, Image: image, Port: 8080, HealthPath: "/health", DataPath: "/data",
-		DataUID: os.Getuid(), DataGID: os.Getgid(), User: "1000:1000",
-		Secrets: map[string]spec.Secret{"SESSION_SECRET": {Kind: "hex", Bytes: 32}},
+		Name: name, Image: "ghcr.io/example/app:1.4", HealthPath: "/health",
+		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+		Secrets: spec.Secrets{"SESSION_SECRET": {}},
 	}
 }
 
-func TestCreateGeneratesSecretsWithoutShowingThem(t *testing.T) {
+// pinnedTag is how memoryRuntime pins a tag.
+func pinnedTag(ref string) string {
+	repository := ref[:strings.LastIndex(ref, ":")]
+	sum := sha256.Sum256([]byte(ref))
+	return repository + "@sha256:" + hex.EncodeToString(sum[:])
+}
+
+func TestCreatePinsDefaultsAndHidesSecrets(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	created, err := f.client.Create(ctx, appSpec("acme"), AdoptNone)
+	applied, err := f.client.Create(ctx, appSpec("acme"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.URL != "https://acme.example.test" || created.HostPort != 20000 || created.Generation != 1 {
-		t.Fatalf("created = %+v", created)
+	created := applied.Tenant
+	if !applied.Changed || created.URL != "https://acme.example.test" || created.HostPort != 20000 || created.Generation != 1 {
+		t.Fatalf("created = %+v", applied)
+	}
+	if created.Spec.Image != pinnedTag("ghcr.io/example/app:1.4") {
+		t.Fatalf("stored image = %q, want the pinned digest", created.Spec.Image)
+	}
+	if created.Spec.Port != 8080 || created.Spec.DataPath != "/data" || created.Spec.Tmpfs["/tmp"] == "" || created.Spec.WritableRoot {
+		t.Fatalf("defaults were not stored: %+v", created.Spec)
 	}
 	secret, err := f.client.Secret(ctx, "acme", "SESSION_SECRET")
 	if err != nil || len(secret) != 64 {
@@ -148,7 +175,7 @@ func TestCreateGeneratesSecretsWithoutShowingThem(t *testing.T) {
 func TestErrorsMapToStatusCodes(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
 		t.Fatal(err)
 	}
 	check := func(name string, err error, status int) {
@@ -158,9 +185,9 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 			t.Errorf("%s: error %v, want HTTP %d", name, err, status)
 		}
 	}
-	_, err := f.client.Create(ctx, appSpec("acme"), AdoptNone)
+	_, err := f.client.Create(ctx, appSpec("acme"))
 	check("duplicate", err, 409)
-	if !strings.Contains(err.Error(), "already exists") {
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("duplicate create explains %q", err)
 	}
 	_, err = f.client.Get(ctx, "nobody")
@@ -169,145 +196,62 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 		t.Error("IsNotFound missed a 404")
 	}
 	bad := appSpec("bad")
-	bad.Port = 0
-	_, err = f.client.Create(ctx, bad, AdoptNone)
+	bad.Port = 70000
+	_, err = f.client.Create(ctx, bad)
 	check("invalid spec", err, 400)
-	_, err = f.client.Create(ctx, appSpec("www"), AdoptNone)
+	_, err = f.client.Create(ctx, appSpec("www"))
 	check("reserved name", err, 400)
-	_, err = f.client.SetImage(ctx, "acme", "nginx:latest")
-	check("unpinned image", err, 400)
+	unpinnable := appSpec("nopull")
+	unpinnable.Image = "ghcr.io/example/missing:1"
+	_, err = f.client.Create(ctx, unpinnable)
+	check("image that cannot be pinned", err, 422)
+	malformed := appSpec("malformed")
+	malformed.Image = "Not An Image"
+	_, err = f.client.Create(ctx, malformed)
+	check("malformed image", err, 400)
 	_, err = f.client.Secret(ctx, "acme", "NOPE")
 	check("missing secret", err, 404)
-	renamed := appSpec("other")
-	_, err = f.client.Replace(ctx, renamed)
+	_, err = f.client.Replace(ctx, appSpec("other"))
 	check("replace missing", err, 404)
-	// A bad secret in a replacement is a client error, checked before any
-	// value is generated.
 	huge := appSpec("acme")
 	huge.Secrets["HUGE"] = spec.Secret{Kind: "password", Bytes: 3_000_000}
 	_, err = f.client.Replace(ctx, huge)
 	check("oversized secret", err, 400)
-	odd := appSpec("acme")
-	odd.Secrets["ODD"] = spec.Secret{Kind: "rot13", Bytes: 32}
-	_, err = f.client.Replace(ctx, odd)
-	check("unknown secret kind", err, 400)
 	root := appSpec("acme")
-	root.User = "0"
+	root.User = "0:0"
 	_, err = f.client.Replace(ctx, root)
 	check("root user", err, 400)
-	err = f.client.PurgeData(ctx, "acme")
-	check("purge data of a live tenant", err, 409)
+	err = f.client.Purge(ctx, "acme")
+	check("purge a live tenant", err, 409)
+	_, err = f.client.Restore(ctx, "acme")
+	check("restore a tenant that is not archived", err, 404)
 }
 
-func TestApplyKeepsSuspension(t *testing.T) {
+func TestReplaceKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
 		t.Fatal(err)
+	}
+	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
+	same, err := f.client.Replace(ctx, appSpec("acme"))
+	if err != nil || same.Changed || same.Tenant.Generation != 1 {
+		t.Fatalf("an unchanged spec = %+v, %v", same, err)
 	}
 	if _, err := f.client.Suspend(ctx, "acme", true); err != nil {
 		t.Fatal(err)
 	}
 	next := appSpec("acme")
+	next.Secrets["ADMIN_PASSWORD"] = spec.Secret{Kind: "password"}
 	next.Env = map[string]string{"MODE": "prod"}
 	replaced, err := f.client.Replace(ctx, next)
-	if err != nil || !replaced.Spec.Suspended {
-		t.Fatalf("applying an app spec resumed a suspended tenant: %+v, %v", replaced.Spec, err)
-	}
-}
-
-func TestDeletedTenantDataIsNotSilentlyReused(t *testing.T) {
-	f := newAPIFixture(t)
-	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
-		t.Fatal(err)
-	}
-	_ = f.client.Reconcile(ctx)
-	if err := os.WriteFile(filepath.Join(f.dataRoot, "acme", "data.db"), []byte("old customer"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	before, err := f.client.Secret(ctx, "acme", "SESSION_SECRET")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.client.Delete(ctx, "acme", false); err != nil {
-		t.Fatal(err)
-	}
-	_, err = f.client.Create(ctx, appSpec("acme"), AdoptNone)
-	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "data of a deleted tenant") {
-		t.Fatalf("create over leftover data = %v", err)
-	}
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptData); err != nil {
-		t.Fatalf("explicit adoption = %v", err)
-	}
-	// The data may be encrypted with the old secrets, so adoption restores them.
-	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
-		t.Fatal("adopting the data generated new secrets instead of restoring the old ones")
-	}
-	if err := f.client.Delete(ctx, "acme", false); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.client.PurgeData(ctx, "acme"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptData); err == nil {
-		t.Fatal("adopted data without saved secrets")
-	}
-	fresh, err := f.client.Create(ctx, appSpec("acme"), AdoptNone)
-	if err != nil {
-		t.Fatalf("create after purge-data = %v", err)
-	}
-	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after == before {
-		t.Fatal("a fresh tenant reused a deleted tenant's secret")
-	}
-	if record, _ := f.store.Get(fresh.Spec.Name); record.DataImage != "" {
-		t.Fatalf("a fresh tenant inherited the data image %q", record.DataImage)
-	}
-}
-
-// Saved secrets of a deleted tenant whose data has since gone are dropped
-// by a plain create, not carried over.
-func TestFreshCreateDropsStaleRetiredEntry(t *testing.T) {
-	f := newAPIFixture(t)
-	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
-		t.Fatal(err)
-	}
-	_ = f.client.Reconcile(ctx)
-	old, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
-	if err := f.client.Delete(ctx, "acme", false); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(f.dataRoot, "acme")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
-		t.Fatal(err)
-	}
-	if fresh, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); fresh == old {
-		t.Fatal("stale saved secrets were reused")
-	}
-	if _, ok := f.store.RetiredTenant("acme"); ok {
-		t.Fatal("the stale retired entry survived")
-	}
-}
-
-func TestReplaceKeepsAndAddsSecrets(t *testing.T) {
-	f := newAPIFixture(t)
-	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
-	next := appSpec("acme")
-	next.Secrets["ADMIN_PASSWORD"] = spec.Secret{Kind: "password", Bytes: 20}
-	next.Env = map[string]string{"MODE": "prod"}
-	replaced, err := f.client.Replace(ctx, next)
-	if err != nil || replaced.Generation != 2 || replaced.Spec.Env["MODE"] != "prod" {
+	if err != nil || !replaced.Changed || replaced.Tenant.Spec.Env["MODE"] != "prod" {
 		t.Fatalf("replace = %+v, %v", replaced, err)
 	}
-	after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
-	if after != before {
+	if !replaced.Tenant.Spec.Suspended {
+		t.Fatal("applying an app spec resumed a suspended tenant")
+	}
+	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
 		t.Fatal("replace regenerated an existing secret")
 	}
 	if password, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); err != nil || len(password) != 20 {
@@ -320,17 +264,97 @@ func TestReplaceKeepsAndAddsSecrets(t *testing.T) {
 	if _, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); !IsNotFound(err) {
 		t.Fatalf("a removed secret is still readable: %v", err)
 	}
+	// A new tag means a new pinned image.
+	upgraded := appSpec("acme")
+	upgraded.Image = "ghcr.io/example/app:1.5"
+	moved, err := f.client.Replace(ctx, upgraded)
+	if err != nil || !moved.Changed || moved.Tenant.Spec.Image != pinnedTag("ghcr.io/example/app:1.5") {
+		t.Fatalf("tag change = %+v, %v", moved, err)
+	}
 }
 
-func TestImageSuspendLogsAndDeleteWithPurge(t *testing.T) {
+func TestArchiveRestorePurge(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptNone); err != nil {
+	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := f.client.SetImage(ctx, "acme", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	if err != nil || changed.Generation != 2 {
-		t.Fatalf("set image = %+v, %v", changed, err)
+	_ = f.client.Reconcile(ctx)
+	if err := os.WriteFile(filepath.Join(f.dataRoot, "acme", "data.db"), []byte("customer data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
+	if err := f.client.Archive(ctx, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if routes := (Routes{Store: f.store}); func() bool { _, ok := routes.Route("acme"); return ok }() {
+		t.Fatal("an archived tenant still has a route")
+	}
+	archived, err := f.client.ListArchived(ctx)
+	if err != nil || len(archived) != 1 || archived[0].Name != "acme" {
+		t.Fatalf("archive = %+v, %v", archived, err)
+	}
+	_, err = f.client.Create(ctx, appSpec("acme"))
+	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
+		t.Fatalf("create over an archived name = %v", err)
+	}
+	restored, err := f.client.Restore(ctx, "acme")
+	if err != nil || restored.Spec.Suspended {
+		t.Fatalf("restore = %+v, %v", restored, err)
+	}
+	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
+		t.Fatal("restore did not bring back the tenant's secrets")
+	}
+	if data, err := os.ReadFile(filepath.Join(f.dataRoot, "acme", "data.db")); err != nil || string(data) != "customer data" {
+		t.Fatalf("data after restore = %q, %v", data, err)
+	}
+	if err := f.client.Archive(ctx, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.Purge(ctx, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(f.dataRoot, "acme")); !os.IsNotExist(err) {
+		t.Fatal("purge left the data")
+	}
+	if archived, _ := f.client.ListArchived(ctx); len(archived) != 0 {
+		t.Fatalf("purge left the archive entry: %+v", archived)
+	}
+	fresh, err := f.client.Create(ctx, appSpec("acme"))
+	if err != nil {
+		t.Fatalf("create after purge = %v", err)
+	}
+	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after == before {
+		t.Fatal("a fresh tenant reused a purged tenant's secret")
+	}
+	if record, _ := f.store.Get(fresh.Tenant.Spec.Name); record.DataImage != "" {
+		t.Fatalf("a fresh tenant inherited the data image %q", record.DataImage)
+	}
+}
+
+// Data no archive entry accounts for blocks a create until it is purged.
+func TestLeftoverDataBlocksCreateUntilPurged(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if err := os.MkdirAll(filepath.Join(f.dataRoot, "acme"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Create(ctx, appSpec("acme")); err == nil || !strings.Contains(err.Error(), "purge it first") {
+		t.Fatalf("create over leftover data = %v", err)
+	}
+	if err := f.client.Purge(ctx, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSuspendLogsAndRoutes(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+		t.Fatal(err)
 	}
 	if suspended, err := f.client.Suspend(ctx, "acme", true); err != nil || !suspended.Spec.Suspended {
 		t.Fatalf("suspend = %+v, %v", suspended, err)
@@ -344,58 +368,11 @@ func TestImageSuspendLogsAndDeleteWithPurge(t *testing.T) {
 	if logs, err := f.client.Logs(ctx, "acme", 10); err != nil || string(logs) != "logs of c-acme\n" {
 		t.Fatalf("logs = %q, %v", logs, err)
 	}
-	if _, err := os.Stat(filepath.Join(f.dataRoot, "acme")); err != nil {
-		t.Fatal("the reconcile pass did not create the data directory")
-	}
-	if err := f.client.Delete(ctx, "acme", true); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(f.dataRoot, "acme")); !os.IsNotExist(err) {
-		t.Fatal("purge left the data directory")
-	}
-	if err := f.client.Delete(ctx, "acme", false); !IsNotFound(err) {
-		t.Fatalf("second delete = %v", err)
-	}
-	if routes := (Routes{Store: f.store}); func() bool { _, ok := routes.Route("acme"); return ok }() {
-		t.Fatal("a deleted tenant still has a route")
-	}
-}
-
-func TestRoutesFollowTheStore(t *testing.T) {
-	f := newAPIFixture(t)
-	if _, err := f.client.Create(context.Background(), appSpec("acme"), AdoptNone); err != nil {
-		t.Fatal(err)
-	}
-	routes := Routes{Store: f.store}
-	route, ok := routes.Route("acme")
+	route, ok := (Routes{Store: f.store}).Route("acme")
 	if !ok || route.Backend != "127.0.0.1:20000" || route.Suspended {
 		t.Fatalf("route = %+v, %v", route, ok)
 	}
-	if _, ok := routes.Route("nobody"); ok {
+	if _, ok := (Routes{Store: f.store}).Route("nobody"); ok {
 		t.Fatal("route for a missing tenant")
-	}
-}
-
-// Data without saved secrets (left from before retirement existed, or
-// restored onto a fresh node) can still be adopted when the operator says so.
-func TestAdoptWithoutSavedSecrets(t *testing.T) {
-	f := newAPIFixture(t)
-	ctx := context.Background()
-	if err := os.MkdirAll(filepath.Join(f.dataRoot, "acme"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptData); err == nil || !strings.Contains(err.Error(), "force-new-secrets") {
-		t.Fatalf("adopt without saved secrets = %v", err)
-	}
-	if _, err := f.client.Create(ctx, appSpec("acme"), AdoptForce); err != nil {
-		t.Fatalf("forced adoption = %v", err)
-	}
-	plain := appSpec("beta")
-	plain.Secrets = nil
-	if err := os.MkdirAll(filepath.Join(f.dataRoot, "beta"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.client.Create(ctx, plain, AdoptData); err != nil {
-		t.Fatalf("adopting data for a spec without secrets = %v", err)
 	}
 }

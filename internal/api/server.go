@@ -32,9 +32,22 @@ type Tenant struct {
 	Status     *reconcile.Status `json:"status,omitempty"`
 }
 
-// ImageChange asks for a new image.
-type ImageChange struct {
-	Image string `json:"image"`
+// Applied is the result of creating or updating a tenant.
+type Applied struct {
+	Tenant Tenant `json:"tenant"`
+	// Changed is false when the update matched what was stored.
+	Changed bool `json:"changed"`
+	// Note explains how the image was pinned when it fell back to a local
+	// image.
+	Note string `json:"note,omitempty"`
+}
+
+// ArchivedTenant is what the API shows about an archived tenant.
+type ArchivedTenant struct {
+	Name       string    `json:"name"`
+	Image      string    `json:"image"`
+	Suspended  bool      `json:"suspended"`
+	ArchivedAt time.Time `json:"archivedAt"`
 }
 
 // SecretValue carries one secret to an operator.
@@ -63,13 +76,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tenants", s.create)
 	mux.HandleFunc("GET /v1/tenants/{name}", s.get)
 	mux.HandleFunc("PUT /v1/tenants/{name}", s.replace)
-	mux.HandleFunc("POST /v1/tenants/{name}/image", s.setImage)
 	mux.HandleFunc("POST /v1/tenants/{name}/suspend", s.suspend(true))
 	mux.HandleFunc("POST /v1/tenants/{name}/resume", s.suspend(false))
-	mux.HandleFunc("DELETE /v1/tenants/{name}", s.delete)
-	mux.HandleFunc("DELETE /v1/data/{name}", s.purgeData)
+	mux.HandleFunc("POST /v1/tenants/{name}/archive", s.archive)
 	mux.HandleFunc("GET /v1/tenants/{name}/secrets/{key}", s.secret)
 	mux.HandleFunc("GET /v1/tenants/{name}/logs", s.logs)
+	mux.HandleFunc("GET /v1/archive", s.listArchived)
+	mux.HandleFunc("POST /v1/archive/{name}/restore", s.restore)
+	mux.HandleFunc("DELETE /v1/archive/{name}", s.purge)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
 	return mux
 }
@@ -103,6 +117,25 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.view(record))
 }
 
+// prepare fills in defaults, pins the image and validates: what every spec
+// goes through before it is stored.
+func (s *Server) prepare(ctx context.Context, tenant spec.Tenant) (spec.Tenant, string, error) {
+	tenant = tenant.WithDefaults()
+	tenant.Suspended = false
+	if err := spec.ValidReference(tenant.Image); err != nil {
+		return spec.Tenant{}, "", badRequest(err)
+	}
+	pinned, note, err := s.runtime.Resolve(ctx, tenant.Image)
+	if err != nil {
+		return spec.Tenant{}, "", statusError{http.StatusUnprocessableEntity, fmt.Errorf("pin image %s: %w", tenant.Image, err)}
+	}
+	tenant.Image = pinned
+	if err := tenant.Validate(); err != nil {
+		return spec.Tenant{}, "", badRequest(err)
+	}
+	return tenant, note, nil
+}
+
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	var tenant spec.Tenant
 	if !readJSON(w, r, &tenant) {
@@ -112,53 +145,38 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(err))
 		return
 	}
-	if err := tenant.Validate(); err != nil {
-		writeError(w, badRequest(err))
-		return
-	}
-	// adoptData=true restores a deleted tenant over its kept data with its
-	// saved secrets; adoptData=force also accepts fresh secrets when none
-	// were saved (the operator vouches that the data does not depend on them).
-	adoptMode := r.URL.Query().Get("adoptData")
-	adopt := adoptMode == "true" || adoptMode == "force"
 	ctx, cancel := detached(r)
 	defer cancel()
+	tenant, note, err := s.prepare(ctx, tenant)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	var record store.Record
-	// Under the reconciler's lock, so a concurrent purge-data cannot delete
-	// the data this create checks or adopts.
-	err := s.reconciler.Exclusive(func() error {
+	// Under the reconciler's lock, so a concurrent purge cannot interleave
+	// with the check for leftover data.
+	err = s.reconciler.Exclusive(func() error {
 		if err := r.Context().Err(); err != nil {
 			return fmt.Errorf("the client gave up while waiting; nothing was created: %w", err)
 		}
 		if _, err := s.store.Get(tenant.Name); err == nil {
 			return store.ErrExists
 		}
-		retired, hasRetired := s.store.RetiredTenant(tenant.Name)
-		var previous map[string]string
-		dataImage := ""
-		if adopt {
-			// Restoring over kept data restores the deleted tenant's
-			// secrets too: the data may be encrypted or signed with them.
-			if !hasRetired && len(tenant.Secrets) > 0 && adoptMode != "force" {
-				return statusError{http.StatusConflict, fmt.Errorf("no saved secrets for a deleted tenant %s; its data may be unreadable with new ones (adopt with -force-new-secrets if it is not)", tenant.Name)}
-			}
-			previous, dataImage = retired.Sealed, retired.DataImage
-		} else {
-			exists, err := s.reconciler.DataExists(ctx, tenant.Name)
-			if err != nil {
-				return err
-			}
-			if exists {
-				return statusError{http.StatusConflict, fmt.Errorf("data of a deleted tenant %s is still on this node; restore it with create -adopt-data or delete it with purge-data", tenant.Name)}
-			}
-			// Saved secrets of a tenant whose data is gone are of no use;
-			// Create drops the retired entry.
+		if _, archived := s.store.ArchivedTenant(tenant.Name); archived {
+			return store.ErrArchived
 		}
-		sealed, err := s.sealMissing(tenant, previous)
+		exists, err := s.reconciler.DataExists(ctx, tenant.Name)
 		if err != nil {
 			return err
 		}
-		record, err = s.store.Create(store.Record{Spec: tenant, Sealed: sealed, DataImage: dataImage})
+		if exists {
+			return statusError{http.StatusConflict, fmt.Errorf("data of an earlier tenant %s is on this node but not in the archive; purge it first", tenant.Name)}
+		}
+		sealed, err := s.sealMissing(tenant, nil)
+		if err != nil {
+			return err
+		}
+		record, err = s.store.Create(store.Record{Spec: tenant, Sealed: sealed})
 		return err
 	})
 	if err != nil {
@@ -166,12 +184,13 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("tenant created", "tenant", tenant.Name, "image", tenant.Image)
-	writeJSON(w, http.StatusCreated, s.view(record))
+	writeJSON(w, http.StatusCreated, Applied{Tenant: s.view(record), Changed: true, Note: note})
 }
 
 // replace swaps the spec. Secrets keep their values; new secret names get
 // generated values and removed ones are forgotten. Suspension is operational
-// state, not part of an app spec, so it is kept as it was.
+// state, not part of an app spec, so it is kept as it was. A spec equal to
+// the stored one changes nothing, not even the generation.
 func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var tenant spec.Tenant
@@ -182,8 +201,21 @@ func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(fmt.Errorf("spec name %q does not match tenant %q", tenant.Name, name)))
 		return
 	}
-	if err := tenant.Validate(); err != nil {
-		writeError(w, badRequest(err))
+	ctx, cancel := detached(r)
+	defer cancel()
+	tenant, note, err := s.prepare(ctx, tenant)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	current, err := s.store.Get(name)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	tenant.Suspended = current.Spec.Suspended
+	if tenant.Equal(current.Spec) {
+		writeJSON(w, http.StatusOK, Applied{Tenant: s.view(current), Changed: false, Note: note})
 		return
 	}
 	record, err := s.store.Update(name, func(record *store.Record) error {
@@ -199,8 +231,8 @@ func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	s.log.Info("tenant updated", "tenant", name, "generation", record.Generation)
-	writeJSON(w, http.StatusOK, s.view(record))
+	s.log.Info("tenant updated", "tenant", name, "generation", record.Generation, "image", tenant.Image)
+	writeJSON(w, http.StatusOK, Applied{Tenant: s.view(record), Changed: true, Note: note})
 }
 
 func (s *Server) sealMissing(tenant spec.Tenant, existing map[string]string) (map[string]string, error) {
@@ -221,27 +253,6 @@ func (s *Server) sealMissing(tenant spec.Tenant, existing map[string]string) (ma
 	return sealed, nil
 }
 
-func (s *Server) setImage(w http.ResponseWriter, r *http.Request) {
-	var change ImageChange
-	if !readJSON(w, r, &change) {
-		return
-	}
-	if err := spec.ValidImage(change.Image); err != nil {
-		writeError(w, badRequest(err))
-		return
-	}
-	record, err := s.store.Update(r.PathValue("name"), func(record *store.Record) error {
-		record.Spec.Image = change.Image
-		return nil
-	})
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	s.log.Info("tenant image changed", "tenant", record.Spec.Name, "image", change.Image)
-	writeJSON(w, http.StatusOK, s.view(record))
-}
-
 func (s *Server) suspend(suspended bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record, err := s.store.SetSuspended(r.PathValue("name"), suspended)
@@ -254,24 +265,47 @@ func (s *Server) suspend(suspended bool) http.HandlerFunc {
 	}
 }
 
-// delete removes the tenant, its containers and network. Its data stays
-// unless purge=true. A failed delete leaves the tenant suspended and can be
-// repeated.
-func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
+// archive takes a tenant out of service and keeps everything needed to
+// restore it. A failed archive leaves the tenant suspended; repeat it.
+func (s *Server) archive(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	purge := r.URL.Query().Get("purge") == "true"
 	ctx, cancel := detached(r)
 	defer cancel()
-	if err := s.reconciler.RemoveTenant(ctx, name, purge); err != nil {
+	if err := s.reconciler.Archive(ctx, name); err != nil {
 		writeError(w, err)
 		return
 	}
-	s.log.Info("tenant deleted", "tenant", name, "purged", purge)
+	s.log.Info("tenant archived", "tenant", name)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// purgeData deletes data a tenant deleted without purge left behind.
-func (s *Server) purgeData(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listArchived(w http.ResponseWriter, _ *http.Request) {
+	archived := s.store.ListArchived()
+	views := make([]ArchivedTenant, 0, len(archived))
+	for _, entry := range archived {
+		views = append(views, ArchivedTenant{Name: entry.Record.Spec.Name, Image: entry.Record.Spec.Image, Suspended: entry.Record.Spec.Suspended, ArchivedAt: entry.ArchivedAt})
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var record store.Record
+	err := s.reconciler.Exclusive(func() error {
+		var err error
+		record, err = s.store.Restore(name)
+		return err
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.log.Info("tenant restored", "tenant", name)
+	writeJSON(w, http.StatusOK, s.view(record))
+}
+
+// purge deletes an archived tenant, or data no archive entry accounts for.
+func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if err := spec.ValidLabel(name); err != nil {
 		writeError(w, badRequest(err))
@@ -279,11 +313,11 @@ func (s *Server) purgeData(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := detached(r)
 	defer cancel()
-	if err := s.reconciler.PurgeData(ctx, name); err != nil {
+	if err := s.reconciler.Purge(ctx, name); err != nil {
 		writeError(w, err)
 		return
 	}
-	s.log.Info("leftover tenant data purged", "tenant", name)
+	s.log.Info("tenant purged", "tenant", name)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -389,7 +423,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = typed.status
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, store.ErrExists):
+	case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrNotArchived):
 		status = http.StatusConflict
 	case errors.As(err, new(*spec.ValidationError)):
 		status = http.StatusBadRequest

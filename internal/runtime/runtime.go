@@ -33,6 +33,11 @@ type Runtime interface {
 	// HasImage reports whether ref is present locally; PullImage fetches it.
 	HasImage(ctx context.Context, ref string) (bool, error)
 	PullImage(ctx context.Context, ref string) error
+	// Resolve pins an image reference: a digest reference or image ID comes
+	// back unchanged; a tag is pulled and replaced by its registry digest,
+	// or by the local image ID if it has none or cannot be pulled. note
+	// explains a fallback to the local image.
+	Resolve(ctx context.Context, ref string) (pinned, note string, err error)
 	// EnsureNetwork creates the isolated network with the given IPv4 subnet
 	// if it is missing. An existing network with another subnet, or one this
 	// node does not own, is an error. RemoveNetwork leaves alone a network

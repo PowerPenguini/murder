@@ -207,7 +207,8 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err := tenant.Validate(); err != nil {
 		return Status{}, fmt.Errorf("stored spec no longer valid; apply a corrected spec: %w", err)
 	}
-	dataPath, mountedNow, err := r.volumes.Ensure(ctx, tenant.Name, tenant.DataUID, tenant.DataGID)
+	uid, gid := tenant.Owner()
+	dataPath, mountedNow, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid)
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
 	}
@@ -393,7 +394,7 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 		MemoryBytes:   int64(limits.MemoryMB) << 20,
 		NanoCPUs:      int64(limits.CPUs * 1e9),
 		PIDs:          int64(limits.PIDs),
-		ReadOnlyRoot:  tenant.ReadOnlyRoot,
+		ReadOnlyRoot:  !tenant.WritableRoot,
 		Tmpfs:         tmpfs,
 		Labels: map[string]string{
 			runtime.LabelTenant: tenant.Name,
@@ -451,31 +452,23 @@ func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error
 	return r.volumes.Exists(ctx, tenant)
 }
 
-// RemoveTenant takes a tenant out of service and deletes its record, and
-// with purge its data. Without purge the record is retired: its secrets and
-// data image stay so the tenant can be restored over its data. Each step must succeed before the next one runs, and
-// the record goes last, so a failure leaves a suspended tenant the operator
-// can delete again; its host port and subnet are only reused once nothing
-// holds them.
-func (r *Reconciler) RemoveTenant(ctx context.Context, name string, purge bool) error {
+// Archive takes a tenant out of service and moves it to the archive with
+// its data, secrets and spec, so Restore can bring it back as it was. Its
+// containers and network go first and the record moves last: a failure
+// leaves a suspended tenant that can be archived again, and its host port
+// and subnet are only reused once nothing holds them.
+func (r *Reconciler) Archive(ctx context.Context, name string) error {
 	r.pass.Lock()
 	defer r.pass.Unlock()
 	// Suspended first, so no pass recreates what is removed below; only
 	// this tenant is touched, whatever the others are doing.
-	if _, err := r.store.SetSuspended(name, true); err != nil {
+	if _, err := r.store.StartArchive(name); err != nil {
 		return err
 	}
 	if err := r.clearRuntime(ctx, name); err != nil {
 		return err
 	}
-	if purge {
-		if err := r.volumes.Remove(ctx, name); err != nil {
-			return fmt.Errorf("delete data: %w", err)
-		}
-		if err := r.store.Delete(name); err != nil {
-			return err
-		}
-	} else if err := r.store.Retire(name); err != nil {
+	if err := r.store.Archive(name); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -484,12 +477,14 @@ func (r *Reconciler) RemoveTenant(ctx context.Context, name string, purge bool) 
 	return nil
 }
 
-// PurgeData deletes data left behind by a tenant deleted without purge.
-func (r *Reconciler) PurgeData(ctx context.Context, name string) error {
+// Purge deletes an archived tenant for good: its data, snapshots and saved
+// secrets. It also cleans up data no archive entry accounts for. A live
+// tenant must be archived first.
+func (r *Reconciler) Purge(ctx context.Context, name string) error {
 	r.pass.Lock()
 	defer r.pass.Unlock()
 	if _, err := r.store.Get(name); err == nil {
-		return fmt.Errorf("%w: delete tenant %s with purge instead", store.ErrExists, name)
+		return fmt.Errorf("%w: archive %s before purging it", store.ErrNotArchived, name)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}

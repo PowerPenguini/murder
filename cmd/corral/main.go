@@ -15,7 +15,8 @@ Node commands:
   agent      run the agent (reconciler, edge proxy and local API)
 
 Client commands (talk to the local agent):
-  tenant     create, change, inspect and delete tenants
+  apply      create and update tenants from a fleet file
+  tenant     inspect, suspend, archive, restore and purge tenants
   reconcile  run one reconcile pass now and report its errors
 
 Run "corral <command> -h" for a command's options.
@@ -40,6 +41,8 @@ func run(args []string) error {
 		return runInit(args[1:])
 	case "agent":
 		return runAgent(args[1:])
+	case "apply":
+		return runApply(args[1:])
 	case "tenant":
 		return runTenant(args[1:])
 	case "reconcile":

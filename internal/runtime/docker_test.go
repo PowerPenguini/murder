@@ -269,3 +269,59 @@ func TestLogsAreDemultiplexed(t *testing.T) {
 		t.Fatalf("unframed output = %q", got)
 	}
 }
+
+func TestResolvePinsTags(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	ctx := context.Background()
+	const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	if pinned, _, err := docker.Resolve(ctx, "ghcr.io/org/app@"+digest); err != nil || pinned != "ghcr.io/org/app@"+digest {
+		t.Fatalf("a pinned reference = %q, %v", pinned, err)
+	}
+	pulls := 0
+	engine.handlers["POST /images/create"] = func(w http.ResponseWriter, r *http.Request) {
+		pulls++
+		if r.URL.Query().Get("fromImage") == "local/app" {
+			_, _ = w.Write([]byte(`{"error":"pull access denied for local/app"}`))
+			return
+		}
+		if r.URL.Query().Get("tag") != "1.4" && r.URL.Query().Get("fromImage") == "ghcr.io/org/app" {
+			t.Errorf("pull query = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"status":"done"}`))
+	}
+	engine.handlers["GET /images/ghcr.io/org/app:1.4/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Id":"sha256:2222222222222222222222222222222222222222222222222222222222222222","RepoDigests":["other/app@sha256:9999999999999999999999999999999999999999999999999999999999999999","ghcr.io/org/app@` + digest + `"]}`))
+	}
+	pinned, note, err := docker.Resolve(ctx, "ghcr.io/org/app:1.4")
+	if err != nil || pinned != "ghcr.io/org/app@"+digest || note != "" {
+		t.Fatalf("Resolve(tag) = %q, %q, %v", pinned, note, err)
+	}
+	// A local image that cannot be pulled is pinned to its ID, with a note.
+	engine.handlers["GET /images/local/app:latest/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Id":"sha256:3333333333333333333333333333333333333333333333333333333333333333","RepoDigests":[]}`))
+	}
+	pinned, note, err = docker.Resolve(ctx, "local/app")
+	if err != nil || pinned != "sha256:3333333333333333333333333333333333333333333333333333333333333333" || !strings.Contains(note, "local image") {
+		t.Fatalf("Resolve(local) = %q, %q, %v", pinned, note, err)
+	}
+	// Neither pullable nor present: the pull error comes back.
+	engine.handlers["POST /images/create"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"error":"manifest unknown"}`))
+	}
+	if _, _, err := docker.Resolve(ctx, "ghcr.io/org/missing:1"); err == nil || !strings.Contains(err.Error(), "manifest unknown") {
+		t.Fatalf("Resolve(missing) = %v", err)
+	}
+	if pulls == 0 {
+		t.Fatal("no pull was attempted")
+	}
+	for ref, want := range map[string][2]string{
+		"nginx":                        {"nginx", "latest"},
+		"nginx:1.27":                   {"nginx", "1.27"},
+		"registry.local:5000/team/app": {"registry.local:5000/team/app", "latest"},
+		"registry.local:5000/app:v2":   {"registry.local:5000/app", "v2"},
+	} {
+		if repository, tag := splitTag(ref); repository != want[0] || tag != want[1] {
+			t.Errorf("splitTag(%q) = %q, %q", ref, repository, tag)
+		}
+	}
+}

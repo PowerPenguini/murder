@@ -14,7 +14,7 @@ import (
 func tenant(name string) spec.Tenant {
 	return spec.Tenant{
 		Name: name, Image: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		Port: 8080, HealthPath: "/health", DataPath: "/data", DataUID: 1000, DataGID: 1000, User: "1000:1000",
+		Port: 8080, HealthPath: "/health", DataPath: "/data", User: "1000:1000",
 	}
 }
 
@@ -83,7 +83,10 @@ func TestFileStoreLifecycleAndPersistence(t *testing.T) {
 		t.Fatal("Observe signalled a change of desired state")
 	default:
 	}
-	if err := st.Delete("beta"); err != nil {
+	if err := st.Archive("beta"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Forget("beta"); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -182,53 +185,76 @@ func TestSetSuspendedIgnoresTodaysValidation(t *testing.T) {
 	if err != nil || !suspended.Spec.Suspended || suspended.Generation != 4 {
 		t.Fatalf("SetSuspended = %+v, %v", suspended, err)
 	}
-	if err := st.Delete("old"); err != nil {
+	if err := st.Archive("old"); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestRetireKeepsWhatARestoreNeeds(t *testing.T) {
-	st, path := openNew(t, options(20000, 20010))
-	if _, err := st.Create(Record{Spec: tenant("acme"), Sealed: map[string]string{"K": "sealed-k"}}); err != nil {
+func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
+	st, path := openNew(t, options(20000, 20001))
+	created, err := st.Create(Record{Spec: tenant("acme"), Sealed: map[string]string{"K": "sealed-k"}})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Observe("acme", "sha256:data-image"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Retire("acme"); err != nil {
+	// Archived as it was before the archive suspended it, however many
+	// times the archive starts.
+	for range 2 {
+		if started, err := st.StartArchive("acme"); err != nil || !started.Spec.Suspended {
+			t.Fatalf("StartArchive = %+v, %v", started, err)
+		}
+	}
+	if err := st.Archive("acme"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Get("acme"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("retired tenant still listed: %v", err)
+		t.Fatalf("archived tenant still listed: %v", err)
 	}
-	retired, ok := st.RetiredTenant("acme")
-	if !ok || retired.Sealed["K"] != "sealed-k" || retired.DataImage != "sha256:data-image" || retired.DeletedAt.IsZero() {
-		t.Fatalf("retired = %+v, %v", retired, ok)
+	if _, err := st.Create(Record{Spec: tenant("acme")}); !errors.Is(err, ErrArchived) {
+		t.Fatalf("create over an archived name = %v", err)
+	}
+	archived, ok := st.ArchivedTenant("acme")
+	if !ok || archived.Record.Sealed["K"] != "sealed-k" || archived.Record.DataImage != "sha256:data-image" || archived.Record.Spec.Suspended || archived.ArchivedAt.IsZero() {
+		t.Fatalf("archived = %+v, %v", archived, ok)
+	}
+	if list := st.ListArchived(); len(list) != 1 || list[0].Record.Spec.Name != "acme" {
+		t.Fatalf("ListArchived = %+v", list)
+	}
+	// Its port is free for others meanwhile.
+	other, err := st.Create(Record{Spec: tenant("beta")})
+	if err != nil || other.HostPort != created.HostPort {
+		t.Fatalf("port of an archived tenant = %+v, %v", other, err)
 	}
 	_ = st.Close()
-	reopened, err := OpenFile(path, options(20000, 20010))
+
+	reopened, err := OpenFile(path, options(20000, 20001))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if _, ok := reopened.RetiredTenant("acme"); !ok {
-		t.Fatal("the retired entry did not survive a restart")
+	restored, err := reopened.Restore("acme")
+	if err != nil {
+		t.Fatal(err)
 	}
-	restored, err := reopened.Create(Record{Spec: tenant("acme"), Sealed: retired.Sealed, DataImage: retired.DataImage})
-	if err != nil || restored.DataImage != "sha256:data-image" {
-		t.Fatalf("restore = %+v, %v", restored, err)
+	if restored.Sealed["K"] != "sealed-k" || restored.DataImage != "sha256:data-image" || restored.HostPort == created.HostPort || restored.Generation <= created.Generation || !restored.CreatedAt.Equal(created.CreatedAt) {
+		t.Fatalf("restored = %+v", restored)
 	}
-	if _, ok := reopened.RetiredTenant("acme"); ok {
-		t.Fatal("Create did not consume the retired entry")
+	if _, ok := reopened.ArchivedTenant("acme"); ok {
+		t.Fatal("Restore left the archive entry")
 	}
-	if err := reopened.Retire("acme"); err != nil {
+	if _, err := reopened.Restore("acme"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second restore = %v", err)
+	}
+	if err := reopened.Archive("acme"); err != nil {
 		t.Fatal(err)
 	}
 	if err := reopened.Forget("acme"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := reopened.RetiredTenant("acme"); ok {
-		t.Fatal("Forget kept the retired entry")
+	if _, ok := reopened.ArchivedTenant("acme"); ok {
+		t.Fatal("Forget kept the archive entry")
 	}
 	if err := reopened.Forget("acme"); err != nil {
 		t.Fatalf("forgetting twice = %v", err)
