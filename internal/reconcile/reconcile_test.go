@@ -518,7 +518,7 @@ func TestContainerThatExitsDuringThePassIsStarted(t *testing.T) {
 func TestInvalidStoredSpecIsNotRun(t *testing.T) {
 	f := newFixture(t)
 	path := filepath.Join(t.TempDir(), "legacy.json")
-	legacy := `{"version":1,"node":"n","tenants":{"old":{"spec":{"name":"old","image":"` + imageA + `","port":8080,"healthPath":"/health","dataPath":"/data","dataUID":1000,"dataGID":1000,"user":"","limits":{}},"hostPort":20000,"subnet":"10.240.0.0/28","generation":1}}}`
+	legacy := `{"version":2,"node":"n","tenants":{"old":{"spec":{"name":"old","image":"` + imageA + `","port":8080,"healthPath":"/health","dataPath":"/data","user":"","limits":{}},"hostPort":20000,"subnet":"10.240.0.0/28","generation":1}}}`
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}

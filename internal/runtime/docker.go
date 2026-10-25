@@ -219,6 +219,9 @@ func (d *Docker) Resolve(ctx context.Context, ref string) (string, string, error
 	}
 	repository, tag := splitTag(ref)
 	pullErr := d.pull(ctx, repository, tag)
+	if pullErr != nil && ctx.Err() != nil {
+		return "", "", pullErr
+	}
 	var image struct {
 		ID          string   `json:"Id"`
 		RepoDigests []string `json:"RepoDigests"`
@@ -233,12 +236,28 @@ func (d *Docker) Resolve(ctx context.Context, ref string) (string, string, error
 	if pullErr != nil {
 		note = fmt.Sprintf("using the local image %s:%s (%v)", repository, tag, pullErr)
 	}
-	for _, digest := range image.RepoDigests {
-		if name, _, ok := strings.Cut(digest, "@"); ok && name == repository {
-			return digest, note, nil
+	for _, repoDigest := range image.RepoDigests {
+		if name, digest, ok := strings.Cut(repoDigest, "@"); ok && familiar(name) == familiar(repository) {
+			return familiar(repository) + "@" + digest, note, nil
 		}
 	}
 	return image.ID, note, nil
+}
+
+// familiar shortens a Docker Hub repository the way the engine reports it:
+// docker.io/library/postgres and index.docker.io/library/postgres are
+// postgres.
+func familiar(repository string) string {
+	for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
+		if rest, ok := strings.CutPrefix(repository, prefix); ok {
+			repository = rest
+			break
+		}
+	}
+	if rest, ok := strings.CutPrefix(repository, "library/"); ok && !strings.Contains(rest, "/") {
+		return rest
+	}
+	return repository
 }
 
 // splitTag splits "registry:5000/repo:tag" into repository and tag; a

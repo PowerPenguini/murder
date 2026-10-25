@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strconv"
 	"time"
@@ -84,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/archive", s.listArchived)
 	mux.HandleFunc("POST /v1/archive/{name}/restore", s.restore)
 	mux.HandleFunc("DELETE /v1/archive/{name}", s.purge)
+	mux.HandleFunc("POST /v1/images/resolve", s.resolveImage)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
 	return mux
 }
@@ -117,23 +119,62 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.view(record))
 }
 
-// prepare fills in defaults, pins the image and validates: what every spec
-// goes through before it is stored.
+// prepare fills in defaults, validates and pins the image: what every spec
+// goes through before it is stored. Everything but the pin is checked first,
+// so a broken spec never waits for a pull. ctx is the request's own: a
+// client that gives up cancels the pull.
 func (s *Server) prepare(ctx context.Context, tenant spec.Tenant) (spec.Tenant, string, error) {
 	tenant = tenant.WithDefaults()
 	tenant.Suspended = false
 	if err := spec.ValidReference(tenant.Image); err != nil {
 		return spec.Tenant{}, "", badRequest(err)
 	}
-	pinned, note, err := s.runtime.Resolve(ctx, tenant.Image)
+	if err := tenant.ValidateUnpinned(); err != nil {
+		return spec.Tenant{}, "", badRequest(err)
+	}
+	pinned, note, err := s.resolve(ctx, tenant.Image)
 	if err != nil {
-		return spec.Tenant{}, "", statusError{http.StatusUnprocessableEntity, fmt.Errorf("pin image %s: %w", tenant.Image, err)}
+		return spec.Tenant{}, "", err
 	}
 	tenant.Image = pinned
 	if err := tenant.Validate(); err != nil {
 		return spec.Tenant{}, "", badRequest(err)
 	}
 	return tenant, note, nil
+}
+
+func (s *Server) resolve(ctx context.Context, image string) (string, string, error) {
+	pinned, note, err := s.runtime.Resolve(ctx, image)
+	if err != nil {
+		return "", "", statusError{http.StatusUnprocessableEntity, fmt.Errorf("pin image %s: %w", image, err)}
+	}
+	return pinned, note, nil
+}
+
+// Resolved is an image reference pinned to a digest.
+type Resolved struct {
+	Image string `json:"image"`
+	// Note explains a fallback to a local image.
+	Note string `json:"note,omitempty"`
+}
+
+// resolveImage pins one reference, so a client applying many tenants of one
+// app pulls once and pins them all to the same digest.
+func (s *Server) resolveImage(w http.ResponseWriter, r *http.Request) {
+	var request Resolved
+	if !readJSON(w, r, &request) {
+		return
+	}
+	if err := spec.ValidReference(request.Image); err != nil {
+		writeError(w, badRequest(err))
+		return
+	}
+	pinned, note, err := s.resolve(r.Context(), request.Image)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, Resolved{Image: pinned, Note: note})
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
@@ -145,13 +186,13 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(err))
 		return
 	}
-	ctx, cancel := detached(r)
-	defer cancel()
-	tenant, note, err := s.prepare(ctx, tenant)
+	tenant, note, err := s.prepare(r.Context(), tenant)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	ctx, cancel := detached(r)
+	defer cancel()
 	var record store.Record
 	// Under the reconciler's lock, so a concurrent purge cannot interleave
 	// with the check for leftover data.
@@ -188,7 +229,9 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 }
 
 // replace swaps the spec. Secrets keep their values; new secret names get
-// generated values and removed ones are forgotten. Suspension is operational
+// generated values, and the values of removed names are kept too, so a
+// mistaken edit to an app spec cannot destroy them (only a purge does).
+// Suspension is operational
 // state, not part of an app spec, so it is kept as it was. A spec equal to
 // the stored one changes nothing, not even the generation.
 func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
@@ -201,9 +244,7 @@ func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(fmt.Errorf("spec name %q does not match tenant %q", tenant.Name, name)))
 		return
 	}
-	ctx, cancel := detached(r)
-	defer cancel()
-	tenant, note, err := s.prepare(ctx, tenant)
+	tenant, note, err := s.prepare(r.Context(), tenant)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -219,6 +260,9 @@ func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, err := s.store.Update(name, func(record *store.Record) error {
+		if err := r.Context().Err(); err != nil {
+			return fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)
+		}
 		sealed, err := s.sealMissing(tenant, record.Sealed)
 		if err != nil {
 			return err
@@ -236,10 +280,12 @@ func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sealMissing(tenant spec.Tenant, existing map[string]string) (map[string]string, error) {
-	sealed := map[string]string{}
+	sealed := maps.Clone(existing)
+	if sealed == nil {
+		sealed = map[string]string{}
+	}
 	for name, secret := range tenant.Secrets {
-		if value, ok := existing[name]; ok {
-			sealed[name] = value
+		if _, ok := sealed[name]; ok {
 			continue
 		}
 		plain, err := secrets.Generate(secret)

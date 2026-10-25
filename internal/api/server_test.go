@@ -225,6 +225,36 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	check("purge a live tenant", err, 409)
 	_, err = f.client.Restore(ctx, "acme")
 	check("restore a tenant that is not archived", err, 404)
+	err = f.client.Purge(ctx, "acmee")
+	check("purge a name with nothing to purge", err, 404)
+	brokenAndUnpinnable := appSpec("broken")
+	brokenAndUnpinnable.Image = "ghcr.io/example/missing:1"
+	brokenAndUnpinnable.User = "0:0"
+	_, err = f.client.Create(ctx, brokenAndUnpinnable)
+	check("an invalid spec is refused before its image is pinned", err, 400)
+	resolved, err := f.client.Resolve(ctx, "ghcr.io/example/app:1.4")
+	if err != nil || resolved.Image != pinnedTag("ghcr.io/example/app:1.4") {
+		t.Errorf("resolve = %+v, %v", resolved, err)
+	}
+	_, err = f.client.Resolve(ctx, "ghcr.io/example/missing:1")
+	check("resolve an image that cannot be pinned", err, 422)
+	_, err = f.client.Resolve(ctx, "Not An Image")
+	check("resolve a malformed image", err, 400)
+}
+
+// An empty tmpfs map means no tmpfs and must survive the trip to the agent.
+func TestEmptyTmpfsIsKept(t *testing.T) {
+	f := newAPIFixture(t)
+	tenant := appSpec("acme")
+	tenant.WritableRoot = true
+	tenant.Tmpfs = map[string]string{}
+	created, err := f.client.Create(context.Background(), tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Tenant.Spec.Tmpfs == nil || len(created.Tenant.Spec.Tmpfs) != 0 {
+		t.Fatalf("tmpfs = %v, want none", created.Tenant.Spec.Tmpfs)
+	}
 }
 
 func TestReplaceKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
@@ -257,12 +287,19 @@ func TestReplaceKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
 	if password, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); err != nil || len(password) != 20 {
 		t.Fatalf("new secret = %q, %v", password, err)
 	}
+	// A secret removed from the spec keeps its value, so a mistaken edit
+	// that is reverted gets the same value back.
+	password, _ := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD")
 	delete(next.Secrets, "ADMIN_PASSWORD")
 	if _, err := f.client.Replace(ctx, next); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); !IsNotFound(err) {
-		t.Fatalf("a removed secret is still readable: %v", err)
+	next.Secrets["ADMIN_PASSWORD"] = spec.Secret{Kind: "password"}
+	if _, err := f.client.Replace(ctx, next); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); err != nil || again != password {
+		t.Fatalf("a secret removed and added back changed its value: %v", err)
 	}
 	// A new tag means a new pinned image.
 	upgraded := appSpec("acme")

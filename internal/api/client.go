@@ -106,6 +106,12 @@ func (c *Client) Create(ctx context.Context, tenant spec.Tenant) (Applied, error
 	return applied, c.do(ctx, http.MethodPost, "/v1/tenants", tenant, &applied)
 }
 
+// Resolve pins an image reference to a digest on the agent's node.
+func (c *Client) Resolve(ctx context.Context, image string) (Resolved, error) {
+	var resolved Resolved
+	return resolved, c.do(ctx, http.MethodPost, "/v1/images/resolve", Resolved{Image: image}, &resolved)
+}
+
 // Replace updates a tenant's spec; Applied.Changed is false if nothing
 // changed.
 func (c *Client) Replace(ctx context.Context, tenant spec.Tenant) (Applied, error) {

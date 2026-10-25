@@ -70,9 +70,14 @@ tenants:
 corral apply fleet.yaml -wait 3m     # create missing tenants, update changed ones
 ```
 
-`apply` reports each tenant as created, updated or unchanged. It never
+`apply` checks the whole file before it changes anything, pins each image
+once, and reports each tenant as created, updated or unchanged. It never
 removes a tenant: one that is missing from the file is only reported. An
-archived tenant listed in the file has to be restored first.
+archived tenant listed in the file has to be restored first. Secrets removed
+from a spec keep their values until a purge, so a mistaken edit cannot lose
+them. `-wait` is one budget for the whole fleet; it waits for every tenant in
+the file, so a retry after a failed rollout fails until the tenants are
+healthy.
 
 An app spec needs only an image and a user; everything else has a default:
 
@@ -129,8 +134,8 @@ or purged.
 - **The CLI is root-equivalent.** Anyone who can use the API socket (root, or
   members of `socketGroup`) controls every tenant on the node, including its
   secrets and data.
-- **Tenants never run as root.** Specs that set user or data owner 0 are
-  refused, and images must not default to root.
+- **Tenants never run as root.** Specs that set user 0 are refused, and
+  images must not default to root.
 - **Every container is locked down.** It drops all capabilities, runs with
   `no-new-privileges`, has resource limits and publishes its port on loopback
   only.
@@ -138,8 +143,8 @@ or purged.
   root-only (`0700`) directory, and ZFS datasets are created with `setuid=off`
   and `devices=off`. A setuid file a tenant writes there is useless to host
   users.
-- **Optional extra isolation:** enabling Docker's `userns-remap` also maps
-  container users away from host users.
+- **Docker's `userns-remap` is not supported.** The data owner is the
+  container user's numeric id on the host, which remapping would change.
 
 ## Develop
 

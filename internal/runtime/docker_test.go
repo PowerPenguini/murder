@@ -296,6 +296,27 @@ func TestResolvePinsTags(t *testing.T) {
 	if err != nil || pinned != "ghcr.io/org/app@"+digest || note != "" {
 		t.Fatalf("Resolve(tag) = %q, %q, %v", pinned, note, err)
 	}
+	// The engine reports Docker Hub digests in their short form; every
+	// spelling of the name pins to the same short reference.
+	engine.handlers["POST /images/create"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"done"}`))
+	}
+	hub := func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Id":"sha256:4444444444444444444444444444444444444444444444444444444444444444","RepoDigests":["postgres@` + digest + `"]}`))
+	}
+	for _, ref := range []string{"postgres:17", "library/postgres:17", "docker.io/library/postgres:17", "index.docker.io/library/postgres:17"} {
+		engine.handlers["GET /images/"+ref+"/json"] = hub
+		if pinned, _, err := docker.Resolve(ctx, ref); err != nil || pinned != "postgres@"+digest {
+			t.Errorf("Resolve(%s) = %q, %v", ref, pinned, err)
+		}
+	}
+	engine.handlers["POST /images/create"] = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("fromImage") == "local/app" {
+			_, _ = w.Write([]byte(`{"error":"pull access denied for local/app"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"done"}`))
+	}
 	// A local image that cannot be pulled is pinned to its ID, with a note.
 	engine.handlers["GET /images/local/app:latest/json"] = func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"Id":"sha256:3333333333333333333333333333333333333333333333333333333333333333","RepoDigests":[]}`))

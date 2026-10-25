@@ -65,7 +65,7 @@ func TestSecretsInYAML(t *testing.T) {
 			}
 		}
 	}
-	for _, document := range []string{"secrets: [A, A]", "secrets: A", "secrets: {A: {kind: hex, size: 3}}"} {
+	for _, document := range []string{"secrets: [A, A]", "secrets: A", "secrets: {A: {kind: hex, size: 3}}", "secrets: {A: password, A: hex}"} {
 		app.Secrets = nil
 		decoder := yaml.NewDecoder(strings.NewReader(document))
 		decoder.KnownFields(true)
@@ -103,6 +103,22 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 	}
 }
 
+// ValidateUnpinned checks everything but the pin.
+func TestValidateUnpinned(t *testing.T) {
+	tenant := validTenant()
+	tenant.Image = "ghcr.io/example/app:1.4"
+	if err := tenant.ValidateUnpinned(); err != nil {
+		t.Fatal(err)
+	}
+	if tenant.Validate() == nil {
+		t.Fatal("Validate accepted a tag")
+	}
+	tenant.User = "0:0"
+	if tenant.ValidateUnpinned() == nil {
+		t.Fatal("ValidateUnpinned accepted root")
+	}
+}
+
 func TestUserMustBeNumericAndNotRoot(t *testing.T) {
 	for _, user := range []string{"10001:10001", "1:1", "4294967:65534", "2147483647:2147483647"} {
 		tenant := validTenant()
@@ -121,12 +137,14 @@ func TestUserMustBeNumericAndNotRoot(t *testing.T) {
 }
 
 func TestImageReferences(t *testing.T) {
-	for _, ref := range []string{"nginx", "nginx:1.27", "ghcr.io/org/app:v1.4.2", "registry.local:5000/team/app", "ghcr.io/org/app@" + digest, digest} {
+	for _, ref := range []string{"nginx", "nginx:1.27", "ghcr.io/org/app:v1.4.2", "registry.local:5000/team/app", "ghcr.io/org/app@" + digest, digest,
+		"ghcr.io/org/my__app:1", "ghcr.io/org/my--app:1", "Registry.Example.com/app:1", "localhost/app", "registry:5000/app:1", "localhost:5000/app@" + digest} {
 		if err := ValidReference(ref); err != nil {
 			t.Errorf("ValidReference(%q) = %v", ref, err)
 		}
 	}
-	for _, ref := range []string{"", "Nginx", "nginx:", "nginx:-bad", "a b", "ghcr.io/org/app@sha256:short"} {
+	for _, ref := range []string{"", "Nginx", "nginx:", "nginx:-bad", "a b", "ghcr.io/org/app@sha256:short",
+		"nginx:5000:latest", "Org/app", "app___x", "app-", "registry.local:5000:1/app"} {
 		if ValidReference(ref) == nil {
 			t.Errorf("ValidReference(%q) accepted", ref)
 		}

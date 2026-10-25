@@ -488,6 +488,15 @@ func (r *Reconciler) Purge(ctx context.Context, name string) error {
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
+	if _, archived := r.store.ArchivedTenant(name); !archived {
+		exists, err := r.volumes.Exists(ctx, name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("%w: no archived tenant or data named %s", store.ErrNotFound, name)
+		}
+	}
 	if err := r.clearRuntime(ctx, name); err != nil {
 		return err
 	}

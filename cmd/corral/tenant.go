@@ -60,7 +60,7 @@ func runReconcile(args []string) error {
 func runApply(args []string) error {
 	flags := flag.NewFlagSet("apply", flag.ContinueOnError)
 	socket := socketPath(flags)
-	wait := flags.Duration("wait", 0, "wait up to this long for created and changed tenants to be healthy (e.g. 3m)")
+	wait := flags.Duration("wait", 0, "wait up to this long in total for the fleet's tenants to be healthy (e.g. 3m)")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
 		return err
@@ -71,6 +71,17 @@ func runApply(args []string) error {
 	desired, err := fleet.Load(positional[0])
 	if err != nil {
 		return err
+	}
+	// Check everything that does not need the agent first, so a broken spec
+	// stops the apply before any image is pulled.
+	var problems []string
+	for _, tenant := range desired {
+		if err := tenant.WithDefaults().ValidateUnpinned(); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", tenant.Name, err))
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%s:\n  %s", positional[0], strings.Join(problems, "\n  "))
 	}
 	ctx := context.Background()
 	client := api.NewClient(*socket)
@@ -90,20 +101,44 @@ func runApply(args []string) error {
 	for _, tenant := range archived {
 		isArchived[tenant.Name] = true
 	}
-	var touched []api.Tenant
+	// Each image is pinned once, so every tenant of an app gets the same
+	// digest even if its tag moves during the apply.
+	pinned := map[string]string{}
 	var failures []string
+	for _, tenant := range desired {
+		if _, done := pinned[tenant.Image]; done || isArchived[tenant.Name] {
+			continue
+		}
+		resolved, err := client.Resolve(ctx, tenant.Image)
+		if err != nil {
+			pinned[tenant.Image] = ""
+			failures = append(failures, fmt.Sprintf("image %s: %v", tenant.Image, err))
+			fmt.Fprintf(stdout, "image %s: %v\n", tenant.Image, err)
+			continue
+		}
+		pinned[tenant.Image] = resolved.Image
+		if resolved.Note != "" {
+			fmt.Fprintf(stdout, "image %s: %s\n", tenant.Image, resolved.Note)
+		}
+	}
+	var applied []api.Tenant
 	listed := map[string]bool{}
 	for _, tenant := range desired {
 		listed[tenant.Name] = true
-		var applied api.Applied
-		switch {
-		case isArchived[tenant.Name]:
+		if isArchived[tenant.Name] {
 			fmt.Fprintf(stdout, "%-20s archived — restore it with \"corral tenant restore %s\" first\n", tenant.Name, tenant.Name)
 			continue
-		case existing[tenant.Name]:
-			applied, err = client.Replace(ctx, tenant)
-		default:
-			applied, err = client.Create(ctx, tenant)
+		}
+		if pinned[tenant.Image] == "" {
+			fmt.Fprintf(stdout, "%-20s skipped: its image could not be pinned\n", tenant.Name)
+			continue
+		}
+		tenant.Image = pinned[tenant.Image]
+		var result api.Applied
+		if existing[tenant.Name] {
+			result, err = client.Replace(ctx, tenant)
+		} else {
+			result, err = client.Create(ctx, tenant)
 		}
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", tenant.Name, err))
@@ -114,29 +149,30 @@ func runApply(args []string) error {
 		switch {
 		case !existing[tenant.Name]:
 			state = "created"
-		case applied.Changed:
+		case result.Changed:
 			state = "updated"
 		}
-		fmt.Fprintf(stdout, "%-20s %-9s %s\n", tenant.Name, state, shortImage(applied.Tenant.Spec.Image))
-		if applied.Note != "" {
-			fmt.Fprintf(stdout, "%-20s note: %s\n", "", applied.Note)
-		}
-		if applied.Changed {
-			touched = append(touched, applied.Tenant)
-		}
+		fmt.Fprintf(stdout, "%-20s %-9s %s\n", tenant.Name, state, shortImage(result.Tenant.Spec.Image))
+		applied = append(applied, result.Tenant)
 	}
 	for _, tenant := range current {
 		if !listed[tenant.Spec.Name] {
 			fmt.Fprintf(stdout, "%-20s not in the fleet file; left as it is (archive it to remove it)\n", tenant.Spec.Name)
 		}
 	}
-	for _, tenant := range touched {
-		if err := waitHealthy(ctx, client, tenant, *wait); err != nil {
-			failures = append(failures, err.Error())
+	// Every applied tenant is waited for, not only changed ones: a retry
+	// after a failed rollout must not pass while the tenant is unhealthy.
+	if *wait > 0 {
+		waitCtx, cancel := context.WithTimeout(ctx, *wait)
+		defer cancel()
+		for _, tenant := range applied {
+			if err := waitFor(waitCtx, client, tenant, *wait); err != nil {
+				failures = append(failures, err.Error())
+			}
 		}
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("%d tenant(s) failed:\n  %s", len(failures), strings.Join(failures, "\n  "))
+		return fmt.Errorf("%d problem(s):\n  %s", len(failures), strings.Join(failures, "\n  "))
 	}
 	return nil
 }
@@ -285,18 +321,27 @@ func parseInterspersed(flags *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// waitHealthy polls until the agent reports the tenant's current generation
-// running and healthy, or failed.
+// waitHealthy waits up to timeout for a tenant; see waitFor.
 func waitHealthy(ctx context.Context, client *api.Client, tenant api.Tenant, timeout time.Duration) error {
 	if timeout <= 0 {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	return waitFor(ctx, client, tenant, timeout)
+}
+
+// waitFor polls until the agent reports the tenant's current generation
+// running and healthy, or suspended (there is nothing more to wait for), or
+// failed, or ctx ends. timeout only labels the error.
+func waitFor(ctx context.Context, client *api.Client, tenant api.Tenant, timeout time.Duration) error {
 	last := ""
 	for {
 		current, err := client.Get(ctx, tenant.Spec.Name)
 		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
 			return err
 		}
 		// Only a pass that started after the change counts; a tenant of the
@@ -306,6 +351,9 @@ func waitHealthy(ctx context.Context, client *api.Client, tenant api.Tenant, tim
 			case status.Phase == reconcile.PhaseRunning && status.Healthy:
 				fmt.Fprintf(stdout, "%s is healthy\n", tenant.Spec.Name)
 				return nil
+			case status.Phase == reconcile.PhaseSuspended:
+				fmt.Fprintf(stdout, "%s is suspended\n", tenant.Spec.Name)
+				return nil
 			case status.Phase == reconcile.PhaseFailed:
 				return fmt.Errorf("%s failed: %s", tenant.Spec.Name, status.Message)
 			}
@@ -313,13 +361,15 @@ func waitHealthy(ctx context.Context, client *api.Client, tenant api.Tenant, tim
 		}
 		select {
 		case <-ctx.Done():
-			if last != "" {
-				return fmt.Errorf("%s did not become healthy within %s: %s", tenant.Spec.Name, timeout, last)
-			}
-			return fmt.Errorf("%s did not become healthy within %s", tenant.Spec.Name, timeout)
 		case <-time.After(time.Second):
+			continue
 		}
+		break
 	}
+	if last != "" {
+		return fmt.Errorf("%s did not become healthy within %s: %s", tenant.Spec.Name, timeout, last)
+	}
+	return fmt.Errorf("%s did not become healthy within %s", tenant.Spec.Name, timeout)
 }
 
 func printJSON(value any) error {

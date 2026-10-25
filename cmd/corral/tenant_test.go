@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -55,6 +58,10 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			views = append(views, api.ArchivedTenant{Name: name})
 		}
 		_ = json.NewEncoder(w).Encode(views)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/images/resolve":
+		var request api.Resolved
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		_ = json.NewEncoder(w).Encode(api.Resolved{Image: pin(request.Image)})
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/tenants":
 		var tenant spec.Tenant
 		_ = json.NewDecoder(r.Body).Decode(&tenant)
@@ -64,6 +71,7 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/tenants/"):
 		var tenant spec.Tenant
 		_ = json.NewDecoder(r.Body).Decode(&tenant)
+		tenant = tenant.WithDefaults()
 		changed := !tenant.Equal(a.tenants[tenant.Name])
 		a.tenants[tenant.Name] = tenant
 		_ = json.NewEncoder(w).Encode(api.Applied{Tenant: api.Tenant{Spec: tenant}, Changed: changed})
@@ -71,6 +79,12 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"unexpected call"}`))
 	}
+}
+
+// pin stands in for the agent pinning a tag to a digest.
+func pin(image string) string {
+	sum := sha256.Sum256([]byte(image))
+	return image[:strings.LastIndex(image, ":")] + "@sha256:" + hex.EncodeToString(sum[:])
 }
 
 func TestApplyCreatesUpdatesAndNeverRemoves(t *testing.T) {
@@ -81,7 +95,7 @@ func TestApplyCreatesUpdatesAndNeverRemoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := &fakeAgent{tenants: map[string]spec.Tenant{
-		"same":     {Name: "same", Image: "app:1", User: "1:1"},
+		"same":     spec.Tenant{Name: "same", Image: pin("app:1"), User: "1:1"}.WithDefaults(),
 		"changed":  {Name: "changed", Image: "app:0", User: "1:1"},
 		"leftover": {Name: "leftover", Image: "app:1", User: "1:1"},
 	}, archived: []string{"old"}}
@@ -112,13 +126,51 @@ tenants:
 			t.Errorf("report lacks %q:\n%s", want, report)
 		}
 	}
+	resolves := 0
 	for _, call := range agent.calls {
+		if call == "POST /v1/images/resolve" {
+			resolves++
+		}
 		if strings.HasPrefix(call, "DELETE") || strings.Contains(call, "archive/old") || strings.HasSuffix(call, "/leftover") {
 			t.Errorf("apply made a call it must never make: %s", call)
 		}
 	}
-	if _, ok := agent.tenants["fresh"]; !ok {
-		t.Fatal("fresh tenant was not created")
+	if resolves != 1 {
+		t.Errorf("one image was resolved %d times", resolves)
+	}
+	if fresh, ok := agent.tenants["fresh"]; !ok || fresh.Image != pin("app:1") {
+		t.Fatalf("fresh tenant = %+v, %v", fresh, ok)
+	}
+}
+
+// A broken spec stops the apply before it talks to the agent at all.
+func TestApplyChecksTheFileFirst(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "agent.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &fakeAgent{tenants: map[string]spec.Tenant{}}
+	server := &http.Server{Handler: agent}
+	go server.Serve(listener)
+	defer server.Close()
+	fleetFile := filepath.Join(dir, "fleet.yaml")
+	if err := os.WriteFile(fleetFile, []byte(`
+apps:
+  app: {image: "app:1", user: "0:0"}
+tenants:
+  acme: {app: app}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout = io.Discard
+	defer func() { stdout = os.Stdout }()
+	if err := runApply([]string{fleetFile, "-socket", socket}); err == nil || !strings.Contains(err.Error(), "acme:") {
+		t.Fatalf("apply = %v", err)
+	}
+	if len(agent.calls) != 0 {
+		t.Fatalf("apply called the agent: %v", agent.calls)
 	}
 }
 

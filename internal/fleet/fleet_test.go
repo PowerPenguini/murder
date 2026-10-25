@@ -84,6 +84,7 @@ func TestLoadRejectsMistakes(t *testing.T) {
 		"app file typo":    "apps: {web: typo.yaml}\ntenants: {acme: {app: web}}\n",
 		"missing app file": "apps: {web: missing.yaml}\ntenants: {acme: {app: web}}\n",
 		"top-level typo":   "apps: {}\ntenant: {}\n",
+		"second document":  "apps: {web: {image: nginx, user: \"1:1\"}}\ntenants: {acme: {app: web}}\n---\ntenants: {beta: {app: web}}\n",
 	} {
 		if _, err := Load(write(t, dir, "fleet.yaml", document)); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -100,8 +101,28 @@ func TestExampleFleetLoads(t *testing.T) {
 		t.Fatalf("example tenants = %d", len(tenants))
 	}
 	for _, tenant := range tenants {
-		if err := tenant.WithDefaults().Validate(); err != nil && !strings.Contains(err.Error(), "must be pinned") {
+		if err := tenant.WithDefaults().ValidateUnpinned(); err != nil {
 			t.Errorf("%s: %v", tenant.Name, err)
 		}
+	}
+}
+
+// Anchors and merge keys work across apps, as in any YAML file.
+func TestLoadResolvesAnchors(t *testing.T) {
+	path := write(t, t.TempDir(), "fleet.yaml", `
+apps:
+  web: &web {image: "nginx:1.27", user: "101:101", env: &env {MODE: prod}, secrets: {ADMIN: &pw password}}
+  canary: {<<: *web, image: "nginx:1.28", env: *env, secrets: {OTHER: *pw}}
+tenants:
+  acme: {app: web}
+  beta: {app: canary}
+`)
+	tenants, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta := tenants[1]
+	if beta.Image != "nginx:1.28" || beta.User != "101:101" || beta.Env["MODE"] != "prod" || beta.Secrets["OTHER"].Kind != "password" {
+		t.Fatalf("beta = %+v", beta)
 	}
 }

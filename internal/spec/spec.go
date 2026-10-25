@@ -3,7 +3,6 @@
 package spec
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -14,6 +13,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/PowerPenguini/corral/internal/strictyaml"
 )
 
 // Tenant is the desired definition of one tenant: the app it runs and how.
@@ -48,7 +49,7 @@ type Tenant struct {
 	// The image's filesystem is read-only unless WritableRoot is set; Tmpfs
 	// adds writable scratch mounts (path → mount options), by default /tmp.
 	WritableRoot bool              `json:"writableRoot,omitempty" yaml:"writableRoot,omitempty"`
-	Tmpfs        map[string]string `json:"tmpfs,omitempty" yaml:"tmpfs,omitempty"`
+	Tmpfs        map[string]string `json:"tmpfs" yaml:"tmpfs,omitempty"`
 	// Suspended keeps the data but runs no container. It is operational
 	// state, set by suspend and resume, never by an app spec.
 	Suspended bool `json:"suspended,omitempty" yaml:"-"`
@@ -85,10 +86,16 @@ func (s *Secrets) UnmarshalYAML(node *yaml.Node) error {
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(node.Content); i += 2 {
 			name, value := node.Content[i].Value, node.Content[i+1]
+			if _, duplicate := secrets[name]; duplicate {
+				return fmt.Errorf("secret %s is listed twice", name)
+			}
+			for value.Kind == yaml.AliasNode {
+				value = value.Alias
+			}
 			var secret Secret
 			if value.Kind == yaml.ScalarNode {
 				secret.Kind = value.Value
-			} else if err := decodeStrict(value, &secret); err != nil {
+			} else if err := strictyaml.DecodeNode(value, &secret); err != nil {
 				return fmt.Errorf("secret %s: %w", name, err)
 			}
 			secrets[name] = secret
@@ -98,18 +105,6 @@ func (s *Secrets) UnmarshalYAML(node *yaml.Node) error {
 	}
 	*s = secrets
 	return nil
-}
-
-// decodeStrict decodes node into out, refusing unknown fields: a custom
-// unmarshaler does not inherit the file decoder's strictness.
-func decodeStrict(node *yaml.Node, out any) error {
-	encoded, err := yaml.Marshal(node)
-	if err != nil {
-		return err
-	}
-	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
-	decoder.KnownFields(true)
-	return decoder.Decode(out)
 }
 
 // Limits caps a tenant's resources. Zero means the agent's default.
@@ -173,15 +168,25 @@ func (t Tenant) Owner() (uid, gid int) {
 
 const maxNameLength = 40
 
+// repositoryName follows Docker's reference grammar: lowercase path
+// components joined by "/", optionally after a registry host. A first
+// component is a host only if it has a dot or a port, or is localhost.
+const repositoryName = `(?:` + registryHost + `/)?` + pathComponent + `(?:/` + pathComponent + `)*`
+
+const (
+	pathComponent = `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*`
+	hostComponent = `(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])`
+	registryHost  = `(?:(?:` + hostComponent + `(?:\.` + hostComponent + `)+|localhost)(?::[0-9]+)?|` + hostComponent + `:[0-9]+)`
+)
+
 var (
 	namePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 	envPattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	userPattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,9})$`)
 	maxID       = int64(1)<<31 - 1
-	digestRef   = regexp.MustCompile(`^[a-z0-9]+(?:[._/:-][a-z0-9]+)*@sha256:[a-f0-9]{64}$`)
+	digestRef   = regexp.MustCompile(`^` + repositoryName + `@sha256:[a-f0-9]{64}$`)
 	imageID     = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
-	// tagRef is a repository with an optional registry, port and tag.
-	tagRef      = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$`)
+	tagRef      = regexp.MustCompile(`^` + repositoryName + `(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$`)
 	placeholder = regexp.MustCompile(`\{\{[^}]*\}\}`)
 	knownHolder = map[string]bool{"{{name}}": true, "{{host}}": true, "{{url}}": true, "{{network}}": true}
 	reserved    = map[string]bool{"www": true, "api": true, "admin": true, "corral": true, "mail": true}
@@ -232,7 +237,13 @@ func ValidReference(image string) error {
 
 // Validate checks a tenant with defaults applied and its image pinned, and
 // returns every problem found.
-func (t Tenant) Validate() error {
+func (t Tenant) Validate() error { return t.validate(ValidImage) }
+
+// ValidateUnpinned is Validate for a spec whose image may still be a tag:
+// everything that can be checked before the image is pinned.
+func (t Tenant) ValidateUnpinned() error { return t.validate(ValidReference) }
+
+func (t Tenant) validate(checkImage func(string) error) error {
 	var problems []string
 	add := func(err error) {
 		if err != nil {
@@ -240,7 +251,7 @@ func (t Tenant) Validate() error {
 		}
 	}
 	add(ValidName(t.Name))
-	add(ValidImage(t.Image))
+	add(checkImage(t.Image))
 	if t.Port < 1 || t.Port > 65535 {
 		problems = append(problems, fmt.Sprintf("port %d is out of range", t.Port))
 	}

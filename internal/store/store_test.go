@@ -166,7 +166,7 @@ func TestUpdateGuardsIdentityAndValidity(t *testing.T) {
 // A tenant stored under older rules can still be suspended (and so deleted).
 func TestSetSuspendedIgnoresTodaysValidation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	legacy := `{"version":1,"node":"node-1","tenants":{"old":{"spec":{"name":"old","image":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","port":8080,"healthPath":"/h","dataPath":"/data","dataUID":0,"dataGID":0,"user":"","limits":{}},"hostPort":20000,"subnet":"10.240.0.0/28","generation":3}}}`
+	legacy := `{"version":2,"node":"node-1","tenants":{"old":{"spec":{"name":"old","image":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","port":8080,"healthPath":"/h","dataPath":"/data","user":"","limits":{}},"hostPort":20000,"subnet":"10.240.0.0/28","generation":3}}}`
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -303,5 +303,42 @@ func TestSubnetPoolExhaustion(t *testing.T) {
 	}
 	if _, err := st.Create(Record{Spec: tenant("overflow")}); err == nil || !strings.Contains(err.Error(), "no free /28") {
 		t.Fatalf("17th tenant in a /24 = %v", err)
+	}
+}
+
+// A suspend or resume after a failed archive decides what the next archive
+// keeps.
+func TestSuspensionAfterAFailedArchiveIsWhatIsArchived(t *testing.T) {
+	st, _ := openNew(t, options(20000, 20001))
+	if _, err := st.Create(Record{Spec: tenant("acme")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartArchive("acme"); err != nil { // running; the archive then fails
+		t.Fatal(err)
+	}
+	if _, err := st.SetSuspended("acme", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetSuspended("acme", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartArchive("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Archive("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if archived, _ := st.ArchivedTenant("acme"); !archived.Record.Spec.Suspended {
+		t.Fatal("a tenant suspended before its archive comes back running")
+	}
+}
+
+func TestStatesOfEarlierReleasesAreRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"node":"n","tenants":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenFile(path, options(20000, 20010)); err == nil || !strings.Contains(err.Error(), "version 1") {
+		t.Fatalf("OpenFile = %v", err)
 	}
 }

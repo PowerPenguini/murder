@@ -114,6 +114,10 @@ type Options struct {
 
 const subnetBits = 28
 
+// stateVersion 2 brought archives and the defaulted spec. Version 1 states
+// came from a release no node ran in production, so they are not upgraded.
+const stateVersion = 2
+
 type fileState struct {
 	Version int `json:"version"`
 	// Node is the node this state belongs to; it labels the node's Docker
@@ -147,7 +151,7 @@ func InitFile(path, node string) error {
 		return fmt.Errorf("state %s already exists", path)
 	}
 	f := &File{path: path}
-	f.state.Store(&fileState{Version: 1, Node: node, Tenants: map[string]Record{}, Archived: map[string]Archived{}})
+	f.state.Store(&fileState{Version: stateVersion, Node: node, Tenants: map[string]Record{}, Archived: map[string]Archived{}})
 	return f.save(f.state.Load())
 }
 
@@ -172,8 +176,8 @@ func OpenFile(path string, options Options) (*File, error) {
 	if err := json.Unmarshal(data, state); err != nil {
 		return nil, fmt.Errorf("parse state %s: %w", path, err)
 	}
-	if state.Version != 1 {
-		return nil, fmt.Errorf("state %s has unsupported version %d", path, state.Version)
+	if state.Version != stateVersion {
+		return nil, fmt.Errorf("state %s has version %d; this release reads only version %d (it does not upgrade states of earlier releases)", path, state.Version, stateVersion)
 	}
 	if state.Node == "" {
 		return nil, fmt.Errorf("state %s names no node", path)
@@ -290,6 +294,9 @@ func (f *File) SetSuspended(name string, suspended bool) (Record, error) {
 	}
 	next := current.clone()
 	next.Spec.Suspended = suspended
+	// An explicit suspend or resume after a failed archive is what a later
+	// archive must keep and a restore bring back.
+	next.SuspendedBeforeArchive = nil
 	next.Generation = current.Generation + 1
 	next.UpdatedAt = f.now().UTC()
 	return next, f.commit(true, func(state *fileState) { state.Tenants[name] = next })

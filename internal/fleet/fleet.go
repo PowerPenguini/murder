@@ -10,7 +10,6 @@
 package fleet
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -22,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/corral/internal/strictyaml"
 )
 
 // File is a parsed fleet file.
@@ -43,7 +43,7 @@ func (a *App) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	case yaml.MappingNode:
 		var inline spec.Tenant
-		if err := decodeStrict(node, &inline); err != nil {
+		if err := strictyaml.DecodeNode(node, &inline); err != nil {
 			return err
 		}
 		a.Inline = &inline
@@ -73,9 +73,7 @@ func Load(path string) ([]spec.Tenant, error) {
 		return nil, err
 	}
 	var file File
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&file); err != nil {
+	if err := strictyaml.Decode(data, &file); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	apps := map[string]spec.Tenant{}
@@ -115,9 +113,7 @@ func (a App) load(dir string) (spec.Tenant, error) {
 		if err != nil {
 			return spec.Tenant{}, err
 		}
-		decoder := yaml.NewDecoder(bytes.NewReader(data))
-		decoder.KnownFields(true)
-		if err := decoder.Decode(&app); err != nil {
+		if err := strictyaml.Decode(data, &app); err != nil {
 			return spec.Tenant{}, fmt.Errorf("parse %s: %w", path, err)
 		}
 	}
@@ -165,16 +161,4 @@ func compose(name string, entry Tenant, apps map[string]spec.Tenant) (spec.Tenan
 		tenant.Limits.PIDs = entry.Limits.PIDs
 	}
 	return tenant, nil
-}
-
-// decodeStrict decodes node into out, refusing unknown fields as the file
-// decoder does.
-func decodeStrict(node *yaml.Node, out any) error {
-	encoded, err := yaml.Marshal(node)
-	if err != nil {
-		return err
-	}
-	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
-	decoder.KnownFields(true)
-	return decoder.Decode(out)
 }
