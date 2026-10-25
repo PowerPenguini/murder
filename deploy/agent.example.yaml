@@ -1,5 +1,5 @@
 # /etc/corral/agent.yaml
-node: node-fsn-1                   # defaults to the host name; labels this node's Docker objects
+node: node-fsn-1                   # stored by "corral init" (host name if unset); must match afterwards
 baseDomain: example.com            # tenants live at <tenant>.example.com
 stateFile: /var/lib/corral/state.json
 masterKeyFile: /etc/corral/master.key
@@ -11,8 +11,7 @@ networkPool: 10.240.0.0/16         # one /28 per tenant network; must not overla
 
 volumes:
   driver: zfs                      # or: driver: dir, root: /srv/corral/tenants
-  parent: tank/corral/tenants
-  mountRoot: /srv/corral/tenants
+  parent: tank/corral/tenants      # datasets mount below /srv/corral/tenants (mountRoot)
 
 ports: {from: 20000, to: 29999}    # loopback ports tenant containers are published on
 

@@ -1,0 +1,14 @@
+# An app spec: what every tenant of the app runs. Everything but image and
+# user has a default (port 8080, healthPath "/", dataPath /data, read-only
+# root with a /tmp tmpfs, the agent's default limits).
+image: ghcr.io/example/web:1.4         # a tag; the agent pins it to a digest
+user: "10001:10001"                    # numeric uid:gid; never root; owns the data
+healthPath: /api/health                # GET must answer 2xx when the tenant is up
+env:
+  PUBLIC_URL: "{{url}}"                # https://<tenant>.<baseDomain>
+  ADMIN_EMAIL: "admin@{{host}}"        # <tenant>.<baseDomain>
+  TRUSTED_PROXIES: "{{network}}"       # the edge proxy connects from this range
+secrets:                               # generated once per tenant, stored encrypted
+  - SESSION_SECRET                     # 32 random bytes, hex
+  - ENCRYPTION_KEY
+# a kind instead of a list entry:      ADMIN_PASSWORD: password

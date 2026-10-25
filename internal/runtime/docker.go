@@ -169,12 +169,23 @@ func (d *Docker) HasImage(ctx context.Context, ref string) (bool, error) {
 	return err == nil, err
 }
 
-// PullImage pulls a digest-pinned reference. The engine streams progress as
-// JSON lines and reports a failed pull inside that stream.
+// PullImage pulls a digest-pinned reference.
 func (d *Docker) PullImage(ctx context.Context, ref string) error {
 	repository, digest, ok := strings.Cut(ref, "@")
 	if !ok {
 		return fmt.Errorf("pull %s: only digest-pinned references can be pulled; a local image ID must already be present", ref)
+	}
+	// In repo:tag@digest the digest decides; the tag is only a label.
+	repository, _ = splitTag(repository)
+	return d.pull(ctx, repository, digest)
+}
+
+// pull fetches repository at tag (a tag or a digest). The engine streams
+// progress as JSON lines and reports a failed pull inside that stream.
+func (d *Docker) pull(ctx context.Context, repository, tag string) error {
+	ref := repository + ":" + tag
+	if strings.HasPrefix(tag, "sha256:") {
+		ref = repository + "@" + tag
 	}
 	header := http.Header{}
 	if auth, err := d.registryAuth(repository); err != nil {
@@ -183,7 +194,7 @@ func (d *Docker) PullImage(ctx context.Context, ref string) error {
 		header.Set("X-Registry-Auth", auth)
 	}
 	var stream []byte
-	call := request{method: http.MethodPost, path: "/images/create", query: url.Values{"fromImage": {repository}, "tag": {digest}}, header: header, timeout: pullTimeout}
+	call := request{method: http.MethodPost, path: "/images/create", query: url.Values{"fromImage": {repository}, "tag": {tag}}, header: header, timeout: pullTimeout}
 	if err := d.do(ctx, call, &stream); err != nil {
 		return fmt.Errorf("pull %s: %w", ref, err)
 	}
@@ -202,6 +213,63 @@ func (d *Docker) PullImage(ctx context.Context, ref string) error {
 			return fmt.Errorf("pull %s: %s", ref, message.Error)
 		}
 	}
+}
+
+func (d *Docker) Resolve(ctx context.Context, ref string) (string, string, error) {
+	if strings.Contains(ref, "@sha256:") || strings.HasPrefix(ref, "sha256:") {
+		return ref, "", nil
+	}
+	repository, tag := splitTag(ref)
+	pullErr := d.pull(ctx, repository, tag)
+	if pullErr != nil && ctx.Err() != nil {
+		return "", "", pullErr
+	}
+	var image struct {
+		ID          string   `json:"Id"`
+		RepoDigests []string `json:"RepoDigests"`
+	}
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/images/" + url.PathEscape(repository+":"+tag) + "/json"}, &image); err != nil {
+		if pullErr != nil {
+			return "", "", pullErr
+		}
+		return "", "", fmt.Errorf("inspect %s: %w", ref, err)
+	}
+	note := ""
+	if pullErr != nil {
+		note = fmt.Sprintf("using the local image %s:%s (%v)", repository, tag, pullErr)
+	}
+	for _, repoDigest := range image.RepoDigests {
+		if name, digest, ok := strings.Cut(repoDigest, "@"); ok && familiar(name) == familiar(repository) {
+			return familiar(repository) + "@" + digest, note, nil
+		}
+	}
+	return image.ID, note, nil
+}
+
+// familiar shortens a Docker Hub repository the way the engine reports it:
+// docker.io/library/postgres and index.docker.io/library/postgres are
+// postgres.
+func familiar(repository string) string {
+	for _, prefix := range []string{"docker.io/", "index.docker.io/"} {
+		if rest, ok := strings.CutPrefix(repository, prefix); ok {
+			repository = rest
+			break
+		}
+	}
+	if rest, ok := strings.CutPrefix(repository, "library/"); ok && !strings.Contains(rest, "/") {
+		return rest
+	}
+	return repository
+}
+
+// splitTag splits "registry:5000/repo:tag" into repository and tag; a
+// reference without a tag means "latest".
+func splitTag(ref string) (string, string) {
+	slash := strings.LastIndex(ref, "/")
+	if colon := strings.LastIndex(ref, ":"); colon > slash {
+		return ref[:colon], ref[colon+1:]
+	}
+	return ref, "latest"
 }
 
 // registryAuth returns the X-Registry-Auth value for repository's registry,

@@ -15,8 +15,9 @@ Stage 2 — a single server — is what this code does today.
 - **Reconciler.** Keeps Docker in line with the desired state. Each tenant gets
   its own container, network and data volume. A container is replaced when its
   spec changes, and the volume is snapshotted first if the image changed.
-  Containers of deleted tenants are removed. Tenants keep running while the
-  agent is down; a restarted agent adopts them without restarting them.
+  Containers of archived or unknown tenants are removed. Tenants keep running
+  while the agent is down; a restarted agent adopts them without restarting
+  them.
 - **Edge proxy.** Routes `<tenant>.<baseDomain>` to the tenant's container. It
   streams responses (server-sent events) and replaces any client-sent
   `X-Forwarded-*` headers. TLS is `off`, `internal` (a local CA, for testing) or
@@ -53,39 +54,90 @@ lost disk, and starting from an empty state would remove every tenant.
 
 ## Run tenants
 
-```bash
-corral tenant create acme -file examples/app.example.yaml -wait 3m
-corral tenant list
-corral tenant secret acme ADMIN_PASSWORD
-corral tenant set-image acme ghcr.io/example/app@sha256:<new digest> -wait 3m
-corral tenant logs acme -tail 100
-corral tenant suspend acme && corral tenant resume acme -wait 3m
-corral tenant delete acme -yes            # keeps the data; add -purge to delete it
-corral tenant purge-data acme -yes        # delete data a deleted tenant left behind
+Tenants are declared in a fleet file and applied with one command:
+
+```yaml
+# fleet.yaml
+apps:
+  web: apps/web.yaml            # an app spec (see below), or an inline spec
+tenants:
+  acme: {app: web}
+  beta: {app: web, env: {TZ: Europe/Berlin}, limits: {memoryMB: 768}}
+  gamma: {app: web, image: ghcr.io/example/web:1.5}    # e.g. a canary
 ```
 
-A new tenant with the name of a deleted one whose data was kept is refused
-until that data is purged or deliberately taken over with `create -adopt-data`.
-A delete that fails leaves the tenant suspended; run it again.
+```bash
+corral apply fleet.yaml -wait 3m     # create missing tenants, update changed ones
+```
+
+`apply` checks the whole file before it changes anything, pins each image
+once, and reports each tenant as created, updated or unchanged. It never
+removes a tenant: one that is missing from the file is only reported. An
+archived tenant listed in the file has to be restored first. A secret's value
+is generated once and kept, even if the secret leaves the spec and comes
+back, so a mistaken edit cannot lose it; `corral tenant rotate` gives it a
+new value. `-wait` is one budget for the whole fleet. It watches every
+tenant in the file side by side, so a retry after a failed rollout fails
+until the tenants are healthy.
+
+An app spec needs only an image and a user; everything else has a default:
+
+```yaml
+# apps/web.yaml
+image: ghcr.io/example/web:1.4  # a tag; the agent pins it to a digest when applying
+user: "10001:10001"             # numeric uid:gid; never root; also owns the data
+healthPath: /api/health         # default "/"
+env:
+  PUBLIC_URL: "{{url}}"
+  TRUSTED_PROXIES: "{{network}}"
+secrets: [SESSION_SECRET]       # 32 random bytes, hex; or a mapping such as ADMIN_PASSWORD: password
+```
+
+**Defaults:**
+- `port` 8080, `dataPath` /data, `healthPath` /;
+- a read-only root with a 256 MB `/tmp` tmpfs (`writableRoot: true` and `tmpfs` change that);
+- the agent's default limits.
+
+**Env placeholders:** values may use `{{name}}`, `{{host}}`, `{{url}}` and
+`{{network}}`. `{{network}}` is the tenant network's CIDR; the edge proxy
+connects from it, so trust it for proxy headers.
 
 **Images:**
-- Images must be pinned by digest, or be a local `sha256:` image ID.
+- Tags are pinned to the registry digest when applied, so the next `apply` of
+  an unchanged file keeps the same bytes until the tag moves.
+- A tag that only exists locally is pinned to the local image.
 - Private registries need credentials in `registryAuthFile`, a Docker
   `config.json` with an `auths` entry per registry. Credential helpers are not
   supported. The Docker engine never reads what `docker login` saved; the
   client has to send it.
 
-**Env placeholders:** values may use `{{name}}`, `{{host}}`, `{{url}}` and
-`{{network}}`. `{{network}}` is the tenant network's CIDR; the edge proxy
-connects from it, so trust it for proxy headers.
+Day-to-day operations:
+
+```bash
+corral tenant list                      # state, health, image, URL
+corral tenant show acme
+corral tenant secret acme ADMIN_PASSWORD
+corral tenant rotate acme ADMIN_PASSWORD -wait 3m   # new value; the container restarts
+corral tenant logs acme -tail 100
+corral tenant suspend acme              # stop it, keep its address (visitors get 503)
+corral tenant resume acme -wait 3m
+corral tenant archive acme              # take it out of service; data, secrets and spec are kept
+corral tenant list -archived
+corral tenant restore acme -wait 3m     # bring it back exactly as it was
+corral tenant purge acme -yes           # delete an archived tenant and its data for good
+```
+
+An archive that fails leaves the tenant suspended; run it again. A new
+tenant cannot take an archived tenant's name until that tenant is restored
+or purged.
 
 ## Security model
 
 - **The CLI is root-equivalent.** Anyone who can use the API socket (root, or
   members of `socketGroup`) controls every tenant on the node, including its
   secrets and data.
-- **Tenants never run as root.** Specs that set user or data owner 0 are
-  refused, and images must not default to root.
+- **Tenants never run as root.** Specs that set user 0 are refused, and
+  images must not default to root.
 - **Every container is locked down.** It drops all capabilities, runs with
   `no-new-privileges`, has resource limits and publishes its port on loopback
   only.
@@ -93,8 +145,8 @@ connects from it, so trust it for proxy headers.
   root-only (`0700`) directory, and ZFS datasets are created with `setuid=off`
   and `devices=off`. A setuid file a tenant writes there is useless to host
   users.
-- **Optional extra isolation:** enabling Docker's `userns-remap` also maps
-  container users away from host users.
+- **Docker's `userns-remap` is not supported.** The data owner is the
+  container user's numeric id on the host, which remapping would change.
 
 ## Develop
 
@@ -110,7 +162,7 @@ through Corral's real components:
 - write data, then change the image and keep the data;
 - restart the agent and adopt the container;
 - suspend and resume;
-- delete with purge.
+- archive, restore with the data, purge.
 
 ## Known limits (stage 2)
 
@@ -121,3 +173,5 @@ through Corral's real components:
   replicated log.
 - **Failing pulls.** A pull that keeps failing is retried on every pass,
   without backoff.
+- **Registry access during apply.** Tags are pinned when `apply` runs, so
+  `apply` needs registry access for tags that are not yet local.

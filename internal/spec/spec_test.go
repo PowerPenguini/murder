@@ -4,35 +4,74 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func validTenant() Tenant {
 	return Tenant{
-		Name:         "acme",
-		Image:        "ghcr.io/example/app@" + digest,
-		Port:         8080,
-		HealthPath:   "/api/health",
-		DataPath:     "/data",
-		DataUID:      10001,
-		DataGID:      10001,
-		User:         "10001:10001",
-		Env:          map[string]string{"PUBLIC_URL": "{{url}}", "TRUSTED_PROXIES": "{{network}}"},
-		Secrets:      map[string]Secret{"SESSION_SECRET": {Kind: "hex", Bytes: 32}},
-		ReadOnlyRoot: true,
-		Tmpfs:        map[string]string{"/tmp": "rw,noexec,nosuid,size=256m"},
+		Name:    "acme",
+		Image:   "ghcr.io/example/app@" + digest,
+		User:    "10001:10002",
+		Env:     map[string]string{"PUBLIC_URL": "{{url}}", "TRUSTED_PROXIES": "{{network}}"},
+		Secrets: Secrets{"SESSION_SECRET": {}},
+	}.WithDefaults()
+}
+
+func TestDefaultsFillTheGaps(t *testing.T) {
+	tenant := validTenant()
+	if err := tenant.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if tenant.Port != 8080 || tenant.HealthPath != "/" || tenant.DataPath != "/data" || tenant.WritableRoot || tenant.Tmpfs["/tmp"] != DefaultTmpfs {
+		t.Fatalf("defaults = %+v", tenant)
+	}
+	if secret := tenant.Secrets["SESSION_SECRET"]; secret.Kind != "hex" || secret.Bytes != 32 {
+		t.Fatalf("default secret = %+v", secret)
+	}
+	if uid, gid := tenant.Owner(); uid != 10001 || gid != 10002 {
+		t.Fatalf("owner = %d:%d", uid, gid)
+	}
+	explicit := Tenant{Port: 9000, HealthPath: "/h", DataPath: "/srv", Tmpfs: map[string]string{}, Secrets: Secrets{"P": {Kind: "password"}}}.WithDefaults()
+	if explicit.Port != 9000 || explicit.HealthPath != "/h" || explicit.DataPath != "/srv" || len(explicit.Tmpfs) != 0 || explicit.Secrets["P"].Bytes != 20 {
+		t.Fatalf("explicit values were overridden: %+v", explicit)
+	}
+	if again := tenant.WithDefaults(); !again.Equal(tenant) {
+		t.Fatal("WithDefaults is not idempotent")
 	}
 }
 
-func TestValidTenantPasses(t *testing.T) {
-	if err := validTenant().Validate(); err != nil {
-		t.Fatal(err)
+func TestSecretsInYAML(t *testing.T) {
+	var app struct {
+		Secrets Secrets `yaml:"secrets"`
 	}
-	local := validTenant()
-	local.Image = digest
-	if err := local.Validate(); err != nil {
-		t.Fatalf("a local image ID must be accepted: %v", err)
+	for document, want := range map[string]Secrets{
+		"secrets: [A, B]":                      {"A": {Kind: "hex"}, "B": {Kind: "hex"}},
+		"secrets: {A: password, B: base64}":    {"A": {Kind: "password"}, "B": {Kind: "base64"}},
+		"secrets: {A: {kind: hex, bytes: 64}}": {"A": {Kind: "hex", Bytes: 64}},
+	} {
+		app.Secrets = nil
+		if err := yaml.Unmarshal([]byte(document), &app); err != nil {
+			t.Fatalf("%s: %v", document, err)
+		}
+		if len(app.Secrets) != len(want) {
+			t.Fatalf("%s: %v", document, app.Secrets)
+		}
+		for name, secret := range want {
+			if app.Secrets[name] != secret {
+				t.Errorf("%s: %s = %+v, want %+v", document, name, app.Secrets[name], secret)
+			}
+		}
+	}
+	for _, document := range []string{"secrets: [A, A]", "secrets: A", "secrets: {A: {kind: hex, size: 3}}", "secrets: {A: password, A: hex}"} {
+		app.Secrets = nil
+		decoder := yaml.NewDecoder(strings.NewReader(document))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&app); err == nil {
+			t.Errorf("%q accepted", document)
+		}
 	}
 }
 
@@ -40,7 +79,7 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 	tenant := validTenant()
 	tenant.Name = "Acme_1"
 	tenant.Image = "ghcr.io/example/app:latest"
-	tenant.Port = 0
+	tenant.Port = 70000
 	tenant.HealthPath = "health"
 	tenant.DataPath = "/data/../etc"
 	tenant.Env["BAD-NAME"] = "x"
@@ -54,13 +93,29 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 		t.Fatalf("Validate() = %v, want a ValidationError", err)
 	}
 	for _, want := range []string{
-		`tenant name "Acme_1"`, "must be pinned", "port 0", `health path "health"`, `data path "/data/../etc"`,
+		`tenant name "Acme_1"`, "must be pinned", "port 70000", `health path "health"`, `data path "/data/../etc"`,
 		`env name "BAD-NAME"`, "unknown placeholder {{nope}}", "PUBLIC_URL is both env and secret",
 		`unknown kind "rot13"`, "needs 16-128 bytes", `tmpfs path "/data/../etc"`,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q:\n%v", want, err)
 		}
+	}
+}
+
+// ValidateUnpinned checks everything but the pin.
+func TestValidateUnpinned(t *testing.T) {
+	tenant := validTenant()
+	tenant.Image = "ghcr.io/example/app:1.4"
+	if err := tenant.ValidateUnpinned(); err != nil {
+		t.Fatal(err)
+	}
+	if tenant.Validate() == nil {
+		t.Fatal("Validate accepted a tag")
+	}
+	tenant.User = "0:0"
+	if tenant.ValidateUnpinned() == nil {
+		t.Fatal("ValidateUnpinned accepted root")
 	}
 }
 
@@ -78,6 +133,24 @@ func TestUserMustBeNumericAndNotRoot(t *testing.T) {
 		if tenant.Validate() == nil {
 			t.Errorf("user %q accepted", user)
 		}
+	}
+}
+
+func TestImageReferences(t *testing.T) {
+	for _, ref := range []string{"nginx", "nginx:1.27", "ghcr.io/org/app:v1.4.2", "registry.local:5000/team/app", "ghcr.io/org/app@" + digest, digest,
+		"ghcr.io/org/my__app:1", "ghcr.io/org/my--app:1", "Registry.Example.com/app:1", "localhost/app", "registry:5000/app:1", "localhost:5000/app@" + digest, "nginx:1.27@" + digest} {
+		if err := ValidReference(ref); err != nil {
+			t.Errorf("ValidReference(%q) = %v", ref, err)
+		}
+	}
+	for _, ref := range []string{"", "Nginx", "nginx:", "nginx:-bad", "a b", "ghcr.io/org/app@sha256:short",
+		"nginx:5000:latest", "Org/app", "app___x", "app-", "registry.local:5000:1/app"} {
+		if ValidReference(ref) == nil {
+			t.Errorf("ValidReference(%q) accepted", ref)
+		}
+	}
+	if Pinned("nginx:1.27") || !Pinned(digest) || !Pinned("nginx@"+digest) || !Pinned("nginx:1.27@"+digest) {
+		t.Fatal("Pinned misjudges references")
 	}
 }
 
@@ -100,8 +173,8 @@ func TestNames(t *testing.T) {
 func TestRenderReplacesPlaceholders(t *testing.T) {
 	tenant := validTenant()
 	tenant.Env["MIXED"] = "{{name}} at {{host}}"
-	env := tenant.Render(Values{Host: "acme.example.com", URL: "https://acme.example.com", Network: "172.20.0.0/16"})
-	want := map[string]string{"PUBLIC_URL": "https://acme.example.com", "TRUSTED_PROXIES": "172.20.0.0/16", "MIXED": "acme at acme.example.com"}
+	env := tenant.Render(Values{Host: "acme.example.com", URL: "https://acme.example.com", Network: "10.240.0.0/28"})
+	want := map[string]string{"PUBLIC_URL": "https://acme.example.com", "TRUSTED_PROXIES": "10.240.0.0/28", "MIXED": "acme at acme.example.com"}
 	for key, value := range want {
 		if env[key] != value {
 			t.Errorf("%s = %q, want %q", key, env[key], value)

@@ -100,28 +100,23 @@ func (c *Client) Get(ctx context.Context, name string) (Tenant, error) {
 	return tenant, c.do(ctx, http.MethodGet, tenantPath(name), nil, &tenant)
 }
 
-// Adoption modes for Create.
-const (
-	AdoptNone  = ""
-	AdoptData  = "true"  // restore over kept data with the saved secrets
-	AdoptForce = "force" // also accept fresh secrets if none were saved
-)
-
-// Create adds a tenant. adopt lets it take over data a deleted tenant of the
-// same name left on the node.
-func (c *Client) Create(ctx context.Context, tenant spec.Tenant, adopt string) (Tenant, error) {
-	var created Tenant
-	return created, c.do(ctx, http.MethodPost, "/v1/tenants?adoptData="+url.QueryEscape(adopt), tenant, &created)
+// Create adds a tenant; the agent fills in defaults and pins the image.
+func (c *Client) Create(ctx context.Context, tenant spec.Tenant) (Applied, error) {
+	var applied Applied
+	return applied, c.do(ctx, http.MethodPost, "/v1/tenants", tenant, &applied)
 }
 
-func (c *Client) Replace(ctx context.Context, tenant spec.Tenant) (Tenant, error) {
-	var replaced Tenant
-	return replaced, c.do(ctx, http.MethodPut, tenantPath(tenant.Name), tenant, &replaced)
+// Resolve pins an image reference to a digest on the agent's node.
+func (c *Client) Resolve(ctx context.Context, image string) (Resolved, error) {
+	var resolved Resolved
+	return resolved, c.do(ctx, http.MethodPost, "/v1/images/resolve", Resolved{Image: image}, &resolved)
 }
 
-func (c *Client) SetImage(ctx context.Context, name, image string) (Tenant, error) {
-	var tenant Tenant
-	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+"/image", ImageChange{Image: image}, &tenant)
+// Replace updates a tenant's spec; Applied.Changed is false if nothing
+// changed.
+func (c *Client) Replace(ctx context.Context, tenant spec.Tenant) (Applied, error) {
+	var applied Applied
+	return applied, c.do(ctx, http.MethodPut, tenantPath(tenant.Name), tenant, &applied)
 }
 
 func (c *Client) Suspend(ctx context.Context, name string, suspended bool) (Tenant, error) {
@@ -133,19 +128,37 @@ func (c *Client) Suspend(ctx context.Context, name string, suspended bool) (Tena
 	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+action, nil, &tenant)
 }
 
-func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
-	return c.do(ctx, http.MethodDelete, tenantPath(name)+"?purge="+strconv.FormatBool(purge), nil, nil)
+// Archive takes a tenant out of service, keeping its data, secrets and spec.
+func (c *Client) Archive(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodPost, tenantPath(name)+"/archive", nil, nil)
 }
 
-// PurgeData deletes data a deleted tenant left behind.
-func (c *Client) PurgeData(ctx context.Context, name string) error {
-	return c.do(ctx, http.MethodDelete, "/v1/data/"+url.PathEscape(name), nil, nil)
+func (c *Client) ListArchived(ctx context.Context) ([]ArchivedTenant, error) {
+	var archived []ArchivedTenant
+	return archived, c.do(ctx, http.MethodGet, "/v1/archive", nil, &archived)
+}
+
+// Restore brings an archived tenant back as it was.
+func (c *Client) Restore(ctx context.Context, name string) (Tenant, error) {
+	var tenant Tenant
+	return tenant, c.do(ctx, http.MethodPost, "/v1/archive/"+url.PathEscape(name)+"/restore", nil, &tenant)
+}
+
+// Purge deletes an archived tenant and its data for good.
+func (c *Client) Purge(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/archive/"+url.PathEscape(name), nil, nil)
 }
 
 func (c *Client) Secret(ctx context.Context, name, key string) (string, error) {
 	var secret SecretValue
 	err := c.do(ctx, http.MethodGet, tenantPath(name)+"/secrets/"+url.PathEscape(key), nil, &secret)
 	return secret.Value, err
+}
+
+// Rotate gives one of a tenant's secrets a new value.
+func (c *Client) Rotate(ctx context.Context, name, key string) (Tenant, error) {
+	var tenant Tenant
+	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+"/secrets/"+url.PathEscape(key)+"/rotate", nil, &tenant)
 }
 
 func (c *Client) Logs(ctx context.Context, name string, tail int) ([]byte, error) {
