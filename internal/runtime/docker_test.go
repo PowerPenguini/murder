@@ -82,7 +82,7 @@ func TestCreateSendsHardenedContainer(t *testing.T) {
 	}
 	id, err := docker.Create(context.Background(), ContainerSpec{
 		Name: "corral-acme", Image: "sha256:img", Env: []string{"A=1"}, User: "10001", Network: "corral-acme",
-		ContainerPort: 8080, HostPort: 20001, Mounts: []Mount{{Source: "/srv/acme", Target: "/data"}},
+		Address: "10.240.0.18", Mounts: []Mount{{Source: "/srv/acme", Target: "/data"}},
 		MemoryBytes: 512 << 20, NanoCPUs: 1e9, PIDs: 256, ReadOnlyRoot: true, Tmpfs: map[string]string{"/tmp": "size=64m"},
 		Labels: map[string]string{LabelTenant: "acme"},
 	})
@@ -90,9 +90,12 @@ func TestCreateSendsHardenedContainer(t *testing.T) {
 		t.Fatalf("Create = %q, %v", id, err)
 	}
 	host := engine.created["HostConfig"].(map[string]any)
-	bindings := host["PortBindings"].(map[string]any)["8080/tcp"].([]any)[0].(map[string]any)
-	if bindings["HostIp"] != "127.0.0.1" || bindings["HostPort"] != "20001" {
-		t.Errorf("port binding = %v, want 127.0.0.1:20001 only", bindings)
+	if _, published := host["PortBindings"]; published || engine.created["ExposedPorts"] != nil {
+		t.Errorf("the container publishes ports: %v", engine.created)
+	}
+	endpoint := engine.created["NetworkingConfig"].(map[string]any)["EndpointsConfig"].(map[string]any)["corral-acme"].(map[string]any)
+	if endpoint["IPAMConfig"].(map[string]any)["IPv4Address"] != "10.240.0.18" {
+		t.Errorf("endpoint = %v, want the fixed address", endpoint)
 	}
 	if host["ReadonlyRootfs"] != true || host["NetworkMode"] != "corral-acme" || host["PidsLimit"] != float64(256) {
 		t.Errorf("host config = %v", host)
@@ -150,9 +153,9 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 	engine.handlers["POST /networks/create"] = func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		subnet := body["IPAM"].(map[string]any)["Config"].([]any)[0].(map[string]any)["Subnet"]
+		ipam := body["IPAM"].(map[string]any)["Config"].([]any)[0].(map[string]any)
 		labels := body["Labels"].(map[string]any)
-		if body["Name"] != "corral-acme" || subnet != "10.240.0.16/28" || labels[LabelNode] != "node-1" || body["Options"].(map[string]any)["com.docker.network.bridge.enable_icc"] != "false" {
+		if body["Name"] != "corral-acme" || ipam["Subnet"] != "10.240.0.16/28" || ipam["Gateway"] != "10.240.0.17" || labels[LabelNode] != "node-1" || body["Options"].(map[string]any)["com.docker.network.bridge.enable_icc"] != "false" {
 			t.Errorf("network create = %v", body)
 		}
 		created = true
@@ -165,8 +168,8 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.16/28", nil); err != nil {
 		t.Fatalf("an existing network with the right subnet = %v", err)
 	}
-	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.32/28", nil); err == nil {
-		t.Fatal("an existing network with another subnet was accepted")
+	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.32/28", nil); !errors.Is(err, ErrNetworkMismatch) {
+		t.Fatalf("an existing network with another subnet = %v", err)
 	}
 	// Another node's network is neither adopted nor removed.
 	if err := docker.EnsureNetwork(ctx, "corral-foreign", "10.240.0.16/28", nil); err == nil || !strings.Contains(err.Error(), "not owned") {
@@ -347,6 +350,18 @@ func TestResolvePinsTags(t *testing.T) {
 	} {
 		if repository, tag := splitTag(ref); repository != want[0] || tag != want[1] {
 			t.Errorf("splitTag(%q) = %q, %q", ref, repository, tag)
+		}
+	}
+}
+
+func TestAddresses(t *testing.T) {
+	gateway, container, err := Addresses("10.240.0.16/28")
+	if err != nil || gateway.String() != "10.240.0.17" || container.String() != "10.240.0.18" {
+		t.Fatalf("Addresses = %v, %v, %v", gateway, container, err)
+	}
+	for _, bad := range []string{"", "10.240.0.17/28", "10.240.0.16/30", "fd00::/64", "nonsense"} {
+		if _, _, err := Addresses(bad); err == nil {
+			t.Errorf("Addresses(%q) accepted", bad)
 		}
 	}
 }

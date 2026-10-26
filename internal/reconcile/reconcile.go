@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -61,6 +62,8 @@ type Reconciler struct {
 	config  Config
 	log     *slog.Logger
 	health  *http.Client
+	// backend finds where to check a tenant's health; tests replace it.
+	backend func(store.Record) (string, error)
 
 	// pass serializes reconcile passes and the removal of tenants.
 	pass     sync.Mutex
@@ -83,6 +86,7 @@ func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secret
 		store: st, runtime: rt, volumes: volumes, key: key, config: config, log: log,
 		health:   &http.Client{Timeout: config.HealthTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		statuses: map[string]Status{},
+		backend:  Backend,
 	}
 }
 
@@ -128,11 +132,28 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	}
 	records := r.store.List()
 	wanted := map[string]bool{}
-	statuses := map[string]Status{}
+	for _, record := range records {
+		wanted[record.Spec.Name] = true
+	}
+	// What no tenant wants goes first: an archived tenant's network must be
+	// gone before a new tenant gets its subnet.
 	var errs []error
+	for _, tenant := range slices.Sorted(maps.Keys(byTenant)) {
+		if wanted[tenant] {
+			continue
+		}
+		if err := r.removeContainers(ctx, byTenant[tenant]); err != nil {
+			errs = append(errs, fmt.Errorf("remove containers of %q, which no tenant wants: %w", tenant, err))
+			continue
+		}
+		r.log.Info("removed the containers of a tenant no longer wanted", "tenant", tenant)
+	}
+	if err := r.removeOrphanNetworks(ctx, wanted); err != nil {
+		errs = append(errs, err)
+	}
+	statuses := map[string]Status{}
 	for _, record := range records {
 		name := record.Spec.Name
-		wanted[name] = true
 		status, err := r.reconcileTenant(ctx, record, byTenant[name])
 		status.Generation = record.Generation
 		status.CheckedAt = time.Now().UTC()
@@ -141,19 +162,6 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("tenant %s: %w", name, err))
 		}
 		statuses[name] = status
-	}
-	for _, tenant := range slices.Sorted(maps.Keys(byTenant)) {
-		if wanted[tenant] {
-			continue
-		}
-		if err := r.removeContainers(ctx, byTenant[tenant]); err != nil {
-			errs = append(errs, fmt.Errorf("remove containers of deleted tenant %q: %w", tenant, err))
-			continue
-		}
-		r.log.Info("removed a deleted tenant's containers", "tenant", tenant)
-	}
-	if err := r.removeOrphanNetworks(ctx, wanted); err != nil {
-		errs = append(errs, err)
 	}
 	r.mu.Lock()
 	r.statuses = statuses
@@ -212,7 +220,19 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
 	}
-	if err := r.runtime.EnsureNetwork(ctx, NetworkName(tenant.Name), record.Subnet, map[string]string{runtime.LabelTenant: tenant.Name}); err != nil {
+	labels := map[string]string{runtime.LabelTenant: tenant.Name}
+	err = r.runtime.EnsureNetwork(ctx, NetworkName(tenant.Name), record.Subnet, labels)
+	if errors.Is(err, runtime.ErrNetworkMismatch) {
+		// Restored with a new subnet while its old network was still
+		// there: the network and anything on it are rebuilt.
+		r.log.Info("rebuilding a network with an outdated subnet", "tenant", tenant.Name, "subnet", record.Subnet)
+		if err := r.clearRuntime(ctx, tenant.Name); err != nil {
+			return Status{}, fmt.Errorf("network: %w", err)
+		}
+		existing = nil
+		err = r.runtime.EnsureNetwork(ctx, NetworkName(tenant.Name), record.Subnet, labels)
+	}
+	if err != nil {
 		return Status{}, fmt.Errorf("network: %w", err)
 	}
 	desired, err := r.containerSpec(record, dataPath)
@@ -346,6 +366,16 @@ func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.
 	return errors.Join(errs...)
 }
 
+// Backend is where a tenant listens: its fixed address in its network and
+// the app's port. Only the host reaches it; other tenants cannot.
+func Backend(record store.Record) (string, error) {
+	_, address, err := runtime.Addresses(record.Subnet)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(address.String(), strconv.Itoa(record.Spec.Port)), nil
+}
+
 // Host and URL are a tenant's public address.
 func (r *Reconciler) Host(tenant string) string { return tenant + "." + r.config.BaseDomain }
 func (r *Reconciler) URL(tenant string) string  { return r.config.Scheme + "://" + r.Host(tenant) }
@@ -382,20 +412,23 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 	if len(tenant.Tmpfs) > 0 {
 		tmpfs = maps.Clone(tenant.Tmpfs)
 	}
+	_, address, err := runtime.Addresses(record.Subnet)
+	if err != nil {
+		return runtime.ContainerSpec{}, err
+	}
 	desired := runtime.ContainerSpec{
-		Name:          ContainerName(tenant.Name),
-		Image:         tenant.Image,
-		Env:           pairs,
-		User:          tenant.User,
-		Network:       NetworkName(tenant.Name),
-		ContainerPort: tenant.Port,
-		HostPort:      record.HostPort,
-		Mounts:        []runtime.Mount{{Source: dataPath, Target: tenant.DataPath}},
-		MemoryBytes:   int64(limits.MemoryMB) << 20,
-		NanoCPUs:      int64(limits.CPUs * 1e9),
-		PIDs:          int64(limits.PIDs),
-		ReadOnlyRoot:  !tenant.WritableRoot,
-		Tmpfs:         tmpfs,
+		Name:         ContainerName(tenant.Name),
+		Image:        tenant.Image,
+		Env:          pairs,
+		User:         tenant.User,
+		Network:      NetworkName(tenant.Name),
+		Address:      address.String(),
+		Mounts:       []runtime.Mount{{Source: dataPath, Target: tenant.DataPath}},
+		MemoryBytes:  int64(limits.MemoryMB) << 20,
+		NanoCPUs:     int64(limits.CPUs * 1e9),
+		PIDs:         int64(limits.PIDs),
+		ReadOnlyRoot: !tenant.WritableRoot,
+		Tmpfs:        tmpfs,
 		Labels: map[string]string{
 			runtime.LabelTenant: tenant.Name,
 			runtime.LabelImage:  tenant.Image,
@@ -422,7 +455,11 @@ func specHash(desired runtime.ContainerSpec) (string, error) {
 }
 
 func (r *Reconciler) checkHealth(ctx context.Context, record store.Record) (bool, string) {
-	target := "http://127.0.0.1:" + strconv.Itoa(record.HostPort) + record.Spec.HealthPath
+	backend, err := r.backend(record)
+	if err != nil {
+		return false, err.Error()
+	}
+	target := "http://" + backend + record.Spec.HealthPath
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return false, err.Error()
@@ -450,31 +487,6 @@ func (r *Reconciler) Status(tenant string) (Status, bool) {
 // DataExists reports whether a tenant name still has data on this node.
 func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error) {
 	return r.volumes.Exists(ctx, tenant)
-}
-
-// Archive takes a tenant out of service and moves it to the archive with
-// its data, secrets and overrides, so Restore can bring it back. Its
-// containers and network go first and the record moves last: a failure
-// leaves a suspended tenant that can be archived again, and its host port
-// and subnet are only reused once nothing holds them.
-func (r *Reconciler) Archive(ctx context.Context, name, actor string) error {
-	r.pass.Lock()
-	defer r.pass.Unlock()
-	// Suspended first, so no pass recreates what is removed below; only
-	// this tenant is touched, whatever the others are doing.
-	if _, err := r.store.StartArchive(name, actor); err != nil {
-		return err
-	}
-	if err := r.clearRuntime(ctx, name); err != nil {
-		return err
-	}
-	if err := r.store.Archive(name, actor); err != nil {
-		return err
-	}
-	r.mu.Lock()
-	delete(r.statuses, name)
-	r.mu.Unlock()
-	return nil
 }
 
 // Purge deletes an archived tenant for good: its data, snapshots and saved

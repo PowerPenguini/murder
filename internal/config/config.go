@@ -42,7 +42,6 @@ type Agent struct {
 	// overlap networks the host or Docker already use.
 	NetworkPool string  `yaml:"networkPool"`
 	Volumes     Volumes `yaml:"volumes"`
-	Ports       Ports   `yaml:"ports"`
 	Edge        Edge    `yaml:"edge"`
 	// Defaults fill in tenant limits left at zero.
 	Defaults          spec.Limits `yaml:"defaults"`
@@ -57,12 +56,6 @@ type Volumes struct {
 	Root      string `yaml:"root"`
 	Parent    string `yaml:"parent"`
 	MountRoot string `yaml:"mountRoot"`
-}
-
-// Ports is the loopback port range tenant containers are published on.
-type Ports struct {
-	From int `yaml:"from"`
-	To   int `yaml:"to"`
 }
 
 // Edge configures the public listeners.
@@ -101,7 +94,6 @@ func Parse(data []byte) (Agent, error) {
 		Socket:            "/run/corral/agent.sock",
 		DockerSocket:      "/var/run/docker.sock",
 		Volumes:           Volumes{Driver: "dir", Root: "/srv/corral/tenants", MountRoot: "/srv/corral/tenants"},
-		Ports:             Ports{From: 20000, To: 29999},
 		NetworkPool:       "10.240.0.0/16",
 		Edge:              Edge{HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/corral/certs"}},
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
@@ -134,9 +126,6 @@ func (a Agent) Validate() error {
 		}
 	default:
 		problems = append(problems, fmt.Sprintf("unknown volume driver %q", a.Volumes.Driver))
-	}
-	if a.Ports.From < 1024 || a.Ports.To > 65535 || a.Ports.From > a.Ports.To {
-		problems = append(problems, "ports must be a range within 1024-65535")
 	}
 	if pool, err := netip.ParsePrefix(a.NetworkPool); err != nil || !pool.Addr().Is4() || pool.Bits() > 24 {
 		problems = append(problems, "networkPool must be an IPv4 prefix of /24 or larger")

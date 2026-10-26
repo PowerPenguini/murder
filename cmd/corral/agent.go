@@ -85,7 +85,7 @@ func runAgent(args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := store.Open(cfg.Database, store.Options{PortFrom: cfg.Ports.From, PortTo: cfg.Ports.To, NetworkPool: netip.MustParsePrefix(cfg.NetworkPool), Sealer: key.NewSealed})
+	st, err := store.Open(cfg.Database, store.Options{NetworkPool: netip.MustParsePrefix(cfg.NetworkPool), Sealer: key.NewSealed})
 	if err != nil {
 		return err
 	}

@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func main() {
@@ -41,6 +43,17 @@ func main() {
 			return
 		}
 		_, _ = w.Write(data)
+	})
+	// dial reports whether this tenant can open a TCP connection to addr,
+	// which isolation tests expect it cannot for another tenant.
+	mux.HandleFunc("GET /dial", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := net.DialTimeout("tcp", r.URL.Query().Get("addr"), 2*time.Second)
+		if err != nil {
+			fmt.Fprint(w, "refused: ", err)
+			return
+		}
+		_ = conn.Close()
+		fmt.Fprint(w, "connected")
 	})
 	mux.HandleFunc("GET /root-writable", func(w http.ResponseWriter, _ *http.Request) {
 		err := os.WriteFile("/should-fail", []byte("x"), 0o600)

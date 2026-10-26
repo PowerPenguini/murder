@@ -50,16 +50,12 @@ type Record struct {
 	// including secrets no longer in the spec: values are only replaced by a
 	// rotation and only deleted by a purge.
 	Sealed map[string]string `json:"-"`
-	// HostPort is the loopback port the edge proxy reaches the tenant on.
-	HostPort int `json:"hostPort"`
-	// Subnet is the tenant network's IPv4 range.
+	// Subnet is the tenant network's IPv4 range; the tenant's address in it
+	// is fixed (see runtime.Addresses). Archived tenants have none.
 	Subnet string `json:"subnet"`
 	// DataImage is the image whose container last owned the data. It is
 	// observed state: the reconciler sets it and it does not bump Generation.
 	DataImage string `json:"dataImage,omitempty"`
-	// SuspendedBeforeArchive is set while an archive is under way: the
-	// suspension to restore the tenant with, kept across a failed attempt.
-	SuspendedBeforeArchive *bool `json:"suspendedBeforeArchive,omitempty"`
 	// Generation counts changes of the desired state.
 	Generation int64     `json:"generation"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -67,10 +63,6 @@ type Record struct {
 }
 
 func (r Record) clone() Record {
-	if r.SuspendedBeforeArchive != nil {
-		value := *r.SuspendedBeforeArchive
-		r.SuspendedBeforeArchive = &value
-	}
 	r.Spec.Env = maps.Clone(r.Spec.Env)
 	r.Spec.Secrets = maps.Clone(r.Spec.Secrets)
 	r.Spec.Tmpfs = maps.Clone(r.Spec.Tmpfs)
@@ -82,8 +74,8 @@ func (r Record) clone() Record {
 
 // Archived is an archived tenant: its record, kept with its data so it can
 // be restored. Its secrets in particular must survive, because the app's
-// data may be encrypted or signed with them. It holds no host port or
-// subnet; a restore assigns new ones and runs the app's current spec.
+// data may be encrypted or signed with them. It holds no subnet; a restore
+// assigns a new one and runs the app's current spec.
 type Archived struct {
 	Record     Record    `json:"record"`
 	ArchivedAt time.Time `json:"archivedAt"`
@@ -149,7 +141,7 @@ type Store interface {
 
 	List() []Record
 	Get(name string) (Record, error)
-	// Create adds a tenant, assigning its host port and subnet. A name held
+	// Create adds a tenant, assigning its subnet. A name held
 	// by an archived tenant is refused with ErrArchived.
 	Create(tenant NewTenant, actor string) (Record, error)
 	// Configure gives a tenant, live or archived, another app or other
@@ -165,11 +157,9 @@ type Store interface {
 	// Observe records the image that now owns a tenant's data.
 	Observe(name, dataImage string) error
 
-	// StartArchive suspends a tenant for archiving, remembering (once, even
-	// across repeated attempts) whether it was suspended before. Archive
-	// then moves it to the archive with that suspension; Restore brings it
-	// back with a fresh host port and subnet; Forget deletes it for good.
-	StartArchive(name, actor string) (Record, error)
+	// Archive moves a tenant to the archive in one write; the reconciler
+	// then removes its container and network. Restore brings it back with
+	// a fresh subnet; Forget deletes it for good.
 	Archive(name, actor string) error
 	Restore(name, actor string) (Record, error)
 	Forget(name, actor string) error
@@ -184,8 +174,6 @@ type Store interface {
 
 // Options sets what a store assigns to new tenants and how it makes secrets.
 type Options struct {
-	// PortFrom and PortTo bound the loopback ports tenants are published on.
-	PortFrom, PortTo int
 	// NetworkPool is split into one /28 per tenant network.
 	NetworkPool netip.Prefix
 	Sealer      Sealer

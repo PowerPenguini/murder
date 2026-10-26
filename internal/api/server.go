@@ -24,12 +24,13 @@ import (
 // Tenant is what the API shows about a tenant. Secret values never appear.
 type Tenant struct {
 	// Spec is what the tenant runs: its app's spec with its overrides.
-	Spec       spec.Tenant       `json:"spec"`
-	App        string            `json:"app"`
-	Overrides  spec.Overrides    `json:"overrides"`
-	Host       string            `json:"host"`
-	URL        string            `json:"url"`
-	HostPort   int               `json:"hostPort"`
+	Spec      spec.Tenant    `json:"spec"`
+	App       string         `json:"app"`
+	Overrides spec.Overrides `json:"overrides"`
+	Host      string         `json:"host"`
+	URL       string         `json:"url"`
+	// Address is where the tenant listens, reachable from this node only.
+	Address    string            `json:"address,omitempty"`
 	Generation int64             `json:"generation"`
 	CreatedAt  time.Time         `json:"createdAt"`
 	UpdatedAt  time.Time         `json:"updatedAt"`
@@ -138,7 +139,10 @@ func (s *Server) view(record store.Record) Tenant {
 	view := Tenant{
 		Spec: record.Spec, App: record.App, Overrides: record.Overrides,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
-		HostPort: record.HostPort, Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+	}
+	if address, err := reconcile.Backend(record); err == nil {
+		view.Address = address
 	}
 	if status, ok := s.reconciler.Status(record.Spec.Name); ok {
 		view.Status = &status
@@ -386,12 +390,11 @@ func (s *Server) suspend(suspended bool) http.HandlerFunc {
 }
 
 // archive takes a tenant out of service and keeps everything needed to
-// restore it. A failed archive leaves the tenant suspended; repeat it.
+// restore it. The edge stops routing to it at once; the next reconcile
+// pass, which the change starts, removes its container and network.
 func (s *Server) archive(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	ctx, cancel := detached(r)
-	defer cancel()
-	if err := s.reconciler.Archive(ctx, name, actor(r)); err != nil {
+	if err := s.store.Archive(name, actor(r)); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -560,7 +563,11 @@ func (r Routes) Route(tenant string) (edge.Route, bool) {
 	if err != nil {
 		return edge.Route{}, false
 	}
-	return edge.Route{Backend: "127.0.0.1:" + strconv.Itoa(record.HostPort), Suspended: record.Spec.Suspended}, true
+	backend, err := reconcile.Backend(record)
+	if err != nil {
+		return edge.Route{}, false
+	}
+	return edge.Route{Backend: backend, Suspended: record.Spec.Suspended}, true
 }
 
 type statusError struct {
