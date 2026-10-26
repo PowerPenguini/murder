@@ -85,16 +85,19 @@ corral tenant set gamma -image ghcr.io/example/web:1.5   # a canary
 corral tenant set gamma -app-image                       # back to the app's image
 ```
 
-`app apply` reads every file before it changes anything and reports each app
-as created, updated or unchanged, with the tenants the change rolls out to. A
-change that would make any tenant invalid (archived ones included, since they
-run the app's current spec when restored) is refused as a whole. `-wait` is
+`app apply` reads and checks every file before it changes anything and
+reports each app as created, updated or unchanged, with the tenants the
+change rolls out to. A change that would make a live tenant invalid is
+refused as a whole, before the image is pulled. Archived tenants run the
+app's current spec when restored; one that no longer fits is refused then
+and can be fixed with `tenant set` while archived. `-wait` is
 one budget for all the apps' tenants, watched side by side, so a retry after
 a failed rollout fails until they are healthy.
 
 **Overrides** are the tenant's own `-image`, `-env`, `-secret` and limits
 (`-memory`, `-cpus`, `-pids`). `tenant set` changes only the flags it is
-given; `-unset-env`, `-unset-secret` and `-app-image` drop an override, and a
+given, and refuses to overwrite a change someone made since it read the
+tenant; `-unset-env`, `-unset-secret` and `-app-image` drop an override, and a
 limit of 0 goes back to the app's.
 
 **Secrets** get a value once per tenant, stored sealed. A value is kept even
@@ -131,7 +134,7 @@ corral tenant rotate acme ADMIN_PASSWORD -wait 3m   # new value; the container r
 corral tenant logs acme -tail 100
 corral tenant suspend acme              # stop it, keep its address (visitors get 503)
 corral tenant resume acme -wait 3m
-corral tenant archive acme              # take it out of service; data, secrets and spec are kept
+corral tenant archive acme              # take it out of service; data, secrets and overrides are kept
 corral tenant list -archived
 corral tenant restore acme -wait 3m     # back with its data, secrets and overrides, on the app's current spec
 corral tenant purge acme -yes           # delete an archived tenant and its data for good

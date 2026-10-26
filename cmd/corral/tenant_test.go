@@ -36,10 +36,11 @@ func TestFlagsMayFollowArguments(t *testing.T) {
 
 // fakeAgent answers the API calls the CLI makes, over a unix socket.
 type fakeAgent struct {
-	mu      sync.Mutex
-	tenants map[string]api.Tenant
-	calls   []string
-	bodies  map[string][]byte
+	mu       sync.Mutex
+	tenants  map[string]api.Tenant
+	archived []api.ArchivedTenant
+	calls    []string
+	bodies   map[string][]byte
 }
 
 func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,6 +57,8 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			views = append(views, a.tenants[name])
 		}
 		_ = json.NewEncoder(w).Encode(views)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/archive":
+		_ = json.NewEncoder(w).Encode(a.archived)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tenants/"):
 		// "slow" never becomes healthy; everything else already is.
 		name := strings.TrimPrefix(r.URL.Path, "/v1/tenants/")
@@ -134,8 +137,9 @@ func TestAppApplyReadsEveryFileFirst(t *testing.T) {
 	good := writeFile(t, dir, "web.yaml", "image: nginx:1.27\nuser: \"101:101\"\nsecrets: [TOKEN]\n")
 	typo := writeFile(t, dir, "shop.yaml", "image: nginx:1.27\nuser: \"101:101\"\nhelthPath: /x\n")
 	badName := writeFile(t, dir, "Bad_Name.yaml", "image: nginx:1.27\nuser: \"101:101\"\n")
+	rooted := writeFile(t, dir, "rooted.yaml", "image: nginx:1.27\nuser: \"0:0\"\n")
 	capture(t)
-	for _, files := range [][]string{{good, typo}, {good, badName}, {good, good}} {
+	for _, files := range [][]string{{good, typo}, {good, badName}, {good, good}, {good, rooted}} {
 		if err := runApp(append([]string{"apply", "-socket", socket}, files...)); err == nil {
 			t.Errorf("apply %v succeeded", files)
 		}
@@ -205,6 +209,23 @@ func TestTenantSetChangesOnlyWhatItIsTold(t *testing.T) {
 	}
 	if err := json.Unmarshal(agent.bodies["POST /v1/tenants"], &sent); err != nil || sent.Name != "beta" || sent.Overrides.Image != "web:2" || sent.Overrides.Limits.CPUs != 0.5 {
 		t.Fatalf("created %+v, %v", sent, err)
+	}
+}
+
+// set works on an archived tenant too, and sends the generation it read.
+func TestTenantSetOnAnArchivedTenant(t *testing.T) {
+	agent, socket := startAgent(t)
+	agent.archived = []api.ArchivedTenant{{Name: "old", App: "web", Generation: 7, Overrides: spec.Overrides{Env: map[string]string{"A": "1"}}}}
+	capture(t)
+	if err := runTenant([]string{"set", "old", "-env", "B=2", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	var sent api.TenantRequest
+	if err := json.Unmarshal(agent.bodies["PUT /v1/tenants/old"], &sent); err != nil || sent.Generation != 7 || sent.App != "web" || sent.Overrides.Env["A"] != "1" || sent.Overrides.Env["B"] != "2" {
+		t.Fatalf("sent %+v, %v", sent, err)
+	}
+	if err := runTenant([]string{"set", "nobody", "-env", "B=2", "-socket", socket}); err == nil {
+		t.Fatal("set on a missing tenant succeeded")
 	}
 }
 

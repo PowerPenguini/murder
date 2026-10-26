@@ -26,7 +26,7 @@ const tenantUsage = `Usage: corral tenant <command> [options]
   show NAME              print a tenant as JSON
   suspend NAME           stop a tenant, keeping its address (visitors get 503)
   resume NAME            start a suspended tenant again
-  archive NAME           take a tenant out of service, keeping data, secrets and spec
+  archive NAME           take a tenant out of service, keeping data, secrets and overrides
   restore NAME           bring an archived tenant back with its data and secrets
   purge NAME -yes        delete an archived tenant and its data for good
   secret NAME KEY        print one generated secret

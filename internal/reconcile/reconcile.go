@@ -453,7 +453,7 @@ func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error
 }
 
 // Archive takes a tenant out of service and moves it to the archive with
-// its data, secrets and spec, so Restore can bring it back as it was. Its
+// its data, secrets and overrides, so Restore can bring it back. Its
 // containers and network go first and the record moves last: a failure
 // leaves a suspended tenant that can be archived again, and its host port
 // and subnet are only reused once nothing holds them.

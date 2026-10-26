@@ -51,14 +51,16 @@ func configureTenant(command string, args []string) error {
 
 	request := api.TenantRequest{App: *app}
 	if command == "set" {
-		current, err := client.Get(ctx, name)
+		currentApp, overrides, generation, err := currentConfig(ctx, client, name)
 		if err != nil {
 			return err
 		}
 		if !given["app"] {
-			request.App = current.App
+			request.App = currentApp
 		}
-		request.Overrides = current.Overrides
+		// The agent refuses the change if the tenant changed meanwhile,
+		// instead of overwriting someone else's edit.
+		request.Overrides, request.Generation = overrides, generation
 	} else {
 		if *app == "" {
 			return errors.New("tenant create needs -app")
@@ -123,6 +125,9 @@ func configureTenant(command string, args []string) error {
 	switch {
 	case command == "create":
 		fmt.Fprintf(stdout, "%s created at %s, running app %s (%s)\n", name, result.Tenant.URL, result.Tenant.App, shortImage(result.Tenant.Spec.Image))
+	case result.Changed && result.Tenant.HostPort == 0:
+		fmt.Fprintf(stdout, "%s updated; it is archived and runs this when restored\n", name)
+		return nil
 	case result.Changed:
 		fmt.Fprintf(stdout, "%s updated (%s)\n", name, shortImage(result.Tenant.Spec.Image))
 	default:
@@ -132,4 +137,26 @@ func configureTenant(command string, args []string) error {
 		fmt.Fprintf(stdout, "note: %s\n", result.Note)
 	}
 	return waitHealthy(ctx, client, result.Tenant, *wait)
+}
+
+// currentConfig returns a tenant's app, overrides and generation, archived
+// or not.
+func currentConfig(ctx context.Context, client *api.Client, name string) (string, spec.Overrides, int64, error) {
+	tenant, err := client.Get(ctx, name)
+	if err == nil {
+		return tenant.App, tenant.Overrides, tenant.Generation, nil
+	}
+	if !api.IsNotFound(err) {
+		return "", spec.Overrides{}, 0, err
+	}
+	archived, listErr := client.ListArchived(ctx)
+	if listErr != nil {
+		return "", spec.Overrides{}, 0, listErr
+	}
+	for _, entry := range archived {
+		if entry.Name == name {
+			return entry.App, entry.Overrides, entry.Generation, nil
+		}
+	}
+	return "", spec.Overrides{}, 0, err
 }

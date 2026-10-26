@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -142,13 +143,14 @@ func TestOpenRefusesMissingLockedOrNewerDatabases(t *testing.T) {
 	if _, err := Open(newer, options(20000, 20001)); err == nil || !strings.Contains(err.Error(), "upgrade Corral") {
 		t.Fatalf("a newer schema = %v", err)
 	}
+	_, valid := openNew(t, options(20000, 20001))
 	for name, opts := range map[string]Options{
 		"ports":   {PortFrom: 80, PortTo: 90, NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: fakeSealer()},
 		"pool":    {PortFrom: 20000, PortTo: 20001, NetworkPool: netip.MustParsePrefix("10.240.0.0/30"), Sealer: fakeSealer()},
 		"no seal": {PortFrom: 20000, PortTo: 20001, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")},
 	} {
-		if _, err := Open(newer, opts); err == nil {
-			t.Errorf("%s: invalid options accepted", name)
+		if _, err := Open(valid, opts); err == nil || strings.Contains(err.Error(), "in use") {
+			t.Errorf("%s: invalid options = %v", name, err)
 		}
 	}
 }
@@ -194,9 +196,10 @@ func TestAppChangesReachTheirTenants(t *testing.T) {
 	}
 }
 
-// An app change that would make any of its tenants invalid, archived ones
-// included, is refused as a whole.
-func TestAppChangeMustKeepEveryTenantValid(t *testing.T) {
+// An app change that would make a live tenant invalid is refused as a
+// whole. Archived tenants do not block it: they are checked on restore and
+// can be reconfigured meanwhile. Nor does a tenant already invalid.
+func TestAppChangeMustKeepLiveTenantsValid(t *testing.T) {
 	st, _ := withApp(t, options(20000, 20010))
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web", Overrides: spec.Overrides{Env: map[string]string{"TOKEN": "x"}}}, "a"); err != nil {
 		t.Fatal(err)
@@ -215,19 +218,64 @@ func TestAppChangeMustKeepEveryTenantValid(t *testing.T) {
 	clash.Secrets["KEY"] = spec.Secret{}
 	_, err := st.PutApp(App{Name: "web", Spec: clash}, "b")
 	var validation *spec.ValidationError
-	if !errors.As(err, &validation) || !strings.Contains(err.Error(), "tenant acme") || !strings.Contains(err.Error(), "tenant old") {
+	if !errors.As(err, &validation) || !strings.Contains(err.Error(), "tenant acme") || strings.Contains(err.Error(), "tenant old") {
 		t.Fatalf("clashing app = %v", err)
+	}
+	if err := st.CheckApp(App{Name: "web", Spec: clash}); err == nil || !strings.Contains(err.Error(), "tenant acme") {
+		t.Fatalf("CheckApp = %v", err)
 	}
 	if app, _ := st.App("web"); len(app.Spec.Secrets) != 1 {
 		t.Fatal("a refused app change was stored")
 	}
-	if _, err := st.PutApp(App{Name: "Bad", Spec: appSpec()}, "b"); err == nil {
-		t.Fatal("an invalid app name was accepted")
+	// Without the live clash the change goes through; the archived tenant
+	// cannot come back until its override is fixed.
+	if _, _, err := st.Configure("acme", "web", spec.Overrides{}, 0, "a"); err != nil {
+		t.Fatal(err)
 	}
-	broken := appSpec()
-	broken.User = "0:0"
-	if _, err := st.PutApp(App{Name: "fresh", Spec: broken}, "b"); err == nil {
-		t.Fatal("an invalid app with no tenants was accepted")
+	if _, err := st.PutApp(App{Name: "web", Spec: clash}, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Restore("old", "a"); !errors.As(err, &validation) || !strings.Contains(err.Error(), "corral tenant set") {
+		t.Fatalf("restore an incompatible tenant = %v", err)
+	}
+	if _, _, err := st.Configure("old", "web", spec.Overrides{}, 0, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := st.Restore("old", "a"); err != nil || restored.Sealed["KEY"] == "" {
+		t.Fatalf("restore after the fix = %+v, %v", restored, err)
+	}
+	for name, app := range map[string]spec.Tenant{"Bad": appSpec(), "fresh": func() spec.Tenant { a := appSpec(); a.User = "0:0"; return a }(), "named": func() spec.Tenant { a := appSpec(); a.Name = "x"; return a }(), "asleep": func() spec.Tenant { a := appSpec(); a.Suspended = true; return a }()} {
+		if _, err := st.PutApp(App{Name: name, Spec: app}, "b"); err == nil {
+			t.Errorf("app %s was accepted", name)
+		}
+	}
+}
+
+// A tenant already invalid under the current rules does not block changes
+// to its app.
+func TestAnInvalidTenantDoesNotBlockItsApp(t *testing.T) {
+	st, path := withApp(t, options(20000, 20010))
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web", Overrides: spec.Overrides{Env: map[string]string{"A": "1"}}}, "a"); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	db, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE tenants SET overrides = '{"env":{"BAD-NAME":"x"}}'`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	st, err = Open(path, options(20000, 20010))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	next := appSpec()
+	next.Image = otherImage
+	if _, err := st.PutApp(App{Name: "web", Spec: next}, "a"); err != nil {
+		t.Fatalf("an invalid tenant blocked its app: %v", err)
 	}
 }
 
@@ -261,29 +309,29 @@ func TestDeleteAppOnlyWhenUnused(t *testing.T) {
 func TestConfigureChangesOverridesAndSkipsNoOps(t *testing.T) {
 	st, _ := withApp(t, options(20000, 20010))
 	created, _ := st.Create(NewTenant{Name: "acme", App: "web"}, "a")
-	same, changed, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{}}, "a")
+	same, changed, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{}}, 0, "a")
 	if err != nil || changed || same.Generation != created.Generation {
 		t.Fatalf("no-op configure = %+v, %v, %v", same, changed, err)
 	}
-	updated, changed, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"TZ": "UTC"}, Secrets: spec.Secrets{"EXTRA": {}}, Limits: spec.Limits{MemoryMB: 768}}, "a")
+	updated, changed, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"TZ": "UTC"}, Secrets: spec.Secrets{"EXTRA": {}}, Limits: spec.Limits{MemoryMB: 768}}, 0, "a")
 	if err != nil || !changed || updated.Generation != created.Generation+1 || updated.Spec.Env["TZ"] != "UTC" || updated.Spec.Limits.MemoryMB != 768 || updated.Sealed["EXTRA"] == "" {
 		t.Fatalf("configure = %+v, %v, %v", updated, changed, err)
 	}
 	// Dropping the extra secret keeps its value for a later return.
-	if _, _, err := st.Configure("acme", "web", spec.Overrides{}, "a"); err != nil {
+	if _, _, err := st.Configure("acme", "web", spec.Overrides{}, 0, "a"); err != nil {
 		t.Fatal(err)
 	}
-	back, _, _ := st.Configure("acme", "web", spec.Overrides{Secrets: spec.Secrets{"EXTRA": {}}}, "a")
+	back, _, _ := st.Configure("acme", "web", spec.Overrides{Secrets: spec.Secrets{"EXTRA": {}}}, 0, "a")
 	if back.Sealed["EXTRA"] != updated.Sealed["EXTRA"] {
 		t.Fatal("a secret that came back got a new value")
 	}
-	if _, _, err := st.Configure("acme", "missing", spec.Overrides{}, "a"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := st.Configure("acme", "missing", spec.Overrides{}, 0, "a"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("configure with a missing app = %v", err)
 	}
-	if _, _, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"SESSION": "x"}}, "a"); err == nil {
+	if _, _, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"SESSION": "x"}}, 0, "a"); err == nil {
 		t.Fatal("an override clashing with a secret was accepted")
 	}
-	if _, _, err := st.Configure("nobody", "web", spec.Overrides{}, "a"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := st.Configure("nobody", "web", spec.Overrides{}, 0, "a"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("configure a missing tenant = %v", err)
 	}
 }
@@ -322,7 +370,8 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "a"); !errors.Is(err, ErrArchived) {
 		t.Fatalf("create over an archived name = %v", err)
 	}
-	if _, _, err := st.Configure("acme", "web", spec.Overrides{}, "a"); !errors.Is(err, ErrArchived) {
+	// An archived tenant can be reconfigured; it runs that when restored.
+	if _, _, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, 0, "a"); err != nil {
 		t.Fatalf("configure an archived tenant = %v", err)
 	}
 	archived, ok := st.ArchivedTenant("acme")
@@ -499,5 +548,111 @@ func TestFailedWritesChangeNothing(t *testing.T) {
 	var tenants int
 	if err := st.db.QueryRow(`SELECT count(*) FROM tenants`).Scan(&tenants); err != nil || tenants != 0 {
 		t.Fatalf("a failed create left %d tenants on disk, %v", tenants, err)
+	}
+}
+
+// A tenant changed since a client read it is not overwritten.
+func TestConfigureRefusesOutdatedGenerations(t *testing.T) {
+	st, _ := withApp(t, options(20000, 20010))
+	created, _ := st.Create(NewTenant{Name: "acme", App: "web"}, "a")
+	if _, _, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, created.Generation, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.Configure("acme", "web", spec.Overrides{Image: otherImage}, created.Generation, "b"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("configure from an outdated read = %v", err)
+	}
+	if record, _ := st.Get("acme"); record.Overrides.Env["TZ"] != "UTC" || record.Overrides.Image != "" {
+		t.Fatalf("the earlier change was overwritten: %+v", record.Overrides)
+	}
+}
+
+// The audit log keeps names of env overrides, not their values, and shows a
+// tenant the app changes that reached it.
+func TestEventsKeepNoEnvValuesAndShowRollouts(t *testing.T) {
+	st, _ := withApp(t, options(20000, 20010))
+	_, _ = st.Create(NewTenant{Name: "acme", App: "web", Overrides: spec.Overrides{Env: map[string]string{"SMTP_PASSWORD": "hunter2"}}}, "a")
+	_, _, _ = st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"SMTP_PASSWORD": "hunter3"}}, 0, "a")
+	next := appSpec()
+	next.Env = map[string]string{"MODE": "prod"}
+	_, _ = st.PutApp(App{Name: "web", Spec: next}, "b")
+	_, _ = st.StartArchive("acme", "c")
+	events, err := st.Events(EventQuery{Tenant: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, e := range events {
+		lines = append(lines, e.Actor+" "+e.Action+" "+e.Detail)
+		if strings.Contains(e.Detail, "hunter") {
+			t.Fatalf("an env value reached the audit log: %+v", e)
+		}
+	}
+	want := []string{"c tenant.archiving ", "b app.rolled-out changed env", "a tenant.updated overrides: env SMTP_PASSWORD", "a tenant.created overrides: env SMTP_PASSWORD"}
+	if !slices.Equal(lines, want) {
+		t.Fatalf("events = %q, want %q", lines, want)
+	}
+	// An app's trail includes its tenants' events.
+	appEvents, _ := st.Events(EventQuery{App: "web"})
+	var update *Event
+	for i := range appEvents {
+		if appEvents[i].Action == "app.updated" {
+			update = &appEvents[i]
+		}
+	}
+	if update == nil || !strings.HasPrefix(update.Detail, "changed env; image ") || len(appEvents) != 6 {
+		t.Fatalf("app events = %+v", appEvents)
+	}
+}
+
+// Paths with URI syntax open the file Init created, owner-only, with the
+// pragmas applied.
+func TestPathsWithURICharacters(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "a#b?c%41")
+	path := filepath.Join(dir, "corral.db")
+	if err := Init(path, "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path, options(20000, 20001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var foreignKeys int
+	if err := st.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+		t.Fatalf("foreign_keys = %d, %v", foreignKeys, err)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, entry := range entries {
+		info, _ := entry.Info()
+		if strings.HasPrefix(entry.Name(), ".corral-init") {
+			t.Errorf("init left %s behind", entry.Name())
+		}
+		if !strings.HasSuffix(entry.Name(), ".lock") && info.Mode().Perm() != 0o600 {
+			t.Errorf("%s has mode %v", entry.Name(), info.Mode().Perm())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "a")); !os.IsNotExist(err) {
+		t.Fatal("SQLite opened a file cut at the URI syntax")
+	}
+}
+
+// Open makes a database copied into place owner-only.
+func TestOpenTightensTheMode(t *testing.T) {
+	_, path := openNew(t, options(20000, 20001))
+	copyPath := filepath.Join(t.TempDir(), "restored.db")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copyPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(copyPath, options(20000, 20001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if info, _ := os.Stat(copyPath); info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v", info.Mode().Perm())
 	}
 }

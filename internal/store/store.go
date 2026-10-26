@@ -24,6 +24,9 @@ var ErrArchived = errors.New("tenant is archived; restore it or purge it")
 // ErrNotArchived reports a live tenant where an archived one is required.
 var ErrNotArchived = errors.New("tenant is not archived")
 
+// ErrConflict reports a change based on an outdated read.
+var ErrConflict = errors.New("conflicting change")
+
 // ErrInUse reports an app that tenants still run.
 var ErrInUse = errors.New("app is in use")
 
@@ -134,9 +137,12 @@ type Store interface {
 
 	Apps() []App
 	App(name string) (App, error)
-	// PutApp creates or replaces an app. Every tenant of it, live or
-	// archived, must stay valid; live ones whose spec changes get a new
-	// generation.
+	// CheckApp checks an app whose image may still be a tag against the
+	// tenants it would change, before the image is pulled.
+	CheckApp(app App) error
+	// PutApp creates or replaces an app. Live tenants it would make invalid
+	// block it; live ones whose spec changes get a new generation. Archived
+	// tenants are checked when restored.
 	PutApp(app App, actor string) (AppChange, error)
 	// DeleteApp removes an app no tenant runs.
 	DeleteApp(name, actor string) error
@@ -146,9 +152,11 @@ type Store interface {
 	// Create adds a tenant, assigning its host port and subnet. A name held
 	// by an archived tenant is refused with ErrArchived.
 	Create(tenant NewTenant, actor string) (Record, error)
-	// Configure gives a tenant another app or other overrides. It reports
-	// false, and changes nothing, when they are what is stored.
-	Configure(name, app string, overrides spec.Overrides, actor string) (Record, bool, error)
+	// Configure gives a tenant, live or archived, another app or other
+	// overrides. With a non-zero generation it refuses, with ErrConflict, a
+	// tenant that has changed since. It reports false, and changes nothing,
+	// when app and overrides are what is stored.
+	Configure(name, app string, overrides spec.Overrides, generation int64, actor string) (Record, bool, error)
 	// SetSuspended changes only suspension. It does not validate the spec,
 	// so a tenant stored under older rules can still be suspended.
 	SetSuspended(name string, suspended bool, actor string) (Record, error)

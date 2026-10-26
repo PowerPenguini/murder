@@ -41,6 +41,9 @@ type TenantRequest struct {
 	Name      string         `json:"name,omitempty"`
 	App       string         `json:"app"`
 	Overrides spec.Overrides `json:"overrides"`
+	// Generation, when reconfiguring, is the generation the client read; a
+	// tenant changed since is refused with 409 instead of overwritten.
+	Generation int64 `json:"generation,omitempty"`
 }
 
 // Applied is the result of creating or reconfiguring a tenant.
@@ -75,11 +78,13 @@ type AppApplied struct {
 
 // ArchivedTenant is what the API shows about an archived tenant.
 type ArchivedTenant struct {
-	Name       string    `json:"name"`
-	App        string    `json:"app"`
-	Image      string    `json:"image"`
-	Suspended  bool      `json:"suspended"`
-	ArchivedAt time.Time `json:"archivedAt"`
+	Name       string         `json:"name"`
+	App        string         `json:"app"`
+	Overrides  spec.Overrides `json:"overrides"`
+	Image      string         `json:"image"`
+	Suspended  bool           `json:"suspended"`
+	Generation int64          `json:"generation"`
+	ArchivedAt time.Time      `json:"archivedAt"`
 }
 
 // SecretValue carries one secret to an operator.
@@ -175,20 +180,8 @@ func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &app) {
 		return
 	}
-	if err := spec.ValidReference(app.Image); err != nil {
-		writeError(w, badRequest(err))
-		return
-	}
-	if err := spec.ValidLabel(name); err != nil {
-		writeError(w, badRequest(fmt.Errorf("app name: %w", err)))
-		return
-	}
-	if app.Name != "" {
-		writeError(w, badRequest(errors.New("an app spec names no tenant; tenants are created separately")))
-		return
-	}
-	if err := spec.Compose(app, "app", spec.Overrides{}).ValidateUnpinned(); err != nil {
-		writeError(w, badRequest(err))
+	if err := s.store.CheckApp(store.App{Name: name, Spec: app}); err != nil {
+		writeError(w, err)
 		return
 	}
 	pinned, note, err := s.resolve(r.Context(), app.Image)
@@ -334,10 +327,11 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, Applied{Tenant: s.view(record), Changed: true, Note: note})
 }
 
-// configure gives a tenant another app or other overrides. The request
-// replaces both; omitted overrides are dropped. Suspension is operational
-// state and stays as it is. A request equal to what is stored changes
-// nothing, not even the generation.
+// configure gives a tenant, live or archived, another app or other
+// overrides. The request replaces both; omitted overrides are dropped. With
+// a generation it is refused if the tenant changed since the client read
+// it. Suspension is operational state and stays as it is. A request equal
+// to what is stored changes nothing, not even the generation.
 func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var request TenantRequest
@@ -348,15 +342,13 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(fmt.Errorf("request names tenant %q, not %q", request.Name, name)))
 		return
 	}
-	if _, err := s.store.Get(name); err != nil {
-		if _, archived := s.store.ArchivedTenant(name); archived {
-			err = fmt.Errorf("tenant %s: %w", name, store.ErrArchived)
-		}
-		writeError(w, err)
+	_, liveErr := s.store.Get(name)
+	if _, archived := s.store.ArchivedTenant(name); liveErr != nil && !archived {
+		writeError(w, liveErr)
 		return
 	}
-	// The pull below is checked against what exists now; the store checks
-	// again when it writes.
+	// Checked against what exists now; the store checks again when it
+	// writes.
 	overrides, note, err := s.prepareOverrides(r, name, request.App, request.Overrides)
 	if err != nil {
 		writeError(w, err)
@@ -366,7 +358,7 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
 		return
 	}
-	record, changed, err := s.store.Configure(name, request.App, overrides, actor(r))
+	record, changed, err := s.store.Configure(name, request.App, overrides, request.Generation, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -408,7 +400,7 @@ func (s *Server) listArchived(w http.ResponseWriter, _ *http.Request) {
 	views := make([]ArchivedTenant, 0, len(archived))
 	for _, entry := range archived {
 		record := entry.Record
-		views = append(views, ArchivedTenant{Name: record.Spec.Name, App: record.App, Image: record.Spec.Image, Suspended: record.Spec.Suspended, ArchivedAt: entry.ArchivedAt})
+		views = append(views, ArchivedTenant{Name: record.Spec.Name, App: record.App, Overrides: record.Overrides, Image: record.Spec.Image, Suspended: record.Spec.Suspended, Generation: record.Generation, ArchivedAt: entry.ArchivedAt})
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -594,7 +586,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = typed.status
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrNotArchived), errors.Is(err, store.ErrInUse):
+	case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrNotArchived), errors.Is(err, store.ErrInUse), errors.Is(err, store.ErrConflict):
 		status = http.StatusConflict
 	case errors.As(err, new(*spec.ValidationError)):
 		status = http.StatusBadRequest

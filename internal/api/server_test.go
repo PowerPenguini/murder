@@ -308,6 +308,27 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	_, err = f.client.PutApp(ctx, "web", clash)
 	checkStatus(t, "app change that breaks a tenant", err, 400)
 	checkStatus(t, "delete a missing app", f.client.DeleteApp(ctx, "nope"), 404)
+	asleep := appSpec()
+	asleep.Suspended = true
+	_, err = f.client.PutApp(ctx, "asleep", asleep)
+	checkStatus(t, "suspended app", err, 400)
+	// A change that breaks a tenant is refused before its image is pulled.
+	acmeSecret := TenantRequest{App: "web", Overrides: spec.Overrides{Secrets: spec.Secrets{"TOKEN": {}}}}
+	if _, err := f.client.Configure(ctx, "acme", acmeSecret); err != nil {
+		t.Fatal(err)
+	}
+	breaking := appSpec()
+	breaking.Image = "ghcr.io/example/missing:2"
+	breaking.Env = map[string]string{"TOKEN": "x"}
+	_, err = f.client.PutApp(ctx, "web", breaking)
+	checkStatus(t, "an app change that breaks a tenant, with an image that cannot be pulled", err, 400)
+	// A change based on an outdated read is refused.
+	current, _ := f.client.Get(ctx, "acme")
+	if _, err := f.client.Configure(ctx, "acme", TenantRequest{App: "web", Generation: current.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.client.Configure(ctx, "acme", TenantRequest{App: "web", Overrides: acmeSecret.Overrides, Generation: current.Generation})
+	checkStatus(t, "an outdated change", err, 409)
 	_, err = f.client.Events(ctx, store.EventQuery{Limit: 5000})
 	checkStatus(t, "event limit", err, 400)
 }
@@ -400,10 +421,13 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
 		t.Fatalf("create over an archived name = %v", err)
 	}
-	_, err = f.client.Configure(ctx, "acme", TenantRequest{App: "web"})
-	checkStatus(t, "configure an archived tenant", err, 409)
+	// An archived tenant can be reconfigured; restore runs the result.
+	archivedConfig := TenantRequest{App: "web", Overrides: spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, Generation: archived[0].Generation}
+	if changed, err := f.client.Configure(ctx, "acme", archivedConfig); err != nil || !changed.Changed {
+		t.Fatalf("configure an archived tenant = %+v, %v", changed, err)
+	}
 	restored, err := f.client.Restore(ctx, "acme")
-	if err != nil || restored.Spec.Suspended {
+	if err != nil || restored.Spec.Suspended || restored.Spec.Env["TZ"] != "UTC" {
 		t.Fatalf("restore = %+v, %v", restored, err)
 	}
 	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
@@ -442,7 +466,7 @@ func TestArchiveRestorePurge(t *testing.T) {
 	for _, e := range events {
 		actions = append(actions, e.Action)
 	}
-	if strings.Join(actions, ",") != "tenant.created,tenant.purged,tenant.archived,tenant.restored,tenant.archived,tenant.created" {
+	if strings.Join(actions, ",") != "tenant.created,tenant.purged,tenant.archived,tenant.archiving,tenant.restored,tenant.updated,tenant.archived,tenant.archiving,tenant.created" {
 		t.Fatalf("events = %v", actions)
 	}
 }

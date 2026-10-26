@@ -13,6 +13,7 @@ import (
 
 	"github.com/PowerPenguini/corral/internal/api"
 	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/corral/internal/store"
 	"github.com/PowerPenguini/corral/internal/strictyaml"
 )
 
@@ -99,11 +100,14 @@ func loadApp(path string) (string, spec.Tenant, error) {
 	if err := strictyaml.Decode(data, &app); err != nil {
 		return "", spec.Tenant{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if err := store.CheckAppSpec(name, app); err != nil {
+		return "", spec.Tenant{}, fmt.Errorf("%s: %w", path, err)
+	}
 	return name, app, nil
 }
 
-// applyApps stores every app, all files read first so a typo in one stops
-// the apply before anything changes. With wait, it then waits for every
+// applyApps stores every app, all files read and checked first so a mistake
+// in one stops the apply before anything changes. With wait, it then waits for every
 // live tenant of the apps, changed or not: a retry after a failed rollout
 // must not pass while a tenant is unhealthy.
 func applyApps(ctx context.Context, client *api.Client, paths []string, wait time.Duration) error {

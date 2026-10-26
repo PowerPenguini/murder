@@ -171,7 +171,7 @@ func (c *Client) Suspend(ctx context.Context, name string, suspended bool) (Tena
 	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+action, nil, &tenant)
 }
 
-// Archive takes a tenant out of service, keeping its data, secrets and spec.
+// Archive takes a tenant out of service, keeping its data, secrets and overrides.
 func (c *Client) Archive(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodPost, tenantPath(name)+"/archive", nil, nil)
 }
@@ -181,7 +181,7 @@ func (c *Client) ListArchived(ctx context.Context) ([]ArchivedTenant, error) {
 	return archived, c.do(ctx, http.MethodGet, "/v1/archive", nil, &archived)
 }
 
-// Restore brings an archived tenant back as it was.
+// Restore brings an archived tenant back on its app's current spec.
 func (c *Client) Restore(ctx context.Context, name string) (Tenant, error) {
 	var tenant Tenant
 	return tenant, c.do(ctx, http.MethodPost, "/v1/archive/"+url.PathEscape(name)+"/restore", nil, &tenant)
