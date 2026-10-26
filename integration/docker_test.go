@@ -77,7 +77,7 @@ func freePort(t *testing.T) int {
 }
 
 type node struct {
-	store      *store.File
+	store      *store.SQLite
 	docker     *runtime.Docker
 	volumes    volume.Dir
 	key        *secrets.Key
@@ -91,16 +91,6 @@ func newNode(t *testing.T, name string) *node {
 	t.Helper()
 	dir := t.TempDir()
 	port := freePort(t)
-	statePath := filepath.Join(dir, "state.json")
-	if err := store.InitFile(statePath, "test-node"); err != nil {
-		t.Fatal(err)
-	}
-	// A pool unlikely to collide with the host's networks.
-	st, err := store.OpenFile(statePath, store.Options{PortFrom: port, PortTo: port, NetworkPool: netip.MustParsePrefix("10.253.0.0/24")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
 	keyPath := filepath.Join(dir, "master.key")
 	if err := secrets.CreateKey(keyPath); err != nil {
 		t.Fatal(err)
@@ -109,6 +99,16 @@ func newNode(t *testing.T, name string) *node {
 	if err != nil {
 		t.Fatal(err)
 	}
+	statePath := filepath.Join(dir, "corral.db")
+	if err := store.Init(statePath, "test-node"); err != nil {
+		t.Fatal(err)
+	}
+	// A pool unlikely to collide with the host's networks.
+	st, err := store.Open(statePath, store.Options{PortFrom: port, PortTo: port, NetworkPool: netip.MustParsePrefix("10.253.0.0/24"), Sealer: key.NewSealed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
 	// A node name of its own keeps this test away from any agent running on
 	// the same engine, and that agent away from this test's objects.
 	n := &node{store: st, docker: runtime.NewDocker(runtime.DockerOptions{Socket: dockerSocket(), Node: name + "-it"}), volumes: volume.Dir{Root: filepath.Join(dir, "tenants")}, key: key, log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
@@ -194,22 +194,26 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 	uid, gid := os.Getuid(), os.Getgid()
 	// A minimal spec: everything else is a default, and the tag is pinned.
 	app := spec.Tenant{
-		Name: tenant, Image: repository + ":v1", HealthPath: "/health",
+		Image: repository + ":v1", HealthPath: "/health",
 		User:    strconv.Itoa(uid) + ":" + strconv.Itoa(gid),
 		Env:     map[string]string{"PUBLIC_URL": "{{url}}", "DATA_DIR": "/data"},
 		Secrets: spec.Secrets{"APP_SECRET": {}},
 		Limits:  spec.Limits{MemoryMB: 64, CPUs: 0.5, PIDs: 64},
 	}
-	applied, err := n.client.Create(ctx, app)
+	stored, err := n.client.PutApp(ctx, "it-app", app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A local-only tag cannot be pulled, so the agent pins the local image:
+	// by ID, or by its content digest where the engine reports one.
+	if !pinnedTo(stored.App.Spec.Image, imageV1) || !strings.Contains(stored.Note, "local image") {
+		t.Fatalf("pinned image = %q (note %q), want the local image %s", stored.App.Spec.Image, stored.Note, imageV1)
+	}
+	applied, err := n.client.Create(ctx, api.TenantRequest{Name: tenant, App: "it-app"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	created := applied.Tenant
-	// A local-only tag cannot be pulled, so the agent pins the local image:
-	// by ID, or by its content digest where the engine reports one.
-	if !pinnedTo(created.Spec.Image, imageV1) || !strings.Contains(applied.Note, "local image") {
-		t.Fatalf("pinned image = %q (note %q), want the local image %s", created.Spec.Image, applied.Note, imageV1)
-	}
 	first := n.waitHealthy(t, n.reconciler, tenant)
 
 	status, body := n.request(t, http.MethodGet, tenant, "/info", "")
@@ -230,13 +234,13 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 		t.Fatalf("write = %d", status)
 	}
 
-	// A new image replaces the container and keeps the data.
+	// A new image of the app replaces the container and keeps the data.
 	app.Image = repository + ":v2"
-	if upgraded, err := n.client.Replace(ctx, app); err != nil || !upgraded.Changed || !pinnedTo(upgraded.Tenant.Spec.Image, imageV2) {
+	if upgraded, err := n.client.PutApp(ctx, "it-app", app); err != nil || !upgraded.Changed || len(upgraded.Tenants) != 1 || !pinnedTo(upgraded.Tenants[0].Spec.Image, imageV2) {
 		t.Fatalf("upgrade = %+v, %v", upgraded, err)
 	}
-	if same, err := n.client.Replace(ctx, app); err != nil || same.Changed {
-		t.Fatalf("applying the same spec again = %+v, %v", same, err)
+	if same, err := n.client.PutApp(ctx, "it-app", app); err != nil || same.Changed {
+		t.Fatalf("applying the same app again = %+v, %v", same, err)
 	}
 	second := n.waitHealthy(t, n.reconciler, tenant)
 	if second.ContainerID == first.ContainerID {

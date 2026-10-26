@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -237,7 +238,8 @@ func (f *fakeVolumes) Remove(ctx context.Context, tenant string) error {
 }
 
 type fixture struct {
-	store      *store.File
+	store      *store.SQLite
+	storePath  string
 	runtime    *fakeRuntime
 	volumes    *fakeVolumes
 	key        *secrets.Key
@@ -262,15 +264,6 @@ func newFixture(t *testing.T) *fixture {
 	})}
 	go server.Serve(listener)
 	t.Cleanup(func() { _ = server.Close() })
-	statePath := filepath.Join(t.TempDir(), "state.json")
-	if err := store.InitFile(statePath, "test-node"); err != nil {
-		t.Fatal(err)
-	}
-	st, err := store.OpenFile(statePath, store.Options{PortFrom: port, PortTo: port, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
 	keyPath := filepath.Join(t.TempDir(), "master.key")
 	if err := secrets.CreateKey(keyPath); err != nil {
 		t.Fatal(err)
@@ -279,35 +272,61 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	statePath := filepath.Join(t.TempDir(), "corral.db")
+	if err := store.Init(statePath, "test-node"); err != nil {
+		t.Fatal(err)
+	}
+	// Every secret gets the same known value, so tests can look for it.
+	sealer := func(tenant, name string, _ spec.Secret) (string, error) {
+		return key.Seal(secrets.Context(tenant, name), "the-secret")
+	}
+	st, err := store.Open(statePath, store.Options{PortFrom: port, PortTo: port, NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: sealer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
 	rt := newFakeRuntime()
 	volumes := &fakeVolumes{Dir: volume.Dir{Root: filepath.Join(t.TempDir(), "tenants")}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := New(st, rt, volumes, key, Config{BaseDomain: "example.test", DefaultLimits: spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128}}, log)
-	return &fixture{store: st, runtime: rt, volumes: volumes, key: key, reconciler: reconciler}
+	return &fixture{store: st, storePath: statePath, runtime: rt, volumes: volumes, key: key, reconciler: reconciler}
 }
 
+// create adds a tenant running an app of its own name, so tests change one
+// tenant by changing its app.
 func (f *fixture) create(t *testing.T, name string) store.Record {
 	t.Helper()
-	tenant := spec.Tenant{
-		Name: name, Image: imageA, Port: 8080, HealthPath: "/health", DataPath: "/data",
+	app := spec.Tenant{
+		Image: imageA, HealthPath: "/health",
 		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		Env:     map[string]string{"PUBLIC_URL": "{{url}}", "TRUSTED_PROXIES": "{{network}}"},
-		Secrets: map[string]spec.Secret{"SESSION_SECRET": {Kind: "hex", Bytes: 32}},
+		Secrets: spec.Secrets{"SESSION_SECRET": {}},
 	}
-	sealed, err := f.key.Seal(secrets.Context(name, "SESSION_SECRET"), "the-secret")
-	if err != nil {
+	if _, err := f.store.PutApp(store.App{Name: name, Spec: app}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	record, err := f.store.Create(store.Record{Spec: tenant, Sealed: map[string]string{"SESSION_SECRET": sealed}})
+	record, err := f.store.Create(store.NewTenant{Name: name, App: name}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return record
 }
 
-func (f *fixture) update(t *testing.T, name string, change func(*store.Record)) {
+func (f *fixture) updateApp(t *testing.T, name string, change func(*spec.Tenant)) {
 	t.Helper()
-	if _, err := f.store.Update(name, func(r *store.Record) error { change(r); return nil }); err != nil {
+	app, err := f.store.App(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change(&app.Spec)
+	if _, err := f.store.PutApp(app, "test"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *fixture) suspend(t *testing.T, name string, suspended bool) {
+	t.Helper()
+	if _, err := f.store.SetSuspended(name, suspended, "test"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -371,7 +390,7 @@ func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 	f.create(t, "acme")
 	f.reconcile(t)
 	old := f.runtime.only(t).ID
-	f.update(t, "acme", func(r *store.Record) { r.Spec.Image = imageB })
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
 	f.runtime.takeEvents()
 	f.reconcile(t)
 	replacement := f.runtime.only(t)
@@ -389,7 +408,7 @@ func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 		t.Fatalf("data image = %q", got.DataImage)
 	}
 	// An env change replaces the container without a snapshot.
-	f.update(t, "acme", func(r *store.Record) { r.Spec.Env["EXTRA"] = "1" })
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Env["EXTRA"] = "1" })
 	f.reconcile(t)
 	if len(f.volumes.snapshots) != 1 {
 		t.Fatalf("an env change took a snapshot: %v", f.volumes.snapshots)
@@ -403,7 +422,7 @@ func TestFailedPullKeepsTheOldContainer(t *testing.T) {
 	f.reconcile(t)
 	old := f.runtime.only(t).ID
 	f.runtime.failPull = errors.New("manifest unknown")
-	f.update(t, "acme", func(r *store.Record) { r.Spec.Image = imageB })
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
 	f.runtime.takeEvents()
 	for range 3 {
 		if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "manifest unknown") {
@@ -429,7 +448,7 @@ func TestFailedSnapshotBlocksTheChangeWithoutAnOutage(t *testing.T) {
 	f.reconcile(t)
 	old := f.runtime.only(t).ID
 	f.volumes.failSnapshot = errors.New("pool is full")
-	f.update(t, "acme", func(r *store.Record) { r.Spec.Image = imageB })
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
 	f.runtime.takeEvents()
 	for range 3 {
 		if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "pool is full") {
@@ -457,7 +476,7 @@ func TestImageChangedWhileSuspendedIsSnapshottedOnResume(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	f.update(t, "acme", func(r *store.Record) { r.Spec.Suspended = true })
+	f.suspend(t, "acme", true)
 	f.reconcile(t)
 	if f.runtime.count() != 0 {
 		t.Fatal("suspended tenant still has containers")
@@ -465,8 +484,8 @@ func TestImageChangedWhileSuspendedIsSnapshottedOnResume(t *testing.T) {
 	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseSuspended {
 		t.Fatalf("status = %+v", status)
 	}
-	f.update(t, "acme", func(r *store.Record) { r.Spec.Image = imageB })
-	f.update(t, "acme", func(r *store.Record) { r.Spec.Suspended = false })
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.suspend(t, "acme", false)
 	f.reconcile(t)
 	if f.runtime.only(t).spec.Image != imageB || !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) {
 		t.Fatalf("resume with a new image: snapshots = %v", f.volumes.snapshots)
@@ -517,12 +536,19 @@ func TestContainerThatExitsDuringThePassIsStarted(t *testing.T) {
 // A spec stored under older, looser rules is reported, not run.
 func TestInvalidStoredSpecIsNotRun(t *testing.T) {
 	f := newFixture(t)
-	path := filepath.Join(t.TempDir(), "legacy.json")
-	legacy := `{"version":2,"node":"n","tenants":{"old":{"spec":{"name":"old","image":"` + imageA + `","port":8080,"healthPath":"/health","dataPath":"/data","user":"","limits":{}},"hostPort":20000,"subnet":"10.240.0.0/28","generation":1}}}`
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+	f.create(t, "old")
+	if err := f.store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.OpenFile(path, store.Options{PortFrom: 20000, PortTo: 20010, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")})
+	db, err := sql.Open("sqlite", "file:"+f.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE apps SET spec = json_set(spec, '$.user', '')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	st, err := store.Open(f.storePath, store.Options{PortFrom: 20000, PortTo: 20010, NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: func(string, string, spec.Secret) (string, error) { return "", nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +579,7 @@ func TestArchiveClearsTheRuntimeAndKeepsTheData(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	if err := f.reconciler.Archive(context.Background(), "acme"); err != nil {
+	if err := f.reconciler.Archive(context.Background(), "acme", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if f.runtime.count() != 0 || f.runtime.networks["corral-acme"] != nil {
@@ -572,7 +598,7 @@ func TestArchiveClearsTheRuntimeAndKeepsTheData(t *testing.T) {
 		t.Fatal("status kept for an archived tenant")
 	}
 	// Restored, it runs again on the same data.
-	if _, err := f.store.Restore("acme"); err != nil {
+	if _, err := f.store.Restore("acme", "test"); err != nil {
 		t.Fatal(err)
 	}
 	f.reconcile(t)
@@ -588,7 +614,7 @@ func TestFailedArchiveCanBeRepeated(t *testing.T) {
 	f.create(t, "acme")
 	f.reconcile(t)
 	f.runtime.failRemove = errors.New("device busy")
-	if err := f.reconciler.Archive(context.Background(), "acme"); err == nil {
+	if err := f.reconciler.Archive(context.Background(), "acme", "test"); err == nil {
 		t.Fatal("Archive reported success while the container remained")
 	}
 	record, err := f.store.Get("acme")
@@ -596,7 +622,7 @@ func TestFailedArchiveCanBeRepeated(t *testing.T) {
 		t.Fatalf("record after a failed archive = %+v, %v", record, err)
 	}
 	f.runtime.failRemove = nil
-	if err := f.reconciler.Archive(context.Background(), "acme"); err != nil {
+	if err := f.reconciler.Archive(context.Background(), "acme", "test"); err != nil {
 		t.Fatal(err)
 	}
 	// The archive remembers the tenant as running, as it was before the
@@ -610,14 +636,14 @@ func TestOrphanNetworkOfAMissingTenantIsRemoved(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	f.update(t, "acme", func(r *store.Record) { r.Spec.Suspended = true })
+	f.suspend(t, "acme", true)
 	f.reconcile(t)
 	if f.runtime.networks["corral-acme"] == nil {
 		t.Fatal("a suspended tenant keeps its network")
 	}
 	// The record disappears without Archive, as after restoring an older
 	// state file: the next pass still removes the network.
-	if err := f.store.Archive("acme"); err != nil {
+	if err := f.store.Archive("acme", "test"); err != nil {
 		t.Fatal(err)
 	}
 	f.reconcile(t)
@@ -630,16 +656,16 @@ func TestPurgeOnlyArchivedTenants(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	if err := f.reconciler.Purge(context.Background(), "acme"); err == nil {
+	if err := f.reconciler.Purge(context.Background(), "acme", "test"); err == nil {
 		t.Fatal("purged a live tenant")
 	}
-	if err := f.reconciler.Archive(context.Background(), "acme"); err != nil {
+	if err := f.reconciler.Archive(context.Background(), "acme", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if exists, _ := f.reconciler.DataExists(context.Background(), "acme"); !exists {
 		t.Fatal("archive removed the data")
 	}
-	if err := f.reconciler.Purge(context.Background(), "acme"); err != nil {
+	if err := f.reconciler.Purge(context.Background(), "acme", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if exists, _ := f.reconciler.DataExists(context.Background(), "acme"); exists {
@@ -677,10 +703,12 @@ func TestSpecHashIsStable(t *testing.T) {
 			t.Fatal("the same spec hashed differently")
 		}
 	}
+	record.Spec.Tmpfs = nil
+	none, _ := f.reconciler.containerSpec(record, "/srv/acme")
 	record.Spec.Tmpfs = map[string]string{}
 	empty, _ := f.reconciler.containerSpec(record, "/srv/acme")
-	if empty.Labels[runtime.LabelHash] != first.Labels[runtime.LabelHash] {
-		t.Fatal("an empty tmpfs map hashed differently from none")
+	if empty.Labels[runtime.LabelHash] != none.Labels[runtime.LabelHash] || none.Labels[runtime.LabelHash] == first.Labels[runtime.LabelHash] {
+		t.Fatal("an empty tmpfs map hashed differently from none, or like the default /tmp")
 	}
 	record.Subnet = "10.240.0.32/28"
 	moved, _ := f.reconciler.containerSpec(record, "/srv/acme")

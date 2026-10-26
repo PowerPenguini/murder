@@ -61,8 +61,11 @@ between servers, is not something they solve.
 
 1. Verify the first app's crash and snapshot recovery (done in the app repo).
 2. Single server: agent, Docker runtime, per-tenant volumes, edge proxy,
-   tenant CLI, encrypted secrets.
-3. Three servers: Raft state, ZFS replication, `drain`.
+   tenant CLI, encrypted secrets. State in SQLite: apps, tenants (an app plus
+   overrides), sealed secrets and an audit log, behind the API a panel will
+   use.
+3. Three servers: Raft replicates the same store changes to every node's
+   SQLite; ZFS replication; `drain`.
 4. Automatic failover: leases, power-off fencing, promotion, alerts.
 5. Wave rollouts with canaries and rollback.
 6. Shared services: provider proxy with per-tenant metering, catalog

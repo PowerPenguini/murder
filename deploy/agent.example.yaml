@@ -1,7 +1,7 @@
 # /etc/corral/agent.yaml
 node: node-fsn-1                   # stored by "corral init" (host name if unset); must match afterwards
 baseDomain: example.com            # tenants live at <tenant>.example.com
-stateFile: /var/lib/corral/state.json
+database: /var/lib/corral/corral.db  # apps, tenants, sealed secrets, audit log (SQLite)
 masterKeyFile: /etc/corral/master.key
 socket: /run/corral/agent.sock
 socketGroup: corral                # members may run the corral CLI without root (they control every tenant)

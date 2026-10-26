@@ -205,7 +205,7 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	// A spec stored under older, looser rules is not run until fixed; its
 	// running container, if any, is left alone.
 	if err := tenant.Validate(); err != nil {
-		return Status{}, fmt.Errorf("stored spec no longer valid; apply a corrected spec: %w", err)
+		return Status{}, fmt.Errorf("stored spec no longer valid; correct the app or the tenant: %w", err)
 	}
 	uid, gid := tenant.Owner()
 	dataPath, mountedNow, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid)
@@ -457,18 +457,18 @@ func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error
 // containers and network go first and the record moves last: a failure
 // leaves a suspended tenant that can be archived again, and its host port
 // and subnet are only reused once nothing holds them.
-func (r *Reconciler) Archive(ctx context.Context, name string) error {
+func (r *Reconciler) Archive(ctx context.Context, name, actor string) error {
 	r.pass.Lock()
 	defer r.pass.Unlock()
 	// Suspended first, so no pass recreates what is removed below; only
 	// this tenant is touched, whatever the others are doing.
-	if _, err := r.store.StartArchive(name); err != nil {
+	if _, err := r.store.StartArchive(name, actor); err != nil {
 		return err
 	}
 	if err := r.clearRuntime(ctx, name); err != nil {
 		return err
 	}
-	if err := r.store.Archive(name); err != nil {
+	if err := r.store.Archive(name, actor); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -480,7 +480,7 @@ func (r *Reconciler) Archive(ctx context.Context, name string) error {
 // Purge deletes an archived tenant for good: its data, snapshots and saved
 // secrets. It also cleans up data no archive entry accounts for. A live
 // tenant must be archived first.
-func (r *Reconciler) Purge(ctx context.Context, name string) error {
+func (r *Reconciler) Purge(ctx context.Context, name, actor string) error {
 	r.pass.Lock()
 	defer r.pass.Unlock()
 	if _, err := r.store.Get(name); err == nil {
@@ -503,7 +503,7 @@ func (r *Reconciler) Purge(ctx context.Context, name string) error {
 	if err := r.volumes.Remove(ctx, name); err != nil {
 		return err
 	}
-	return r.store.Forget(name)
+	return r.store.Forget(name, actor)
 }
 
 // clearRuntime makes sure no container or network of the tenant remains.
