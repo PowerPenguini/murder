@@ -79,10 +79,20 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/v1/tenants/")
 		var request api.TenantRequest
 		_ = json.Unmarshal(body, &request)
-		tenant := a.tenants[name]
+		tenant, live := a.tenants[name]
+		changed := tenant.App != request.App || !tenant.Overrides.Equal(request.Overrides)
+		if !live {
+			for _, entry := range a.archived {
+				if entry.Name == name {
+					changed = entry.App != request.App || !entry.Overrides.Equal(request.Overrides)
+				}
+			}
+		}
 		tenant.App, tenant.Overrides = request.App, request.Overrides
-		a.tenants[name] = tenant
-		_ = json.NewEncoder(w).Encode(api.Applied{Tenant: tenant, Changed: true})
+		if live {
+			a.tenants[name] = tenant
+		}
+		_ = json.NewEncoder(w).Encode(api.Applied{Tenant: tenant, Changed: changed, Archived: !live})
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/tenants":
 		var request api.TenantRequest
 		_ = json.Unmarshal(body, &request)
@@ -223,6 +233,11 @@ func TestTenantSetOnAnArchivedTenant(t *testing.T) {
 	var sent api.TenantRequest
 	if err := json.Unmarshal(agent.bodies["PUT /v1/tenants/old"], &sent); err != nil || sent.Generation != 7 || sent.App != "web" || sent.Overrides.Env["A"] != "1" || sent.Overrides.Env["B"] != "2" {
 		t.Fatalf("sent %+v, %v", sent, err)
+	}
+	// A no-op on an archived tenant does not wait for it to run.
+	out := capture(t)
+	if err := runTenant([]string{"set", "old", "-env", "A=1", "-wait", "5s", "-socket", socket}); err != nil || !strings.Contains(out.String(), "old unchanged; it is archived") {
+		t.Fatalf("no-op set on an archived tenant = %v:\n%s", err, out)
 	}
 	if err := runTenant([]string{"set", "nobody", "-env", "B=2", "-socket", socket}); err == nil {
 		t.Fatal("set on a missing tenant succeeded")

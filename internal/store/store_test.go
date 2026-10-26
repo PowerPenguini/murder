@@ -587,7 +587,7 @@ func TestEventsKeepNoEnvValuesAndShowRollouts(t *testing.T) {
 			t.Fatalf("an env value reached the audit log: %+v", e)
 		}
 	}
-	want := []string{"c tenant.archiving ", "b app.rolled-out changed env", "a tenant.updated overrides: env SMTP_PASSWORD", "a tenant.created overrides: env SMTP_PASSWORD"}
+	want := []string{"c tenant.archiving ", "b app.rolled-out app changed env", "a tenant.updated overrides: env SMTP_PASSWORD", "a tenant.created overrides: env SMTP_PASSWORD"}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("events = %q, want %q", lines, want)
 	}
@@ -654,5 +654,32 @@ func TestOpenTightensTheMode(t *testing.T) {
 	defer st.Close()
 	if info, _ := os.Stat(copyPath); info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v", info.Mode().Perm())
+	}
+}
+
+// A relative database path works, and leftovers of an interrupted init are
+// removed by the next one.
+func TestRelativePathAndInterruptedInit(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	stale := filepath.Join(dir, "state", ".corral-init-123.db")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal"} {
+		if err := os.WriteFile(stale+suffix, []byte("half"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Init(filepath.Join("state", "corral.db"), "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(filepath.Join("state", "corral.db"), options(20000, 20001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if left, _ := filepath.Glob(filepath.Join(dir, "state", ".corral-init-*")); len(left) != 0 {
+		t.Fatalf("init leftovers: %v", left)
 	}
 }

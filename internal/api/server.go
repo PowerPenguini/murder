@@ -54,6 +54,9 @@ type Applied struct {
 	// Note explains how an image was pinned when it fell back to a local
 	// image.
 	Note string `json:"note,omitempty"`
+	// Archived is set for an archived tenant: it runs the change only once
+	// restored.
+	Archived bool `json:"archived,omitempty"`
 }
 
 // App is what the API shows about an app.
@@ -366,7 +369,8 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		s.log.Info("tenant updated", "tenant", name, "app", request.App, "generation", record.Generation, "image", record.Spec.Image)
 	}
-	writeJSON(w, http.StatusOK, Applied{Tenant: s.view(record), Changed: changed, Note: note})
+	_, archived := s.store.ArchivedTenant(name)
+	writeJSON(w, http.StatusOK, Applied{Tenant: s.view(record), Changed: changed, Note: note, Archived: archived})
 }
 
 func (s *Server) suspend(suspended bool) http.HandlerFunc {

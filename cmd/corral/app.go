@@ -13,7 +13,6 @@ import (
 
 	"github.com/PowerPenguini/corral/internal/api"
 	"github.com/PowerPenguini/corral/internal/spec"
-	"github.com/PowerPenguini/corral/internal/store"
 	"github.com/PowerPenguini/corral/internal/strictyaml"
 )
 
@@ -100,7 +99,7 @@ func loadApp(path string) (string, spec.Tenant, error) {
 	if err := strictyaml.Decode(data, &app); err != nil {
 		return "", spec.Tenant{}, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if err := store.CheckAppSpec(name, app); err != nil {
+	if err := spec.CheckApp(name, app, spec.Tenant.ValidateUnpinned); err != nil {
 		return "", spec.Tenant{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return name, app, nil

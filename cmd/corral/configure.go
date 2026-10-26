@@ -125,9 +125,10 @@ func configureTenant(command string, args []string) error {
 	switch {
 	case command == "create":
 		fmt.Fprintf(stdout, "%s created at %s, running app %s (%s)\n", name, result.Tenant.URL, result.Tenant.App, shortImage(result.Tenant.Spec.Image))
-	case result.Changed && result.Tenant.HostPort == 0:
+	case result.Archived && result.Changed:
 		fmt.Fprintf(stdout, "%s updated; it is archived and runs this when restored\n", name)
-		return nil
+	case result.Archived:
+		fmt.Fprintf(stdout, "%s unchanged; it is archived\n", name)
 	case result.Changed:
 		fmt.Fprintf(stdout, "%s updated (%s)\n", name, shortImage(result.Tenant.Spec.Image))
 	default:
@@ -135,6 +136,9 @@ func configureTenant(command string, args []string) error {
 	}
 	if result.Note != "" {
 		fmt.Fprintf(stdout, "note: %s\n", result.Note)
+	}
+	if result.Archived {
+		return nil // nothing runs until it is restored
 	}
 	return waitHealthy(ctx, client, result.Tenant, *wait)
 }

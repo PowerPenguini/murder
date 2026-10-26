@@ -46,11 +46,18 @@ type snapshot struct {
 	apps     map[string]App
 	live     map[string]Record
 	archived map[string]Archived
+	// lastEvent is the newest event the snapshot includes; readers of the
+	// audit log see nothing newer, so no event shows before its change.
+	lastEvent int64
 }
 
 // dsn escapes path, so "#", "?" or "%" in it cannot be read as URI syntax
 // and open another file than the one Init created and Open locks.
 func dsn(path string) string {
+	// A relative path would read as a URI authority.
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
 	uri := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)&_txlock=immediate"}
 	return uri.String()
 }
@@ -72,26 +79,33 @@ func openDB(path string) (*sql.DB, error) {
 
 // Init creates an empty database for node at path, refusing to overwrite
 // one. It is built under a temporary name and linked into place complete, so
-// an interrupted init leaves nothing behind.
+// an interrupted init never leaves a half-made database at path; leftovers
+// of one are removed by the next.
 func Init(path, node string) error {
 	if !nodePattern.MatchString(node) {
 		return fmt.Errorf("node name %q must be 1-63 letters, digits, dots or hyphens", node)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("database %s already exists", path)
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".corral-init-*.db")
+	stale, _ := filepath.Glob(filepath.Join(dir, ".corral-init-*"))
+	for _, file := range stale {
+		_ = os.Remove(file)
+	}
+	temp, err := os.CreateTemp(dir, ".corral-init-*.db") // mode 0600
 	if err != nil {
 		return err
 	}
 	_ = temp.Close()
-	defer os.Remove(temp.Name())
-	if err := os.Chmod(temp.Name(), 0o600); err != nil {
-		return err
-	}
+	defer func() {
+		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+			_ = os.Remove(temp.Name() + suffix)
+		}
+	}()
 	if err := initDB(temp.Name(), node); err != nil {
 		return err
 	}
@@ -100,7 +114,7 @@ func Init(path, node string) error {
 	} else if err != nil {
 		return err
 	}
-	return syncDir(filepath.Dir(path))
+	return syncDir(dir)
 }
 
 // initDB writes the schema and the node name; closing the database folds
@@ -110,17 +124,11 @@ func initDB(path, node string) error {
 	if err != nil {
 		return err
 	}
-	if err := migrate(db); err == nil {
+	err = migrate(db)
+	if err == nil {
 		_, err = db.Exec(`INSERT INTO meta (key, value) VALUES ('node', ?)`, node)
-		if err != nil {
-			_ = db.Close()
-			return err
-		}
-	} else {
-		_ = db.Close()
-		return err
 	}
-	return db.Close()
+	return errors.Join(err, db.Close())
 }
 
 func syncDir(dir string) error {
@@ -151,13 +159,6 @@ func Open(path string, options Options) (*SQLite, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	// Owner-only, even for a database copied into place from a backup; the
-	// write-ahead log files inherit the mode.
-	for _, file := range []string{path, path + "-wal", path + "-shm"} {
-		if err := os.Chmod(file, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-	}
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
@@ -165,6 +166,10 @@ func Open(path string, options Options) (*SQLite, error) {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = lock.Close()
 		return nil, fmt.Errorf("database %s is in use by another agent", path)
+	}
+	if err := ownerOnly(path); err != nil {
+		_ = lock.Close()
+		return nil, err
 	}
 	db, err := openDB(path)
 	if err != nil {
@@ -183,6 +188,29 @@ func Open(path string, options Options) (*SQLite, error) {
 	}
 	s.state.Store(state)
 	return s, nil
+}
+
+// ownerOnly makes a database, and its write-ahead log files, readable by
+// their owner only, as Init creates them: one copied into place from a
+// backup may have come with a wider mode. It changes nothing already
+// private, so a database owned by someone else that is private still opens.
+func ownerOnly(path string) error {
+	for _, file := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(file)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0o077 == 0 {
+			continue
+		}
+		if err := os.Chmod(file, info.Mode().Perm()&0o700); err != nil {
+			return fmt.Errorf("%s is readable by others (mode %v) and cannot be made private: %w", file, info.Mode().Perm(), err)
+		}
+	}
+	return nil
 }
 
 // Close closes the database and releases its lock.
@@ -208,6 +236,9 @@ func load(q querier) (*snapshot, error) {
 	state := &snapshot{apps: map[string]App{}, live: map[string]Record{}, archived: map[string]Archived{}}
 	if err := q.QueryRow(`SELECT value FROM meta WHERE key = 'node'`).Scan(&state.node); err != nil {
 		return nil, fmt.Errorf("read the node name: %w", err)
+	}
+	if err := q.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&state.lastEvent); err != nil {
+		return nil, err
 	}
 	rows, err := q.Query(`SELECT name, spec, created_at, updated_at FROM apps`)
 	if err != nil {
@@ -396,21 +427,6 @@ func normalizeApp(app spec.Tenant) spec.Tenant {
 	return app
 }
 
-// checkApp checks an app spec on its own, as a tenant with no overrides
-// would run it.
-func checkApp(name string, app spec.Tenant, validate func(spec.Tenant) error) error {
-	if err := spec.ValidLabel(name); err != nil {
-		return &spec.ValidationError{Problems: []string{"app name: " + err.Error()}}
-	}
-	if app.Name != "" {
-		return &spec.ValidationError{Problems: []string{"an app spec names no tenant; tenants are created separately"}}
-	}
-	if app.Suspended {
-		return &spec.ValidationError{Problems: []string{"an app cannot be suspended; suspend its tenants"}}
-	}
-	return validate(spec.Compose(app, "app", spec.Overrides{}))
-}
-
 // checkTenants returns the live tenants of app that the new spec would make
 // invalid. A tenant already invalid (under older rules) does not block the
 // app: the reconciler does not run it either way. Archived tenants are
@@ -432,23 +448,17 @@ func checkTenants(state *snapshot, app string, next spec.Tenant, validate func(s
 	return nil
 }
 
-// CheckAppSpec checks an app spec on its own, its image possibly a tag: what
-// a client can check before it talks to the agent.
-func CheckAppSpec(name string, app spec.Tenant) error {
-	return checkApp(name, app, spec.Tenant.ValidateUnpinned)
-}
-
 // CheckApp checks an app whose image may still be a tag, against the
 // tenants it would change: everything worth knowing before pulling.
 func (s *SQLite) CheckApp(app App) error {
-	if err := checkApp(app.Name, app.Spec, spec.Tenant.ValidateUnpinned); err != nil {
+	if err := spec.CheckApp(app.Name, app.Spec, spec.Tenant.ValidateUnpinned); err != nil {
 		return err
 	}
 	return checkTenants(s.state.Load(), app.Name, normalizeApp(app.Spec), spec.Tenant.ValidateUnpinned)
 }
 
 func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
-	if err := checkApp(app.Name, app.Spec, spec.Tenant.Validate); err != nil {
+	if err := spec.CheckApp(app.Name, app.Spec, spec.Tenant.Validate); err != nil {
 		return AppChange{}, err
 	}
 	app.Spec = normalizeApp(app.Spec)
@@ -471,8 +481,9 @@ func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
 			return err
 		}
 		detail := "image " + app.Spec.Image
+		changed := strings.Join(changedFields(existing.Spec, app.Spec), ", ")
 		if found {
-			detail = "changed " + strings.Join(changedFields(existing.Spec, app.Spec), ", ") + "; " + detail
+			detail = "changed " + changed + "; " + detail
 		}
 		for _, name := range slices.Sorted(maps.Keys(current.live)) {
 			record := current.live[name]
@@ -492,7 +503,7 @@ func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
 			}
 			// The tenant's own trail shows the app changes that replaced
 			// its container.
-			if err := event(tx, now, actor, "app.rolled-out", name, app.Name, "changed "+strings.Join(changedFields(record.Spec, composed), ", ")); err != nil {
+			if err := event(tx, now, actor, "app.rolled-out", name, app.Name, "app changed "+changed); err != nil {
 				return err
 			}
 			result.Tenants = append(result.Tenants, name)
@@ -708,7 +719,7 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 			detail = "no overrides"
 		}
 		if record.App != app {
-			detail = strings.TrimSuffix("app "+record.App+" → "+app+"; "+detail, "; ")
+			detail = "app " + record.App + " → " + app + "; " + detail
 		}
 		return event(tx, now, actor, "tenant.updated", name, app, detail)
 	})
@@ -904,9 +915,11 @@ func (s *SQLite) Events(query EventQuery) ([]Event, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	before := query.Before
-	if before <= 0 {
-		before = 1<<63 - 1
+	// Never past the published snapshot: a write commits before its
+	// snapshot is published, and its event must not show before its change.
+	before := s.state.Load().lastEvent + 1
+	if query.Before > 0 && query.Before < before {
+		before = query.Before
 	}
 	// Built per filter, so the tenant and app indexes can serve it.
 	where, args := "id < ?", []any{before}
@@ -916,10 +929,6 @@ func (s *SQLite) Events(query EventQuery) ([]Event, error) {
 	if query.App != "" {
 		where, args = where+" AND app = ?", append(args, query.App)
 	}
-	// Under the writer lock: a write commits before its snapshot is
-	// published, and an event must not be seen before its change.
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.db.Query(`SELECT id, at, actor, action, tenant, app, detail FROM events WHERE `+where+` ORDER BY id DESC LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		return nil, err

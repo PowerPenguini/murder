@@ -39,6 +39,22 @@ func (o Overrides) Equal(other Overrides) bool {
 	return string(a) == string(b)
 }
 
+// CheckApp checks an app spec on its own, as a tenant with no overrides
+// would run it. validate is Tenant.Validate for a pinned image, or
+// Tenant.ValidateUnpinned before the image is pinned.
+func CheckApp(name string, app Tenant, validate func(Tenant) error) error {
+	if err := ValidLabel(name); err != nil {
+		return &ValidationError{Problems: []string{"app name: " + err.Error()}}
+	}
+	if app.Name != "" {
+		return &ValidationError{Problems: []string{"an app spec names no tenant; tenants are created separately"}}
+	}
+	if app.Suspended {
+		return &ValidationError{Problems: []string{"an app cannot be suspended; suspend its tenants"}}
+	}
+	return validate(Compose(app, "app", Overrides{}))
+}
+
 // Compose returns the spec tenant name runs: the app's spec with the
 // tenant's overrides and every default filled in. It does not validate.
 func Compose(app Tenant, name string, overrides Overrides) Tenant {
