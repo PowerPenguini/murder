@@ -13,12 +13,15 @@ import (
 	"strconv"
 
 	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/corral/internal/store"
 )
 
 // Client calls the agent's API over its unix socket.
 type Client struct {
 	http *http.Client
 	base string
+	// Actor, if set, names the person the client acts for in the audit log.
+	Actor string
 }
 
 // NewClient returns a client for the agent listening on socket.
@@ -49,6 +52,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
+	}
+	if c.Actor != "" {
+		request.Header.Set(ActorHeader, c.Actor)
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -100,23 +106,60 @@ func (c *Client) Get(ctx context.Context, name string) (Tenant, error) {
 	return tenant, c.do(ctx, http.MethodGet, tenantPath(name), nil, &tenant)
 }
 
-// Create adds a tenant; the agent fills in defaults and pins the image.
-func (c *Client) Create(ctx context.Context, tenant spec.Tenant) (Applied, error) {
-	var applied Applied
-	return applied, c.do(ctx, http.MethodPost, "/v1/tenants", tenant, &applied)
+func appPath(name string) string { return "/v1/apps/" + url.PathEscape(name) }
+
+func (c *Client) Apps(ctx context.Context) ([]App, error) {
+	var apps []App
+	return apps, c.do(ctx, http.MethodGet, "/v1/apps", nil, &apps)
 }
 
-// Resolve pins an image reference to a digest on the agent's node.
-func (c *Client) Resolve(ctx context.Context, image string) (Resolved, error) {
-	var resolved Resolved
-	return resolved, c.do(ctx, http.MethodPost, "/v1/images/resolve", Resolved{Image: image}, &resolved)
+func (c *Client) App(ctx context.Context, name string) (App, error) {
+	var app App
+	return app, c.do(ctx, http.MethodGet, appPath(name), nil, &app)
 }
 
-// Replace updates a tenant's spec; Applied.Changed is false if nothing
-// changed.
-func (c *Client) Replace(ctx context.Context, tenant spec.Tenant) (Applied, error) {
+// PutApp creates or replaces an app and rolls it out to its tenants; the
+// agent fills in defaults and pins the image.
+func (c *Client) PutApp(ctx context.Context, name string, app spec.Tenant) (AppApplied, error) {
+	var applied AppApplied
+	return applied, c.do(ctx, http.MethodPut, appPath(name), app, &applied)
+}
+
+// DeleteApp removes an app no tenant runs.
+func (c *Client) DeleteApp(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, appPath(name), nil, nil)
+}
+
+// Create adds a tenant of an app.
+func (c *Client) Create(ctx context.Context, request TenantRequest) (Applied, error) {
 	var applied Applied
-	return applied, c.do(ctx, http.MethodPut, tenantPath(tenant.Name), tenant, &applied)
+	return applied, c.do(ctx, http.MethodPost, "/v1/tenants", request, &applied)
+}
+
+// Configure replaces a tenant's app and overrides; Applied.Changed is false
+// if nothing changed.
+func (c *Client) Configure(ctx context.Context, name string, request TenantRequest) (Applied, error) {
+	var applied Applied
+	return applied, c.do(ctx, http.MethodPut, tenantPath(name), request, &applied)
+}
+
+// Events reads the audit log, newest first.
+func (c *Client) Events(ctx context.Context, query store.EventQuery) ([]store.Event, error) {
+	values := url.Values{}
+	if query.Tenant != "" {
+		values.Set("tenant", query.Tenant)
+	}
+	if query.App != "" {
+		values.Set("app", query.App)
+	}
+	if query.Before > 0 {
+		values.Set("before", strconv.FormatInt(query.Before, 10))
+	}
+	if query.Limit > 0 {
+		values.Set("limit", strconv.Itoa(query.Limit))
+	}
+	var events []store.Event
+	return events, c.do(ctx, http.MethodGet, "/v1/events?"+values.Encode(), nil, &events)
 }
 
 func (c *Client) Suspend(ctx context.Context, name string, suspended bool) (Tenant, error) {
@@ -128,7 +171,7 @@ func (c *Client) Suspend(ctx context.Context, name string, suspended bool) (Tena
 	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+action, nil, &tenant)
 }
 
-// Archive takes a tenant out of service, keeping its data, secrets and spec.
+// Archive takes a tenant out of service, keeping its data, secrets and overrides.
 func (c *Client) Archive(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodPost, tenantPath(name)+"/archive", nil, nil)
 }
@@ -138,7 +181,7 @@ func (c *Client) ListArchived(ctx context.Context) ([]ArchivedTenant, error) {
 	return archived, c.do(ctx, http.MethodGet, "/v1/archive", nil, &archived)
 }
 
-// Restore brings an archived tenant back as it was.
+// Restore brings an archived tenant back on its app's current spec.
 func (c *Client) Restore(ctx context.Context, name string) (Tenant, error) {
 	var tenant Tenant
 	return tenant, c.do(ctx, http.MethodPost, "/v1/archive/"+url.PathEscape(name)+"/restore", nil, &tenant)

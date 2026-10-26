@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -92,43 +95,57 @@ func (m *memoryRuntime) Logs(_ context.Context, id string, tail int) ([]byte, er
 
 type apiFixture struct {
 	client     *Client
-	store      *store.File
+	store      *store.SQLite
 	reconciler *reconcile.Reconciler
+	handler    http.Handler
 	dataRoot   string
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
-	statePath := filepath.Join(t.TempDir(), "state.json")
-	if err := store.InitFile(statePath, "test-node"); err != nil {
-		t.Fatal(err)
-	}
-	st, err := store.OpenFile(statePath, store.Options{PortFrom: 20000, PortTo: 20100, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
 	keyPath := filepath.Join(t.TempDir(), "master.key")
 	if err := secrets.CreateKey(keyPath); err != nil {
 		t.Fatal(err)
 	}
 	key, _ := secrets.LoadKey(keyPath)
+	statePath := filepath.Join(t.TempDir(), "corral.db")
+	if err := store.Init(statePath, "test-node"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(statePath, store.Options{PortFrom: 20000, PortTo: 20100, NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: key.NewSealed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
 	rt := &memoryRuntime{}
 	dataRoot := filepath.Join(t.TempDir(), "tenants")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := reconcile.New(st, rt, volume.Dir{Root: dataRoot}, key, reconcile.Config{BaseDomain: "example.test", HealthTimeout: 100 * time.Millisecond}, log)
-	server := httptest.NewServer(NewServer(st, reconciler, rt, key, log).Handler())
+	handler := NewServer(st, reconciler, rt, key, log).Handler()
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return &apiFixture{client: NewClientURL(server.URL), store: st, reconciler: reconciler, dataRoot: dataRoot}
+	return &apiFixture{client: NewClientURL(server.URL), store: st, reconciler: reconciler, handler: handler, dataRoot: dataRoot}
 }
 
-func appSpec(name string) spec.Tenant {
+func appSpec() spec.Tenant {
 	return spec.Tenant{
-		Name: name, Image: "ghcr.io/example/app:1.4", HealthPath: "/health",
+		Image: "ghcr.io/example/app:1.4", HealthPath: "/health",
 		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		Secrets: spec.Secrets{"SESSION_SECRET": {}},
 	}
 }
+
+// withApp is a fixture with app "web" stored.
+func withApp(t *testing.T) *apiFixture {
+	t.Helper()
+	f := newAPIFixture(t)
+	if _, err := f.client.PutApp(context.Background(), "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func tenantOf(name string) TenantRequest { return TenantRequest{Name: name, App: "web"} }
 
 // pinnedTag is how memoryRuntime pins a tag.
 func pinnedTag(ref string) string {
@@ -137,19 +154,72 @@ func pinnedTag(ref string) string {
 	return repository + "@sha256:" + hex.EncodeToString(sum[:])
 }
 
-func TestCreatePinsDefaultsAndHidesSecrets(t *testing.T) {
+func checkStatus(t *testing.T, name string, err error, status int) {
+	t.Helper()
+	apiErr, ok := err.(*Error)
+	if !ok || apiErr.Status != status {
+		t.Errorf("%s: error %v, want HTTP %d", name, err, status)
+	}
+}
+
+func TestAppsArePinnedAndRolledOutToTheirTenants(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
-	applied, err := f.client.Create(ctx, appSpec("acme"))
+	created, err := f.client.PutApp(ctx, "web", appSpec())
+	if err != nil || !created.Created || !created.Changed || created.App.Spec.Image != pinnedTag("ghcr.io/example/app:1.4") || created.App.Spec.Port != 8080 {
+		t.Fatalf("new app = %+v, %v", created, err)
+	}
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
+		t.Fatal(err)
+	}
+	beta := tenantOf("beta")
+	beta.Overrides = spec.Overrides{Env: map[string]string{"TZ": "UTC"}}
+	if _, err := f.client.Create(ctx, beta); err != nil {
+		t.Fatal(err)
+	}
+	same, err := f.client.PutApp(ctx, "web", appSpec())
+	if err != nil || same.Changed || len(same.Tenants) != 0 {
+		t.Fatalf("an unchanged app = %+v, %v", same, err)
+	}
+	next := appSpec()
+	next.Image = "ghcr.io/example/app:1.5"
+	moved, err := f.client.PutApp(ctx, "web", next)
+	if err != nil || !moved.Changed || len(moved.Tenants) != 2 || moved.Tenants[0].Spec.Image != pinnedTag("ghcr.io/example/app:1.5") || moved.Tenants[0].Generation != 2 {
+		t.Fatalf("app upgrade = %+v, %v", moved, err)
+	}
+	if moved.Tenants[1].Spec.Env["TZ"] != "UTC" {
+		t.Fatal("an upgrade dropped a tenant's override")
+	}
+	apps, err := f.client.Apps(ctx)
+	if err != nil || len(apps) != 1 || strings.Join(apps[0].Tenants, ",") != "acme,beta" {
+		t.Fatalf("apps = %+v, %v", apps, err)
+	}
+	checkStatus(t, "delete an app in use", f.client.DeleteApp(ctx, "web"), 409)
+	if _, err := f.client.PutApp(ctx, "spare", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.DeleteApp(ctx, "spare"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.client.App(ctx, "spare")
+	checkStatus(t, "a deleted app", err, 404)
+}
+
+func TestCreatePinsDefaultsAndHidesSecrets(t *testing.T) {
+	f := withApp(t)
+	ctx := context.Background()
+	request := tenantOf("acme")
+	request.Overrides.Image = "ghcr.io/example/app:canary"
+	applied, err := f.client.Create(ctx, request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	created := applied.Tenant
-	if !applied.Changed || created.URL != "https://acme.example.test" || created.HostPort != 20000 || created.Generation != 1 {
+	if !applied.Changed || created.URL != "https://acme.example.test" || created.HostPort != 20000 || created.Generation != 1 || created.App != "web" {
 		t.Fatalf("created = %+v", applied)
 	}
-	if created.Spec.Image != pinnedTag("ghcr.io/example/app:1.4") {
-		t.Fatalf("stored image = %q, want the pinned digest", created.Spec.Image)
+	if created.Spec.Image != pinnedTag("ghcr.io/example/app:canary") || created.Overrides.Image != created.Spec.Image {
+		t.Fatalf("stored image = %q, want the pinned canary", created.Spec.Image)
 	}
 	if created.Spec.Port != 8080 || created.Spec.DataPath != "/data" || created.Spec.Tmpfs["/tmp"] == "" || created.Spec.WritableRoot {
 		t.Fatalf("defaults were not stored: %+v", created.Spec)
@@ -173,135 +243,150 @@ func TestCreatePinsDefaultsAndHidesSecrets(t *testing.T) {
 }
 
 func TestErrorsMapToStatusCodes(t *testing.T) {
-	f := newAPIFixture(t)
+	f := withApp(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
 		t.Fatal(err)
 	}
-	check := func(name string, err error, status int) {
-		t.Helper()
-		apiErr, ok := err.(*Error)
-		if !ok || apiErr.Status != status {
-			t.Errorf("%s: error %v, want HTTP %d", name, err, status)
-		}
-	}
-	_, err := f.client.Create(ctx, appSpec("acme"))
-	check("duplicate", err, 409)
-	if err != nil && !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("duplicate create explains %q", err)
-	}
+	_, err := f.client.Create(ctx, tenantOf("acme"))
+	checkStatus(t, "duplicate", err, 409)
 	_, err = f.client.Get(ctx, "nobody")
-	check("missing", err, 404)
+	checkStatus(t, "missing", err, 404)
 	if !IsNotFound(err) {
 		t.Error("IsNotFound missed a 404")
 	}
-	bad := appSpec("bad")
-	bad.Port = 70000
+	bad := tenantOf("bad")
+	bad.Overrides.Env = map[string]string{"BAD-NAME": "x"}
 	_, err = f.client.Create(ctx, bad)
-	check("invalid spec", err, 400)
-	_, err = f.client.Create(ctx, appSpec("www"))
-	check("reserved name", err, 400)
-	unpinnable := appSpec("nopull")
-	unpinnable.Image = "ghcr.io/example/missing:1"
+	checkStatus(t, "invalid override", err, 400)
+	_, err = f.client.Create(ctx, tenantOf("www"))
+	checkStatus(t, "reserved name", err, 400)
+	_, err = f.client.Create(ctx, TenantRequest{Name: "orphan", App: "nope"})
+	checkStatus(t, "unknown app", err, 404)
+	unpinnable := tenantOf("nopull")
+	unpinnable.Overrides.Image = "ghcr.io/example/missing:1"
 	_, err = f.client.Create(ctx, unpinnable)
-	check("image that cannot be pinned", err, 422)
-	malformed := appSpec("malformed")
-	malformed.Image = "Not An Image"
-	_, err = f.client.Create(ctx, malformed)
-	check("malformed image", err, 400)
-	_, err = f.client.Secret(ctx, "acme", "NOPE")
-	check("missing secret", err, 404)
-	_, err = f.client.Replace(ctx, appSpec("other"))
-	check("replace missing", err, 404)
-	huge := appSpec("acme")
-	huge.Secrets["HUGE"] = spec.Secret{Kind: "password", Bytes: 3_000_000}
-	_, err = f.client.Replace(ctx, huge)
-	check("oversized secret", err, 400)
-	root := appSpec("acme")
-	root.User = "0:0"
-	_, err = f.client.Replace(ctx, root)
-	check("root user", err, 400)
-	err = f.client.Purge(ctx, "acme")
-	check("purge a live tenant", err, 409)
-	_, err = f.client.Restore(ctx, "acme")
-	check("restore a tenant that is not archived", err, 404)
-	err = f.client.Purge(ctx, "acmee")
-	check("purge a name with nothing to purge", err, 404)
-	brokenAndUnpinnable := appSpec("broken")
-	brokenAndUnpinnable.Image = "ghcr.io/example/missing:1"
-	brokenAndUnpinnable.User = "0:0"
+	checkStatus(t, "image that cannot be pinned", err, 422)
+	brokenAndUnpinnable := unpinnable
+	brokenAndUnpinnable.Overrides.Env = map[string]string{"SESSION_SECRET": "clash"}
 	_, err = f.client.Create(ctx, brokenAndUnpinnable)
-	check("an invalid spec is refused before its image is pinned", err, 400)
-	resolved, err := f.client.Resolve(ctx, "ghcr.io/example/app:1.4")
-	if err != nil || resolved.Image != pinnedTag("ghcr.io/example/app:1.4") {
-		t.Errorf("resolve = %+v, %v", resolved, err)
+	checkStatus(t, "an invalid tenant is refused before its image is pinned", err, 400)
+	malformed := tenantOf("malformed")
+	malformed.Overrides.Image = "Not An Image"
+	_, err = f.client.Create(ctx, malformed)
+	checkStatus(t, "malformed image", err, 400)
+	_, err = f.client.Secret(ctx, "acme", "NOPE")
+	checkStatus(t, "missing secret", err, 404)
+	_, err = f.client.Configure(ctx, "other", TenantRequest{App: "web"})
+	checkStatus(t, "configure missing", err, 404)
+	huge := TenantRequest{App: "web", Overrides: spec.Overrides{Secrets: spec.Secrets{"HUGE": {Kind: "password", Bytes: 3_000_000}}}}
+	_, err = f.client.Configure(ctx, "acme", huge)
+	checkStatus(t, "oversized secret", err, 400)
+	checkStatus(t, "purge a live tenant", f.client.Purge(ctx, "acme"), 409)
+	_, err = f.client.Restore(ctx, "acme")
+	checkStatus(t, "restore a live tenant", err, 409)
+	checkStatus(t, "purge a name with nothing to purge", f.client.Purge(ctx, "acmee"), 404)
+	_, err = f.client.Rotate(ctx, "acme", "NOPE")
+	checkStatus(t, "rotate a secret outside the spec", err, 404)
+
+	root := appSpec()
+	root.User = "0:0"
+	_, err = f.client.PutApp(ctx, "rooted", root)
+	checkStatus(t, "root app", err, 400)
+	named := appSpec()
+	named.Name = "acme"
+	_, err = f.client.PutApp(ctx, "named", named)
+	checkStatus(t, "app spec naming a tenant", err, 400)
+	_, err = f.client.PutApp(ctx, "Bad_Name", appSpec())
+	checkStatus(t, "invalid app name", err, 400)
+	missingImage := appSpec()
+	missingImage.Image = "ghcr.io/example/missing:1"
+	_, err = f.client.PutApp(ctx, "nopull", missingImage)
+	checkStatus(t, "app image that cannot be pinned", err, 422)
+	clash := appSpec()
+	clash.Env = map[string]string{"SESSION_SECRET": "x"}
+	_, err = f.client.PutApp(ctx, "web", clash)
+	checkStatus(t, "app change that breaks a tenant", err, 400)
+	checkStatus(t, "delete a missing app", f.client.DeleteApp(ctx, "nope"), 404)
+	asleep := appSpec()
+	asleep.Suspended = true
+	_, err = f.client.PutApp(ctx, "asleep", asleep)
+	checkStatus(t, "suspended app", err, 400)
+	// A change that breaks a tenant is refused before its image is pulled.
+	acmeSecret := TenantRequest{App: "web", Overrides: spec.Overrides{Secrets: spec.Secrets{"TOKEN": {}}}}
+	if _, err := f.client.Configure(ctx, "acme", acmeSecret); err != nil {
+		t.Fatal(err)
 	}
-	_, err = f.client.Resolve(ctx, "ghcr.io/example/missing:1")
-	check("resolve an image that cannot be pinned", err, 422)
-	_, err = f.client.Resolve(ctx, "Not An Image")
-	check("resolve a malformed image", err, 400)
+	breaking := appSpec()
+	breaking.Image = "ghcr.io/example/missing:2"
+	breaking.Env = map[string]string{"TOKEN": "x"}
+	_, err = f.client.PutApp(ctx, "web", breaking)
+	checkStatus(t, "an app change that breaks a tenant, with an image that cannot be pulled", err, 400)
+	// A change based on an outdated read is refused.
+	current, _ := f.client.Get(ctx, "acme")
+	if _, err := f.client.Configure(ctx, "acme", TenantRequest{App: "web", Generation: current.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.client.Configure(ctx, "acme", TenantRequest{App: "web", Overrides: acmeSecret.Overrides, Generation: current.Generation})
+	checkStatus(t, "an outdated change", err, 409)
+	_, err = f.client.Events(ctx, store.EventQuery{Limit: 5000})
+	checkStatus(t, "event limit", err, 400)
 }
 
 // An empty tmpfs map means no tmpfs and must survive the trip to the agent.
 func TestEmptyTmpfsIsKept(t *testing.T) {
 	f := newAPIFixture(t)
-	tenant := appSpec("acme")
-	tenant.WritableRoot = true
-	tenant.Tmpfs = map[string]string{}
-	created, err := f.client.Create(context.Background(), tenant)
+	app := appSpec()
+	app.WritableRoot = true
+	app.Tmpfs = map[string]string{}
+	created, err := f.client.PutApp(context.Background(), "web", app)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Tenant.Spec.Tmpfs == nil || len(created.Tenant.Spec.Tmpfs) != 0 {
-		t.Fatalf("tmpfs = %v, want none", created.Tenant.Spec.Tmpfs)
+	if created.App.Spec.Tmpfs == nil || len(created.App.Spec.Tmpfs) != 0 {
+		t.Fatalf("tmpfs = %v, want none", created.App.Spec.Tmpfs)
 	}
 }
 
-func TestReplaceKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
-	f := newAPIFixture(t)
+func TestConfigureKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
+	f := withApp(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
-	same, err := f.client.Replace(ctx, appSpec("acme"))
+	same, err := f.client.Configure(ctx, "acme", TenantRequest{App: "web"})
 	if err != nil || same.Changed || same.Tenant.Generation != 1 {
-		t.Fatalf("an unchanged spec = %+v, %v", same, err)
+		t.Fatalf("an unchanged tenant = %+v, %v", same, err)
 	}
 	if _, err := f.client.Suspend(ctx, "acme", true); err != nil {
 		t.Fatal(err)
 	}
-	next := appSpec("acme")
-	next.Secrets["ADMIN_PASSWORD"] = spec.Secret{Kind: "password"}
-	next.Env = map[string]string{"MODE": "prod"}
-	replaced, err := f.client.Replace(ctx, next)
+	next := TenantRequest{App: "web", Overrides: spec.Overrides{Env: map[string]string{"MODE": "prod"}, Secrets: spec.Secrets{"ADMIN_PASSWORD": {Kind: "password"}}}}
+	replaced, err := f.client.Configure(ctx, "acme", next)
 	if err != nil || !replaced.Changed || replaced.Tenant.Spec.Env["MODE"] != "prod" {
-		t.Fatalf("replace = %+v, %v", replaced, err)
+		t.Fatalf("configure = %+v, %v", replaced, err)
 	}
 	if !replaced.Tenant.Spec.Suspended {
-		t.Fatal("applying an app spec resumed a suspended tenant")
+		t.Fatal("configuring a tenant resumed it")
 	}
 	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
-		t.Fatal("replace regenerated an existing secret")
+		t.Fatal("configure regenerated an existing secret")
 	}
-	if password, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); err != nil || len(password) != 20 {
+	password, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD")
+	if err != nil || len(password) != 20 {
 		t.Fatalf("new secret = %q, %v", password, err)
 	}
-	// A secret removed from the spec keeps its value, so a mistaken edit
-	// that is reverted gets the same value back.
-	password, _ := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD")
-	delete(next.Secrets, "ADMIN_PASSWORD")
-	if _, err := f.client.Replace(ctx, next); err != nil {
+	// A secret removed and added back keeps its value.
+	if _, err := f.client.Configure(ctx, "acme", TenantRequest{App: "web"}); err != nil {
 		t.Fatal(err)
 	}
-	next.Secrets["ADMIN_PASSWORD"] = spec.Secret{Kind: "password"}
-	if _, err := f.client.Replace(ctx, next); err != nil {
+	if _, err := f.client.Configure(ctx, "acme", next); err != nil {
 		t.Fatal(err)
 	}
 	if again, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); err != nil || again != password {
 		t.Fatalf("a secret removed and added back changed its value: %v", err)
 	}
-	// Rotation is the way to a new value, and it rolls the container.
 	rotated, err := f.client.Rotate(ctx, "acme", "ADMIN_PASSWORD")
 	if err != nil || rotated.Generation <= replaced.Tenant.Generation {
 		t.Fatalf("rotate = %+v, %v", rotated, err)
@@ -309,22 +394,12 @@ func TestReplaceKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
 	if fresh, _ := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); fresh == password || len(fresh) != 20 {
 		t.Fatal("rotate kept the old value")
 	}
-	if _, err := f.client.Rotate(ctx, "acme", "NOT_IN_SPEC"); !IsNotFound(err) {
-		t.Fatalf("rotating a secret outside the spec = %v", err)
-	}
-	// A new tag means a new pinned image.
-	upgraded := appSpec("acme")
-	upgraded.Image = "ghcr.io/example/app:1.5"
-	moved, err := f.client.Replace(ctx, upgraded)
-	if err != nil || !moved.Changed || moved.Tenant.Spec.Image != pinnedTag("ghcr.io/example/app:1.5") {
-		t.Fatalf("tag change = %+v, %v", moved, err)
-	}
 }
 
 func TestArchiveRestorePurge(t *testing.T) {
-	f := newAPIFixture(t)
+	f := withApp(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
 		t.Fatal(err)
 	}
 	_ = f.client.Reconcile(ctx)
@@ -339,15 +414,20 @@ func TestArchiveRestorePurge(t *testing.T) {
 		t.Fatal("an archived tenant still has a route")
 	}
 	archived, err := f.client.ListArchived(ctx)
-	if err != nil || len(archived) != 1 || archived[0].Name != "acme" {
+	if err != nil || len(archived) != 1 || archived[0].Name != "acme" || archived[0].App != "web" {
 		t.Fatalf("archive = %+v, %v", archived, err)
 	}
-	_, err = f.client.Create(ctx, appSpec("acme"))
+	_, err = f.client.Create(ctx, tenantOf("acme"))
 	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
 		t.Fatalf("create over an archived name = %v", err)
 	}
+	// An archived tenant can be reconfigured; restore runs the result.
+	archivedConfig := TenantRequest{App: "web", Overrides: spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, Generation: archived[0].Generation}
+	if changed, err := f.client.Configure(ctx, "acme", archivedConfig); err != nil || !changed.Changed {
+		t.Fatalf("configure an archived tenant = %+v, %v", changed, err)
+	}
 	restored, err := f.client.Restore(ctx, "acme")
-	if err != nil || restored.Spec.Suspended {
+	if err != nil || restored.Spec.Suspended || restored.Spec.Env["TZ"] != "UTC" {
 		t.Fatalf("restore = %+v, %v", restored, err)
 	}
 	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
@@ -368,7 +448,7 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if archived, _ := f.client.ListArchived(ctx); len(archived) != 0 {
 		t.Fatalf("purge left the archive entry: %+v", archived)
 	}
-	fresh, err := f.client.Create(ctx, appSpec("acme"))
+	fresh, err := f.client.Create(ctx, tenantOf("acme"))
 	if err != nil {
 		t.Fatalf("create after purge = %v", err)
 	}
@@ -378,30 +458,41 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if record, _ := f.store.Get(fresh.Tenant.Spec.Name); record.DataImage != "" {
 		t.Fatalf("a fresh tenant inherited the data image %q", record.DataImage)
 	}
+	events, err := f.client.Events(ctx, store.EventQuery{Tenant: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
+	for _, e := range events {
+		actions = append(actions, e.Action)
+	}
+	if strings.Join(actions, ",") != "tenant.created,tenant.purged,tenant.archived,tenant.archiving,tenant.restored,tenant.updated,tenant.archived,tenant.archiving,tenant.created" {
+		t.Fatalf("events = %v", actions)
+	}
 }
 
 // Data no archive entry accounts for blocks a create until it is purged.
 func TestLeftoverDataBlocksCreateUntilPurged(t *testing.T) {
-	f := newAPIFixture(t)
+	f := withApp(t)
 	ctx := context.Background()
 	if err := os.MkdirAll(filepath.Join(f.dataRoot, "acme"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Create(ctx, appSpec("acme")); err == nil || !strings.Contains(err.Error(), "purge it first") {
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err == nil || !strings.Contains(err.Error(), "purge it first") {
 		t.Fatalf("create over leftover data = %v", err)
 	}
 	if err := f.client.Purge(ctx, "acme"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestSuspendLogsAndRoutes(t *testing.T) {
-	f := newAPIFixture(t)
+	f := withApp(t)
 	ctx := context.Background()
-	if _, err := f.client.Create(ctx, appSpec("acme")); err != nil {
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
 		t.Fatal(err)
 	}
 	if suspended, err := f.client.Suspend(ctx, "acme", true); err != nil || !suspended.Spec.Suspended {
@@ -422,5 +513,52 @@ func TestSuspendLogsAndRoutes(t *testing.T) {
 	}
 	if _, ok := (Routes{Store: f.store}).Route("nobody"); ok {
 		t.Fatal("route for a missing tenant")
+	}
+}
+
+// Over the unix socket the audit log names the user at the other end, and
+// the person a client says it acts for next to it.
+func TestEventsNameTheSocketUser(t *testing.T) {
+	f := newAPIFixture(t)
+	socket := filepath.Join(t.TempDir(), "agent.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: f.handler, ConnContext: ConnContext}
+	go server.Serve(listener)
+	t.Cleanup(func() { _ = server.Close() })
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(socket)
+	ctx := context.Background()
+	if _, err := client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	client.Actor = "  alice "
+	if _, err := client.Create(ctx, tenantOf("acme")); err != nil {
+		t.Fatal(err)
+	}
+	events, err := client.Events(ctx, store.EventQuery{Limit: 2})
+	if err != nil || len(events) != 2 {
+		t.Fatalf("events = %+v, %v", events, err)
+	}
+	if events[0].Actor != "alice via "+me.Username || events[0].Action != "tenant.created" {
+		t.Errorf("newest event = %+v", events[0])
+	}
+	if events[1].Actor != me.Username || events[1].Action != "app.created" || events[1].Detail != "image "+pinnedTag("ghcr.io/example/app:1.4") {
+		t.Errorf("first event = %+v", events[1])
+	}
+	if cleanActor("bo\x01b\u200b") != "bob" || len(cleanActor(strings.Repeat("x", 100))) != 64 {
+		t.Error("cleanActor keeps unprintable or overlong names")
+	}
+	// Over TCP nobody is known.
+	if _, err := f.client.Suspend(ctx, "acme", true); err != nil {
+		t.Fatal(err)
+	}
+	if latest, _ := client.Events(ctx, store.EventQuery{Limit: 1}); latest[0].Actor != "unknown" {
+		t.Errorf("TCP event = %+v", latest[0])
 	}
 }

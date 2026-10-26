@@ -23,11 +23,14 @@ Stage 2 — a single server — is what this code does today.
   `X-Forwarded-*` headers. TLS is `off`, `internal` (a local CA, for testing) or
   `acme`, which gets a wildcard certificate through DNS-01 from Hetzner Cloud DNS
   or Namecheap.
-- **Local API.** A unix socket the `corral` CLI talks to.
+- **Local API.** A unix socket the `corral` CLI (and, later, the panel) talks to.
+- **Database.** One SQLite file holds the node's apps, tenants, sealed secrets
+  and an audit log of every change: who (the socket user, plus the person a
+  panel acts for), what and when.
 - **Volumes.** The `zfs` driver gives each tenant a dataset. The `dir` driver
   uses plain directories and is for development.
 - **Secrets.** Generated per tenant and sealed with the node's master key
-  (AES-256-GCM, bound to tenant and name). The state file never holds them in
+  (AES-256-GCM, bound to tenant and name). The database never holds them in
   the clear.
 
 ## Install on a node
@@ -36,7 +39,7 @@ Stage 2 — a single server — is what this code does today.
 sudo install -m 0755 corral /usr/local/bin/corral
 sudo install -d -m 0755 /etc/corral
 sudo install -m 0644 deploy/agent.example.yaml /etc/corral/agent.yaml   # then edit it
-sudo corral init                       # creates the master key (store a copy offline) and an empty state
+sudo corral init                       # creates the master key (store a copy offline) and an empty database
 sudo install -m 0644 deploy/corral-agent.service /etc/systemd/system/
 sudo systemctl enable --now corral-agent
 ```
@@ -48,39 +51,20 @@ everything: install `deploy/docker-after-zfs.conf` as
 late, the agent sees in the container's mount table that it runs on the empty
 directory underneath and replaces it.
 
-The agent refuses to start without its state file. A new node gets one from
+The agent refuses to start without its database. A new node gets one from
 `corral init`; on an existing node a missing file means a broken mount or a
-lost disk, and starting from an empty state would remove every tenant.
+lost disk, and starting from an empty database would remove every tenant.
+Back it up with `sqlite3 /var/lib/corral/corral.db ".backup /path/corral.db"`
+(a plain copy of a live database can be torn), together with the master key.
 
 ## Run tenants
 
-Tenants are declared in a fleet file and applied with one command:
+A tenant runs an **app**: a spec shared by every tenant of it, kept in git and
+applied from CI or by hand. The tenant adds only what is its own: a name and a
+few overrides. Changing an app rolls the change out to all its tenants.
 
-```yaml
-# fleet.yaml
-apps:
-  web: apps/web.yaml            # an app spec (see below), or an inline spec
-tenants:
-  acme: {app: web}
-  beta: {app: web, env: {TZ: Europe/Berlin}, limits: {memoryMB: 768}}
-  gamma: {app: web, image: ghcr.io/example/web:1.5}    # e.g. a canary
-```
-
-```bash
-corral apply fleet.yaml -wait 3m     # create missing tenants, update changed ones
-```
-
-`apply` checks the whole file before it changes anything, pins each image
-once, and reports each tenant as created, updated or unchanged. It never
-removes a tenant: one that is missing from the file is only reported. An
-archived tenant listed in the file has to be restored first. A secret's value
-is generated once and kept, even if the secret leaves the spec and comes
-back, so a mistaken edit cannot lose it; `corral tenant rotate` gives it a
-new value. `-wait` is one budget for the whole fleet. It watches every
-tenant in the file side by side, so a retry after a failed rollout fails
-until the tenants are healthy.
-
-An app spec needs only an image and a user; everything else has a default:
+An app spec needs only an image and a user; everything else has a default.
+The app is named after its file:
 
 ```yaml
 # apps/web.yaml
@@ -93,6 +77,33 @@ env:
 secrets: [SESSION_SECRET]       # 32 random bytes, hex; or a mapping such as ADMIN_PASSWORD: password
 ```
 
+```bash
+corral app apply apps/web.yaml -wait 3m          # store the app; roll it out to its tenants
+corral tenant create acme -app web -wait 3m
+corral tenant create beta -app web -env TZ=Europe/Berlin -memory 768
+corral tenant set gamma -image ghcr.io/example/web:1.5   # a canary
+corral tenant set gamma -app-image                       # back to the app's image
+```
+
+`app apply` reads and checks every file before it changes anything and
+reports each app as created, updated or unchanged, with the tenants the
+change rolls out to. A change that would make a live tenant invalid is
+refused as a whole, before the image is pulled. Archived tenants run the
+app's current spec when restored; one that no longer fits is refused then
+and can be fixed with `tenant set` while archived. `-wait` is
+one budget for all the apps' tenants, watched side by side, so a retry after
+a failed rollout fails until they are healthy.
+
+**Overrides** are the tenant's own `-image`, `-env`, `-secret` and limits
+(`-memory`, `-cpus`, `-pids`). `tenant set` changes only the flags it is
+given, and refuses to overwrite a change someone made since it read the
+tenant; `-unset-env`, `-unset-secret` and `-app-image` drop an override, and a
+limit of 0 goes back to the app's.
+
+**Secrets** get a value once per tenant, stored sealed. A value is kept even
+if the secret leaves the spec and comes back, so a mistaken edit cannot lose
+it; `corral tenant rotate` gives it a new value.
+
 **Defaults:**
 - `port` 8080, `dataPath` /data, `healthPath` /;
 - a read-only root with a 256 MB `/tmp` tmpfs (`writableRoot: true` and `tmpfs` change that);
@@ -103,8 +114,9 @@ secrets: [SESSION_SECRET]       # 32 random bytes, hex; or a mapping such as ADM
 connects from it, so trust it for proxy headers.
 
 **Images:**
-- Tags are pinned to the registry digest when applied, so the next `apply` of
-  an unchanged file keeps the same bytes until the tag moves.
+- Tags are pinned to the registry digest when applied, so tenants keep the
+  same bytes until the next `app apply` (or `tenant set -image`) of a tag
+  that has moved.
 - A tag that only exists locally is pinned to the local image.
 - Private registries need credentials in `registryAuthFile`, a Docker
   `config.json` with an `auths` entry per registry. Credential helpers are not
@@ -114,17 +126,20 @@ connects from it, so trust it for proxy headers.
 Day-to-day operations:
 
 ```bash
-corral tenant list                      # state, health, image, URL
+corral app list                         # apps, their tenants and images
+corral tenant list                      # app, state, health, image, URL
 corral tenant show acme
 corral tenant secret acme ADMIN_PASSWORD
 corral tenant rotate acme ADMIN_PASSWORD -wait 3m   # new value; the container restarts
 corral tenant logs acme -tail 100
 corral tenant suspend acme              # stop it, keep its address (visitors get 503)
 corral tenant resume acme -wait 3m
-corral tenant archive acme              # take it out of service; data, secrets and spec are kept
+corral tenant archive acme              # take it out of service; data, secrets and overrides are kept
 corral tenant list -archived
-corral tenant restore acme -wait 3m     # bring it back exactly as it was
+corral tenant restore acme -wait 3m     # back with its data, secrets and overrides, on the app's current spec
 corral tenant purge acme -yes           # delete an archived tenant and its data for good
+corral app delete web                   # once no tenant (live or archived) runs it
+corral events -tenant acme              # the audit log: who changed what, and when
 ```
 
 An archive that fails leaves the tenant suspended; run it again. A new
@@ -173,5 +188,6 @@ through Corral's real components:
   replicated log.
 - **Failing pulls.** A pull that keeps failing is retried on every pass,
   without backoff.
-- **Registry access during apply.** Tags are pinned when `apply` runs, so
-  `apply` needs registry access for tags that are not yet local.
+- **Registry access during apply.** Tags are pinned when an app is applied
+  (or a tenant's image is set), which needs registry access for tags that are
+  not yet local.

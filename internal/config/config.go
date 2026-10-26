@@ -22,12 +22,13 @@ import (
 type Agent struct {
 	// Node names this node; the agent only manages Docker objects carrying
 	// its node label. "corral init" stores it in the state (the host name if
-	// unset here); afterwards the state decides and a different value here is
-	// an error, so renaming the host changes nothing.
+	// unset here); afterwards the database decides and a different value
+	// here is an error, so renaming the host changes nothing.
 	Node string `yaml:"node"`
 	// BaseDomain is the domain tenants live below: <tenant>.<BaseDomain>.
-	BaseDomain    string `yaml:"baseDomain"`
-	StateFile     string `yaml:"stateFile"`
+	BaseDomain string `yaml:"baseDomain"`
+	// Database holds the node's apps, tenants, secrets and audit log.
+	Database      string `yaml:"database"`
 	MasterKeyFile string `yaml:"masterKeyFile"`
 	// Socket is the local API the CLI talks to. SocketGroup, if set, may use
 	// it besides root.
@@ -95,7 +96,7 @@ func Load(path string) (Agent, error) {
 // Parse reads a configuration and fills in defaults.
 func Parse(data []byte) (Agent, error) {
 	agent := Agent{
-		StateFile:         "/var/lib/corral/state.json",
+		Database:          "/var/lib/corral/corral.db",
 		MasterKeyFile:     "/etc/corral/master.key",
 		Socket:            "/run/corral/agent.sock",
 		DockerSocket:      "/var/run/docker.sock",

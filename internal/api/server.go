@@ -1,4 +1,5 @@
-// Package api is the agent's local HTTP API on a unix socket, used by the CLI.
+// Package api is the agent's local HTTP API on a unix socket, used by the CLI
+// and, later, by the panel.
 package api
 
 import (
@@ -8,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net/http"
 	"strconv"
 	"time"
@@ -23,7 +23,10 @@ import (
 
 // Tenant is what the API shows about a tenant. Secret values never appear.
 type Tenant struct {
+	// Spec is what the tenant runs: its app's spec with its overrides.
 	Spec       spec.Tenant       `json:"spec"`
+	App        string            `json:"app"`
+	Overrides  spec.Overrides    `json:"overrides"`
 	Host       string            `json:"host"`
 	URL        string            `json:"url"`
 	HostPort   int               `json:"hostPort"`
@@ -33,22 +36,58 @@ type Tenant struct {
 	Status     *reconcile.Status `json:"status,omitempty"`
 }
 
-// Applied is the result of creating or updating a tenant.
+// TenantRequest creates a tenant (with Name) or reconfigures one.
+type TenantRequest struct {
+	Name      string         `json:"name,omitempty"`
+	App       string         `json:"app"`
+	Overrides spec.Overrides `json:"overrides"`
+	// Generation, when reconfiguring, is the generation the client read; a
+	// tenant changed since is refused with 409 instead of overwritten.
+	Generation int64 `json:"generation,omitempty"`
+}
+
+// Applied is the result of creating or reconfiguring a tenant.
 type Applied struct {
 	Tenant Tenant `json:"tenant"`
-	// Changed is false when the update matched what was stored.
+	// Changed is false when the request matched what was stored.
 	Changed bool `json:"changed"`
-	// Note explains how the image was pinned when it fell back to a local
+	// Note explains how an image was pinned when it fell back to a local
 	// image.
 	Note string `json:"note,omitempty"`
+	// Archived is set for an archived tenant: it runs the change only once
+	// restored.
+	Archived bool `json:"archived,omitempty"`
+}
+
+// App is what the API shows about an app.
+type App struct {
+	Name string      `json:"name"`
+	Spec spec.Tenant `json:"spec"`
+	// Tenants are the live tenants running the app.
+	Tenants   []string  `json:"tenants"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// AppApplied is the result of storing an app.
+type AppApplied struct {
+	App     App  `json:"app"`
+	Created bool `json:"created"`
+	Changed bool `json:"changed"`
+	// Tenants are the live tenants the change rolls out to.
+	Tenants []Tenant `json:"tenants"`
+	Note    string   `json:"note,omitempty"`
 }
 
 // ArchivedTenant is what the API shows about an archived tenant.
 type ArchivedTenant struct {
-	Name       string    `json:"name"`
-	Image      string    `json:"image"`
-	Suspended  bool      `json:"suspended"`
-	ArchivedAt time.Time `json:"archivedAt"`
+	Name       string         `json:"name"`
+	App        string         `json:"app"`
+	Overrides  spec.Overrides `json:"overrides"`
+	Image      string         `json:"image"`
+	Suspended  bool           `json:"suspended"`
+	Generation int64          `json:"generation"`
+	ArchivedAt time.Time      `json:"archivedAt"`
 }
 
 // SecretValue carries one secret to an operator.
@@ -73,10 +112,14 @@ func NewServer(st store.Store, reconciler *reconcile.Reconciler, rt runtime.Runt
 // Handler routes API requests.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/apps", s.listApps)
+	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
+	mux.HandleFunc("PUT /v1/apps/{name}", s.putApp)
+	mux.HandleFunc("DELETE /v1/apps/{name}", s.deleteApp)
 	mux.HandleFunc("GET /v1/tenants", s.list)
 	mux.HandleFunc("POST /v1/tenants", s.create)
 	mux.HandleFunc("GET /v1/tenants/{name}", s.get)
-	mux.HandleFunc("PUT /v1/tenants/{name}", s.replace)
+	mux.HandleFunc("PUT /v1/tenants/{name}", s.configure)
 	mux.HandleFunc("POST /v1/tenants/{name}/suspend", s.suspend(true))
 	mux.HandleFunc("POST /v1/tenants/{name}/resume", s.suspend(false))
 	mux.HandleFunc("POST /v1/tenants/{name}/archive", s.archive)
@@ -86,20 +129,103 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/archive", s.listArchived)
 	mux.HandleFunc("POST /v1/archive/{name}/restore", s.restore)
 	mux.HandleFunc("DELETE /v1/archive/{name}", s.purge)
-	mux.HandleFunc("POST /v1/images/resolve", s.resolveImage)
+	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
 	return mux
 }
 
 func (s *Server) view(record store.Record) Tenant {
 	view := Tenant{
-		Spec: record.Spec, Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
+		Spec: record.Spec, App: record.App, Overrides: record.Overrides,
+		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		HostPort: record.HostPort, Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
 	}
 	if status, ok := s.reconciler.Status(record.Spec.Name); ok {
 		view.Status = &status
 	}
 	return view
+}
+
+func (s *Server) appView(app store.App) App {
+	view := App{Name: app.Name, Spec: app.Spec, Tenants: []string{}, CreatedAt: app.CreatedAt, UpdatedAt: app.UpdatedAt}
+	for _, record := range s.store.List() {
+		if record.App == app.Name {
+			view.Tenants = append(view.Tenants, record.Spec.Name)
+		}
+	}
+	return view
+}
+
+func (s *Server) listApps(w http.ResponseWriter, _ *http.Request) {
+	apps := s.store.Apps()
+	views := make([]App, 0, len(apps))
+	for _, app := range apps {
+		views = append(views, s.appView(app))
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *Server) getApp(w http.ResponseWriter, r *http.Request) {
+	app, err := s.store.App(r.PathValue("name"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.appView(app))
+}
+
+// putApp stores an app and rolls it out to its tenants. Everything but the
+// image pin is checked first, so a broken spec never waits for a pull; the
+// pull runs on the request's context, so a client that gives up cancels it.
+func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var app spec.Tenant
+	if !readJSON(w, r, &app) {
+		return
+	}
+	if err := s.store.CheckApp(store.App{Name: name, Spec: app}); err != nil {
+		writeError(w, err)
+		return
+	}
+	pinned, note, err := s.resolve(r.Context(), app.Image)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	app.Image = pinned
+	if err := r.Context().Err(); err != nil {
+		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
+		return
+	}
+	change, err := s.store.PutApp(store.App{Name: name, Spec: app}, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	result := AppApplied{App: s.appView(change.App), Created: change.Created, Changed: change.Changed, Tenants: []Tenant{}, Note: note}
+	for _, tenant := range change.Tenants {
+		if record, err := s.store.Get(tenant); err == nil {
+			result.Tenants = append(result.Tenants, s.view(record))
+		}
+	}
+	if change.Changed {
+		s.log.Info("app stored", "app", name, "image", app.Image, "tenants", change.Tenants)
+	}
+	status := http.StatusOK
+	if change.Created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, result)
+}
+
+func (s *Server) deleteApp(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := s.store.DeleteApp(name, actor(r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.log.Info("app deleted", "app", name)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) list(w http.ResponseWriter, _ *http.Request) {
@@ -112,36 +238,16 @@ func (s *Server) list(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
-	record, err := s.store.Get(r.PathValue("name"))
+	name := r.PathValue("name")
+	record, err := s.store.Get(name)
+	if _, archived := s.store.ArchivedTenant(name); err != nil && archived {
+		err = notFound(fmt.Errorf("tenant %s is archived; restore it first", name))
+	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.view(record))
-}
-
-// prepare fills in defaults, validates and pins the image: what every spec
-// goes through before it is stored. Everything but the pin is checked first,
-// so a broken spec never waits for a pull. ctx is the request's own: a
-// client that gives up cancels the pull.
-func (s *Server) prepare(ctx context.Context, tenant spec.Tenant) (spec.Tenant, string, error) {
-	tenant = tenant.WithDefaults()
-	tenant.Suspended = false
-	if err := spec.ValidReference(tenant.Image); err != nil {
-		return spec.Tenant{}, "", badRequest(err)
-	}
-	if err := tenant.ValidateUnpinned(); err != nil {
-		return spec.Tenant{}, "", badRequest(err)
-	}
-	pinned, note, err := s.resolve(ctx, tenant.Image)
-	if err != nil {
-		return spec.Tenant{}, "", err
-	}
-	tenant.Image = pinned
-	if err := tenant.Validate(); err != nil {
-		return spec.Tenant{}, "", badRequest(err)
-	}
-	return tenant, note, nil
 }
 
 func (s *Server) resolve(ctx context.Context, image string) (string, string, error) {
@@ -152,42 +258,41 @@ func (s *Server) resolve(ctx context.Context, image string) (string, string, err
 	return pinned, note, nil
 }
 
-// Resolved is an image reference pinned to a digest.
-type Resolved struct {
-	Image string `json:"image"`
-	// Note explains a fallback to a local image.
-	Note string `json:"note,omitempty"`
-}
-
-// resolveImage pins one reference, so a client applying many tenants of one
-// app pulls once and pins them all to the same digest.
-func (s *Server) resolveImage(w http.ResponseWriter, r *http.Request) {
-	var request Resolved
-	if !readJSON(w, r, &request) {
-		return
-	}
-	if err := spec.ValidReference(request.Image); err != nil {
-		writeError(w, badRequest(err))
-		return
-	}
-	pinned, note, err := s.resolve(r.Context(), request.Image)
+// prepareOverrides checks what a tenant of app with overrides would run and
+// pins an image override, before anything is stored.
+func (s *Server) prepareOverrides(r *http.Request, name, appName string, overrides spec.Overrides) (spec.Overrides, string, error) {
+	app, err := s.store.App(appName)
 	if err != nil {
-		writeError(w, err)
-		return
+		return spec.Overrides{}, "", err
 	}
-	writeJSON(w, http.StatusOK, Resolved{Image: pinned, Note: note})
+	if overrides.Image != "" {
+		if err := spec.ValidReference(overrides.Image); err != nil {
+			return spec.Overrides{}, "", badRequest(err)
+		}
+	}
+	if err := spec.Compose(app.Spec, name, overrides).ValidateUnpinned(); err != nil {
+		return spec.Overrides{}, "", badRequest(err)
+	}
+	note := ""
+	if overrides.Image != "" {
+		overrides.Image, note, err = s.resolve(r.Context(), overrides.Image)
+		if err != nil {
+			return spec.Overrides{}, "", err
+		}
+	}
+	return overrides, note, nil
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
-	var tenant spec.Tenant
-	if !readJSON(w, r, &tenant) {
+	var request TenantRequest
+	if !readJSON(w, r, &request) {
 		return
 	}
-	if err := spec.ValidName(tenant.Name); err != nil {
+	if err := spec.ValidName(request.Name); err != nil {
 		writeError(w, badRequest(err))
 		return
 	}
-	tenant, note, err := s.prepare(r.Context(), tenant)
+	overrides, note, err := s.prepareOverrides(r, request.Name, request.App, request.Overrides)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -201,108 +306,76 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		if err := r.Context().Err(); err != nil {
 			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err))
 		}
-		if _, err := s.store.Get(tenant.Name); err == nil {
+		if _, err := s.store.Get(request.Name); err == nil {
 			return store.ErrExists
 		}
-		if _, archived := s.store.ArchivedTenant(tenant.Name); archived {
+		if _, archived := s.store.ArchivedTenant(request.Name); archived {
 			return store.ErrArchived
 		}
-		exists, err := s.reconciler.DataExists(ctx, tenant.Name)
+		exists, err := s.reconciler.DataExists(ctx, request.Name)
 		if err != nil {
 			return err
 		}
 		if exists {
-			return statusError{http.StatusConflict, fmt.Errorf("data of an earlier tenant %s is on this node but not in the archive; purge it first", tenant.Name)}
+			return statusError{http.StatusConflict, fmt.Errorf("data of an earlier tenant %s is on this node but not in the archive; purge it first", request.Name)}
 		}
-		sealed, err := s.sealMissing(tenant, nil)
-		if err != nil {
-			return err
-		}
-		record, err = s.store.Create(store.Record{Spec: tenant, Sealed: sealed})
+		record, err = s.store.Create(store.NewTenant{Name: request.Name, App: request.App, Overrides: overrides}, actor(r))
 		return err
 	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	s.log.Info("tenant created", "tenant", tenant.Name, "image", tenant.Image)
+	s.log.Info("tenant created", "tenant", request.Name, "app", request.App, "image", record.Spec.Image)
 	writeJSON(w, http.StatusCreated, Applied{Tenant: s.view(record), Changed: true, Note: note})
 }
 
-// replace swaps the spec. Secrets keep their values; new secret names get
-// generated values, and the values of removed names are kept too, so a
-// mistaken edit to an app spec cannot destroy them (only a purge does).
-// Suspension is operational
-// state, not part of an app spec, so it is kept as it was. A spec equal to
-// the stored one changes nothing, not even the generation.
-func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
+// configure gives a tenant, live or archived, another app or other
+// overrides. The request replaces both; omitted overrides are dropped. With
+// a generation it is refused if the tenant changed since the client read
+// it. Suspension is operational state and stays as it is. A request equal
+// to what is stored changes nothing, not even the generation.
+func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	var tenant spec.Tenant
-	if !readJSON(w, r, &tenant) {
+	var request TenantRequest
+	if !readJSON(w, r, &request) {
 		return
 	}
-	if tenant.Name != name {
-		writeError(w, badRequest(fmt.Errorf("spec name %q does not match tenant %q", tenant.Name, name)))
+	if request.Name != "" && request.Name != name {
+		writeError(w, badRequest(fmt.Errorf("request names tenant %q, not %q", request.Name, name)))
 		return
 	}
-	tenant, note, err := s.prepare(r.Context(), tenant)
+	_, liveErr := s.store.Get(name)
+	if _, archived := s.store.ArchivedTenant(name); liveErr != nil && !archived {
+		writeError(w, liveErr)
+		return
+	}
+	// Checked against what exists now; the store checks again when it
+	// writes.
+	overrides, note, err := s.prepareOverrides(r, name, request.App, request.Overrides)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	current, err := s.store.Get(name)
+	if err := r.Context().Err(); err != nil {
+		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
+		return
+	}
+	record, changed, err := s.store.Configure(name, request.App, overrides, request.Generation, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	tenant.Suspended = current.Spec.Suspended
-	if tenant.Equal(current.Spec) {
-		writeJSON(w, http.StatusOK, Applied{Tenant: s.view(current), Changed: false, Note: note})
-		return
+	if changed {
+		s.log.Info("tenant updated", "tenant", name, "app", request.App, "generation", record.Generation, "image", record.Spec.Image)
 	}
-	record, err := s.store.Update(name, func(record *store.Record) error {
-		if err := r.Context().Err(); err != nil {
-			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err))
-		}
-		sealed, err := s.sealMissing(tenant, record.Sealed)
-		if err != nil {
-			return err
-		}
-		tenant.Suspended = record.Spec.Suspended
-		record.Spec, record.Sealed = tenant, sealed
-		return nil
-	})
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	s.log.Info("tenant updated", "tenant", name, "generation", record.Generation, "image", tenant.Image)
-	writeJSON(w, http.StatusOK, Applied{Tenant: s.view(record), Changed: true, Note: note})
-}
-
-func (s *Server) sealMissing(tenant spec.Tenant, existing map[string]string) (map[string]string, error) {
-	sealed := maps.Clone(existing)
-	if sealed == nil {
-		sealed = map[string]string{}
-	}
-	for name, secret := range tenant.Secrets {
-		if _, ok := sealed[name]; ok {
-			continue
-		}
-		plain, err := secrets.Generate(secret)
-		if err != nil {
-			return nil, err
-		}
-		if sealed[name], err = s.key.Seal(secrets.Context(tenant.Name, name), plain); err != nil {
-			return nil, err
-		}
-	}
-	return sealed, nil
+	_, archived := s.store.ArchivedTenant(name)
+	writeJSON(w, http.StatusOK, Applied{Tenant: s.view(record), Changed: changed, Note: note, Archived: archived})
 }
 
 func (s *Server) suspend(suspended bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		record, err := s.store.SetSuspended(r.PathValue("name"), suspended)
+		record, err := s.store.SetSuspended(r.PathValue("name"), suspended, actor(r))
 		if err != nil {
 			writeError(w, err)
 			return
@@ -318,7 +391,7 @@ func (s *Server) archive(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	ctx, cancel := detached(r)
 	defer cancel()
-	if err := s.reconciler.Archive(ctx, name); err != nil {
+	if err := s.reconciler.Archive(ctx, name, actor(r)); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -330,7 +403,8 @@ func (s *Server) listArchived(w http.ResponseWriter, _ *http.Request) {
 	archived := s.store.ListArchived()
 	views := make([]ArchivedTenant, 0, len(archived))
 	for _, entry := range archived {
-		views = append(views, ArchivedTenant{Name: entry.Record.Spec.Name, Image: entry.Record.Spec.Image, Suspended: entry.Record.Spec.Suspended, ArchivedAt: entry.ArchivedAt})
+		record := entry.Record
+		views = append(views, ArchivedTenant{Name: record.Spec.Name, App: record.App, Overrides: record.Overrides, Image: record.Spec.Image, Suspended: record.Spec.Suspended, Generation: record.Generation, ArchivedAt: entry.ArchivedAt})
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -340,7 +414,7 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 	var record store.Record
 	err := s.reconciler.Exclusive(func() error {
 		var err error
-		record, err = s.store.Restore(name)
+		record, err = s.store.Restore(name, actor(r))
 		return err
 	})
 	if err != nil {
@@ -360,7 +434,7 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := detached(r)
 	defer cancel()
-	if err := s.reconciler.Purge(ctx, name); err != nil {
+	if err := s.reconciler.Purge(ctx, name, actor(r)); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -391,7 +465,7 @@ func (s *Server) secret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	s.log.Info("secret read", "tenant", name, "secret", key)
+	s.log.Info("secret read", "tenant", name, "secret", key, "actor", actor(r))
 	writeJSON(w, http.StatusOK, SecretValue{Value: value})
 }
 
@@ -400,25 +474,7 @@ func (s *Server) secret(w http.ResponseWriter, r *http.Request) {
 // a secret leaves the spec and comes back.
 func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	name, key := r.PathValue("name"), r.PathValue("key")
-	record, err := s.store.Update(name, func(record *store.Record) error {
-		secret, ok := record.Spec.Secrets[key]
-		if !ok {
-			return notFound(fmt.Errorf("tenant %s has no secret %s in its spec", name, key))
-		}
-		plain, err := secrets.Generate(secret)
-		if err != nil {
-			return err
-		}
-		sealed, err := s.key.Seal(secrets.Context(name, key), plain)
-		if err != nil {
-			return err
-		}
-		if record.Sealed == nil {
-			record.Sealed = map[string]string{}
-		}
-		record.Sealed[key] = sealed
-		return nil
-	})
+	record, err := s.store.Rotate(name, key, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -454,6 +510,34 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write(output)
+}
+
+// events returns the audit log, newest first: ?tenant=, ?app=, ?before=ID
+// for the next page and ?limit= (at most 1000).
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	query := store.EventQuery{Tenant: r.URL.Query().Get("tenant"), App: r.URL.Query().Get("app")}
+	if value := r.URL.Query().Get("before"); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || parsed < 1 {
+			writeError(w, badRequest(errors.New("before must be a positive event ID")))
+			return
+		}
+		query.Before = parsed
+	}
+	if value := r.URL.Query().Get("limit"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > 1000 {
+			writeError(w, badRequest(errors.New("limit must be 1-1000")))
+			return
+		}
+		query.Limit = parsed
+	}
+	events, err := s.store.Events(query)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
 }
 
 func (s *Server) reconcileNow(w http.ResponseWriter, r *http.Request) {
@@ -506,7 +590,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = typed.status
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrNotArchived):
+	case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrNotArchived), errors.Is(err, store.ErrInUse), errors.Is(err, store.ErrConflict):
 		status = http.StatusConflict
 	case errors.As(err, new(*spec.ValidationError)):
 		status = http.StatusBadRequest

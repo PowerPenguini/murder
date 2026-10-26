@@ -184,3 +184,37 @@ func TestRenderReplacesPlaceholders(t *testing.T) {
 		t.Error("Render changed the spec")
 	}
 }
+
+func TestComposeAppliesOverridesWithoutChangingTheApp(t *testing.T) {
+	app := Tenant{
+		Image: "ghcr.io/example/app@" + digest, User: "10001:10001",
+		Env: map[string]string{"MODE": "prod", "TZ": "UTC"}, Secrets: Secrets{"SESSION_SECRET": {}},
+		Limits: Limits{MemoryMB: 512, CPUs: 1},
+	}
+	beta := Compose(app, "beta", Overrides{
+		Image: "ghcr.io/example/app:canary", Env: map[string]string{"TZ": "Europe/Berlin"},
+		Secrets: Secrets{"EXTRA": {Kind: "password"}}, Limits: Limits{MemoryMB: 768},
+	})
+	if beta.Name != "beta" || beta.Image != "ghcr.io/example/app:canary" || beta.Env["TZ"] != "Europe/Berlin" || beta.Env["MODE"] != "prod" {
+		t.Fatalf("beta = %+v", beta)
+	}
+	if beta.Limits.MemoryMB != 768 || beta.Limits.CPUs != 1 || beta.Secrets["EXTRA"].Bytes != 20 || beta.Secrets["SESSION_SECRET"].Bytes != 32 {
+		t.Fatalf("beta limits or secrets = %+v %+v", beta.Limits, beta.Secrets)
+	}
+	acme := Compose(app, "acme", Overrides{})
+	if acme.Env["TZ"] != "UTC" || len(acme.Secrets) != 1 || acme.Image != app.Image || acme.Port != DefaultPort {
+		t.Fatalf("an override leaked into another tenant, or defaults are missing: %+v", acme)
+	}
+	if app.Env["TZ"] != "UTC" || len(app.Secrets) != 1 {
+		t.Fatal("Compose changed the app")
+	}
+}
+
+func TestOverridesCompareNormalized(t *testing.T) {
+	if !(Overrides{Env: map[string]string{}, Secrets: Secrets{"A": {}}}).Equal(Overrides{Secrets: Secrets{"A": {Kind: "hex", Bytes: 32}}}) {
+		t.Fatal("equivalent overrides differ")
+	}
+	if (Overrides{Image: "a:1"}).Equal(Overrides{}) {
+		t.Fatal("different overrides are equal")
+	}
+}

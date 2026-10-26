@@ -117,6 +117,15 @@ func (k *Key) Open(context, sealed string) (string, error) {
 // Context names the sealing context of one tenant secret.
 func Context(tenant, name string) string { return tenant + "/" + name }
 
+// NewSealed generates a value for one secret of tenant and seals it with k.
+func (k *Key) NewSealed(tenant, name string, secret spec.Secret) (string, error) {
+	plain, err := Generate(secret)
+	if err != nil {
+		return "", err
+	}
+	return k.Seal(Context(tenant, name), plain)
+}
+
 // passwordAlphabet leaves out characters that are easy to misread.
 const passwordAlphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 

@@ -15,26 +15,36 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/corral/internal/api"
-	"github.com/PowerPenguini/corral/internal/fleet"
 	"github.com/PowerPenguini/corral/internal/reconcile"
 )
 
 const tenantUsage = `Usage: corral tenant <command> [options]
 
+  create NAME -app APP [overrides]   add a tenant running an app
+  set NAME [-app APP] [overrides]    change a tenant's app or overrides
   list [-archived]       list tenants (or archived tenants) and their state
   show NAME              print a tenant as JSON
   suspend NAME           stop a tenant, keeping its address (visitors get 503)
   resume NAME            start a suspended tenant again
-  archive NAME           take a tenant out of service, keeping data, secrets and spec
-  restore NAME           bring an archived tenant back as it was
+  archive NAME           take a tenant out of service, keeping data, secrets and overrides
+  restore NAME           bring an archived tenant back with its data and secrets
   purge NAME -yes        delete an archived tenant and its data for good
   secret NAME KEY        print one generated secret
   rotate NAME KEY        give a secret a new value (the container restarts)
   logs NAME [-tail N]    print the container's recent output
 
-Tenants are created and changed with "corral apply FLEET.yaml".
+Overrides (repeatable where it makes sense; set changes only what is given):
+  -image REF             run this image instead of the app's (a canary)
+  -app-image             (set) drop the image override
+  -env KEY=VALUE         add or replace an env value
+  -unset-env KEY         (set) drop an env override
+  -secret KEY[=KIND]     add a secret (KIND hex, base64 or password; default hex)
+  -unset-secret KEY      (set) drop a secret override; its value is kept
+  -memory MB, -cpus N, -pids N   limits; 0 goes back to the app's
+
 Every command accepts -socket (default $CORRAL_SOCKET or /run/corral/agent.sock).
-resume, restore and rotate accept -wait to block until the tenant is healthy.
+create, set, resume, restore and rotate accept -wait to block until the
+tenant is healthy.
 `
 
 var stdout io.Writer = os.Stdout
@@ -68,144 +78,15 @@ func runReconcile(args []string) error {
 	return api.NewClient(*socket).Reconcile(context.Background())
 }
 
-// runApply makes the node's tenants match a fleet file: missing tenants are
-// created and changed ones updated. It never removes a tenant; one missing
-// from the file is only reported, and an archived one must be restored.
-func runApply(args []string) error {
-	flags := flag.NewFlagSet("apply", flag.ContinueOnError)
-	socket := socketPath(flags)
-	wait := flags.Duration("wait", 0, "wait up to this long in total for the fleet's tenants to be healthy (e.g. 3m)")
-	positional, err := parseInterspersed(flags, args)
-	if err != nil {
-		return err
-	}
-	if len(positional) != 1 {
-		return errors.New("usage: corral apply FLEET.yaml [-wait 3m]")
-	}
-	desired, err := fleet.Load(positional[0])
-	if err != nil {
-		return err
-	}
-	// Check everything that does not need the agent first, so a broken spec
-	// stops the apply before any image is pulled.
-	var problems []string
-	for _, tenant := range desired {
-		if err := tenant.WithDefaults().ValidateUnpinned(); err != nil {
-			problems = append(problems, fmt.Sprintf("%s: %v", tenant.Name, err))
-		}
-	}
-	if len(problems) > 0 {
-		return fmt.Errorf("%s:\n  %s", positional[0], strings.Join(problems, "\n  "))
-	}
-	ctx := context.Background()
-	client := api.NewClient(*socket)
-	current, err := client.List(ctx)
-	if err != nil {
-		return err
-	}
-	archived, err := client.ListArchived(ctx)
-	if err != nil {
-		return err
-	}
-	existing := map[string]bool{}
-	for _, tenant := range current {
-		existing[tenant.Spec.Name] = true
-	}
-	isArchived := map[string]bool{}
-	for _, tenant := range archived {
-		isArchived[tenant.Name] = true
-	}
-	// Each image is pinned once, so every tenant of an app gets the same
-	// digest even if its tag moves during the apply.
-	pinned := map[string]string{}
-	var failures []string
-	for _, tenant := range desired {
-		if _, done := pinned[tenant.Image]; done || isArchived[tenant.Name] {
-			continue
-		}
-		resolved, err := client.Resolve(ctx, tenant.Image)
-		if err != nil {
-			pinned[tenant.Image] = ""
-			failures = append(failures, fmt.Sprintf("image %s: %v", tenant.Image, err))
-			fmt.Fprintf(stdout, "image %s: %v\n", tenant.Image, err)
-			continue
-		}
-		pinned[tenant.Image] = resolved.Image
-		if resolved.Note != "" {
-			fmt.Fprintf(stdout, "image %s: %s\n", tenant.Image, resolved.Note)
-		}
-	}
-	var applied []api.Tenant
-	listed := map[string]bool{}
-	for _, tenant := range desired {
-		listed[tenant.Name] = true
-		if isArchived[tenant.Name] {
-			fmt.Fprintf(stdout, "%-20s archived — restore it with \"corral tenant restore %s\" first\n", tenant.Name, tenant.Name)
-			continue
-		}
-		if pinned[tenant.Image] == "" {
-			fmt.Fprintf(stdout, "%-20s skipped: its image could not be pinned\n", tenant.Name)
-			continue
-		}
-		tenant.Image = pinned[tenant.Image]
-		var result api.Applied
-		if existing[tenant.Name] {
-			result, err = client.Replace(ctx, tenant)
-		} else {
-			result, err = client.Create(ctx, tenant)
-		}
-		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", tenant.Name, err))
-			fmt.Fprintf(stdout, "%-20s failed: %v\n", tenant.Name, err)
-			continue
-		}
-		state := "unchanged"
-		switch {
-		case !existing[tenant.Name]:
-			state = "created"
-		case result.Changed:
-			state = "updated"
-		}
-		fmt.Fprintf(stdout, "%-20s %-9s %s\n", tenant.Name, state, shortImage(result.Tenant.Spec.Image))
-		applied = append(applied, result.Tenant)
-	}
-	for _, tenant := range current {
-		if !listed[tenant.Spec.Name] {
-			fmt.Fprintf(stdout, "%-20s not in the fleet file; left as it is (archive it to remove it)\n", tenant.Spec.Name)
-		}
-	}
-	// Every applied tenant is waited for, not only changed ones: a retry
-	// after a failed rollout must not pass while the tenant is unhealthy.
-	// They are watched side by side, so a slow one cannot use up the time
-	// of the others.
-	if *wait > 0 {
-		waitCtx, cancel := context.WithTimeout(ctx, *wait)
-		defer cancel()
-		results := make([]error, len(applied))
-		out := &lockedWriter{w: stdout}
-		var group sync.WaitGroup
-		for i, tenant := range applied {
-			group.Go(func() { results[i] = waitFor(waitCtx, client, tenant, *wait, out) })
-		}
-		group.Wait()
-		for _, err := range results {
-			if err != nil {
-				failures = append(failures, err.Error())
-			}
-		}
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("%d problem(s):\n  %s", len(failures), strings.Join(failures, "\n  "))
-	}
-	return nil
-}
-
 func runTenant(args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "help" {
 		fmt.Fprint(os.Stderr, tenantUsage)
 		return flag.ErrHelp
 	}
 	command, args := args[0], args[1:]
+	if command == "create" || command == "set" {
+		return configureTenant(command, args)
+	}
 	flags := flag.NewFlagSet("tenant "+command, flag.ContinueOnError)
 	socket := socketPath(flags)
 	wait := flags.Duration("wait", 0, "wait up to this long for the tenant to be healthy (e.g. 2m)")
@@ -287,7 +168,7 @@ func runTenant(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "%s restored at %s\n", result.Spec.Name, result.URL)
+		fmt.Fprintf(stdout, "%s restored at %s, running app %s\n", result.Spec.Name, result.URL, result.App)
 		return waitHealthy(ctx, client, result, *wait)
 	case "purge":
 		if err := need(1); err != nil {
@@ -364,6 +245,31 @@ func waitHealthy(ctx context.Context, client *api.Client, tenant api.Tenant, tim
 	return waitFor(ctx, client, tenant, timeout, stdout)
 }
 
+// waitAll waits for tenants side by side within one budget, so a slow one
+// cannot use up the time of the others, and returns one problem per tenant
+// that did not become healthy.
+func waitAll(ctx context.Context, client *api.Client, tenants []api.Tenant, timeout time.Duration) []string {
+	if timeout <= 0 || len(tenants) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	results := make([]error, len(tenants))
+	out := &lockedWriter{w: stdout}
+	var group sync.WaitGroup
+	for i, tenant := range tenants {
+		group.Go(func() { results[i] = waitFor(ctx, client, tenant, timeout, out) })
+	}
+	group.Wait()
+	var problems []string
+	for _, err := range results {
+		if err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	return problems
+}
+
 // waitFor polls until the agent reports the tenant's current generation
 // running and healthy, or suspended (there is nothing more to wait for), or
 // failed, or ctx ends. timeout only labels the error.
@@ -413,7 +319,7 @@ func printJSON(value any) error {
 
 func printTable(tenants []api.Tenant) error {
 	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "NAME\tSTATE\tHEALTHY\tIMAGE\tURL")
+	fmt.Fprintln(table, "NAME\tAPP\tSTATE\tHEALTHY\tIMAGE\tURL")
 	for _, tenant := range tenants {
 		state, healthy := "pending", "-"
 		if tenant.Status != nil {
@@ -422,17 +328,17 @@ func printTable(tenants []api.Tenant) error {
 				healthy = fmt.Sprint(tenant.Status.Healthy)
 			}
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n", tenant.Spec.Name, state, healthy, shortImage(tenant.Spec.Image), tenant.URL)
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", tenant.Spec.Name, tenant.App, state, healthy, shortImage(tenant.Spec.Image), tenant.URL)
 	}
 	return table.Flush()
 }
 
 func printArchived(archived []api.ArchivedTenant) error {
 	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "NAME\tARCHIVED\tIMAGE")
+	fmt.Fprintln(table, "NAME\tAPP\tARCHIVED\tIMAGE")
 	slices.SortFunc(archived, func(a, b api.ArchivedTenant) int { return strings.Compare(a.Name, b.Name) })
 	for _, tenant := range archived {
-		fmt.Fprintf(table, "%s\t%s\t%s\n", tenant.Name, tenant.ArchivedAt.Format(time.DateTime), shortImage(tenant.Image))
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", tenant.Name, tenant.App, tenant.ArchivedAt.Local().Format(time.DateTime), shortImage(tenant.Image))
 	}
 	return table.Flush()
 }

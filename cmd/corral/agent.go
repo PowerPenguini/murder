@@ -51,21 +51,21 @@ func runInit(args []string) error {
 	} else {
 		fmt.Printf("master key %s already exists\n", cfg.MasterKeyFile)
 	}
-	if _, err := os.Stat(cfg.StateFile); errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(cfg.Database); errors.Is(err, os.ErrNotExist) {
 		node := cfg.Node
 		if node == "" {
 			if node, err = os.Hostname(); err != nil {
 				return fmt.Errorf("set node in %s: the host name is unknown: %w", *configPath, err)
 			}
 		}
-		if err := store.InitFile(cfg.StateFile, node); err != nil {
+		if err := store.Init(cfg.Database, node); err != nil {
 			return err
 		}
-		fmt.Printf("created empty state %s for node %s\n", cfg.StateFile, node)
+		fmt.Printf("created empty database %s for node %s\n", cfg.Database, node)
 	} else if err != nil {
 		return err
 	} else {
-		fmt.Printf("state %s already exists\n", cfg.StateFile)
+		fmt.Printf("database %s already exists\n", cfg.Database)
 	}
 	return nil
 }
@@ -85,14 +85,14 @@ func runAgent(args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := store.OpenFile(cfg.StateFile, store.Options{PortFrom: cfg.Ports.From, PortTo: cfg.Ports.To, NetworkPool: netip.MustParsePrefix(cfg.NetworkPool)})
+	st, err := store.Open(cfg.Database, store.Options{PortFrom: cfg.Ports.From, PortTo: cfg.Ports.To, NetworkPool: netip.MustParsePrefix(cfg.NetworkPool), Sealer: key.NewSealed})
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 	node := st.Node()
 	if cfg.Node != "" && cfg.Node != node {
-		return fmt.Errorf("config names node %q but the state belongs to node %q", cfg.Node, node)
+		return fmt.Errorf("config names node %q but the database belongs to node %q", cfg.Node, node)
 	}
 	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: node, RegistryAuthFile: cfg.RegistryAuthFile})
 	volumes, err := newVolumes(cfg.Volumes)
@@ -130,7 +130,7 @@ func runAgent(args []string) error {
 		}
 	}
 
-	apiServer := &http.Server{Handler: api.NewServer(st, reconciler, docker, key, log).Handler(), ReadHeaderTimeout: 10 * time.Second}
+	apiServer := &http.Server{Handler: api.NewServer(st, reconciler, docker, key, log).Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
 	go serve("api", apiServer, apiListener)
 	go reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
 
