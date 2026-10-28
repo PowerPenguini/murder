@@ -36,11 +36,10 @@ func TestFlagsMayFollowArguments(t *testing.T) {
 
 // fakeAgent answers the API calls the CLI makes, over a unix socket.
 type fakeAgent struct {
-	mu       sync.Mutex
-	tenants  map[string]api.Tenant
-	archived []api.ArchivedTenant
-	calls    []string
-	bodies   map[string][]byte
+	mu      sync.Mutex
+	tenants map[string]api.Tenant
+	calls   []string
+	bodies  map[string][]byte
 }
 
 func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,8 +56,6 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			views = append(views, a.tenants[name])
 		}
 		_ = json.NewEncoder(w).Encode(views)
-	case r.Method == http.MethodGet && r.URL.Path == "/v1/archive":
-		_ = json.NewEncoder(w).Encode(a.archived)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tenants/"):
 		// "slow" never becomes healthy; everything else already is.
 		name := strings.TrimPrefix(r.URL.Path, "/v1/tenants/")
@@ -66,6 +63,10 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not found"}`))
+			return
+		}
+		if !tenant.ArchivedAt.IsZero() {
+			_ = json.NewEncoder(w).Encode(tenant)
 			return
 		}
 		tenant.Status = &reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: name != "slow", Message: "health check: HTTP 500", CheckedAt: time.Now()}
@@ -79,20 +80,11 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/v1/tenants/")
 		var request api.TenantRequest
 		_ = json.Unmarshal(body, &request)
-		tenant, live := a.tenants[name]
+		tenant := a.tenants[name]
 		changed := tenant.App != request.App || !tenant.Overrides.Equal(request.Overrides)
-		if !live {
-			for _, entry := range a.archived {
-				if entry.Name == name {
-					changed = entry.App != request.App || !entry.Overrides.Equal(request.Overrides)
-				}
-			}
-		}
 		tenant.App, tenant.Overrides = request.App, request.Overrides
-		if live {
-			a.tenants[name] = tenant
-		}
-		_ = json.NewEncoder(w).Encode(api.Applied{Tenant: tenant, Changed: changed, Archived: !live})
+		a.tenants[name] = tenant
+		_ = json.NewEncoder(w).Encode(api.Applied{Tenant: tenant, Changed: changed})
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/tenants":
 		var request api.TenantRequest
 		_ = json.Unmarshal(body, &request)
@@ -224,8 +216,7 @@ func TestTenantSetChangesOnlyWhatItIsTold(t *testing.T) {
 
 // set works on an archived tenant too, and sends the generation it read.
 func TestTenantSetOnAnArchivedTenant(t *testing.T) {
-	agent, socket := startAgent(t)
-	agent.archived = []api.ArchivedTenant{{Name: "old", App: "web", Generation: 7, Overrides: spec.Overrides{Env: map[string]string{"A": "1"}}}}
+	agent, socket := startAgent(t, api.Tenant{Spec: spec.Tenant{Name: "old"}, App: "web", Generation: 7, ArchivedAt: time.Now(), Overrides: spec.Overrides{Env: map[string]string{"A": "1"}}})
 	capture(t)
 	if err := runTenant([]string{"set", "old", "-env", "B=2", "-socket", socket}); err != nil {
 		t.Fatal(err)
@@ -254,5 +245,20 @@ func TestExampleAppIsValid(t *testing.T) {
 	}
 	if err := spec.Compose(app, "acme", spec.Overrides{}).ValidateUnpinned(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// list shows archived tenants with the others.
+func TestTenantListShowsArchivedTenants(t *testing.T) {
+	_, socket := startAgent(t,
+		api.Tenant{Spec: spec.Tenant{Name: "acme"}, App: "web"},
+		api.Tenant{Spec: spec.Tenant{Name: "old"}, App: "web", ArchivedAt: time.Now()})
+	out := capture(t)
+	if err := runTenant([]string{"list", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[1], "acme") || !strings.Contains(lines[1], "pending") || !strings.HasPrefix(lines[2], "old") || !strings.Contains(lines[2], "archived") {
+		t.Fatalf("list:\n%s", out)
 	}
 }

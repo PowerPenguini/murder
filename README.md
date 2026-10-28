@@ -127,7 +127,7 @@ Day-to-day operations:
 
 ```bash
 corral app list                         # apps, their tenants and images
-corral tenant list                      # app, state, health, image, URL
+corral tenant list                      # app, state, health, image, URL; archived tenants too
 corral tenant show acme
 corral tenant secret acme ADMIN_PASSWORD
 corral tenant rotate acme ADMIN_PASSWORD -wait 3m   # new value; the container restarts
@@ -135,7 +135,6 @@ corral tenant logs acme -tail 100
 corral tenant suspend acme              # stop it, keep its address (visitors get 503)
 corral tenant resume acme -wait 3m
 corral tenant archive acme              # take it out of service; data, secrets and overrides are kept
-corral tenant list -archived
 corral tenant restore acme -wait 3m     # back with its data, secrets and overrides, on the app's current spec
 corral tenant purge acme -yes           # delete an archived tenant and its data for good
 corral app delete web                   # once no tenant (live or archived) runs it
@@ -145,7 +144,9 @@ corral events -tenant acme              # the audit log: who changed what, and w
 An archive is one change: the edge stops routing to the tenant at once, and
 the reconcile pass it starts removes the container and network (a pass that
 cannot, retries). A new tenant cannot take an archived tenant's name until
-that tenant is restored or purged.
+that tenant is restored or purged, and it keeps its network range (and so
+its address) until it is purged: no other tenant can be routed to a
+container of it that is still running.
 
 ## Security model
 
@@ -189,8 +190,8 @@ through Corral's real components:
 - **Edge inside the agent.** The edge proxy runs in the agent process, so
   public traffic pauses for the few seconds an agent restart takes. Tenant
   containers keep running.
-- **Single node.** State is one local file; stage 3 replaces it with a
-  replicated log.
+- **Single node.** State is one local SQLite database; stage 3 replicates
+  it to other nodes.
 - **Failing pulls.** A pull that keeps failing is retried on every pass,
   without backoff.
 - **Registry access during apply.** Tags are pinned when an app is applied

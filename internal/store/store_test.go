@@ -129,16 +129,18 @@ func TestOpenRefusesMissingLockedOrNewerDatabases(t *testing.T) {
 	if err := Init(newer, "node-1"); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", dsn(newer))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", len(migrations)+1)); err != nil {
-		t.Fatal(err)
-	}
-	_ = db.Close()
-	if _, err := Open(newer, options()); err == nil || !strings.Contains(err.Error(), "upgrade Corral") {
-		t.Fatalf("a newer schema = %v", err)
+	for version, want := range map[int]string{schemaVersion + 1: "upgrade Corral", 2: "development release", 0: "corral init"} {
+		db, err := sql.Open("sqlite", dsn(newer))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
+			t.Fatal(err)
+		}
+		_ = db.Close()
+		if _, err := Open(newer, options()); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("schema version %d = %v", version, err)
+		}
 	}
 	_, valid := openNew(t, options())
 	for name, opts := range map[string]Options{
@@ -349,8 +351,11 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 	if err := st.Archive("acme", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Get("acme"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("archived tenant still live: %v", err)
+	if _, err := st.SetSuspended("acme", true, "a"); !errors.Is(err, ErrArchived) {
+		t.Fatalf("suspend an archived tenant = %v", err)
+	}
+	if err := st.Archive("acme", "a"); !errors.Is(err, ErrArchived) {
+		t.Fatalf("archive twice = %v", err)
 	}
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "a"); !errors.Is(err, ErrArchived) {
 		t.Fatalf("create over an archived name = %v", err)
@@ -359,18 +364,18 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 	if _, _, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, 0, "a"); err != nil {
 		t.Fatalf("configure an archived tenant = %v", err)
 	}
-	archived, ok := st.ArchivedTenant("acme")
-	if !ok || archived.Record.Sealed["SESSION"] != created.Sealed["SESSION"] || archived.Record.DataImage != image || archived.Record.Spec.Suspended || archived.ArchivedAt.IsZero() || archived.Record.Subnet != created.Subnet {
-		t.Fatalf("archived = %+v, %v", archived, ok)
+	archived, err := st.Get("acme")
+	if err != nil || !archived.Archived() || archived.Sealed["SESSION"] != created.Sealed["SESSION"] || archived.DataImage != image || archived.Spec.Suspended || archived.Subnet != created.Subnet {
+		t.Fatalf("archived = %+v, %v", archived, err)
 	}
-	if list := st.ListArchived(); len(list) != 1 || list[0].Record.Spec.Name != "acme" {
-		t.Fatalf("ListArchived = %+v", list)
+	if list := st.List(); len(list) != 1 || list[0].Spec.Name != "acme" || !list[0].Archived() {
+		t.Fatalf("List = %+v", list)
 	}
-	// It keeps its subnet until it is released: a container may still run
-	// at its address.
+	// It keeps its subnet until it is purged: a container may still run at
+	// its address.
 	other, err := st.Create(NewTenant{Name: "beta", App: "web"}, "a")
 	if err != nil || other.Subnet == created.Subnet {
-		t.Fatalf("a new tenant got an archived tenant's unreleased subnet: %+v, %v", other, err)
+		t.Fatalf("a new tenant got an archived tenant's subnet: %+v, %v", other, err)
 	}
 	// A restore runs the app's current spec with the tenant's overrides.
 	next := appSpec()
@@ -379,7 +384,7 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, err := st.Restore("acme", "a")
-	if err != nil || restored.Subnet != created.Subnet || restored.Spec.Image != otherImage || restored.Spec.Env["TZ"] != "UTC" || restored.Sealed["SESSION"] != created.Sealed["SESSION"] || restored.Spec.Suspended || restored.DataImage != image {
+	if err != nil || restored.Archived() || restored.Subnet != created.Subnet || restored.Spec.Image != otherImage || restored.Spec.Env["TZ"] != "UTC" || restored.Sealed["SESSION"] != created.Sealed["SESSION"] || restored.Spec.Suspended || restored.DataImage != image {
 		t.Fatalf("restored = %+v, %v", restored, err)
 	}
 	if !restored.CreatedAt.Equal(created.CreatedAt) || restored.Generation <= created.Generation {
@@ -405,7 +410,7 @@ func TestArchiveKeepsTheSuspension(t *testing.T) {
 	if err := st.Archive("acme", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if archived, _ := st.ArchivedTenant("acme"); !archived.Record.Spec.Suspended {
+	if archived, _ := st.Get("acme"); !archived.Spec.Suspended {
 		t.Fatal("the archive lost the suspension")
 	}
 	if restored, err := st.Restore("acme", "a"); err != nil || !restored.Spec.Suspended {
@@ -428,8 +433,8 @@ func TestForgetDeletesTheTenantAndItsSecrets(t *testing.T) {
 	if err := st.Forget("acme", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := st.ArchivedTenant("acme"); ok {
-		t.Fatal("the archive entry survived")
+	if _, err := st.Get("acme"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the archived tenant survived: %v", err)
 	}
 	var secrets int
 	if err := st.db.QueryRow(`SELECT count(*) FROM secrets`).Scan(&secrets); err != nil || secrets != 0 {
@@ -605,9 +610,6 @@ func TestPathsWithURICharacters(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	for _, entry := range entries {
 		info, _ := entry.Info()
-		if strings.HasPrefix(entry.Name(), ".corral-init") {
-			t.Errorf("init left %s behind", entry.Name())
-		}
 		if !strings.HasSuffix(entry.Name(), ".lock") && info.Mode().Perm() != 0o600 {
 			t.Errorf("%s has mode %v", entry.Name(), info.Mode().Perm())
 		}
@@ -638,119 +640,61 @@ func TestOpenTightensTheMode(t *testing.T) {
 	}
 }
 
-// A relative database path works, and leftovers of an interrupted init are
-// removed by the next one.
+// A relative database path works, and an init interrupted before its
+// transaction committed, which leaves an empty database, is completed by the
+// next one. A database that is not empty is never taken over.
 func TestRelativePathAndInterruptedInit(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	stale := filepath.Join(dir, "state", ".corral-init-123.db")
-	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
+	path := filepath.Join("state", "corral.db")
+	if err := os.MkdirAll("state", 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, suffix := range []string{"", "-wal"} {
-		if err := os.WriteFile(stale+suffix, []byte("half"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := Init(filepath.Join("state", "corral.db"), "node-1"); err != nil {
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	st, err := Open(filepath.Join("state", "corral.db"), options())
-	if err != nil {
+	if err := Init(path, "node-1"); err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
-	if left, _ := filepath.Glob(filepath.Join(dir, "state", ".corral-init-*")); len(left) != 0 {
-		t.Fatalf("init leftovers: %v", left)
-	}
-}
-
-// A database of schema 1 keeps its tenants, secrets and archive through
-// the rebuild of migration 2; a tenant caught half way through an archive
-// stays suspended, as it was.
-func TestMigrationTwoKeepsEverything(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "corral.db")
-	db, err := sql.Open("sqlite", dsn(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stamp := "2026-10-26T10:00:00Z"
-	appJSON := marshal(normalizeApp(appSpec()))
-	for _, statement := range []string{
-		migrations[0],
-		`PRAGMA user_version = 1`,
-		`INSERT INTO meta VALUES ('node', 'node-1')`,
-		`INSERT INTO apps VALUES ('web', '` + appJSON + `', '` + stamp + `', '` + stamp + `')`,
-		`INSERT INTO tenants VALUES ('acme', 'web', '{}', 0, NULL, 20000, '10.240.0.0/28', '', 3, '` + stamp + `', '` + stamp + `', NULL)`,
-		`INSERT INTO tenants VALUES ('half', 'web', '{}', 1, 0, 20001, '10.240.0.16/28', '', 2, '` + stamp + `', '` + stamp + `', NULL)`,
-		`INSERT INTO tenants VALUES ('old', 'web', '{"env":{"TZ":"UTC"}}', 1, NULL, NULL, NULL, '', 5, '` + stamp + `', '` + stamp + `', '` + stamp + `')`,
-		`INSERT INTO secrets VALUES ('acme', 'SESSION', 'sealed-acme', '` + stamp + `')`,
-		`INSERT INTO secrets VALUES ('old', 'SESSION', 'sealed-old', '` + stamp + `')`,
-	} {
-		if _, err := db.Exec(statement); err != nil {
-			t.Fatalf("%s: %v", statement, err)
-		}
-	}
-	_ = db.Close()
 	st, err := Open(path, options())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	acme, err := st.Get("acme")
-	if err != nil || acme.Subnet != "10.240.0.0/28" || acme.Generation != 3 || acme.Sealed["SESSION"] != "sealed-acme" {
-		t.Fatalf("acme = %+v, %v", acme, err)
+	if st.Node() != "node-1" {
+		t.Fatalf("node = %q", st.Node())
 	}
-	if half, err := st.Get("half"); err != nil || !half.Spec.Suspended {
-		t.Fatalf("half-archived = %+v, %v", half, err)
-	}
-	old, ok := st.ArchivedTenant("old")
-	if !ok || old.Record.Sealed["SESSION"] != "sealed-old" || old.Record.Overrides.Env["TZ"] != "UTC" || !old.Record.Spec.Suspended {
-		t.Fatalf("old = %+v, %v", old, ok)
-	}
-	var version, foreignKeys int
-	_ = st.db.QueryRow(`PRAGMA user_version`).Scan(&version)
-	_ = st.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys)
-	if version != len(migrations) || foreignKeys != 1 {
-		t.Fatalf("user_version = %d, foreign_keys = %d", version, foreignKeys)
-	}
-	// Secrets still cascade with their tenant after the rebuild.
-	if err := st.Forget("old", "a"); err != nil {
+	other := filepath.Join(dir, "other.db")
+	db, err := sql.Open("sqlite", dsn(other))
+	if err != nil {
 		t.Fatal(err)
 	}
-	var left int
-	_ = st.db.QueryRow(`SELECT count(*) FROM secrets WHERE tenant = 'old'`).Scan(&left)
-	if left != 0 {
-		t.Fatalf("%d secrets of a purged tenant left", left)
+	if _, err := db.Exec(`CREATE TABLE notes (text TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if err := Init(other, "node-1"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("init over another database = %v", err)
 	}
 }
 
-// A released subnet goes to the next tenant; a tenant restored after its
-// release gets a free one.
-func TestReleaseFreesAnArchivedSubnet(t *testing.T) {
+// A tenant keeps its subnet while archived; a purge frees it for the next
+// tenant.
+func TestPurgeFreesTheSubnet(t *testing.T) {
 	st, _ := withApp(t, options())
 	acme, _ := st.Create(NewTenant{Name: "acme", App: "web"}, "a")
-	if err := st.Release("acme"); err != nil {
-		t.Fatal(err)
-	}
-	if again, _ := st.Get("acme"); again.Subnet != acme.Subnet {
-		t.Fatal("Release freed a live tenant's subnet")
-	}
 	if err := st.Archive("acme", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Release("acme"); err != nil {
+	beta, err := st.Create(NewTenant{Name: "beta", App: "web"}, "a")
+	if err != nil || beta.Subnet == acme.Subnet {
+		t.Fatalf("beta = %+v, %v; acme holds %s", beta, err, acme.Subnet)
+	}
+	if err := st.Forget("acme", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if archived, _ := st.ArchivedTenant("acme"); archived.Record.Subnet != "" {
-		t.Fatalf("subnet after release = %q", archived.Record.Subnet)
-	}
-	beta, err := st.Create(NewTenant{Name: "beta", App: "web"}, "a")
-	if err != nil || beta.Subnet != acme.Subnet {
-		t.Fatalf("beta = %+v, %v; want the released %s", beta, err, acme.Subnet)
-	}
-	restored, err := st.Restore("acme", "a")
-	if err != nil || restored.Subnet == "" || restored.Subnet == beta.Subnet {
-		t.Fatalf("restored = %+v, %v", restored, err)
+	gamma, err := st.Create(NewTenant{Name: "gamma", App: "web"}, "a")
+	if err != nil || gamma.Subnet != acme.Subnet {
+		t.Fatalf("gamma = %+v, %v; want the purged %s", gamma, err, acme.Subnet)
 	}
 }

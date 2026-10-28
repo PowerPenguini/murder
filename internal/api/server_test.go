@@ -413,21 +413,29 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if routes := (Routes{Store: f.store}); func() bool { _, ok := routes.Route("acme"); return ok }() {
 		t.Fatal("an archived tenant still has a route")
 	}
-	archived, err := f.client.ListArchived(ctx)
-	if err != nil || len(archived) != 1 || archived[0].Name != "acme" || archived[0].App != "web" {
-		t.Fatalf("archive = %+v, %v", archived, err)
+	list, err := f.client.List(ctx)
+	if err != nil || len(list) != 1 || list[0].Spec.Name != "acme" || list[0].App != "web" || list[0].ArchivedAt.IsZero() || list[0].Address != "" {
+		t.Fatalf("list = %+v, %v", list, err)
+	}
+	archived := list[0]
+	if shown, err := f.client.Get(ctx, "acme"); err != nil || shown.ArchivedAt.IsZero() {
+		t.Fatalf("show an archived tenant = %+v, %v", shown, err)
+	}
+	_, err = f.client.Suspend(ctx, "acme", true)
+	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 {
+		t.Fatalf("suspend an archived tenant = %v", err)
 	}
 	_, err = f.client.Create(ctx, tenantOf("acme"))
 	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
 		t.Fatalf("create over an archived name = %v", err)
 	}
 	// An archived tenant can be reconfigured; restore runs the result.
-	archivedConfig := TenantRequest{App: "web", Overrides: spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, Generation: archived[0].Generation}
-	if changed, err := f.client.Configure(ctx, "acme", archivedConfig); err != nil || !changed.Changed {
+	archivedConfig := TenantRequest{App: "web", Overrides: spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, Generation: archived.Generation}
+	if changed, err := f.client.Configure(ctx, "acme", archivedConfig); err != nil || !changed.Changed || changed.Tenant.ArchivedAt.IsZero() {
 		t.Fatalf("configure an archived tenant = %+v, %v", changed, err)
 	}
 	restored, err := f.client.Restore(ctx, "acme")
-	if err != nil || restored.Spec.Suspended || restored.Spec.Env["TZ"] != "UTC" {
+	if err != nil || !restored.ArchivedAt.IsZero() || restored.Spec.Suspended || restored.Spec.Env["TZ"] != "UTC" {
 		t.Fatalf("restore = %+v, %v", restored, err)
 	}
 	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
@@ -445,8 +453,8 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.dataRoot, "acme")); !os.IsNotExist(err) {
 		t.Fatal("purge left the data")
 	}
-	if archived, _ := f.client.ListArchived(ctx); len(archived) != 0 {
-		t.Fatalf("purge left the archive entry: %+v", archived)
+	if _, err := f.client.Get(ctx, "acme"); !IsNotFound(err) {
+		t.Fatalf("purge left the tenant: %v", err)
 	}
 	fresh, err := f.client.Create(ctx, tenantOf("acme"))
 	if err != nil {

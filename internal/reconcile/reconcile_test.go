@@ -626,10 +626,10 @@ func TestArchiveClearsTheRuntimeAndKeepsTheData(t *testing.T) {
 	}
 }
 
-// An archived tenant keeps its subnet until a pass has removed its
-// container and network, so a new tenant is never routed to a container
-// still running at that address.
-func TestArchivedSubnetIsReleasedOnlyOnceItsRuntimeIsGone(t *testing.T) {
+// An archived tenant keeps its subnet until it is purged, so a new tenant is
+// never routed to a container still running at that address, even one a
+// pass could not remove.
+func TestArchivedTenantKeepsItsSubnetUntilPurged(t *testing.T) {
 	f := newFixture(t)
 	old := f.create(t, "acme")
 	f.reconcile(t)
@@ -638,24 +638,24 @@ func TestArchivedSubnetIsReleasedOnlyOnceItsRuntimeIsGone(t *testing.T) {
 	if err := f.reconciler.Reconcile(context.Background()); err == nil {
 		t.Fatal("a pass that could not remove a container reported success")
 	}
-	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != old.Subnet {
-		t.Fatal("the subnet was released while the container remained")
-	}
 	if beta := f.create(t, "beta"); beta.Subnet == old.Subnet {
 		t.Fatal("a new tenant got the subnet of a container still running")
 	}
 	f.runtime.failRemove = nil
-	f.reconcile(t)
-	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != "" {
-		t.Fatal("the subnet was not released once the runtime was gone")
+	if err := f.reconciler.Purge(context.Background(), "acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	containers, _ := f.runtime.List(context.Background())
+	if f.runtime.networks["corral-acme"] != nil || slices.ContainsFunc(containers, func(c runtime.Container) bool { return c.Labels[runtime.LabelTenant] == "acme" }) {
+		t.Fatal("a purge left the tenant's runtime")
 	}
 	if gamma := f.create(t, "gamma"); gamma.Subnet != old.Subnet {
-		t.Fatalf("gamma got %s, not the released %s", gamma.Subnet, old.Subnet)
+		t.Fatalf("gamma got %s, not the purged %s", gamma.Subnet, old.Subnet)
 	}
 	f.reconcile(t)
 }
 
-// A tenant restored before its subnet was released returns to its own
+// A tenant restored before a pass removed its runtime returns to its own
 // network and container.
 func TestQuickRestoreKeepsTheNetwork(t *testing.T) {
 	f := newFixture(t)
@@ -736,8 +736,8 @@ func TestPurgeOnlyArchivedTenants(t *testing.T) {
 	if exists, _ := f.reconciler.DataExists(context.Background(), "acme"); exists {
 		t.Fatal("Purge left the data")
 	}
-	if _, ok := f.store.ArchivedTenant("acme"); ok {
-		t.Fatal("Purge left the archive entry")
+	if _, err := f.store.Get("acme"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Purge left the archived tenant: %v", err)
 	}
 }
 
@@ -779,26 +779,5 @@ func TestSpecHashIsStable(t *testing.T) {
 	moved, _ := f.reconciler.containerSpec(record, "/srv/acme")
 	if moved.Labels[runtime.LabelHash] == first.Labels[runtime.LabelHash] {
 		t.Fatal("a different subnet kept the same hash")
-	}
-}
-
-// A tenant archived after a pass read the store is still run by that pass,
-// so the pass must not release its subnet: it may create the tenant's
-// network and container there right after.
-func TestAPassDoesNotReleaseATenantItStillRuns(t *testing.T) {
-	f := newFixture(t)
-	record := f.create(t, "acme")
-	f.archive(t, "acme")
-	if err := f.reconciler.releaseArchived(map[string]bool{"acme": true}, []runtime.Container{}, []runtime.Network{}); err != nil {
-		t.Fatal(err)
-	}
-	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != record.Subnet {
-		t.Fatal("a pass released the subnet of a tenant it still runs")
-	}
-	if err := f.reconciler.releaseArchived(map[string]bool{}, []runtime.Container{}, []runtime.Network{}); err != nil {
-		t.Fatal(err)
-	}
-	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != "" {
-		t.Fatal("the next pass did not release it")
 	}
 }

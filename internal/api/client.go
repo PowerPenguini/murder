@@ -96,6 +96,7 @@ func IsNotFound(err error) bool {
 
 func tenantPath(name string) string { return "/v1/tenants/" + url.PathEscape(name) }
 
+// List returns every tenant, archived ones too.
 func (c *Client) List(ctx context.Context) ([]Tenant, error) {
 	var tenants []Tenant
 	return tenants, c.do(ctx, http.MethodGet, "/v1/tenants", nil, &tenants)
@@ -176,20 +177,15 @@ func (c *Client) Archive(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodPost, tenantPath(name)+"/archive", nil, nil)
 }
 
-func (c *Client) ListArchived(ctx context.Context) ([]ArchivedTenant, error) {
-	var archived []ArchivedTenant
-	return archived, c.do(ctx, http.MethodGet, "/v1/archive", nil, &archived)
-}
-
 // Restore brings an archived tenant back on its app's current spec.
 func (c *Client) Restore(ctx context.Context, name string) (Tenant, error) {
 	var tenant Tenant
-	return tenant, c.do(ctx, http.MethodPost, "/v1/archive/"+url.PathEscape(name)+"/restore", nil, &tenant)
+	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+"/restore", nil, &tenant)
 }
 
 // Purge deletes an archived tenant and its data for good.
 func (c *Client) Purge(ctx context.Context, name string) error {
-	return c.do(ctx, http.MethodDelete, "/v1/archive/"+url.PathEscape(name), nil, nil)
+	return c.do(ctx, http.MethodDelete, tenantPath(name), nil, nil)
 }
 
 func (c *Client) Secret(ctx context.Context, name, key string) (string, error) {

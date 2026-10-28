@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -22,7 +21,7 @@ const tenantUsage = `Usage: corral tenant <command> [options]
 
   create NAME -app APP [overrides]   add a tenant running an app
   set NAME [-app APP] [overrides]    change a tenant's app or overrides
-  list [-archived]       list tenants (or archived tenants) and their state
+  list                   list tenants, archived ones too, and their state
   show NAME              print a tenant as JSON
   suspend NAME           stop a tenant, keeping its address (visitors get 503)
   resume NAME            start a suspended tenant again
@@ -93,7 +92,6 @@ func runTenant(args []string) error {
 	yes := flags.Bool("yes", false, "confirm purge")
 	tail := flags.Int("tail", 200, "with logs: number of lines")
 	asJSON := flags.Bool("json", false, "with list: print JSON")
-	showArchived := flags.Bool("archived", false, "with list: list archived tenants")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
 		return err
@@ -110,16 +108,6 @@ func runTenant(args []string) error {
 	case "list":
 		if err := need(0); err != nil {
 			return err
-		}
-		if *showArchived {
-			archived, err := client.ListArchived(ctx)
-			if err != nil {
-				return err
-			}
-			if *asJSON {
-				return printJSON(archived)
-			}
-			return printArchived(archived)
 		}
 		tenants, err := client.List(ctx)
 		if err != nil {
@@ -322,23 +310,15 @@ func printTable(tenants []api.Tenant) error {
 	fmt.Fprintln(table, "NAME\tAPP\tSTATE\tHEALTHY\tIMAGE\tURL")
 	for _, tenant := range tenants {
 		state, healthy := "pending", "-"
-		if tenant.Status != nil {
+		if !tenant.ArchivedAt.IsZero() {
+			state = "archived"
+		} else if tenant.Status != nil {
 			state = tenant.Status.Phase
 			if tenant.Status.Phase == reconcile.PhaseRunning {
 				healthy = fmt.Sprint(tenant.Status.Healthy)
 			}
 		}
 		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", tenant.Spec.Name, tenant.App, state, healthy, shortImage(tenant.Spec.Image), tenant.URL)
-	}
-	return table.Flush()
-}
-
-func printArchived(archived []api.ArchivedTenant) error {
-	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "NAME\tAPP\tARCHIVED\tIMAGE")
-	slices.SortFunc(archived, func(a, b api.ArchivedTenant) int { return strings.Compare(a.Name, b.Name) })
-	for _, tenant := range archived {
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", tenant.Name, tenant.App, tenant.ArchivedAt.Local().Format(time.DateTime), shortImage(tenant.Image))
 	}
 	return table.Flush()
 }
