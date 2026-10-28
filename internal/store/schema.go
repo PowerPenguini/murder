@@ -115,8 +115,11 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	var on int
-	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&on); err != nil || on != 1 {
-		return fmt.Errorf("foreign keys could not be turned back on: %v", err)
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&on); err != nil {
+		return fmt.Errorf("check foreign keys: %w", err)
+	}
+	if on != 1 {
+		return fmt.Errorf("foreign keys could not be turned back on (PRAGMA foreign_keys = %d)", on)
 	}
 	return nil
 }

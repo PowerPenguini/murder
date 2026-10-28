@@ -150,11 +150,14 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		}
 		r.log.Info("removed the containers of a tenant no longer wanted", "tenant", tenant)
 	}
-	if err := r.removeOrphanNetworks(ctx, wanted); err != nil {
+	containers, networks, err := r.removeOrphanNetworks(ctx, wanted)
+	if err != nil {
 		errs = append(errs, err)
 	}
-	if err := r.releaseArchived(ctx); err != nil {
-		errs = append(errs, err)
+	if containers != nil || networks != nil {
+		if err := r.releaseArchived(wanted, containers, networks); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	statuses := map[string]Status{}
 	for _, record := range records {
@@ -175,53 +178,50 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 }
 
 // removeOrphanNetworks removes the networks of tenants that no longer exist,
-// whether or not they still had containers.
-func (r *Reconciler) removeOrphanNetworks(ctx context.Context, wanted map[string]bool) error {
+// whether or not they still had containers. It returns the containers and
+// networks that remain; both are nil if they could not be listed.
+func (r *Reconciler) removeOrphanNetworks(ctx context.Context, wanted map[string]bool) ([]runtime.Container, []runtime.Network, error) {
 	networks, err := r.runtime.ListNetworks(ctx)
 	if err != nil {
-		return fmt.Errorf("list networks: %w", err)
+		return nil, nil, fmt.Errorf("list networks: %w", err)
 	}
 	remaining, err := r.runtime.List(ctx)
 	if err != nil {
-		return fmt.Errorf("list containers: %w", err)
+		return nil, nil, fmt.Errorf("list containers: %w", err)
 	}
 	var errs []error
+	kept := []runtime.Network{}
 	for _, network := range networks {
 		tenant := network.Labels[runtime.LabelTenant]
 		if wanted[tenant] || hasTenant(remaining, tenant) {
-			continue // a live tenant, or containers this pass could not remove
+			kept = append(kept, network) // a live tenant, or containers this pass could not remove
+			continue
 		}
 		if err := r.runtime.RemoveNetwork(ctx, network.Name); err != nil {
+			kept = append(kept, network)
 			errs = append(errs, fmt.Errorf("remove network %s: %w", network.Name, err))
 		}
 	}
-	return errors.Join(errs...)
+	if remaining == nil {
+		remaining = []runtime.Container{}
+	}
+	return remaining, kept, errors.Join(errs...)
 }
 
 // releaseArchived frees the subnets of archived tenants whose containers
 // and network are gone. Until then the subnet stays reserved: a container
-// left at its address must not receive another tenant's traffic.
-func (r *Reconciler) releaseArchived(ctx context.Context) error {
-	var holding []string
-	for _, archived := range r.store.ListArchived() {
-		if archived.Record.Subnet != "" {
-			holding = append(holding, archived.Record.Spec.Name)
-		}
-	}
-	if len(holding) == 0 {
-		return nil
-	}
-	containers, err := r.runtime.List(ctx)
-	if err != nil {
-		return fmt.Errorf("list containers: %w", err)
-	}
-	networks, err := r.runtime.ListNetworks(ctx)
-	if err != nil {
-		return fmt.Errorf("list networks: %w", err)
-	}
+// left at its address must not receive another tenant's traffic. A tenant
+// this pass still runs (archived after the pass read the store) is left to
+// the next pass, which no longer runs it.
+func (r *Reconciler) releaseArchived(wanted map[string]bool, containers []runtime.Container, networks []runtime.Network) error {
 	var errs []error
-	for _, tenant := range holding {
-		if hasTenant(containers, tenant) || slices.ContainsFunc(networks, func(n runtime.Network) bool { return n.Labels[runtime.LabelTenant] == tenant }) {
+	for _, archived := range r.store.ListArchived() {
+		tenant := archived.Record.Spec.Name
+		if archived.Record.Subnet == "" || wanted[tenant] {
+			continue
+		}
+		if hasTenant(containers, tenant) || hasNetwork(networks, tenant) {
+			r.log.Info("an archived tenant keeps its subnet until its container and network are removed", "tenant", tenant, "subnet", archived.Record.Subnet)
 			continue
 		}
 		if err := r.store.Release(tenant); err != nil {
@@ -229,6 +229,10 @@ func (r *Reconciler) releaseArchived(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func hasNetwork(networks []runtime.Network, tenant string) bool {
+	return slices.ContainsFunc(networks, func(network runtime.Network) bool { return network.Labels[runtime.LabelTenant] == tenant })
 }
 
 func hasTenant(containers []runtime.Container, tenant string) bool {
@@ -261,8 +265,8 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	labels := map[string]string{runtime.LabelTenant: tenant.Name}
 	err = r.runtime.EnsureNetwork(ctx, NetworkName(tenant.Name), record.Subnet, labels)
 	if errors.Is(err, runtime.ErrNetworkMismatch) {
-		// Restored with a new subnet while its old network was still
-		// there: the network and anything on it are rebuilt.
+		// A network left with another subnet, say by restoring an older
+		// database: it and anything on it are rebuilt.
 		r.log.Info("rebuilding a network with an outdated subnet", "tenant", tenant.Name, "subnet", record.Subnet)
 		if err := r.clearRuntime(ctx, tenant.Name); err != nil {
 			return Status{}, fmt.Errorf("network: %w", err)

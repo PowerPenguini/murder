@@ -781,3 +781,24 @@ func TestSpecHashIsStable(t *testing.T) {
 		t.Fatal("a different subnet kept the same hash")
 	}
 }
+
+// A tenant archived after a pass read the store is still run by that pass,
+// so the pass must not release its subnet: it may create the tenant's
+// network and container there right after.
+func TestAPassDoesNotReleaseATenantItStillRuns(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	f.archive(t, "acme")
+	if err := f.reconciler.releaseArchived(map[string]bool{"acme": true}, []runtime.Container{}, []runtime.Network{}); err != nil {
+		t.Fatal(err)
+	}
+	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != record.Subnet {
+		t.Fatal("a pass released the subnet of a tenant it still runs")
+	}
+	if err := f.reconciler.releaseArchived(map[string]bool{}, []runtime.Container{}, []runtime.Network{}); err != nil {
+		t.Fatal(err)
+	}
+	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != "" {
+		t.Fatal("the next pass did not release it")
+	}
+}

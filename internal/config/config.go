@@ -43,11 +43,11 @@ type Agent struct {
 	NetworkPool string  `yaml:"networkPool"`
 	Volumes     Volumes `yaml:"volumes"`
 	Edge        Edge    `yaml:"edge"`
-	// Defaults fill in tenant limits left at zero.
 	// RetiredPorts catches the "ports" setting of earlier releases, so its
 	// error says what to do instead of naming an unknown field.
 	RetiredPorts any `yaml:"ports"`
 
+	// Defaults fill in tenant limits left at zero.
 	Defaults          spec.Limits `yaml:"defaults"`
 	ReconcileInterval Duration    `yaml:"reconcileInterval"`
 }
