@@ -1,6 +1,6 @@
 //go:build docker
 
-// Package integration runs Corral's components against a real Docker
+// Package integration runs Murder's components against a real Docker
 // engine. Run with: go test -tags docker ./integration
 package integration
 
@@ -23,20 +23,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/api"
-	"github.com/PowerPenguini/corral/internal/edge"
-	"github.com/PowerPenguini/corral/internal/reconcile"
-	"github.com/PowerPenguini/corral/internal/runtime"
-	"github.com/PowerPenguini/corral/internal/secrets"
-	"github.com/PowerPenguini/corral/internal/spec"
-	"github.com/PowerPenguini/corral/internal/store"
-	"github.com/PowerPenguini/corral/internal/volume"
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/runtime"
+	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/volume"
 )
 
-const baseDomain = "corral.test"
+const baseDomain = "murder.test"
 
 func dockerSocket() string {
-	if socket := os.Getenv("CORRAL_DOCKER_SOCKET"); socket != "" {
+	if socket := os.Getenv("MURDER_DOCKER_SOCKET"); socket != "" {
 		return socket
 	}
 	return "/var/run/docker.sock"
@@ -87,7 +87,7 @@ func newNode(t *testing.T, name string) *node {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(dir, "corral.db")
+	statePath := filepath.Join(dir, "murder.db")
 	if err := store.Init(statePath, "test-node"); err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 	suffix := make([]byte, 3)
 	_, _ = rand.Read(suffix)
 	tenant := "it-" + hex.EncodeToString(suffix)
-	repository := "corral-it/" + tenant
+	repository := "murder-it/" + tenant
 	imageV1, imageV2 := buildTestImage(t, "v1", repository+":v1"), buildTestImage(t, "v2", repository+":v2")
 	cleanupTenant(t, tenant)
 	n := newNode(t, tenant)
@@ -341,7 +341,7 @@ func TestTenantsCannotReachEachOther(t *testing.T) {
 	suffix := make([]byte, 3)
 	_, _ = rand.Read(suffix)
 	first, second := "iso-a-"+hex.EncodeToString(suffix), "iso-b-"+hex.EncodeToString(suffix)
-	repository := "corral-it/" + first
+	repository := "murder-it/" + first
 	buildTestImage(t, "v1", repository+":v1")
 	cleanupTenant(t, first)
 	cleanupTenant(t, second)

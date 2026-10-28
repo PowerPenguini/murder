@@ -1,4 +1,4 @@
-// Command corral is the Corral agent and its command-line client.
+// Command murder is the Murder agent and its command-line client.
 package main
 
 import (
@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-const usage = `Usage: corral <command> [arguments]
+const usage = `Usage: murder <command> [arguments]
 
 Node commands:
   init       create the master key and the database for a node
@@ -20,13 +20,13 @@ Client commands (talk to the local agent):
   events     show the audit log: who changed what, and when
   reconcile  run one reconcile pass now and report its errors
 
-Run "corral <command> -h" for a command's options.
+Run "murder <command> -h" for a command's options.
 `
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		if !errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(os.Stderr, "corral:", err)
+			fmt.Fprintln(os.Stderr, "murder:", err)
 		}
 		os.Exit(1)
 	}

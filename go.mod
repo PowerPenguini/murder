@@ -1,4 +1,4 @@
-module github.com/PowerPenguini/corral
+module github.com/PowerPenguini/murder
 
 go 1.26.0
 

@@ -5,8 +5,8 @@
 # send/receive, and destroys the pool again.
 set -euo pipefail
 
-POOL=${POOL:-corralsmoke}
-VDEV=${VDEV:-/dev/disk/by-id/virtio-corral-vdev0}
+POOL=${POOL:-murdersmoke}
+VDEV=${VDEV:-/dev/disk/by-id/virtio-murder-vdev0}
 step() { printf '\n== %s\n' "$*"; }
 t0=$(date +%s.%N)
 

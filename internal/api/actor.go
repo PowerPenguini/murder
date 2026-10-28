@@ -11,7 +11,7 @@ type actorKey struct{}
 // ActorHeader lets a trusted client, such as the panel, name the person it
 // acts for. It is recorded next to the socket user, never instead of it:
 // anyone who can use the socket controls every tenant anyway.
-const ActorHeader = "X-Corral-Actor"
+const ActorHeader = "X-Murder-Actor"
 
 // actor names who made a request: the socket user, and the person a
 // client says it acts for.

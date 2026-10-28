@@ -18,11 +18,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/runtime"
-	"github.com/PowerPenguini/corral/internal/secrets"
-	"github.com/PowerPenguini/corral/internal/spec"
-	"github.com/PowerPenguini/corral/internal/store"
-	"github.com/PowerPenguini/corral/internal/volume"
+	"github.com/PowerPenguini/murder/internal/runtime"
+	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/volume"
 )
 
 // Phases a tenant can be in, as seen by the reconciler.
@@ -92,9 +92,9 @@ func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secret
 	}
 }
 
-// ContainerName and NetworkName name what Corral creates for a tenant.
-func ContainerName(tenant string) string { return "corral-" + tenant }
-func NetworkName(tenant string) string   { return "corral-" + tenant }
+// ContainerName and NetworkName name what Murder creates for a tenant.
+func ContainerName(tenant string) string { return "murder-" + tenant }
+func NetworkName(tenant string) string   { return "murder-" + tenant }
 
 // Run reconciles every interval and whenever the store changes, until ctx
 // ends.

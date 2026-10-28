@@ -11,12 +11,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/api"
-	"github.com/PowerPenguini/corral/internal/spec"
-	"github.com/PowerPenguini/corral/internal/strictyaml"
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
-const appUsage = `Usage: corral app <command> [options]
+const appUsage = `Usage: murder app <command> [options]
 
   apply FILE... [-wait 3m]   store app specs and roll them out to their tenants;
                              an app is named after its file (apps/web.yaml is "web")
@@ -24,7 +24,7 @@ const appUsage = `Usage: corral app <command> [options]
   show NAME                  print an app as JSON
   delete NAME                delete an app no tenant runs
 
-Every command accepts -socket (default $CORRAL_SOCKET or /run/corral/agent.sock).
+Every command accepts -socket (default $MURDER_SOCKET or /run/murder/agent.sock).
 `
 
 func runApp(args []string) error {
@@ -46,7 +46,7 @@ func runApp(args []string) error {
 	switch command {
 	case "apply":
 		if len(positional) == 0 {
-			return errors.New("usage: corral app apply FILE... [-wait 3m]")
+			return errors.New("usage: murder app apply FILE... [-wait 3m]")
 		}
 		return applyApps(ctx, client, positional, *wait)
 	case "list":
@@ -65,7 +65,7 @@ func runApp(args []string) error {
 		return table.Flush()
 	case "show", "delete":
 		if len(positional) != 1 {
-			return fmt.Errorf("usage: corral app %s NAME", command)
+			return fmt.Errorf("usage: murder app %s NAME", command)
 		}
 		if command == "delete" {
 			if err := client.DeleteApp(ctx, positional[0]); err != nil {

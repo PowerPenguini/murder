@@ -14,7 +14,7 @@ VM=$SCRIPT_DIR/vm.sh
 VM_DIR=${VM_DIR:-$REPO_ROOT/.vm}
 export VM_DIR
 GO_TEST_TAGS=${GO_TEST_TAGS:-zfs}
-VDEV=/dev/disk/by-id/virtio-corral-vdev0
+VDEV=/dev/disk/by-id/virtio-murder-vdev0
 
 die() { echo "go-test.sh: error: $*" >&2; exit 1; }
 
@@ -44,7 +44,7 @@ mapfile -t pkgs < <(go list -tags "$GO_TEST_TAGS" \
 
 mkdir -p "$VM_DIR/run"
 build=$(mktemp -d "$VM_DIR/run/gotest.XXXXXX")
-remote=/tmp/corral-gotest.$$.$RANDOM
+remote=/tmp/murder-gotest.$$.$RANDOM
 cleanup() {
   "$VM" ssh "rm -rf $remote" >/dev/null 2>&1 || true
   rm -rf "$build"
@@ -58,10 +58,10 @@ trap cleanup EXIT
 tty_flag=()
 [[ -t 0 && -t 1 ]] && tty_flag=(-t)
 
-# Forward CORRAL_TEST_* variables from the host environment.
-envs=(CORRAL_TEST_VM=1 "CORRAL_TEST_VDEV=$VDEV")
+# Forward MURDER_TEST_* variables from the host environment.
+envs=(MURDER_TEST_VM=1 "MURDER_TEST_VDEV=$VDEV")
 while IFS='=' read -r k _; do
-  [[ $k == CORRAL_TEST_* && $k != CORRAL_TEST_VM && $k != CORRAL_TEST_VDEV ]] && envs+=("$k=${!k}")
+  [[ $k == MURDER_TEST_* && $k != MURDER_TEST_VM && $k != MURDER_TEST_VDEV ]] && envs+=("$k=${!k}")
 done < <(env)
 
 summary_fd=1

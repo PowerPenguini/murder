@@ -334,7 +334,7 @@ func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels 
 		"Driver":         "bridge",
 		"CheckDuplicate": true,
 		"Labels":         d.ownLabels(labels),
-		// Corral assigns each tenant a small subnet from its own pool, so the
+		// Murder assigns each tenant a small subnet from its own pool, so the
 		// engine's default pools (about thirty networks) are never used up.
 		"IPAM": map[string]any{"Driver": "default", "Config": []map[string]string{{"Subnet": subnet, "Gateway": gateway.String()}}},
 		// Containers on one tenant network cannot reach each other, and

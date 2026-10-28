@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 // ErrSnapshotsUnsupported is returned by drivers that cannot snapshot.
@@ -131,9 +131,9 @@ func Exec(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return output, nil
 }
 
-// ownerProperty marks datasets Corral created; Corral never touches a
+// ownerProperty marks datasets Murder created; Murder never touches a
 // dataset without it, even below its own parent.
-const ownerProperty = "io.corral:tenant"
+const ownerProperty = "io.murder:tenant"
 
 // ZFS keeps each tenant in a dataset below Parent, mounted below MountRoot.
 type ZFS struct {
@@ -171,12 +171,12 @@ func (z ZFS) properties(ctx context.Context, dataset string) (owner, mounted, mo
 	return values[0], values[1], values[2], true, nil
 }
 
-// owned checks that dataset was made by Corral for tenant and is mounted
-// where Corral expects; anything else is refused rather than used.
+// owned checks that dataset was made by Murder for tenant and is mounted
+// where Murder expects; anything else is refused rather than used.
 func (z ZFS) owned(tenant, owner, mountpoint string) error {
 	want := filepath.Join(z.MountRoot, tenant)
 	if owner != tenant {
-		return fmt.Errorf("dataset %s was not created by corral for tenant %s (%s=%q)", z.dataset(tenant), tenant, ownerProperty, owner)
+		return fmt.Errorf("dataset %s was not created by murder for tenant %s (%s=%q)", z.dataset(tenant), tenant, ownerProperty, owner)
 	}
 	if mountpoint != want {
 		return fmt.Errorf("dataset %s is mounted at %s, want %s", z.dataset(tenant), mountpoint, want)
@@ -278,7 +278,7 @@ func unescapeMount(value string) string {
 	return out.String()
 }
 
-// Snapshot names snapshots "corral-<reason>-<UTC time>" so they sort by time.
+// Snapshot names snapshots "murder-<reason>-<UTC time>" so they sort by time.
 func (z ZFS) Snapshot(ctx context.Context, tenant, reason string) (string, error) {
 	if err := checkTenant(tenant); err != nil {
 		return "", err
@@ -286,7 +286,7 @@ func (z ZFS) Snapshot(ctx context.Context, tenant, reason string) (string, error
 	if !snapshotReason(reason) {
 		return "", fmt.Errorf("snapshot reason %q must be lowercase letters and hyphens", reason)
 	}
-	name := z.dataset(tenant) + "@corral-" + reason + "-" + z.now().UTC().Format("20060102T150405.000Z")
+	name := z.dataset(tenant) + "@murder-" + reason + "-" + z.now().UTC().Format("20060102T150405.000Z")
 	if _, err := z.Run(ctx, "zfs", "snapshot", name); err != nil {
 		return "", err
 	}
@@ -305,8 +305,8 @@ func snapshotReason(reason string) bool {
 	return true
 }
 
-// Remove destroys the tenant's dataset only if Corral created it for this
-// tenant and it is mounted where Corral put it.
+// Remove destroys the tenant's dataset only if Murder created it for this
+// tenant and it is mounted where Murder put it.
 func (z ZFS) Remove(ctx context.Context, tenant string) error {
 	if err := checkTenant(tenant); err != nil {
 		return err

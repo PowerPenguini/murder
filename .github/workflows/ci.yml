@@ -17,4 +17,4 @@ jobs:
       - run: go test -race ./...
       # GitHub-hosted runners ship Docker, so the full tenant lifecycle runs too.
       - run: go test -tags docker -count=1 ./integration
-      - run: go build -o corral ./cmd/corral
+      - run: go build -o murder ./cmd/murder

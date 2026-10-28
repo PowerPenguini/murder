@@ -17,7 +17,7 @@ var ErrNotFound = errors.New("not found")
 var ErrNotRunning = errors.New("container is not running")
 
 // ErrNotOwned reports an object with the expected name that this node does
-// not own; Corral leaves it alone.
+// not own; Murder leaves it alone.
 var ErrNotOwned = errors.New("not owned by this node")
 
 // ErrNetworkMismatch reports a network that exists with another subnet.
@@ -35,14 +35,14 @@ func Addresses(subnet string) (gateway, container netip.Addr, err error) {
 	return gateway, gateway.Next(), nil
 }
 
-// Labels Corral puts on everything it creates. LabelNode marks which node's
+// Labels Murder puts on everything it creates. LabelNode marks which node's
 // agent owns an object; an agent never touches another node's objects.
 const (
-	LabelManaged = "io.corral.managed"
-	LabelNode    = "io.corral.node"
-	LabelTenant  = "io.corral.tenant"
-	LabelHash    = "io.corral.spec-hash"
-	LabelImage   = "io.corral.image"
+	LabelManaged = "io.murder.managed"
+	LabelNode    = "io.murder.node"
+	LabelTenant  = "io.murder.tenant"
+	LabelHash    = "io.murder.spec-hash"
+	LabelImage   = "io.murder.image"
 )
 
 // Runtime is what the reconciler needs from a container engine.

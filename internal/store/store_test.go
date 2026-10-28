@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 const image = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -36,7 +36,7 @@ func options() Options {
 
 func openNew(t *testing.T, opts Options) (*SQLite, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "state", "corral.db")
+	path := filepath.Join(t.TempDir(), "state", "murder.db")
 	if err := Init(path, "node-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestTenantsLiveThroughARestart(t *testing.T) {
 }
 
 func TestOpenRefusesMissingLockedOrNewerDatabases(t *testing.T) {
-	if _, err := Open(filepath.Join(t.TempDir(), "missing.db"), options()); err == nil || !strings.Contains(err.Error(), "corral init") {
+	if _, err := Open(filepath.Join(t.TempDir(), "missing.db"), options()); err == nil || !strings.Contains(err.Error(), "murder init") {
 		t.Fatalf("missing database = %v", err)
 	}
 	_, path := openNew(t, options())
@@ -129,7 +129,7 @@ func TestOpenRefusesMissingLockedOrNewerDatabases(t *testing.T) {
 	if err := Init(newer, "node-1"); err != nil {
 		t.Fatal(err)
 	}
-	for version, want := range map[int]string{schemaVersion + 1: "upgrade Corral", 2: "development release", 0: "not a Corral database"} {
+	for version, want := range map[int]string{schemaVersion + 1: "upgrade Murder", 2: "development release", 0: "not a Murder database"} {
 		db, err := sql.Open("sqlite", dsn(newer))
 		if err != nil {
 			t.Fatal(err)
@@ -237,7 +237,7 @@ func TestAppChangeMustKeepLiveTenantsValid(t *testing.T) {
 	if _, err := st.PutApp(App{Name: "web", Spec: clash}, "b"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Restore("old", "a"); !errors.As(err, &validation) || !strings.Contains(err.Error(), "corral tenant set") {
+	if _, err := st.Restore("old", "a"); !errors.As(err, &validation) || !strings.Contains(err.Error(), "murder tenant set") {
 		t.Fatalf("restore an incompatible tenant = %v", err)
 	}
 	if _, _, err := st.Configure("old", "web", spec.Overrides{}, 0, "a"); err != nil {
@@ -604,7 +604,7 @@ func TestEventsKeepNoEnvValuesAndShowRollouts(t *testing.T) {
 // pragmas applied.
 func TestPathsWithURICharacters(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "a#b?c%41")
-	path := filepath.Join(dir, "corral.db")
+	path := filepath.Join(dir, "murder.db")
 	if err := Init(path, "node-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +656,7 @@ func TestOpenTightensTheMode(t *testing.T) {
 func TestRelativePathAndInterruptedInit(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	path := filepath.Join("state", "corral.db")
+	path := filepath.Join("state", "murder.db")
 	if err := os.MkdirAll("state", 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +700,7 @@ func TestRelativePathAndInterruptedInit(t *testing.T) {
 		t.Fatalf("journal mode = %q, %v", mode, err)
 	}
 	_ = db.Close()
-	if _, err := Open(other, options()); err == nil || !strings.Contains(err.Error(), "not a Corral database") {
+	if _, err := Open(other, options()); err == nil || !strings.Contains(err.Error(), "not a Murder database") {
 		t.Fatalf("open another database = %v", err)
 	}
 }

@@ -13,12 +13,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/edge"
-	"github.com/PowerPenguini/corral/internal/reconcile"
-	"github.com/PowerPenguini/corral/internal/runtime"
-	"github.com/PowerPenguini/corral/internal/secrets"
-	"github.com/PowerPenguini/corral/internal/spec"
-	"github.com/PowerPenguini/corral/internal/store"
+	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/runtime"
+	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // Tenant is what the API shows about a tenant. Secret values never appear.

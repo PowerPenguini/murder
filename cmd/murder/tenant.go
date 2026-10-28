@@ -13,11 +13,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/api"
-	"github.com/PowerPenguini/corral/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/reconcile"
 )
 
-const tenantUsage = `Usage: corral tenant <command> [options]
+const tenantUsage = `Usage: murder tenant <command> [options]
 
   create NAME -app APP [overrides]   add a tenant running an app
   set NAME [-app APP] [overrides]    change a tenant's app or overrides
@@ -41,7 +41,7 @@ Overrides (repeatable where it makes sense; set changes only what is given):
   -unset-secret KEY      (set) drop a secret override; its value is kept
   -memory MB, -cpus N, -pids N   limits; 0 goes back to the app's
 
-Every command accepts -socket (default $CORRAL_SOCKET or /run/corral/agent.sock).
+Every command accepts -socket (default $MURDER_SOCKET or /run/murder/agent.sock).
 create, set, resume, restore and rotate accept -wait to block until the
 tenant is healthy.
 `
@@ -61,9 +61,9 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 }
 
 func socketPath(flags *flag.FlagSet) *string {
-	fallback := os.Getenv("CORRAL_SOCKET")
+	fallback := os.Getenv("MURDER_SOCKET")
 	if fallback == "" {
-		fallback = "/run/corral/agent.sock"
+		fallback = "/run/murder/agent.sock"
 	}
 	return flags.String("socket", fallback, "agent API socket")
 }
@@ -146,7 +146,7 @@ func runTenant(args []string) error {
 		if err := client.Archive(ctx, positional[0]); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "%s archived; \"corral tenant restore %s\" brings it back, \"corral tenant purge %s -yes\" deletes it\n", positional[0], positional[0], positional[0])
+		fmt.Fprintf(stdout, "%s archived; \"murder tenant restore %s\" brings it back, \"murder tenant purge %s -yes\" deletes it\n", positional[0], positional[0], positional[0])
 		return nil
 	case "restore":
 		if err := need(1); err != nil {

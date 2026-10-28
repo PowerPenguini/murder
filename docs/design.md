@@ -1,6 +1,6 @@
 # Design
 
-Corral is a self-built orchestrator for single-tenant web apps: one app
+Murder is a self-built orchestrator for single-tenant web apps: one app
 container per tenant, its state in one local data directory. It deliberately
 avoids Kubernetes and Nomad: the hard part, moving a tenant's local data
 between servers, is not something they solve.
@@ -9,17 +9,17 @@ between servers, is not something they solve.
 
 - **Tenant**: one customer workspace. It gets its own container, data
   directory, network and subdomain (`<tenant>.<base domain>`). The app inside
-  is single-tenant; Corral never looks into its data.
+  is single-tenant; Murder never looks into its data.
 - **Spec**: what a tenant runs — image (pinned by digest), container port,
   health path, data mount path and owner, environment, generated secrets and
-  resource limits. An app is configuration, not code in Corral.
+  resource limits. An app is configuration, not code in Murder.
 - **Secrets**: generated per tenant, stored encrypted with a master key that
   lives in a `0600` file on each node and offline in a password manager.
 
 ## Topology
 
 - Start with three small cloud servers in three locations on one private
-  network; each runs tenants, the Corral agent, the edge proxy and a Raft voter.
+  network; each runs tenants, the Murder agent, the edge proxy and a Raft voter.
   Grow by resizing, then by adding dedicated servers and draining old ones.
 - Capacity is planned N+1: the tenants of a failed server must fit on the rest.
 

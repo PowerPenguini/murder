@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/api"
-	"github.com/PowerPenguini/corral/internal/reconcile"
-	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 func TestFlagsMayFollowArguments(t *testing.T) {

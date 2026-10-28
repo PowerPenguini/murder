@@ -14,14 +14,14 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/PowerPenguini/corral/internal/edge"
-	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 // Agent configures one node's agent.
 type Agent struct {
 	// Node names this node; the agent only manages Docker objects carrying
-	// its node label. "corral init" stores it in the state (the host name if
+	// its node label. "murder init" stores it in the state (the host name if
 	// unset here); afterwards the database decides and a different value
 	// here is an error, so renaming the host changes nothing.
 	Node string `yaml:"node"`
@@ -55,7 +55,7 @@ type Agent struct {
 // Volumes selects the data volume driver.
 type Volumes struct {
 	// Driver is "dir" (Root/<tenant>) or "zfs" (Parent/<tenant> mounted at
-	// MountRoot/<tenant>). Root and MountRoot default to /srv/corral/tenants.
+	// MountRoot/<tenant>). Root and MountRoot default to /srv/murder/tenants.
 	Driver    string `yaml:"driver"`
 	Root      string `yaml:"root"`
 	Parent    string `yaml:"parent"`
@@ -93,13 +93,13 @@ func Load(path string) (Agent, error) {
 // Parse reads a configuration and fills in defaults.
 func Parse(data []byte) (Agent, error) {
 	agent := Agent{
-		Database:          "/var/lib/corral/corral.db",
-		MasterKeyFile:     "/etc/corral/master.key",
-		Socket:            "/run/corral/agent.sock",
+		Database:          "/var/lib/murder/murder.db",
+		MasterKeyFile:     "/etc/murder/master.key",
+		Socket:            "/run/murder/agent.sock",
 		DockerSocket:      "/var/run/docker.sock",
-		Volumes:           Volumes{Driver: "dir", Root: "/srv/corral/tenants", MountRoot: "/srv/corral/tenants"},
+		Volumes:           Volumes{Driver: "dir", Root: "/srv/murder/tenants", MountRoot: "/srv/murder/tenants"},
 		NetworkPool:       "10.240.0.0/16",
-		Edge:              Edge{HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/corral/certs"}},
+		Edge:              Edge{HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/murder/certs"}},
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
 	}
