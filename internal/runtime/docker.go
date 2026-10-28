@@ -321,8 +321,12 @@ func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels 
 	case err == nil && existing == subnet:
 		return nil
 	case err == nil:
-		return fmt.Errorf("network %s has subnet %s, want %s", name, existing, subnet)
+		return fmt.Errorf("%w: network %s has subnet %s, want %s", ErrNetworkMismatch, name, existing, subnet)
 	case !errors.Is(err, ErrNotFound):
+		return err
+	}
+	gateway, _, err := Addresses(subnet)
+	if err != nil {
 		return err
 	}
 	create := map[string]any{
@@ -332,9 +336,10 @@ func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels 
 		"Labels":         d.ownLabels(labels),
 		// Corral assigns each tenant a small subnet from its own pool, so the
 		// engine's default pools (about thirty networks) are never used up.
-		"IPAM": map[string]any{"Driver": "default", "Config": []map[string]string{{"Subnet": subnet}}},
-		// Containers on one tenant network cannot reach each other; the edge
-		// proxy reaches the tenant through its published loopback port.
+		"IPAM": map[string]any{"Driver": "default", "Config": []map[string]string{{"Subnet": subnet, "Gateway": gateway.String()}}},
+		// Containers on one tenant network cannot reach each other, and
+		// networks are isolated from each other; the host (the edge proxy)
+		// reaches the tenant at its address.
 		"Options": map[string]string{"com.docker.network.bridge.enable_icc": "false"},
 	}
 	if err := d.do(ctx, request{method: http.MethodPost, path: "/networks/create", body: create}, nil); err != nil {
@@ -421,13 +426,11 @@ func (d *Docker) List(ctx context.Context) ([]Container, error) {
 }
 
 func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error) {
-	port := strconv.Itoa(spec.ContainerPort) + "/tcp"
 	mounts := make([]map[string]any, 0, len(spec.Mounts))
 	for _, mount := range spec.Mounts {
 		mounts = append(mounts, map[string]any{"Type": "bind", "Source": mount.Source, "Target": mount.Target})
 	}
 	host := map[string]any{
-		"PortBindings":   map[string]any{port: []map[string]string{{"HostIp": "127.0.0.1", "HostPort": strconv.Itoa(spec.HostPort)}}},
 		"Mounts":         mounts,
 		"Memory":         spec.MemoryBytes,
 		"NanoCpus":       spec.NanoCPUs,
@@ -445,9 +448,8 @@ func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error)
 		"Env":              spec.Env,
 		"User":             spec.User,
 		"Labels":           d.ownLabels(spec.Labels),
-		"ExposedPorts":     map[string]any{port: map[string]any{}},
 		"HostConfig":       host,
-		"NetworkingConfig": map[string]any{"EndpointsConfig": map[string]any{spec.Network: map[string]any{}}},
+		"NetworkingConfig": map[string]any{"EndpointsConfig": map[string]any{spec.Network: map[string]any{"IPAMConfig": map[string]string{"IPv4Address": spec.Address}}}},
 	}
 	var created struct {
 		ID string `json:"Id"`

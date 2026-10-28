@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,7 @@ type fakeRuntime struct {
 	images     map[string]bool
 	containers map[string]*fakeContainer
 	networks   map[string]map[string]string // name → labels
+	subnets    map[string]string            // name → subnet
 	pulled     []string
 	next       int
 	events     []string
@@ -53,7 +55,7 @@ type fakeContainer struct {
 }
 
 func newFakeRuntime() *fakeRuntime {
-	return &fakeRuntime{images: map[string]bool{imageA: true}, containers: map[string]*fakeContainer{}, networks: map[string]map[string]string{}}
+	return &fakeRuntime{images: map[string]bool{imageA: true}, containers: map[string]*fakeContainer{}, networks: map[string]map[string]string{}, subnets: map[string]string{}}
 }
 
 func (f *fakeRuntime) record(event string) { f.events = append(f.events, event) }
@@ -75,10 +77,24 @@ func (f *fakeRuntime) PullImage(_ context.Context, ref string) error {
 	return nil
 }
 
-func (f *fakeRuntime) EnsureNetwork(_ context.Context, name, _ string, labels map[string]string) error {
+// EnsureNetwork refuses, like Docker, a subnet another network holds, and
+// reports a network of the name with another subnet.
+func (f *fakeRuntime) EnsureNetwork(_ context.Context, name, subnet string, labels map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.networks[name] = labels
+	if existing, ok := f.subnets[name]; ok {
+		if existing != subnet {
+			return fmt.Errorf("%w: %s has %s", runtime.ErrNetworkMismatch, name, existing)
+		}
+		return nil
+	}
+	for other, taken := range f.subnets {
+		if taken == subnet {
+			return fmt.Errorf("Pool overlaps with other one on this address space (%s)", other)
+		}
+	}
+	f.networks[name], f.subnets[name] = labels, subnet
+	f.record("create-network " + name + " " + subnet)
 	return nil
 }
 
@@ -89,6 +105,7 @@ func (f *fakeRuntime) RemoveNetwork(_ context.Context, name string) error {
 		f.record("remove-network " + name)
 	}
 	delete(f.networks, name)
+	delete(f.subnets, name)
 	return nil
 }
 
@@ -246,8 +263,7 @@ type fixture struct {
 	reconciler *Reconciler
 }
 
-// newFixture serves a health endpoint on the single host port the store can
-// assign, so the reconciler's health check reaches it.
+// newFixture serves a health endpoint the reconciler checks every tenant at.
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -280,7 +296,7 @@ func newFixture(t *testing.T) *fixture {
 	sealer := func(tenant, name string, _ spec.Secret) (string, error) {
 		return key.Seal(secrets.Context(tenant, name), "the-secret")
 	}
-	st, err := store.Open(statePath, store.Options{PortFrom: port, PortTo: port, NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: sealer})
+	st, err := store.Open(statePath, store.Options{NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: sealer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,6 +305,8 @@ func newFixture(t *testing.T) *fixture {
 	volumes := &fakeVolumes{Dir: volume.Dir{Root: filepath.Join(t.TempDir(), "tenants")}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := New(st, rt, volumes, key, Config{BaseDomain: "example.test", DefaultLimits: spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128}}, log)
+	// Every tenant's health is checked at the test server.
+	reconciler.backend = func(store.Record) (string, error) { return "127.0.0.1:" + strconv.Itoa(port), nil }
 	return &fixture{store: st, storePath: statePath, runtime: rt, volumes: volumes, key: key, reconciler: reconciler}
 }
 
@@ -377,6 +395,7 @@ func TestUnchangedTenantIsLeftAlone(t *testing.T) {
 	f.reconcile(t)
 	f.runtime.takeEvents()
 	restarted := New(f.store, f.runtime, f.volumes, f.key, f.reconciler.config, f.reconciler.log)
+	restarted.backend = f.reconciler.backend
 	if err := restarted.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +567,7 @@ func TestInvalidStoredSpecIsNotRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	st, err := store.Open(f.storePath, store.Options{PortFrom: 20000, PortTo: 20010, NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: func(string, string, spec.Secret) (string, error) { return "", nil }})
+	st, err := store.Open(f.storePath, store.Options{NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: func(string, string, spec.Secret) (string, error) { return "", nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,24 +594,24 @@ func TestStoppedContainerIsStartedAgain(t *testing.T) {
 	}
 }
 
+func (f *fixture) archive(t *testing.T, name string) {
+	t.Helper()
+	if err := f.store.Archive(name, "test"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestArchiveClearsTheRuntimeAndKeepsTheData(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	if err := f.reconciler.Archive(context.Background(), "acme", "test"); err != nil {
-		t.Fatal(err)
-	}
+	f.archive(t, "acme")
+	f.reconcile(t)
 	if f.runtime.count() != 0 || f.runtime.networks["corral-acme"] != nil {
 		t.Fatalf("left behind: %d containers, networks %v", f.runtime.count(), f.runtime.networks)
 	}
 	if len(f.volumes.removed) != 0 {
 		t.Fatalf("archive removed data: %v", f.volumes.removed)
-	}
-	if _, err := f.store.Get("acme"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("record after archiving = %v", err)
-	}
-	if archived, ok := f.store.ArchivedTenant("acme"); !ok || archived.Record.Spec.Suspended {
-		t.Fatalf("archive entry = %+v, %v", archived, ok)
 	}
 	if _, ok := f.reconciler.Status("acme"); ok {
 		t.Fatal("status kept for an archived tenant")
@@ -607,28 +626,80 @@ func TestArchiveClearsTheRuntimeAndKeepsTheData(t *testing.T) {
 	}
 }
 
-// A failure leaves the tenant suspended and its record (with its port and
-// subnet) in place, so the archive can be repeated and nothing is reused early.
-func TestFailedArchiveCanBeRepeated(t *testing.T) {
+// An archived tenant keeps its subnet until a pass has removed its
+// container and network, so a new tenant is never routed to a container
+// still running at that address.
+func TestArchivedSubnetIsReleasedOnlyOnceItsRuntimeIsGone(t *testing.T) {
+	f := newFixture(t)
+	old := f.create(t, "acme")
+	f.reconcile(t)
+	f.runtime.failRemove = errors.New("device busy")
+	f.archive(t, "acme")
+	if err := f.reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("a pass that could not remove a container reported success")
+	}
+	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != old.Subnet {
+		t.Fatal("the subnet was released while the container remained")
+	}
+	if beta := f.create(t, "beta"); beta.Subnet == old.Subnet {
+		t.Fatal("a new tenant got the subnet of a container still running")
+	}
+	f.runtime.failRemove = nil
+	f.reconcile(t)
+	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != "" {
+		t.Fatal("the subnet was not released once the runtime was gone")
+	}
+	if gamma := f.create(t, "gamma"); gamma.Subnet != old.Subnet {
+		t.Fatalf("gamma got %s, not the released %s", gamma.Subnet, old.Subnet)
+	}
+	f.reconcile(t)
+}
+
+// A tenant restored before its subnet was released returns to its own
+// network and container.
+func TestQuickRestoreKeepsTheNetwork(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
-	f.runtime.failRemove = errors.New("device busy")
-	if err := f.reconciler.Archive(context.Background(), "acme", "test"); err == nil {
-		t.Fatal("Archive reported success while the container remained")
-	}
-	record, err := f.store.Get("acme")
-	if err != nil || !record.Spec.Suspended {
-		t.Fatalf("record after a failed archive = %+v, %v", record, err)
-	}
-	f.runtime.failRemove = nil
-	if err := f.reconciler.Archive(context.Background(), "acme", "test"); err != nil {
+	container := f.runtime.only(t).ID
+	f.archive(t, "acme")
+	if _, err := f.store.Restore("acme", "test"); err != nil {
 		t.Fatal(err)
 	}
-	// The archive remembers the tenant as running, as it was before the
-	// first attempt, not as the suspension that attempt left behind.
-	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Spec.Suspended || archived.Record.SuspendedBeforeArchive != nil {
-		t.Fatalf("archived record = %+v", archived.Record)
+	f.runtime.takeEvents()
+	f.reconcile(t)
+	if f.runtime.only(t).ID != container || slices.ContainsFunc(f.runtime.takeEvents(), func(e string) bool { return strings.Contains(e, "network") }) {
+		t.Fatal("a quick restore rebuilt the tenant's runtime")
+	}
+}
+
+// A network found with another subnet (say, after restoring an older
+// database) is rebuilt.
+func TestOutdatedNetworkIsRebuilt(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	f.runtime.networks["corral-acme"] = map[string]string{runtime.LabelTenant: "acme"}
+	f.runtime.subnets["corral-acme"] = "10.240.9.0/28"
+	f.reconcile(t)
+	if f.runtime.subnets["corral-acme"] != record.Subnet {
+		t.Fatalf("network subnet = %s, want %s", f.runtime.subnets["corral-acme"], record.Subnet)
+	}
+	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseRunning || !status.Healthy {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestContainerGetsTheFixedAddress(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	f.reconcile(t)
+	_, address, _ := runtime.Addresses(record.Subnet)
+	if got := f.runtime.only(t).spec.Address; got != address.String() {
+		t.Fatalf("address = %s, want %s", got, address)
+	}
+	backend, err := Backend(record)
+	if err != nil || backend != address.String()+":8080" {
+		t.Fatalf("Backend = %s, %v", backend, err)
 	}
 }
 
@@ -641,11 +712,7 @@ func TestOrphanNetworkOfAMissingTenantIsRemoved(t *testing.T) {
 	if f.runtime.networks["corral-acme"] == nil {
 		t.Fatal("a suspended tenant keeps its network")
 	}
-	// The record disappears without Archive, as after restoring an older
-	// state file: the next pass still removes the network.
-	if err := f.store.Archive("acme", "test"); err != nil {
-		t.Fatal(err)
-	}
+	f.archive(t, "acme")
 	f.reconcile(t)
 	if f.runtime.networks["corral-acme"] != nil {
 		t.Fatal("the network of a tenant without a record was left behind")
@@ -659,9 +726,7 @@ func TestPurgeOnlyArchivedTenants(t *testing.T) {
 	if err := f.reconciler.Purge(context.Background(), "acme", "test"); err == nil {
 		t.Fatal("purged a live tenant")
 	}
-	if err := f.reconciler.Archive(context.Background(), "acme", "test"); err != nil {
-		t.Fatal(err)
-	}
+	f.archive(t, "acme")
 	if exists, _ := f.reconciler.DataExists(context.Background(), "acme"); !exists {
 		t.Fatal("archive removed the data")
 	}
@@ -714,5 +779,26 @@ func TestSpecHashIsStable(t *testing.T) {
 	moved, _ := f.reconciler.containerSpec(record, "/srv/acme")
 	if moved.Labels[runtime.LabelHash] == first.Labels[runtime.LabelHash] {
 		t.Fatal("a different subnet kept the same hash")
+	}
+}
+
+// A tenant archived after a pass read the store is still run by that pass,
+// so the pass must not release its subnet: it may create the tenant's
+// network and container there right after.
+func TestAPassDoesNotReleaseATenantItStillRuns(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	f.archive(t, "acme")
+	if err := f.reconciler.releaseArchived(map[string]bool{"acme": true}, []runtime.Container{}, []runtime.Network{}); err != nil {
+		t.Fatal(err)
+	}
+	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != record.Subnet {
+		t.Fatal("a pass released the subnet of a tenant it still runs")
+	}
+	if err := f.reconciler.releaseArchived(map[string]bool{}, []runtime.Container{}, []runtime.Network{}); err != nil {
+		t.Fatal(err)
+	}
+	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != "" {
+		t.Fatal("the next pass did not release it")
 	}
 }

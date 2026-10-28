@@ -112,7 +112,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	if err := store.Init(statePath, "test-node"); err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(statePath, store.Options{PortFrom: 20000, PortTo: 20100, NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: key.NewSealed})
+	st, err := store.Open(statePath, store.Options{NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: key.NewSealed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestCreatePinsDefaultsAndHidesSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	created := applied.Tenant
-	if !applied.Changed || created.URL != "https://acme.example.test" || created.HostPort != 20000 || created.Generation != 1 || created.App != "web" {
+	if !applied.Changed || created.URL != "https://acme.example.test" || created.Address != "10.240.0.2:8080" || created.Generation != 1 || created.App != "web" {
 		t.Fatalf("created = %+v", applied)
 	}
 	if created.Spec.Image != pinnedTag("ghcr.io/example/app:canary") || created.Overrides.Image != created.Spec.Image {
@@ -466,7 +466,7 @@ func TestArchiveRestorePurge(t *testing.T) {
 	for _, e := range events {
 		actions = append(actions, e.Action)
 	}
-	if strings.Join(actions, ",") != "tenant.created,tenant.purged,tenant.archived,tenant.archiving,tenant.restored,tenant.updated,tenant.archived,tenant.archiving,tenant.created" {
+	if strings.Join(actions, ",") != "tenant.created,tenant.purged,tenant.archived,tenant.restored,tenant.updated,tenant.archived,tenant.created" {
 		t.Fatalf("events = %v", actions)
 	}
 }
@@ -508,7 +508,7 @@ func TestSuspendLogsAndRoutes(t *testing.T) {
 		t.Fatalf("logs = %q, %v", logs, err)
 	}
 	route, ok := (Routes{Store: f.store}).Route("acme")
-	if !ok || route.Backend != "127.0.0.1:20000" || route.Suspended {
+	if !ok || route.Backend != "10.240.0.2:8080" || route.Suspended {
 		t.Fatalf("route = %+v, %v", route, ok)
 	}
 	if _, ok := (Routes{Store: f.store}).Route("nobody"); ok {

@@ -142,9 +142,10 @@ corral app delete web                   # once no tenant (live or archived) runs
 corral events -tenant acme              # the audit log: who changed what, and when
 ```
 
-An archive that fails leaves the tenant suspended; run it again. A new
-tenant cannot take an archived tenant's name until that tenant is restored
-or purged.
+An archive is one change: the edge stops routing to the tenant at once, and
+the reconcile pass it starts removes the container and network (a pass that
+cannot, retries). A new tenant cannot take an archived tenant's name until
+that tenant is restored or purged.
 
 ## Security model
 
@@ -154,8 +155,12 @@ or purged.
 - **Tenants never run as root.** Specs that set user 0 are refused, and
   images must not default to root.
 - **Every container is locked down.** It drops all capabilities, runs with
-  `no-new-privileges`, has resource limits and publishes its port on loopback
-  only.
+  `no-new-privileges` and has resource limits.
+- **Tenants cannot reach each other.** Each has its own network (a /28 with
+  inter-container traffic off, and Docker isolates networks from each
+  other). Nothing is published on the host: the edge proxy, on the host,
+  connects to the tenant's fixed address in its network, which other
+  tenants cannot reach. An integration test checks this on Docker.
 - **Tenant data is out of reach of host users.** Data directories sit below a
   root-only (`0700`) directory, and ZFS datasets are created with `setuid=off`
   and `devices=off`. A setuid file a tenant writes there is useless to host

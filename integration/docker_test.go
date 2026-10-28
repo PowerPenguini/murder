@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -66,16 +65,6 @@ func buildTestImage(t *testing.T, variant, tag string) string {
 	return id
 }
 
-func freePort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
-}
-
 type node struct {
 	store      *store.SQLite
 	docker     *runtime.Docker
@@ -90,7 +79,6 @@ type node struct {
 func newNode(t *testing.T, name string) *node {
 	t.Helper()
 	dir := t.TempDir()
-	port := freePort(t)
 	keyPath := filepath.Join(dir, "master.key")
 	if err := secrets.CreateKey(keyPath); err != nil {
 		t.Fatal(err)
@@ -104,7 +92,7 @@ func newNode(t *testing.T, name string) *node {
 		t.Fatal(err)
 	}
 	// A pool unlikely to collide with the host's networks.
-	st, err := store.Open(statePath, store.Options{PortFrom: port, PortTo: port, NetworkPool: netip.MustParsePrefix("10.253.0.0/24"), Sealer: key.NewSealed})
+	st, err := store.Open(statePath, store.Options{NetworkPool: netip.MustParsePrefix("10.253.0.0/24"), Sealer: key.NewSealed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,6 +277,13 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 	if err := n.client.Archive(ctx, tenant); err != nil {
 		t.Fatal(err)
 	}
+	if status, _ := n.request(t, http.MethodGet, tenant, "/health", ""); status != http.StatusNotFound {
+		t.Fatalf("archived tenant answered %d before its container was removed", status)
+	}
+	// The pass the archive starts removes the container and network.
+	if err := n.reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if containers, _ := n.docker.List(ctx); hasTenant(containers, tenant) {
 		t.Fatal("container left after archive")
 	}
@@ -335,4 +330,50 @@ func hasTenant(containers []runtime.Container, tenant string) bool {
 		}
 	}
 	return false
+}
+
+// Tenants on one node cannot reach each other, while the host (the edge
+// proxy) reaches every tenant at its address.
+func TestTenantsCannotReachEachOther(t *testing.T) {
+	if _, err := os.Stat(dockerSocket()); err != nil {
+		t.Skipf("no Docker socket: %v", err)
+	}
+	suffix := make([]byte, 3)
+	_, _ = rand.Read(suffix)
+	first, second := "iso-a-"+hex.EncodeToString(suffix), "iso-b-"+hex.EncodeToString(suffix)
+	repository := "corral-it/" + first
+	buildTestImage(t, "v1", repository+":v1")
+	cleanupTenant(t, first)
+	cleanupTenant(t, second)
+	n := newNode(t, first)
+	ctx := context.Background()
+	app := spec.Tenant{Image: repository + ":v1", HealthPath: "/health", User: strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()), Env: map[string]string{"DATA_DIR": "/data"}}
+	if _, err := n.client.PutApp(ctx, "iso", app); err != nil {
+		t.Fatal(err)
+	}
+	var addresses []string
+	for _, name := range []string{first, second} {
+		created, err := n.client.Create(ctx, api.TenantRequest{Name: name, App: "iso"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n.waitHealthy(t, n.reconciler, name)
+		addresses = append(addresses, created.Tenant.Address)
+	}
+	// The host reaches both directly.
+	for _, address := range addresses {
+		response, err := http.Get("http://" + address + "/health")
+		if err != nil {
+			t.Fatalf("the host cannot reach %s: %v", address, err)
+		}
+		response.Body.Close()
+	}
+	// Neither reaches the other.
+	for i, name := range []string{first, second} {
+		other := addresses[1-i]
+		_, body := n.request(t, http.MethodGet, name, "/dial?addr="+other, "")
+		if body == "connected" || !strings.HasPrefix(body, "refused") {
+			t.Fatalf("%s reached the other tenant at %s: %s", name, other, body)
+		}
+	}
 }

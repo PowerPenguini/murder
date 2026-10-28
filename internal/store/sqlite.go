@@ -145,9 +145,6 @@ func syncDir(dir string) error {
 // error, not an empty state: an empty state would remove every tenant's
 // containers.
 func Open(path string, options Options) (*SQLite, error) {
-	if options.PortFrom < 1024 || options.PortTo > 65535 || options.PortFrom > options.PortTo {
-		return nil, fmt.Errorf("host port range %d-%d is invalid", options.PortFrom, options.PortTo)
-	}
 	if !options.NetworkPool.IsValid() || !options.NetworkPool.Addr().Is4() || options.NetworkPool.Bits() > subnetBits-4 {
 		return nil, fmt.Errorf("network pool %v must be an IPv4 prefix of /%d or larger", options.NetworkPool, subnetBits-4)
 	}
@@ -280,7 +277,7 @@ func load(q querier) (*snapshot, error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, suspended_before_archive, host_port, subnet, data_image, generation, created_at, updated_at, archived_at FROM tenants`)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, generation, created_at, updated_at, archived_at FROM tenants`)
 	if err != nil {
 		return nil, err
 	}
@@ -288,10 +285,8 @@ func load(q querier) (*snapshot, error) {
 		var record Record
 		var name, overrides, created, updated string
 		var suspended bool
-		var before sql.NullBool
-		var port sql.NullInt64
 		var subnet, archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &before, &port, &subnet, &record.DataImage, &record.Generation, &created, &updated, &archivedAt); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &subnet, &record.DataImage, &record.Generation, &created, &updated, &archivedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -301,11 +296,7 @@ func load(q querier) (*snapshot, error) {
 		}
 		record.Spec = spec.Compose(state.apps[record.App].Spec, name, record.Overrides)
 		record.Spec.Suspended = suspended
-		if before.Valid {
-			value := before.Bool
-			record.SuspendedBeforeArchive = &value
-		}
-		record.HostPort, record.Subnet = int(port.Int64), subnet.String
+		record.Subnet = subnet.String
 		record.Sealed = sealed[name]
 		record.CreatedAt, record.UpdatedAt = parseTime(created), parseTime(updated)
 		if archivedAt.Valid {
@@ -639,13 +630,13 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 		if err != nil {
 			return err
 		}
-		port, subnet, err := s.assign(current)
+		subnet, err := s.assign(current)
 		if err != nil {
 			return err
 		}
 		stamp := formatTime(now)
-		if _, err := tx.Exec(`INSERT INTO tenants (name, app, overrides, suspended, host_port, subnet, data_image, generation, created_at, updated_at)
-			VALUES (?, ?, ?, 0, ?, ?, '', 1, ?, ?)`, tenant.Name, tenant.App, marshal(overrides), port, subnet, stamp, stamp); err != nil {
+		if _, err := tx.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, generation, created_at, updated_at)
+			VALUES (?, ?, ?, 0, ?, '', 1, ?, ?)`, tenant.Name, tenant.App, marshal(overrides), subnet, stamp, stamp); err != nil {
 			return err
 		}
 		if err := s.sealMissing(tx, now, composed, nil); err != nil {
@@ -741,9 +732,7 @@ func (s *SQLite) SetSuspended(name string, suspended bool, actor string) (Record
 		if err != nil {
 			return err
 		}
-		// An explicit suspend or resume after a failed archive is what a
-		// later archive must keep and a restore bring back.
-		if _, err := tx.Exec(`UPDATE tenants SET suspended = ?, suspended_before_archive = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
+		if _, err := tx.Exec(`UPDATE tenants SET suspended = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
 			suspended, formatTime(now), name); err != nil {
 			return err
 		}
@@ -803,34 +792,19 @@ func (s *SQLite) Observe(name, dataImage string) error {
 	return err
 }
 
-func (s *SQLite) StartArchive(name, actor string) (Record, error) {
-	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
-		record, err := liveTenant(current, name)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`UPDATE tenants SET suspended_before_archive = COALESCE(suspended_before_archive, suspended), suspended = 1,
-			generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
-			return err
-		}
-		// Logged now, so a failed archive that leaves the tenant suspended
-		// still names who started it.
-		return event(tx, now, actor, "tenant.archiving", name, record.App, "")
-	})
-	if err != nil {
-		return Record{}, err
-	}
-	return next.live[name].clone(), nil
-}
-
+// Archive moves a live tenant to the archive in one write; the edge stops
+// routing to it at once. Its suspension is kept for the restore. It keeps
+// its subnet until the reconciler has removed its container and network
+// and calls Release: until then a container may still run at the address,
+// and no other tenant may be routed there.
 func (s *SQLite) Archive(name, actor string) error {
 	_, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE tenants SET suspended = COALESCE(suspended_before_archive, suspended), suspended_before_archive = NULL,
-			host_port = NULL, subnet = NULL, archived_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
+		if _, err := tx.Exec(`UPDATE tenants SET archived_at = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
+			formatTime(now), formatTime(now), name); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "tenant.archived", name, record.App, "")
@@ -852,12 +826,16 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 		if err != nil {
 			return fmt.Errorf("tenant %s cannot run app %s as it is now; change it with \"corral tenant set\" first: %w", name, record.App, err)
 		}
-		port, subnet, err := s.assign(current)
-		if err != nil {
-			return err
+		// Back on its own subnet if it still holds it (its network may still
+		// stand); otherwise on a free one.
+		subnet := record.Subnet
+		if subnet == "" {
+			if subnet, err = s.assign(current); err != nil {
+				return err
+			}
 		}
-		if _, err := tx.Exec(`UPDATE tenants SET host_port = ?, subnet = ?, archived_at = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
-			port, subnet, formatTime(now), name); err != nil {
+		if _, err := tx.Exec(`UPDATE tenants SET subnet = ?, archived_at = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
+			subnet, formatTime(now), name); err != nil {
 			return err
 		}
 		if err := s.sealMissing(tx, now, composed, record.Sealed); err != nil {
@@ -869,6 +847,20 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 		return Record{}, err
 	}
 	return next.live[name].clone(), nil
+}
+
+// Release frees the subnet of an archived tenant once the reconciler has
+// removed everything that used it. It does nothing for a tenant that is not
+// archived or holds none.
+func (s *SQLite) Release(name string) error {
+	if archived, ok := s.state.Load().archived[name]; !ok || archived.Record.Subnet == "" {
+		return nil
+	}
+	_, err := s.write(false, func(tx *sql.Tx, current *snapshot, _ time.Time) error {
+		_, err := tx.Exec(`UPDATE tenants SET subnet = NULL WHERE name = ? AND archived_at IS NOT NULL`, name)
+		return err
+	})
+	return err
 }
 
 // Forget deletes an archived tenant and its secrets. It also records the
@@ -947,23 +939,17 @@ func (s *SQLite) Events(query EventQuery) ([]Event, error) {
 	return events, closeRows(rows)
 }
 
-// assign returns a free host port and subnet for a new or restored tenant.
-func (s *SQLite) assign(state *snapshot) (int, string, error) {
-	usedPorts := map[int]bool{}
+// assign returns a subnet no tenant holds, live or archived and not yet
+// released.
+func (s *SQLite) assign(state *snapshot) (string, error) {
 	usedSubnets := map[string]bool{}
 	for _, record := range state.live {
-		usedPorts[record.HostPort] = true
 		usedSubnets[record.Subnet] = true
 	}
-	port := 0
-	for candidate := s.options.PortFrom; candidate <= s.options.PortTo; candidate++ {
-		if !usedPorts[candidate] {
-			port = candidate
-			break
+	for _, archived := range state.archived {
+		if archived.Record.Subnet != "" {
+			usedSubnets[archived.Record.Subnet] = true
 		}
-	}
-	if port == 0 {
-		return 0, "", fmt.Errorf("no free host port in %d-%d", s.options.PortFrom, s.options.PortTo)
 	}
 	pool := s.options.NetworkPool
 	base := pool.Masked().Addr().As4()
@@ -974,8 +960,8 @@ func (s *SQLite) assign(state *snapshot) (int, string, error) {
 		binary.BigEndian.PutUint32(addr[:], start+i<<(32-subnetBits))
 		subnet := netip.PrefixFrom(netip.AddrFrom4(addr), subnetBits).String()
 		if !usedSubnets[subnet] {
-			return port, subnet, nil
+			return subnet, nil
 		}
 	}
-	return 0, "", fmt.Errorf("network pool %v has no free /%d", pool, subnetBits)
+	return "", fmt.Errorf("network pool %v has no free /%d", pool, subnetBits)
 }

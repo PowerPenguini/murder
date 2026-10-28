@@ -30,8 +30,8 @@ func fakeSealer() Sealer {
 	}
 }
 
-func options(from, to int) Options {
-	return Options{PortFrom: from, PortTo: to, NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: fakeSealer()}
+func options() Options {
+	return Options{NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: fakeSealer()}
 }
 
 func openNew(t *testing.T, opts Options) (*SQLite, string) {
@@ -68,13 +68,13 @@ func drain(st *SQLite) bool {
 }
 
 func TestTenantsLiveThroughARestart(t *testing.T) {
-	st, path := withApp(t, options(20000, 20001))
+	st, path := withApp(t, options())
 	drain(st)
 	first, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.HostPort != 20000 || first.Subnet != "10.240.0.0/28" || first.Generation != 1 || first.CreatedAt.IsZero() || first.Spec.Name != "acme" || first.Spec.Port != 8080 {
+	if first.Subnet != "10.240.0.0/28" || first.Generation != 1 || first.CreatedAt.IsZero() || first.Spec.Name != "acme" || first.Spec.Port != 8080 {
 		t.Fatalf("created record = %+v", first)
 	}
 	if first.Sealed["SESSION"] == "" {
@@ -87,11 +87,8 @@ func TestTenantsLiveThroughARestart(t *testing.T) {
 		t.Fatalf("duplicate create = %v", err)
 	}
 	second, err := st.Create(NewTenant{Name: "beta", App: "web"}, "alice")
-	if err != nil || second.HostPort != 20001 || second.Subnet != "10.240.0.16/28" {
+	if err != nil || second.Subnet != "10.240.0.16/28" {
 		t.Fatalf("second tenant = %+v, %v", second, err)
-	}
-	if _, err := st.Create(NewTenant{Name: "gamma", App: "web"}, "alice"); err == nil || !strings.Contains(err.Error(), "no free host port") {
-		t.Fatalf("create beyond the port range = %v", err)
 	}
 	drain(st)
 	if err := st.Observe("acme", image); err != nil {
@@ -103,13 +100,13 @@ func TestTenantsLiveThroughARestart(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(path, options(20000, 20001))
+	reopened, err := Open(path, options())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
 	again, err := reopened.Get("acme")
-	if err != nil || again.HostPort != 20000 || again.DataImage != image || again.Sealed["SESSION"] != first.Sealed["SESSION"] || !again.Spec.Equal(first.Spec) {
+	if err != nil || again.Subnet != first.Subnet || again.DataImage != image || again.Sealed["SESSION"] != first.Sealed["SESSION"] || !again.Spec.Equal(first.Spec) {
 		t.Fatalf("after reopen = %+v, %v", again, err)
 	}
 	if reopened.Node() != "node-1" {
@@ -118,11 +115,11 @@ func TestTenantsLiveThroughARestart(t *testing.T) {
 }
 
 func TestOpenRefusesMissingLockedOrNewerDatabases(t *testing.T) {
-	if _, err := Open(filepath.Join(t.TempDir(), "missing.db"), options(20000, 20001)); err == nil || !strings.Contains(err.Error(), "corral init") {
+	if _, err := Open(filepath.Join(t.TempDir(), "missing.db"), options()); err == nil || !strings.Contains(err.Error(), "corral init") {
 		t.Fatalf("missing database = %v", err)
 	}
-	_, path := openNew(t, options(20000, 20001))
-	if _, err := Open(path, options(20000, 20001)); err == nil || !strings.Contains(err.Error(), "in use") {
+	_, path := openNew(t, options())
+	if _, err := Open(path, options()); err == nil || !strings.Contains(err.Error(), "in use") {
 		t.Fatalf("second open = %v", err)
 	}
 	if err := Init(path, "node-1"); err == nil {
@@ -140,14 +137,13 @@ func TestOpenRefusesMissingLockedOrNewerDatabases(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	if _, err := Open(newer, options(20000, 20001)); err == nil || !strings.Contains(err.Error(), "upgrade Corral") {
+	if _, err := Open(newer, options()); err == nil || !strings.Contains(err.Error(), "upgrade Corral") {
 		t.Fatalf("a newer schema = %v", err)
 	}
-	_, valid := openNew(t, options(20000, 20001))
+	_, valid := openNew(t, options())
 	for name, opts := range map[string]Options{
-		"ports":   {PortFrom: 80, PortTo: 90, NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: fakeSealer()},
-		"pool":    {PortFrom: 20000, PortTo: 20001, NetworkPool: netip.MustParsePrefix("10.240.0.0/30"), Sealer: fakeSealer()},
-		"no seal": {PortFrom: 20000, PortTo: 20001, NetworkPool: netip.MustParsePrefix("10.240.0.0/16")},
+		"pool":    {NetworkPool: netip.MustParsePrefix("10.240.0.0/30"), Sealer: fakeSealer()},
+		"no seal": {NetworkPool: netip.MustParsePrefix("10.240.0.0/16")},
 	} {
 		if _, err := Open(valid, opts); err == nil || strings.Contains(err.Error(), "in use") {
 			t.Errorf("%s: invalid options = %v", name, err)
@@ -158,7 +154,7 @@ func TestOpenRefusesMissingLockedOrNewerDatabases(t *testing.T) {
 // An app change reaches every tenant of the app and bumps their generation,
 // unless the tenant's spec stays the same.
 func TestAppChangesReachTheirTenants(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20010))
+	st, _ := withApp(t, options())
 	if _, err := st.PutApp(App{Name: "other", Spec: appSpec()}, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -200,14 +196,11 @@ func TestAppChangesReachTheirTenants(t *testing.T) {
 // whole. Archived tenants do not block it: they are checked on restore and
 // can be reconfigured meanwhile. Nor does a tenant already invalid.
 func TestAppChangeMustKeepLiveTenantsValid(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20010))
+	st, _ := withApp(t, options())
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web", Overrides: spec.Overrides{Env: map[string]string{"TOKEN": "x"}}}, "a"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Create(NewTenant{Name: "old", App: "web", Overrides: spec.Overrides{Env: map[string]string{"KEY": "x"}}}, "a"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.StartArchive("old", "a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Archive("old", "a"); err != nil {
@@ -254,7 +247,7 @@ func TestAppChangeMustKeepLiveTenantsValid(t *testing.T) {
 // A tenant already invalid under the current rules does not block changes
 // to its app.
 func TestAnInvalidTenantDoesNotBlockItsApp(t *testing.T) {
-	st, path := withApp(t, options(20000, 20010))
+	st, path := withApp(t, options())
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web", Overrides: spec.Overrides{Env: map[string]string{"A": "1"}}}, "a"); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +260,7 @@ func TestAnInvalidTenantDoesNotBlockItsApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	st, err = Open(path, options(20000, 20010))
+	st, err = Open(path, options())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,14 +273,13 @@ func TestAnInvalidTenantDoesNotBlockItsApp(t *testing.T) {
 }
 
 func TestDeleteAppOnlyWhenUnused(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20010))
+	st, _ := withApp(t, options())
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.DeleteApp("web", "a"); !errors.Is(err, ErrInUse) {
 		t.Fatalf("delete a used app = %v", err)
 	}
-	_, _ = st.StartArchive("acme", "a")
 	_ = st.Archive("acme", "a")
 	if err := st.DeleteApp("web", "a"); !errors.Is(err, ErrInUse) {
 		t.Fatalf("delete an app of an archived tenant = %v", err)
@@ -307,7 +299,7 @@ func TestDeleteAppOnlyWhenUnused(t *testing.T) {
 }
 
 func TestConfigureChangesOverridesAndSkipsNoOps(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20010))
+	st, _ := withApp(t, options())
 	created, _ := st.Create(NewTenant{Name: "acme", App: "web"}, "a")
 	same, changed, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{}}, 0, "a")
 	if err != nil || changed || same.Generation != created.Generation {
@@ -337,7 +329,7 @@ func TestConfigureChangesOverridesAndSkipsNoOps(t *testing.T) {
 }
 
 func TestRotateReplacesOneSecret(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20010))
+	st, _ := withApp(t, options())
 	created, _ := st.Create(NewTenant{Name: "acme", App: "web"}, "a")
 	rotated, err := st.Rotate("acme", "SESSION", "a")
 	if err != nil || rotated.Sealed["SESSION"] == created.Sealed["SESSION"] || rotated.Generation != created.Generation+1 {
@@ -349,17 +341,10 @@ func TestRotateReplacesOneSecret(t *testing.T) {
 }
 
 func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20001))
+	st, _ := withApp(t, options())
 	created, _ := st.Create(NewTenant{Name: "acme", App: "web", Overrides: spec.Overrides{Env: map[string]string{"TZ": "UTC"}}}, "a")
 	if err := st.Observe("acme", image); err != nil {
 		t.Fatal(err)
-	}
-	// Archived as it was before the archive suspended it, however many
-	// times the archive starts.
-	for range 2 {
-		if started, err := st.StartArchive("acme", "a"); err != nil || !started.Spec.Suspended {
-			t.Fatalf("StartArchive = %+v, %v", started, err)
-		}
 	}
 	if err := st.Archive("acme", "a"); err != nil {
 		t.Fatal(err)
@@ -375,16 +360,17 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 		t.Fatalf("configure an archived tenant = %v", err)
 	}
 	archived, ok := st.ArchivedTenant("acme")
-	if !ok || archived.Record.Sealed["SESSION"] != created.Sealed["SESSION"] || archived.Record.DataImage != image || archived.Record.Spec.Suspended || archived.ArchivedAt.IsZero() || archived.Record.HostPort != 0 {
+	if !ok || archived.Record.Sealed["SESSION"] != created.Sealed["SESSION"] || archived.Record.DataImage != image || archived.Record.Spec.Suspended || archived.ArchivedAt.IsZero() || archived.Record.Subnet != created.Subnet {
 		t.Fatalf("archived = %+v, %v", archived, ok)
 	}
 	if list := st.ListArchived(); len(list) != 1 || list[0].Record.Spec.Name != "acme" {
 		t.Fatalf("ListArchived = %+v", list)
 	}
-	// Its port and subnet are free for others meanwhile.
+	// It keeps its subnet until it is released: a container may still run
+	// at its address.
 	other, err := st.Create(NewTenant{Name: "beta", App: "web"}, "a")
-	if err != nil || other.HostPort != created.HostPort || other.Subnet != created.Subnet {
-		t.Fatalf("port of an archived tenant = %+v, %v", other, err)
+	if err != nil || other.Subnet == created.Subnet {
+		t.Fatalf("a new tenant got an archived tenant's unreleased subnet: %+v, %v", other, err)
 	}
 	// A restore runs the app's current spec with the tenant's overrides.
 	next := appSpec()
@@ -393,7 +379,7 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, err := st.Restore("acme", "a")
-	if err != nil || restored.HostPort != 20001 || restored.Spec.Image != otherImage || restored.Spec.Env["TZ"] != "UTC" || restored.Sealed["SESSION"] != created.Sealed["SESSION"] || restored.Spec.Suspended || restored.DataImage != image {
+	if err != nil || restored.Subnet != created.Subnet || restored.Spec.Image != otherImage || restored.Spec.Env["TZ"] != "UTC" || restored.Sealed["SESSION"] != created.Sealed["SESSION"] || restored.Spec.Suspended || restored.DataImage != image {
 		t.Fatalf("restored = %+v, %v", restored, err)
 	}
 	if !restored.CreatedAt.Equal(created.CreatedAt) || restored.Generation <= created.Generation {
@@ -407,42 +393,37 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 	}
 }
 
-// A suspend or resume after a failed archive decides what the next archive
-// keeps.
-func TestSuspensionAfterAFailedArchiveIsWhatIsArchived(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20001))
+// An archive keeps the tenant's suspension for its restore.
+func TestArchiveKeepsTheSuspension(t *testing.T) {
+	st, _ := withApp(t, options())
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.StartArchive("acme", "a"); err != nil { // running; the archive then fails
-		t.Fatal(err)
-	}
-	if _, err := st.SetSuspended("acme", false, "a"); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := st.SetSuspended("acme", true, "a"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.StartArchive("acme", "a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Archive("acme", "a"); err != nil {
 		t.Fatal(err)
 	}
 	if archived, _ := st.ArchivedTenant("acme"); !archived.Record.Spec.Suspended {
-		t.Fatal("a tenant suspended before its archive comes back running")
+		t.Fatal("the archive lost the suspension")
+	}
+	if restored, err := st.Restore("acme", "a"); err != nil || !restored.Spec.Suspended {
+		t.Fatalf("restore = %+v, %v", restored, err)
+	}
+	if err := st.Archive("nobody", "a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("archive a missing tenant = %v", err)
 	}
 }
 
 func TestForgetDeletesTheTenantAndItsSecrets(t *testing.T) {
-	st, path := withApp(t, options(20000, 20001))
+	st, path := withApp(t, options())
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Forget("acme", "a"); !errors.Is(err, ErrNotArchived) {
 		t.Fatalf("forget a live tenant = %v", err)
 	}
-	_, _ = st.StartArchive("acme", "a")
 	_ = st.Archive("acme", "a")
 	if err := st.Forget("acme", "a"); err != nil {
 		t.Fatal(err)
@@ -462,7 +443,7 @@ func TestForgetDeletesTheTenantAndItsSecrets(t *testing.T) {
 }
 
 func TestEventsRecordWhoChangedWhat(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20010))
+	st, _ := withApp(t, options())
 	_, _ = st.Create(NewTenant{Name: "acme", App: "web"}, "alice")
 	_, _ = st.SetSuspended("acme", true, "bob")
 	_, _ = st.Rotate("acme", "SESSION", "carol")
@@ -495,7 +476,7 @@ func TestEventsRecordWhoChangedWhat(t *testing.T) {
 }
 
 func TestReturnedRecordsAreCopies(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20010))
+	st, _ := withApp(t, options())
 	_, _ = st.Create(NewTenant{Name: "acme", App: "web", Overrides: spec.Overrides{Env: map[string]string{"A": "1"}}}, "a")
 	record, _ := st.Get("acme")
 	record.Spec.Env["A"] = "changed"
@@ -513,7 +494,7 @@ func TestReturnedRecordsAreCopies(t *testing.T) {
 }
 
 func TestSubnetPoolExhaustion(t *testing.T) {
-	opts := options(20000, 20100)
+	opts := options()
 	opts.NetworkPool = netip.MustParsePrefix("10.240.0.0/24") // 16 subnets
 	st, _ := withApp(t, opts)
 	for i := range 16 {
@@ -528,7 +509,7 @@ func TestSubnetPoolExhaustion(t *testing.T) {
 
 // A failed sealer leaves nothing behind.
 func TestFailedWritesChangeNothing(t *testing.T) {
-	opts := options(20000, 20010)
+	opts := options()
 	fail := false
 	sealer := opts.Sealer
 	opts.Sealer = func(tenant, name string, secret spec.Secret) (string, error) {
@@ -553,7 +534,7 @@ func TestFailedWritesChangeNothing(t *testing.T) {
 
 // A tenant changed since a client read it is not overwritten.
 func TestConfigureRefusesOutdatedGenerations(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20010))
+	st, _ := withApp(t, options())
 	created, _ := st.Create(NewTenant{Name: "acme", App: "web"}, "a")
 	if _, _, err := st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, created.Generation, "a"); err != nil {
 		t.Fatal(err)
@@ -569,13 +550,13 @@ func TestConfigureRefusesOutdatedGenerations(t *testing.T) {
 // The audit log keeps names of env overrides, not their values, and shows a
 // tenant the app changes that reached it.
 func TestEventsKeepNoEnvValuesAndShowRollouts(t *testing.T) {
-	st, _ := withApp(t, options(20000, 20010))
+	st, _ := withApp(t, options())
 	_, _ = st.Create(NewTenant{Name: "acme", App: "web", Overrides: spec.Overrides{Env: map[string]string{"SMTP_PASSWORD": "hunter2"}}}, "a")
 	_, _, _ = st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"SMTP_PASSWORD": "hunter3"}}, 0, "a")
 	next := appSpec()
 	next.Env = map[string]string{"MODE": "prod"}
 	_, _ = st.PutApp(App{Name: "web", Spec: next}, "b")
-	_, _ = st.StartArchive("acme", "c")
+	_ = st.Archive("acme", "c")
 	events, err := st.Events(EventQuery{Tenant: "acme"})
 	if err != nil {
 		t.Fatal(err)
@@ -587,7 +568,7 @@ func TestEventsKeepNoEnvValuesAndShowRollouts(t *testing.T) {
 			t.Fatalf("an env value reached the audit log: %+v", e)
 		}
 	}
-	want := []string{"c tenant.archiving ", "b app.rolled-out app changed env", "a tenant.updated overrides: env SMTP_PASSWORD", "a tenant.created overrides: env SMTP_PASSWORD"}
+	want := []string{"c tenant.archived ", "b app.rolled-out app changed env", "a tenant.updated overrides: env SMTP_PASSWORD", "a tenant.created overrides: env SMTP_PASSWORD"}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("events = %q, want %q", lines, want)
 	}
@@ -612,7 +593,7 @@ func TestPathsWithURICharacters(t *testing.T) {
 	if err := Init(path, "node-1"); err != nil {
 		t.Fatal(err)
 	}
-	st, err := Open(path, options(20000, 20001))
+	st, err := Open(path, options())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +619,7 @@ func TestPathsWithURICharacters(t *testing.T) {
 
 // Open makes a database copied into place owner-only.
 func TestOpenTightensTheMode(t *testing.T) {
-	_, path := openNew(t, options(20000, 20001))
+	_, path := openNew(t, options())
 	copyPath := filepath.Join(t.TempDir(), "restored.db")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -647,7 +628,7 @@ func TestOpenTightensTheMode(t *testing.T) {
 	if err := os.WriteFile(copyPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st, err := Open(copyPath, options(20000, 20001))
+	st, err := Open(copyPath, options())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -674,12 +655,102 @@ func TestRelativePathAndInterruptedInit(t *testing.T) {
 	if err := Init(filepath.Join("state", "corral.db"), "node-1"); err != nil {
 		t.Fatal(err)
 	}
-	st, err := Open(filepath.Join("state", "corral.db"), options(20000, 20001))
+	st, err := Open(filepath.Join("state", "corral.db"), options())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
 	if left, _ := filepath.Glob(filepath.Join(dir, "state", ".corral-init-*")); len(left) != 0 {
 		t.Fatalf("init leftovers: %v", left)
+	}
+}
+
+// A database of schema 1 keeps its tenants, secrets and archive through
+// the rebuild of migration 2; a tenant caught half way through an archive
+// stays suspended, as it was.
+func TestMigrationTwoKeepsEverything(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corral.db")
+	db, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := "2026-10-26T10:00:00Z"
+	appJSON := marshal(normalizeApp(appSpec()))
+	for _, statement := range []string{
+		migrations[0],
+		`PRAGMA user_version = 1`,
+		`INSERT INTO meta VALUES ('node', 'node-1')`,
+		`INSERT INTO apps VALUES ('web', '` + appJSON + `', '` + stamp + `', '` + stamp + `')`,
+		`INSERT INTO tenants VALUES ('acme', 'web', '{}', 0, NULL, 20000, '10.240.0.0/28', '', 3, '` + stamp + `', '` + stamp + `', NULL)`,
+		`INSERT INTO tenants VALUES ('half', 'web', '{}', 1, 0, 20001, '10.240.0.16/28', '', 2, '` + stamp + `', '` + stamp + `', NULL)`,
+		`INSERT INTO tenants VALUES ('old', 'web', '{"env":{"TZ":"UTC"}}', 1, NULL, NULL, NULL, '', 5, '` + stamp + `', '` + stamp + `', '` + stamp + `')`,
+		`INSERT INTO secrets VALUES ('acme', 'SESSION', 'sealed-acme', '` + stamp + `')`,
+		`INSERT INTO secrets VALUES ('old', 'SESSION', 'sealed-old', '` + stamp + `')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	_ = db.Close()
+	st, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	acme, err := st.Get("acme")
+	if err != nil || acme.Subnet != "10.240.0.0/28" || acme.Generation != 3 || acme.Sealed["SESSION"] != "sealed-acme" {
+		t.Fatalf("acme = %+v, %v", acme, err)
+	}
+	if half, err := st.Get("half"); err != nil || !half.Spec.Suspended {
+		t.Fatalf("half-archived = %+v, %v", half, err)
+	}
+	old, ok := st.ArchivedTenant("old")
+	if !ok || old.Record.Sealed["SESSION"] != "sealed-old" || old.Record.Overrides.Env["TZ"] != "UTC" || !old.Record.Spec.Suspended {
+		t.Fatalf("old = %+v, %v", old, ok)
+	}
+	var version, foreignKeys int
+	_ = st.db.QueryRow(`PRAGMA user_version`).Scan(&version)
+	_ = st.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys)
+	if version != len(migrations) || foreignKeys != 1 {
+		t.Fatalf("user_version = %d, foreign_keys = %d", version, foreignKeys)
+	}
+	// Secrets still cascade with their tenant after the rebuild.
+	if err := st.Forget("old", "a"); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	_ = st.db.QueryRow(`SELECT count(*) FROM secrets WHERE tenant = 'old'`).Scan(&left)
+	if left != 0 {
+		t.Fatalf("%d secrets of a purged tenant left", left)
+	}
+}
+
+// A released subnet goes to the next tenant; a tenant restored after its
+// release gets a free one.
+func TestReleaseFreesAnArchivedSubnet(t *testing.T) {
+	st, _ := withApp(t, options())
+	acme, _ := st.Create(NewTenant{Name: "acme", App: "web"}, "a")
+	if err := st.Release("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := st.Get("acme"); again.Subnet != acme.Subnet {
+		t.Fatal("Release freed a live tenant's subnet")
+	}
+	if err := st.Archive("acme", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Release("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if archived, _ := st.ArchivedTenant("acme"); archived.Record.Subnet != "" {
+		t.Fatalf("subnet after release = %q", archived.Record.Subnet)
+	}
+	beta, err := st.Create(NewTenant{Name: "beta", App: "web"}, "a")
+	if err != nil || beta.Subnet != acme.Subnet {
+		t.Fatalf("beta = %+v, %v; want the released %s", beta, err, acme.Subnet)
+	}
+	restored, err := st.Restore("acme", "a")
+	if err != nil || restored.Subnet == "" || restored.Subnet == beta.Subnet {
+		t.Fatalf("restored = %+v, %v", restored, err)
 	}
 }
