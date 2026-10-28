@@ -24,7 +24,8 @@ var spoofable = []string{
 
 // Route says where a tenant's traffic goes.
 type Route struct {
-	// Backend is the host:port the tenant container is published on.
+	// Backend is the tenant container's address and port, which only the
+	// host reaches.
 	Backend   string
 	Suspended bool
 }

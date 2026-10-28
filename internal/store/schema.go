@@ -23,7 +23,7 @@ CREATE TABLE apps (
 ) STRICT;
 
 -- Live and archived tenants. An archived tenant holds no host port or
--- subnet, so they are free for others. (Rebuilt by migration 2.)
+-- subnet, so they are free for others.
 CREATE TABLE tenants (
 	name                     TEXT PRIMARY KEY,
 	app                      TEXT NOT NULL REFERENCES apps (name),
@@ -67,8 +67,10 @@ CREATE INDEX events_app ON events (app, id);
 `,
 	// 2: tenants are reached at a fixed address in their subnet instead of a
 	// published host port, and an archive is one write, so it needs no
-	// marker. A tenant caught half way through an archive is left live with
-	// the suspension it had before.
+	// marker. An archived tenant keeps its subnet until the reconciler has
+	// removed its container and network, so no other tenant is routed to a
+	// container still running at that address. A tenant caught half way
+	// through an old archive stays live and suspended, as it was.
 	`
 CREATE TABLE tenants_v2 (
 	name        TEXT PRIMARY KEY,
@@ -81,11 +83,11 @@ CREATE TABLE tenants_v2 (
 	created_at  TEXT NOT NULL,
 	updated_at  TEXT NOT NULL,
 	archived_at TEXT,
-	CHECK ((archived_at IS NULL) = (subnet IS NOT NULL))
+	CHECK (archived_at IS NOT NULL OR subnet IS NOT NULL)
 ) STRICT;
 
 INSERT INTO tenants_v2 (name, app, overrides, suspended, subnet, data_image, generation, created_at, updated_at, archived_at)
-SELECT name, app, overrides, COALESCE(suspended_before_archive, suspended), subnet, data_image, generation, created_at, updated_at, archived_at
+SELECT name, app, overrides, suspended, subnet, data_image, generation, created_at, updated_at, archived_at
 FROM tenants;
 
 DROP TABLE tenants;
@@ -103,7 +105,23 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
 		return err
 	}
-	defer db.Exec(`PRAGMA foreign_keys = ON`)
+	if err := migrateWithoutForeignKeys(db); err != nil {
+		_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+		return err
+	}
+	// The store runs on this one connection: it must not stay without
+	// foreign keys.
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return err
+	}
+	var on int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&on); err != nil || on != 1 {
+		return fmt.Errorf("foreign keys could not be turned back on: %v", err)
+	}
+	return nil
+}
+
+func migrateWithoutForeignKeys(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err

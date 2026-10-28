@@ -626,10 +626,10 @@ func TestArchiveClearsTheRuntimeAndKeepsTheData(t *testing.T) {
 	}
 }
 
-// A pass removes what no tenant wants before it creates anything, so a
-// subnet freed by an archive can go to a new tenant in the same pass; what
-// a pass could not remove, a later one does.
-func TestArchivedTenantMakesRoomBeforeANewOne(t *testing.T) {
+// An archived tenant keeps its subnet until a pass has removed its
+// container and network, so a new tenant is never routed to a container
+// still running at that address.
+func TestArchivedSubnetIsReleasedOnlyOnceItsRuntimeIsGone(t *testing.T) {
 	f := newFixture(t)
 	old := f.create(t, "acme")
 	f.reconcile(t)
@@ -638,36 +638,51 @@ func TestArchivedTenantMakesRoomBeforeANewOne(t *testing.T) {
 	if err := f.reconciler.Reconcile(context.Background()); err == nil {
 		t.Fatal("a pass that could not remove a container reported success")
 	}
+	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != old.Subnet {
+		t.Fatal("the subnet was released while the container remained")
+	}
+	if beta := f.create(t, "beta"); beta.Subnet == old.Subnet {
+		t.Fatal("a new tenant got the subnet of a container still running")
+	}
 	f.runtime.failRemove = nil
-	fresh := f.create(t, "beta")
-	if fresh.Subnet != old.Subnet {
-		t.Fatalf("the new tenant got %s, not the freed %s", fresh.Subnet, old.Subnet)
-	}
-	f.runtime.takeEvents()
 	f.reconcile(t)
-	events := strings.Join(f.runtime.takeEvents(), "\n")
-	if !strings.Contains(events, "remove-network corral-acme") || strings.Index(events, "remove-network corral-acme") > strings.Index(events, "create-network corral-beta") {
-		t.Fatalf("the old network was not removed first:\n%s", events)
+	if archived, _ := f.store.ArchivedTenant("acme"); archived.Record.Subnet != "" {
+		t.Fatal("the subnet was not released once the runtime was gone")
 	}
+	if gamma := f.create(t, "gamma"); gamma.Subnet != old.Subnet {
+		t.Fatalf("gamma got %s, not the released %s", gamma.Subnet, old.Subnet)
+	}
+	f.reconcile(t)
 }
 
-// A tenant restored with a new subnet while its old network is still there
-// gets the network rebuilt.
-func TestRestoredTenantRebuildsAnOutdatedNetwork(t *testing.T) {
+// A tenant restored before its subnet was released returns to its own
+// network and container.
+func TestQuickRestoreKeepsTheNetwork(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
+	container := f.runtime.only(t).ID
 	f.archive(t, "acme")
-	// Another tenant takes the subnet before any pass ran, so the restore
-	// gets another one, while the old network still stands.
-	f.create(t, "beta")
-	restored, err := f.store.Restore("acme", "test")
-	if err != nil {
+	if _, err := f.store.Restore("acme", "test"); err != nil {
 		t.Fatal(err)
 	}
+	f.runtime.takeEvents()
 	f.reconcile(t)
-	if f.runtime.subnets["corral-acme"] != restored.Subnet {
-		t.Fatalf("network subnet = %s, want %s", f.runtime.subnets["corral-acme"], restored.Subnet)
+	if f.runtime.only(t).ID != container || slices.ContainsFunc(f.runtime.takeEvents(), func(e string) bool { return strings.Contains(e, "network") }) {
+		t.Fatal("a quick restore rebuilt the tenant's runtime")
+	}
+}
+
+// A network found with another subnet (say, after restoring an older
+// database) is rebuilt.
+func TestOutdatedNetworkIsRebuilt(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	f.runtime.networks["corral-acme"] = map[string]string{runtime.LabelTenant: "acme"}
+	f.runtime.subnets["corral-acme"] = "10.240.9.0/28"
+	f.reconcile(t)
+	if f.runtime.subnets["corral-acme"] != record.Subnet {
+		t.Fatalf("network subnet = %s, want %s", f.runtime.subnets["corral-acme"], record.Subnet)
 	}
 	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseRunning || !status.Healthy {
 		t.Fatalf("status = %+v", status)

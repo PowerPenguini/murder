@@ -360,16 +360,17 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 		t.Fatalf("configure an archived tenant = %v", err)
 	}
 	archived, ok := st.ArchivedTenant("acme")
-	if !ok || archived.Record.Sealed["SESSION"] != created.Sealed["SESSION"] || archived.Record.DataImage != image || archived.Record.Spec.Suspended || archived.ArchivedAt.IsZero() || archived.Record.Subnet != "" {
+	if !ok || archived.Record.Sealed["SESSION"] != created.Sealed["SESSION"] || archived.Record.DataImage != image || archived.Record.Spec.Suspended || archived.ArchivedAt.IsZero() || archived.Record.Subnet != created.Subnet {
 		t.Fatalf("archived = %+v, %v", archived, ok)
 	}
 	if list := st.ListArchived(); len(list) != 1 || list[0].Record.Spec.Name != "acme" {
 		t.Fatalf("ListArchived = %+v", list)
 	}
-	// Its subnet is free for others meanwhile.
+	// It keeps its subnet until it is released: a container may still run
+	// at its address.
 	other, err := st.Create(NewTenant{Name: "beta", App: "web"}, "a")
-	if err != nil || other.Subnet != created.Subnet {
-		t.Fatalf("subnet of an archived tenant = %+v, %v", other, err)
+	if err != nil || other.Subnet == created.Subnet {
+		t.Fatalf("a new tenant got an archived tenant's unreleased subnet: %+v, %v", other, err)
 	}
 	// A restore runs the app's current spec with the tenant's overrides.
 	next := appSpec()
@@ -378,7 +379,7 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, err := st.Restore("acme", "a")
-	if err != nil || restored.Subnet != "10.240.0.16/28" || restored.Spec.Image != otherImage || restored.Spec.Env["TZ"] != "UTC" || restored.Sealed["SESSION"] != created.Sealed["SESSION"] || restored.Spec.Suspended || restored.DataImage != image {
+	if err != nil || restored.Subnet != created.Subnet || restored.Spec.Image != otherImage || restored.Spec.Env["TZ"] != "UTC" || restored.Sealed["SESSION"] != created.Sealed["SESSION"] || restored.Spec.Suspended || restored.DataImage != image {
 		t.Fatalf("restored = %+v, %v", restored, err)
 	}
 	if !restored.CreatedAt.Equal(created.CreatedAt) || restored.Generation <= created.Generation {
@@ -666,7 +667,7 @@ func TestRelativePathAndInterruptedInit(t *testing.T) {
 
 // A database of schema 1 keeps its tenants, secrets and archive through
 // the rebuild of migration 2; a tenant caught half way through an archive
-// gets back the suspension it had before.
+// stays suspended, as it was.
 func TestMigrationTwoKeepsEverything(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "corral.db")
 	db, err := sql.Open("sqlite", dsn(path))
@@ -700,7 +701,7 @@ func TestMigrationTwoKeepsEverything(t *testing.T) {
 	if err != nil || acme.Subnet != "10.240.0.0/28" || acme.Generation != 3 || acme.Sealed["SESSION"] != "sealed-acme" {
 		t.Fatalf("acme = %+v, %v", acme, err)
 	}
-	if half, err := st.Get("half"); err != nil || half.Spec.Suspended {
+	if half, err := st.Get("half"); err != nil || !half.Spec.Suspended {
 		t.Fatalf("half-archived = %+v, %v", half, err)
 	}
 	old, ok := st.ArchivedTenant("old")
@@ -721,5 +722,35 @@ func TestMigrationTwoKeepsEverything(t *testing.T) {
 	_ = st.db.QueryRow(`SELECT count(*) FROM secrets WHERE tenant = 'old'`).Scan(&left)
 	if left != 0 {
 		t.Fatalf("%d secrets of a purged tenant left", left)
+	}
+}
+
+// A released subnet goes to the next tenant; a tenant restored after its
+// release gets a free one.
+func TestReleaseFreesAnArchivedSubnet(t *testing.T) {
+	st, _ := withApp(t, options())
+	acme, _ := st.Create(NewTenant{Name: "acme", App: "web"}, "a")
+	if err := st.Release("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := st.Get("acme"); again.Subnet != acme.Subnet {
+		t.Fatal("Release freed a live tenant's subnet")
+	}
+	if err := st.Archive("acme", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Release("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if archived, _ := st.ArchivedTenant("acme"); archived.Record.Subnet != "" {
+		t.Fatalf("subnet after release = %q", archived.Record.Subnet)
+	}
+	beta, err := st.Create(NewTenant{Name: "beta", App: "web"}, "a")
+	if err != nil || beta.Subnet != acme.Subnet {
+		t.Fatalf("beta = %+v, %v; want the released %s", beta, err, acme.Subnet)
+	}
+	restored, err := st.Restore("acme", "a")
+	if err != nil || restored.Subnet == "" || restored.Subnet == beta.Subnet {
+		t.Fatalf("restored = %+v, %v", restored, err)
 	}
 }

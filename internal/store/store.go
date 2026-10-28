@@ -51,7 +51,8 @@ type Record struct {
 	// rotation and only deleted by a purge.
 	Sealed map[string]string `json:"-"`
 	// Subnet is the tenant network's IPv4 range; the tenant's address in it
-	// is fixed (see runtime.Addresses). Archived tenants have none.
+	// is fixed (see runtime.Addresses). An archived tenant holds it until
+	// the reconciler releases it.
 	Subnet string `json:"subnet"`
 	// DataImage is the image whose container last owned the data. It is
 	// observed state: the reconciler sets it and it does not bump Generation.
@@ -74,8 +75,9 @@ func (r Record) clone() Record {
 
 // Archived is an archived tenant: its record, kept with its data so it can
 // be restored. Its secrets in particular must survive, because the app's
-// data may be encrypted or signed with them. It holds no subnet; a restore
-// assigns a new one and runs the app's current spec.
+// data may be encrypted or signed with them. It keeps its subnet only until
+// its container and network are gone. A restore runs the app's current
+// spec.
 type Archived struct {
 	Record     Record    `json:"record"`
 	ArchivedAt time.Time `json:"archivedAt"`
@@ -158,9 +160,11 @@ type Store interface {
 	Observe(name, dataImage string) error
 
 	// Archive moves a tenant to the archive in one write; the reconciler
-	// then removes its container and network. Restore brings it back with
-	// a fresh subnet; Forget deletes it for good.
+	// then removes its container and network and calls Release, which frees
+	// its subnet. Restore brings it back, on its own subnet if not yet
+	// released; Forget deletes it for good.
 	Archive(name, actor string) error
+	Release(name string) error
 	Restore(name, actor string) (Record, error)
 	Forget(name, actor string) error
 	ArchivedTenant(name string) (Archived, bool)

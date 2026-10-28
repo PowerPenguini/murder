@@ -62,7 +62,9 @@ type Reconciler struct {
 	config  Config
 	log     *slog.Logger
 	health  *http.Client
-	// backend finds where to check a tenant's health; tests replace it.
+	// backend finds where to check a tenant's health: Backend, the same
+	// address the container is created with. Tests point it at their own
+	// server.
 	backend func(store.Record) (string, error)
 
 	// pass serializes reconcile passes and the removal of tenants.
@@ -151,6 +153,9 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	if err := r.removeOrphanNetworks(ctx, wanted); err != nil {
 		errs = append(errs, err)
 	}
+	if err := r.releaseArchived(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	statuses := map[string]Status{}
 	for _, record := range records {
 		name := record.Spec.Name
@@ -188,6 +193,39 @@ func (r *Reconciler) removeOrphanNetworks(ctx context.Context, wanted map[string
 		}
 		if err := r.runtime.RemoveNetwork(ctx, network.Name); err != nil {
 			errs = append(errs, fmt.Errorf("remove network %s: %w", network.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// releaseArchived frees the subnets of archived tenants whose containers
+// and network are gone. Until then the subnet stays reserved: a container
+// left at its address must not receive another tenant's traffic.
+func (r *Reconciler) releaseArchived(ctx context.Context) error {
+	var holding []string
+	for _, archived := range r.store.ListArchived() {
+		if archived.Record.Subnet != "" {
+			holding = append(holding, archived.Record.Spec.Name)
+		}
+	}
+	if len(holding) == 0 {
+		return nil
+	}
+	containers, err := r.runtime.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list containers: %w", err)
+	}
+	networks, err := r.runtime.ListNetworks(ctx)
+	if err != nil {
+		return fmt.Errorf("list networks: %w", err)
+	}
+	var errs []error
+	for _, tenant := range holding {
+		if hasTenant(containers, tenant) || slices.ContainsFunc(networks, func(n runtime.Network) bool { return n.Labels[runtime.LabelTenant] == tenant }) {
+			continue
+		}
+		if err := r.store.Release(tenant); err != nil {
+			errs = append(errs, fmt.Errorf("release the subnet of archived tenant %s: %w", tenant, err))
 		}
 	}
 	return errors.Join(errs...)

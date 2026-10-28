@@ -792,17 +792,18 @@ func (s *SQLite) Observe(name, dataImage string) error {
 	return err
 }
 
-// Archive moves a live tenant to the archive in one write. Its suspension
-// is kept for the restore; its subnet is freed. The reconciler removes its
-// container and network in its next pass, before it creates anything that
-// could take the subnet.
+// Archive moves a live tenant to the archive in one write; the edge stops
+// routing to it at once. Its suspension is kept for the restore. It keeps
+// its subnet until the reconciler has removed its container and network
+// and calls Release: until then a container may still run at the address,
+// and no other tenant may be routed there.
 func (s *SQLite) Archive(name, actor string) error {
 	_, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE tenants SET subnet = NULL, archived_at = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
+		if _, err := tx.Exec(`UPDATE tenants SET archived_at = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
 			formatTime(now), formatTime(now), name); err != nil {
 			return err
 		}
@@ -825,9 +826,13 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 		if err != nil {
 			return fmt.Errorf("tenant %s cannot run app %s as it is now; change it with \"corral tenant set\" first: %w", name, record.App, err)
 		}
-		subnet, err := s.assign(current)
-		if err != nil {
-			return err
+		// Back on its own subnet if it still holds it (its network may still
+		// stand); otherwise on a free one.
+		subnet := record.Subnet
+		if subnet == "" {
+			if subnet, err = s.assign(current); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(`UPDATE tenants SET subnet = ?, archived_at = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
 			subnet, formatTime(now), name); err != nil {
@@ -842,6 +847,20 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 		return Record{}, err
 	}
 	return next.live[name].clone(), nil
+}
+
+// Release frees the subnet of an archived tenant once the reconciler has
+// removed everything that used it. It does nothing for a tenant that is not
+// archived or holds none.
+func (s *SQLite) Release(name string) error {
+	if archived, ok := s.state.Load().archived[name]; !ok || archived.Record.Subnet == "" {
+		return nil
+	}
+	_, err := s.write(false, func(tx *sql.Tx, current *snapshot, _ time.Time) error {
+		_, err := tx.Exec(`UPDATE tenants SET subnet = NULL WHERE name = ? AND archived_at IS NOT NULL`, name)
+		return err
+	})
+	return err
 }
 
 // Forget deletes an archived tenant and its secrets. It also records the
@@ -920,11 +939,17 @@ func (s *SQLite) Events(query EventQuery) ([]Event, error) {
 	return events, closeRows(rows)
 }
 
-// assign returns a free subnet for a new or restored tenant.
+// assign returns a subnet no tenant holds, live or archived and not yet
+// released.
 func (s *SQLite) assign(state *snapshot) (string, error) {
 	usedSubnets := map[string]bool{}
 	for _, record := range state.live {
 		usedSubnets[record.Subnet] = true
+	}
+	for _, archived := range state.archived {
+		if archived.Record.Subnet != "" {
+			usedSubnets[archived.Record.Subnet] = true
+		}
 	}
 	pool := s.options.NetworkPool
 	base := pool.Masked().Addr().As4()
