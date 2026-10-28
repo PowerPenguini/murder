@@ -21,7 +21,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 const subnetBits = 28
@@ -161,7 +161,7 @@ func Open(path string, options Options) (*SQLite, error) {
 		return nil, errors.New("a store needs a sealer for secrets")
 	}
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("database %s does not exist; run \"corral init\" on a new node, or restore it from a backup", path)
+		return nil, fmt.Errorf("database %s does not exist; run \"murder init\" on a new node, or restore it from a backup", path)
 	} else if err != nil {
 		return nil, err
 	}
@@ -813,7 +813,7 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 		}
 		composed, err := prepare(current, name, record.App, record.Overrides)
 		if err != nil {
-			return fmt.Errorf("tenant %s cannot run app %s as it is now; change it with \"corral tenant set\" first: %w", name, record.App, err)
+			return fmt.Errorf("tenant %s cannot run app %s as it is now; change it with \"murder tenant set\" first: %w", name, record.App, err)
 		}
 		if _, err := tx.Exec(`UPDATE tenants SET archived_at = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
 			formatTime(now), name); err != nil {

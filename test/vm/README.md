@@ -48,7 +48,7 @@ Everything lives in the git-ignored `.vm/` directory:
 - `run/root.qcow2` is the copy-on-write overlay the VM boots from (about
   300 MB after provisioning, 10 GB virtual).
 - `run/vdev0.qcow2` is a spare 2 GB (sparse) disk for zpools. In the guest it
-  is `/dev/disk/by-id/virtio-corral-vdev0`. For more vdevs (mirrors, raidz)
+  is `/dev/disk/by-id/virtio-murder-vdev0`. For more vdevs (mirrors, raidz)
   use file vdevs, for example `truncate -s 256M /var/tmp/v1`.
 - `ssh/id_ed25519` is the dedicated SSH key, injected through the cloud-init
   NoCloud seed `run/seed.iso`.
@@ -72,8 +72,8 @@ package fails to build or pass.
 - Common `go test` flags (`-run`, `-v`, `-count`, `-timeout`, `-failfast`, ...)
   are translated to `-test.*`; everything after `-args` goes to the binary
   unchanged. `-json` produces `go test -json` output.
-- Tests see `CORRAL_TEST_VM=1` and `CORRAL_TEST_VDEV` (the spare disk path).
-  Other `CORRAL_TEST_*` variables are forwarded from the host.
+- Tests see `MURDER_TEST_VM=1` and `MURDER_TEST_VDEV` (the spare disk path).
+  Other `MURDER_TEST_*` variables are forwarded from the host.
 - Tests should create and destroy their own pools, using unique pool names and
   `t.Cleanup`, because the VM is reused between runs.
 - `GO_TEST_TAGS` overrides the tag list (default `zfs`), for example

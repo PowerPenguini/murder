@@ -74,14 +74,14 @@ func TestImagePresenceAndPull(t *testing.T) {
 func TestCreateSendsHardenedContainer(t *testing.T) {
 	engine, docker := newFakeEngine(t)
 	engine.handlers["POST /containers/create"] = func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("name") != "corral-acme" {
+		if r.URL.Query().Get("name") != "murder-acme" {
 			t.Errorf("container name = %q", r.URL.Query().Get("name"))
 		}
 		_ = json.NewDecoder(r.Body).Decode(&engine.created)
 		_, _ = w.Write([]byte(`{"Id":"c1"}`))
 	}
 	id, err := docker.Create(context.Background(), ContainerSpec{
-		Name: "corral-acme", Image: "sha256:img", Env: []string{"A=1"}, User: "10001", Network: "corral-acme",
+		Name: "murder-acme", Image: "sha256:img", Env: []string{"A=1"}, User: "10001", Network: "murder-acme",
 		Address: "10.240.0.18", Mounts: []Mount{{Source: "/srv/acme", Target: "/data"}},
 		MemoryBytes: 512 << 20, NanoCPUs: 1e9, PIDs: 256, ReadOnlyRoot: true, Tmpfs: map[string]string{"/tmp": "size=64m"},
 		Labels: map[string]string{LabelTenant: "acme"},
@@ -93,11 +93,11 @@ func TestCreateSendsHardenedContainer(t *testing.T) {
 	if _, published := host["PortBindings"]; published || engine.created["ExposedPorts"] != nil {
 		t.Errorf("the container publishes ports: %v", engine.created)
 	}
-	endpoint := engine.created["NetworkingConfig"].(map[string]any)["EndpointsConfig"].(map[string]any)["corral-acme"].(map[string]any)
+	endpoint := engine.created["NetworkingConfig"].(map[string]any)["EndpointsConfig"].(map[string]any)["murder-acme"].(map[string]any)
 	if endpoint["IPAMConfig"].(map[string]any)["IPv4Address"] != "10.240.0.18" {
 		t.Errorf("endpoint = %v, want the fixed address", endpoint)
 	}
-	if host["ReadonlyRootfs"] != true || host["NetworkMode"] != "corral-acme" || host["PidsLimit"] != float64(256) {
+	if host["ReadonlyRootfs"] != true || host["NetworkMode"] != "murder-acme" || host["PidsLimit"] != float64(256) {
 		t.Errorf("host config = %v", host)
 	}
 	if capDrop := host["CapDrop"].([]any); len(capDrop) != 1 || capDrop[0] != "ALL" {
@@ -123,10 +123,10 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 		if !strings.Contains(filters, LabelManaged+"=true") || !strings.Contains(filters, LabelNode+"=node-1") || r.URL.Query().Get("all") != "true" {
 			t.Errorf("list query = %s", r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`[{"Id":"c1","Names":["/corral-acme"],"State":"running","Labels":{"io.corral.tenant":"acme"}},{"Id":"c2","Names":["/corral-beta"],"State":"exited","Labels":{}}]`))
+		_, _ = w.Write([]byte(`[{"Id":"c1","Names":["/murder-acme"],"State":"running","Labels":{"io.murder.tenant":"acme"}},{"Id":"c2","Names":["/murder-beta"],"State":"exited","Labels":{}}]`))
 	}
 	containers, err := docker.List(ctx)
-	if err != nil || len(containers) != 2 || !containers[0].Running || containers[1].Running || containers[0].Name != "corral-acme" {
+	if err != nil || len(containers) != 2 || !containers[0].Running || containers[1].Running || containers[0].Name != "murder-acme" {
 		t.Fatalf("List = %+v, %v", containers, err)
 	}
 	// Stopping or removing something already gone is not an error.
@@ -140,46 +140,46 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	created := false
-	engine.handlers["GET /networks/corral-acme"] = func(w http.ResponseWriter, _ *http.Request) {
+	engine.handlers["GET /networks/murder-acme"] = func(w http.ResponseWriter, _ *http.Request) {
 		if !created {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write([]byte(`{"Labels":{"io.corral.managed":"true","io.corral.node":"node-1"},"IPAM":{"Config":[{"Subnet":"fd00::/64"},{"Subnet":"10.240.0.16/28"}]}}`))
+		_, _ = w.Write([]byte(`{"Labels":{"io.murder.managed":"true","io.murder.node":"node-1"},"IPAM":{"Config":[{"Subnet":"fd00::/64"},{"Subnet":"10.240.0.16/28"}]}}`))
 	}
-	engine.handlers["GET /networks/corral-foreign"] = func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"Labels":{"io.corral.managed":"true","io.corral.node":"node-2"},"IPAM":{"Config":[{"Subnet":"10.240.0.16/28"}]}}`))
+	engine.handlers["GET /networks/murder-foreign"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Labels":{"io.murder.managed":"true","io.murder.node":"node-2"},"IPAM":{"Config":[{"Subnet":"10.240.0.16/28"}]}}`))
 	}
 	engine.handlers["POST /networks/create"] = func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		ipam := body["IPAM"].(map[string]any)["Config"].([]any)[0].(map[string]any)
 		labels := body["Labels"].(map[string]any)
-		if body["Name"] != "corral-acme" || ipam["Subnet"] != "10.240.0.16/28" || ipam["Gateway"] != "10.240.0.17" || labels[LabelNode] != "node-1" || body["Options"].(map[string]any)["com.docker.network.bridge.enable_icc"] != "false" {
+		if body["Name"] != "murder-acme" || ipam["Subnet"] != "10.240.0.16/28" || ipam["Gateway"] != "10.240.0.17" || labels[LabelNode] != "node-1" || body["Options"].(map[string]any)["com.docker.network.bridge.enable_icc"] != "false" {
 			t.Errorf("network create = %v", body)
 		}
 		created = true
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"Id":"n1"}`))
 	}
-	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.16/28", map[string]string{LabelTenant: "acme"}); err != nil {
+	if err := docker.EnsureNetwork(ctx, "murder-acme", "10.240.0.16/28", map[string]string{LabelTenant: "acme"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.16/28", nil); err != nil {
+	if err := docker.EnsureNetwork(ctx, "murder-acme", "10.240.0.16/28", nil); err != nil {
 		t.Fatalf("an existing network with the right subnet = %v", err)
 	}
-	if err := docker.EnsureNetwork(ctx, "corral-acme", "10.240.0.32/28", nil); !errors.Is(err, ErrNetworkMismatch) {
+	if err := docker.EnsureNetwork(ctx, "murder-acme", "10.240.0.32/28", nil); !errors.Is(err, ErrNetworkMismatch) {
 		t.Fatalf("an existing network with another subnet = %v", err)
 	}
 	// Another node's network is neither adopted nor removed.
-	if err := docker.EnsureNetwork(ctx, "corral-foreign", "10.240.0.16/28", nil); err == nil || !strings.Contains(err.Error(), "not owned") {
+	if err := docker.EnsureNetwork(ctx, "murder-foreign", "10.240.0.16/28", nil); err == nil || !strings.Contains(err.Error(), "not owned") {
 		t.Fatalf("adopting another node's network = %v", err)
 	}
-	if err := docker.RemoveNetwork(ctx, "corral-foreign"); !errors.Is(err, ErrNotOwned) {
+	if err := docker.RemoveNetwork(ctx, "murder-foreign"); !errors.Is(err, ErrNotOwned) {
 		t.Fatalf("removing another node's network = %v, want ErrNotOwned", err)
 	}
 	for _, request := range engine.requests {
-		if strings.HasPrefix(request, "DELETE /networks/corral-foreign") {
+		if strings.HasPrefix(request, "DELETE /networks/murder-foreign") {
 			t.Fatal("removed another node's network")
 		}
 	}
@@ -187,7 +187,7 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 		if !strings.Contains(r.URL.Query().Get("filters"), LabelNode+"=node-1") {
 			t.Errorf("network list filters = %s", r.URL.Query().Get("filters"))
 		}
-		_, _ = w.Write([]byte(`[{"Name":"corral-acme","Labels":{"io.corral.tenant":"acme"}}]`))
+		_, _ = w.Write([]byte(`[{"Name":"murder-acme","Labels":{"io.murder.tenant":"acme"}}]`))
 	}
 	networks, err := docker.ListNetworks(ctx)
 	if err != nil || len(networks) != 1 || networks[0].Labels[LabelTenant] != "acme" {

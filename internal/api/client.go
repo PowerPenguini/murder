@@ -12,8 +12,8 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/PowerPenguini/corral/internal/spec"
-	"github.com/PowerPenguini/corral/internal/store"
+	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // Client calls the agent's API over its unix socket.
@@ -30,7 +30,7 @@ func NewClient(socket string) *Client {
 		var dialer net.Dialer
 		return dialer.DialContext(ctx, "unix", socket)
 	}}
-	return &Client{http: &http.Client{Transport: transport}, base: "http://corral"}
+	return &Client{http: &http.Client{Transport: transport}, base: "http://murder"}
 }
 
 // NewClientURL returns a client for an agent API served over TCP at base,
@@ -58,7 +58,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		return fmt.Errorf("reach the corral agent: %w", err)
+		return fmt.Errorf("reach the murder agent: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 300 {

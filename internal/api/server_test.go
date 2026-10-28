@@ -21,12 +21,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/reconcile"
-	"github.com/PowerPenguini/corral/internal/runtime"
-	"github.com/PowerPenguini/corral/internal/secrets"
-	"github.com/PowerPenguini/corral/internal/spec"
-	"github.com/PowerPenguini/corral/internal/store"
-	"github.com/PowerPenguini/corral/internal/volume"
+	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/runtime"
+	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/volume"
 )
 
 // memoryRuntime runs nothing; it only remembers containers.
@@ -108,7 +108,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		t.Fatal(err)
 	}
 	key, _ := secrets.LoadKey(keyPath)
-	statePath := filepath.Join(t.TempDir(), "corral.db")
+	statePath := filepath.Join(t.TempDir(), "murder.db")
 	if err := store.Init(statePath, "test-node"); err != nil {
 		t.Fatal(err)
 	}

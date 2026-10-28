@@ -19,17 +19,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/api"
-	"github.com/PowerPenguini/corral/internal/config"
-	"github.com/PowerPenguini/corral/internal/edge"
-	"github.com/PowerPenguini/corral/internal/reconcile"
-	"github.com/PowerPenguini/corral/internal/runtime"
-	"github.com/PowerPenguini/corral/internal/secrets"
-	"github.com/PowerPenguini/corral/internal/store"
-	"github.com/PowerPenguini/corral/internal/volume"
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/runtime"
+	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/volume"
 )
 
-const defaultConfig = "/etc/corral/agent.yaml"
+const defaultConfig = "/etc/murder/agent.yaml"
 
 func runInit(args []string) error {
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
@@ -161,7 +161,7 @@ func runAgent(args []string) error {
 			serve("edge https", secure, tls.NewListener(listener, tlsConfig))
 		}()
 	}
-	log.Info("corral agent started", "node", node, "baseDomain", cfg.BaseDomain, "volumes", cfg.Volumes.Driver, "tls", cfg.Edge.TLS.Mode)
+	log.Info("murder agent started", "node", node, "baseDomain", cfg.BaseDomain, "volumes", cfg.Volumes.Driver, "tls", cfg.Edge.TLS.Mode)
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -175,7 +175,7 @@ func runAgent(args []string) error {
 	for _, server := range servers {
 		_ = server.Shutdown(shutdown)
 	}
-	log.Info("corral agent stopped")
+	log.Info("murder agent stopped")
 	return runErr
 }
 

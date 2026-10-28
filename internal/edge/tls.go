@@ -196,7 +196,7 @@ func loadOrCreateCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	}
 	template := &x509.Certificate{
 		SerialNumber:          randomSerial(),
-		Subject:               pkix.Name{CommonName: "Corral internal CA"},
+		Subject:               pkix.Name{CommonName: "Murder internal CA"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
 		IsCA:                  true,

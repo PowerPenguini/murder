@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 func newTestKey(t *testing.T) (*Key, string) {

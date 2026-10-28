@@ -116,14 +116,14 @@ func (f *fakeZFS) ran(fragment string) bool {
 func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	fake := &fakeZFS{datasets: map[string]*fakeDataset{}}
 	mountRoot := filepath.Join(t.TempDir(), "mnt")
-	volumes := ZFS{Parent: "tank/corral", MountRoot: mountRoot, Run: fake.run, Now: func() time.Time { return time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC) }}
+	volumes := ZFS{Parent: "tank/murder", MountRoot: mountRoot, Run: fake.run, Now: func() time.Time { return time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC) }}
 	ctx := context.Background()
 	uid, gid := os.Getuid(), os.Getgid()
 	path, mounted, err := volumes.Ensure(ctx, "acme", uid, gid)
 	if err != nil || path != filepath.Join(mountRoot, "acme") || mounted {
 		t.Fatalf("Ensure = %q, %v, %v", path, mounted, err)
 	}
-	if !fake.ran("zfs create -p -o mountpoint=" + path + " -o setuid=off -o devices=off -o " + ownerProperty + "=acme tank/corral/acme") {
+	if !fake.ran("zfs create -p -o mountpoint=" + path + " -o setuid=off -o devices=off -o " + ownerProperty + "=acme tank/murder/acme") {
 		t.Fatalf("calls = %v", fake.calls)
 	}
 	if info, _ := os.Stat(mountRoot); info.Mode().Perm() != 0o700 {
@@ -131,19 +131,19 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	}
 	// An existing but unmounted dataset is mounted, not recreated, and the
 	// caller learns that it was.
-	fake.datasets["tank/corral/acme"].mounted = false
+	fake.datasets["tank/murder/acme"].mounted = false
 	fake.calls = nil
 	if _, mounted, err := volumes.Ensure(ctx, "acme", uid, gid); err != nil || !mounted {
 		t.Fatalf("Ensure of an unmounted dataset = %v, %v", mounted, err)
 	}
-	if fake.ran("create") || !fake.ran("zfs mount tank/corral/acme") {
+	if fake.ran("create") || !fake.ran("zfs mount tank/murder/acme") {
 		t.Fatalf("calls = %v", fake.calls)
 	}
 	if exists, err := volumes.Exists(ctx, "acme"); err != nil || !exists {
 		t.Fatalf("Exists = %v, %v", exists, err)
 	}
 	name, err := volumes.Snapshot(ctx, "acme", "image-change")
-	if err != nil || name != "tank/corral/acme@corral-image-change-20261025T120000.000Z" {
+	if err != nil || name != "tank/murder/acme@murder-image-change-20261025T120000.000Z" {
 		t.Fatalf("Snapshot = %q, %v", name, err)
 	}
 	if _, err := volumes.Snapshot(ctx, "acme", "Bad Reason"); err == nil {
@@ -153,7 +153,7 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	if err := volumes.Remove(ctx, "acme"); err != nil {
 		t.Fatal(err)
 	}
-	if !fake.ran("zfs destroy -r tank/corral/acme") {
+	if !fake.ran("zfs destroy -r tank/murder/acme") {
 		t.Fatalf("calls = %v", fake.calls)
 	}
 	if err := volumes.Remove(ctx, "never-existed"); err != nil {
@@ -161,7 +161,7 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	}
 }
 
-// A dataset Corral did not create for the tenant is never used or destroyed,
+// A dataset Murder did not create for the tenant is never used or destroyed,
 // even when its name matches.
 func TestZFSRefusesForeignDatasets(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "mnt")
@@ -187,22 +187,22 @@ func TestZFSRefusesForeignDatasets(t *testing.T) {
 
 func TestMountsFindsASourceAnywhere(t *testing.T) {
 	mountinfo := "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n" +
-		"101 22 0:50 / /var/lib/app rw,noatime - zfs tank/corral/acme rw,xattr\n" +
-		"102 22 0:51 / /odd rw - zfs tank/corral/with\\040space rw\n"
-	if !mounts(mountinfo, "zfs", "tank/corral/acme") {
+		"101 22 0:50 / /var/lib/app rw,noatime - zfs tank/murder/acme rw,xattr\n" +
+		"102 22 0:51 / /odd rw - zfs tank/murder/with\\040space rw\n"
+	if !mounts(mountinfo, "zfs", "tank/murder/acme") {
 		t.Fatal("missed a dataset mounted at a resolved symlink target")
 	}
-	if !mounts(mountinfo, "zfs", "tank/corral/with space") {
+	if !mounts(mountinfo, "zfs", "tank/murder/with space") {
 		t.Fatal("missed an escaped source")
 	}
-	if mounts(mountinfo, "zfs", "tank/corral/beta") || mounts(mountinfo, "ext4", "tank/corral/acme") {
+	if mounts(mountinfo, "zfs", "tank/murder/beta") || mounts(mountinfo, "ext4", "tank/murder/acme") {
 		t.Fatal("found a mount that is not there")
 	}
 }
 
 func TestZFSServingChecksTheContainersMount(t *testing.T) {
 	proc := t.TempDir()
-	volumes := ZFS{Parent: "tank/corral", ProcRoot: proc}
+	volumes := ZFS{Parent: "tank/murder", ProcRoot: proc}
 	write := func(content string) {
 		if err := os.MkdirAll(filepath.Join(proc, "42"), 0o700); err != nil {
 			t.Fatal(err)
@@ -211,15 +211,15 @@ func TestZFSServingChecksTheContainersMount(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("100 22 0:50 / /data rw - zfs tank/corral/acme rw\n")
+	write("100 22 0:50 / /data rw - zfs tank/murder/acme rw\n")
 	if ok, err := volumes.Serving(context.Background(), "acme", 42); err != nil || !ok {
 		t.Fatalf("container on its dataset = %v, %v", ok, err)
 	}
-	write("100 22 8:2 /srv/corral/tenants/acme /data rw - ext4 /dev/sda2 rw\n")
+	write("100 22 8:2 /srv/murder/tenants/acme /data rw - ext4 /dev/sda2 rw\n")
 	if ok, _ := volumes.Serving(context.Background(), "acme", 42); ok {
 		t.Fatal("a container on the directory under the dataset counted as serving")
 	}
-	write("100 22 0:50 / /data rw - zfs tank/corral/beta rw\n")
+	write("100 22 0:50 / /data rw - zfs tank/murder/beta rw\n")
 	if ok, _ := volumes.Serving(context.Background(), "acme", 42); ok {
 		t.Fatal("another tenant's dataset counted as serving")
 	}

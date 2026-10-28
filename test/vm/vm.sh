@@ -71,7 +71,7 @@ vssh() {
 ensure_key() {
   [[ -f $KEY ]] && return
   mkdir -p "$(dirname "$KEY")"; chmod 700 "$(dirname "$KEY")"
-  ssh-keygen -q -t ed25519 -N '' -C corral-test-vm -f "$KEY"
+  ssh-keygen -q -t ed25519 -N '' -C murder-test-vm -f "$KEY"
   log "generated SSH key $KEY"
 }
 
@@ -98,12 +98,12 @@ ensure_base() {
 make_seed() {
   local dir; dir=$(mktemp -d "$RUN/seed.XXXXXX")
   cat >"$dir/meta-data" <<EOF
-instance-id: corral-test-vm
-local-hostname: corral-vm
+instance-id: murder-test-vm
+local-hostname: murder-vm
 EOF
   cat >"$dir/user-data" <<EOF
 #cloud-config
-hostname: corral-vm
+hostname: murder-vm
 ssh_pwauth: false
 users:
   - name: $VM_USER
@@ -161,12 +161,12 @@ cmd_up() {
     rm -f "$MONITOR" "$PIDFILE"
     : >"$SERIAL"
     qemu-system-x86_64 \
-      -name corral-test-vm -machine q35,accel=kvm -cpu host \
+      -name murder-test-vm -machine q35,accel=kvm -cpu host \
       -smp "$VM_CPUS" -m "$VM_MEM" \
       -drive "file=$OVERLAY,if=none,id=root,format=qcow2,discard=unmap" \
       -device virtio-blk-pci,drive=root,bootindex=0 \
       -drive "file=$VDEV,if=none,id=vdev0,format=qcow2,discard=unmap" \
-      -device virtio-blk-pci,drive=vdev0,serial=corral-vdev0 \
+      -device virtio-blk-pci,drive=vdev0,serial=murder-vdev0 \
       -drive "file=$SEED,if=none,id=seed,format=raw,readonly=on" \
       -device virtio-blk-pci,drive=seed \
       -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$VM_SSH_PORT-:22" \
@@ -264,7 +264,7 @@ cmd_status() {
   echo "vm dir:   $VM_DIR"
   if [[ -f $img ]]; then echo "base:     $img ($(du -h "$img" | cut -f1))"; else echo "base:     missing (downloaded by 'up')"; fi
   if [[ -f $OVERLAY ]]; then echo "overlay:  $OVERLAY ($(du -h "$OVERLAY" | cut -f1) used)"; else echo "overlay:  none"; fi
-  [[ -f $VDEV ]] && echo "vdev:     $VDEV ($(du -h "$VDEV" | cut -f1) used) -> guest /dev/disk/by-id/virtio-corral-vdev0"
+  [[ -f $VDEV ]] && echo "vdev:     $VDEV ($(du -h "$VDEV" | cut -f1) used) -> guest /dev/disk/by-id/virtio-murder-vdev0"
   echo "disk:     $(du -sh "$VM_DIR" 2>/dev/null | cut -f1) total under $VM_DIR"
   if is_running; then
     echo "state:    running (pid $(qemu_pid))"

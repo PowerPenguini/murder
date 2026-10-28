@@ -81,12 +81,12 @@ func checkSchema(q querier) error {
 			return err
 		}
 		if objects > 0 {
-			return errors.New("it is not a Corral database")
+			return errors.New("it is not a Murder database")
 		}
-		return errors.New(`it is not initialized; run "corral init"`)
+		return errors.New(`it is not initialized; run "murder init"`)
 	case version > schemaVersion:
-		return fmt.Errorf("it has schema version %d; this release knows only %d — upgrade Corral", version, schemaVersion)
+		return fmt.Errorf("it has schema version %d; this release knows only %d — upgrade Murder", version, schemaVersion)
 	default:
-		return fmt.Errorf("it has schema version %d of a development release, which cannot be upgraded; create a new one with \"corral init\"", version)
+		return fmt.Errorf("it has schema version %d of a development release, which cannot be upgraded; create a new one with \"murder init\"", version)
 	}
 }

@@ -8,8 +8,8 @@ import (
 	"maps"
 	"strings"
 
-	"github.com/PowerPenguini/corral/internal/api"
-	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 // listFlag collects a repeatable flag.
@@ -41,7 +41,7 @@ func configureTenant(command string, args []string) error {
 		return err
 	}
 	if len(positional) != 1 {
-		return fmt.Errorf("usage: corral tenant %s NAME [options]\n\n%s", command, tenantUsage)
+		return fmt.Errorf("usage: murder tenant %s NAME [options]\n\n%s", command, tenantUsage)
 	}
 	given := map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { given[f.Name] = true })

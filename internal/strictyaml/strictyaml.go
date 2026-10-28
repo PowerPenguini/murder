@@ -1,4 +1,4 @@
-// Package strictyaml decodes YAML the way Corral's config files expect:
+// Package strictyaml decodes YAML the way Murder's config files expect:
 // unknown fields are errors, and so is a second document in one file.
 package strictyaml
 

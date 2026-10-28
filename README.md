@@ -1,16 +1,17 @@
-# Corral
+# Murder
 
-Corral runs one container per tenant across a few servers and, from stage 4,
+Murder runs one container per tenant across a few servers and, from stage 4,
 moves a tenant to another server when its server fails. It is built for small
 fleets of single-tenant web apps that keep their state in a local data
-directory. An app is configuration (an image and a spec), not code in Corral.
+directory. An app is configuration (an image and a spec), not code in Murder.
+The name is the word for a flock of crows: a murder of crows.
 
 See [docs/design.md](docs/design.md) for the architecture and build stages.
 Stage 2 — a single server — is what this code does today.
 
 ## What one node does
 
-`corral agent` runs on every server:
+`murder agent` runs on every server:
 
 - **Reconciler.** Keeps Docker in line with the desired state. Each tenant gets
   its own container, network and data volume. A container is replaced when its
@@ -23,7 +24,7 @@ Stage 2 — a single server — is what this code does today.
   `X-Forwarded-*` headers. TLS is `off`, `internal` (a local CA, for testing) or
   `acme`, which gets a wildcard certificate through DNS-01 from Hetzner Cloud DNS
   or Namecheap.
-- **Local API.** A unix socket the `corral` CLI (and, later, the panel) talks to.
+- **Local API.** A unix socket the `murder` CLI (and, later, the panel) talks to.
 - **Database.** One SQLite file holds the node's apps, tenants, sealed secrets
   and an audit log of every change: who (the socket user, plus the person a
   panel acts for), what and when.
@@ -36,25 +37,25 @@ Stage 2 — a single server — is what this code does today.
 ## Install on a node
 
 ```bash
-sudo install -m 0755 corral /usr/local/bin/corral
-sudo install -d -m 0755 /etc/corral
-sudo install -m 0644 deploy/agent.example.yaml /etc/corral/agent.yaml   # then edit it
-sudo corral init                       # creates the master key (store a copy offline) and an empty database
-sudo install -m 0644 deploy/corral-agent.service /etc/systemd/system/
-sudo systemctl enable --now corral-agent
+sudo install -m 0755 murder /usr/local/bin/murder
+sudo install -d -m 0755 /etc/murder
+sudo install -m 0644 deploy/agent.example.yaml /etc/murder/agent.yaml   # then edit it
+sudo murder init                       # creates the master key (store a copy offline) and an empty database
+sudo install -m 0644 deploy/murder-agent.service /etc/systemd/system/
+sudo systemctl enable --now murder-agent
 ```
 
 With the `zfs` driver, create the parent dataset first, for example
-`zfs create -p tank/corral/tenants`, and make Docker start after ZFS has mounted
+`zfs create -p tank/murder/tenants`, and make Docker start after ZFS has mounted
 everything: install `deploy/docker-after-zfs.conf` as
-`/etc/systemd/system/docker.service.d/corral.conf`. If a dataset still mounts
+`/etc/systemd/system/docker.service.d/murder.conf`. If a dataset still mounts
 late, the agent sees in the container's mount table that it runs on the empty
 directory underneath and replaces it.
 
 The agent refuses to start without its database. A new node gets one from
-`corral init`; on an existing node a missing file means a broken mount or a
+`murder init`; on an existing node a missing file means a broken mount or a
 lost disk, and starting from an empty database would remove every tenant.
-Back it up with `sqlite3 /var/lib/corral/corral.db ".backup /path/corral.db"`
+Back it up with `sqlite3 /var/lib/murder/murder.db ".backup /path/murder.db"`
 (a plain copy of a live database can be torn), together with the master key.
 
 ## Run tenants
@@ -78,11 +79,11 @@ secrets: [SESSION_SECRET]       # 32 random bytes, hex; or a mapping such as ADM
 ```
 
 ```bash
-corral app apply apps/web.yaml -wait 3m          # store the app; roll it out to its tenants
-corral tenant create acme -app web -wait 3m
-corral tenant create beta -app web -env TZ=Europe/Berlin -memory 768
-corral tenant set gamma -image ghcr.io/example/web:1.5   # a canary
-corral tenant set gamma -app-image                       # back to the app's image
+murder app apply apps/web.yaml -wait 3m          # store the app; roll it out to its tenants
+murder tenant create acme -app web -wait 3m
+murder tenant create beta -app web -env TZ=Europe/Berlin -memory 768
+murder tenant set gamma -image ghcr.io/example/web:1.5   # a canary
+murder tenant set gamma -app-image                       # back to the app's image
 ```
 
 `app apply` reads and checks every file before it changes anything and
@@ -102,7 +103,7 @@ limit of 0 goes back to the app's.
 
 **Secrets** get a value once per tenant, stored sealed. A value is kept even
 if the secret leaves the spec and comes back, so a mistaken edit cannot lose
-it; `corral tenant rotate` gives it a new value.
+it; `murder tenant rotate` gives it a new value.
 
 **Defaults:**
 - `port` 8080, `dataPath` /data, `healthPath` /;
@@ -126,19 +127,19 @@ connects from it, so trust it for proxy headers.
 Day-to-day operations:
 
 ```bash
-corral app list                         # apps, their tenants and images
-corral tenant list                      # app, state, health, image, URL; archived tenants too
-corral tenant show acme
-corral tenant secret acme ADMIN_PASSWORD
-corral tenant rotate acme ADMIN_PASSWORD -wait 3m   # new value; the container restarts
-corral tenant logs acme -tail 100
-corral tenant suspend acme              # stop it, keep its address (visitors get 503)
-corral tenant resume acme -wait 3m
-corral tenant archive acme              # take it out of service; data, secrets and overrides are kept
-corral tenant restore acme -wait 3m     # back with its data, secrets and overrides, on the app's current spec
-corral tenant purge acme -yes           # delete an archived tenant and its data for good
-corral app delete web                   # once no tenant (live or archived) runs it
-corral events -tenant acme              # the audit log: who changed what, and when
+murder app list                         # apps, their tenants and images
+murder tenant list                      # app, state, health, image, URL; archived tenants too
+murder tenant show acme
+murder tenant secret acme ADMIN_PASSWORD
+murder tenant rotate acme ADMIN_PASSWORD -wait 3m   # new value; the container restarts
+murder tenant logs acme -tail 100
+murder tenant suspend acme              # stop it, keep its address (visitors get 503)
+murder tenant resume acme -wait 3m
+murder tenant archive acme              # take it out of service; data, secrets and overrides are kept
+murder tenant restore acme -wait 3m     # back with its data, secrets and overrides, on the app's current spec
+murder tenant purge acme -yes           # delete an archived tenant and its data for good
+murder app delete web                   # once no tenant (live or archived) runs it
+murder events -tenant acme              # the audit log: who changed what, and when
 ```
 
 An archive is one change: the edge stops routing to the tenant at once, and
@@ -178,7 +179,7 @@ test/vm/go-test.sh ./internal/volume            # ZFS driver tests inside a thro
 ```
 
 **What the Docker test does:** it builds a tiny scratch image and runs a tenant
-through Corral's real components:
+through Murder's real components:
 - create, then route through the edge;
 - write data, then change the image and keep the data;
 - restart the agent and adopt the container;

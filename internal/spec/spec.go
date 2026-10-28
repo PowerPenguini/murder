@@ -14,11 +14,11 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/PowerPenguini/corral/internal/strictyaml"
+	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
 // Tenant is the desired definition of one tenant: the app it runs and how.
-// Corral treats the app as configuration; nothing here is app specific.
+// Murder treats the app as configuration; nothing here is app specific.
 // WithDefaults fills in everything an app spec may leave out.
 type Tenant struct {
 	// Name is the tenant's DNS label: its subdomain and the suffix of its
@@ -41,7 +41,7 @@ type Tenant struct {
 	// Env holds plain environment values. Values may use the placeholders
 	// {{name}}, {{host}}, {{url}} and {{network}}; see Render.
 	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	// Secrets names environment variables whose values Corral generates once
+	// Secrets names environment variables whose values Murder generates once
 	// and stores encrypted. In YAML a list of names gives 32-byte hex values;
 	// a mapping may give a kind ("password") or a full {kind, bytes}.
 	Secrets Secrets `json:"secrets,omitempty" yaml:"secrets,omitempty"`
@@ -190,7 +190,7 @@ var (
 	tagRef      = regexp.MustCompile(`^` + repositoryName + `(?:` + imageTag + `)?$`)
 	placeholder = regexp.MustCompile(`\{\{[^}]*\}\}`)
 	knownHolder = map[string]bool{"{{name}}": true, "{{host}}": true, "{{url}}": true, "{{network}}": true}
-	reserved    = map[string]bool{"www": true, "api": true, "admin": true, "corral": true, "mail": true}
+	reserved    = map[string]bool{"www": true, "api": true, "admin": true, "murder": true, "mail": true}
 )
 
 // ValidLabel reports whether name has the shape of a tenant name: safe as a

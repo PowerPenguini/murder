@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/runtime"
-	"github.com/PowerPenguini/corral/internal/secrets"
-	"github.com/PowerPenguini/corral/internal/spec"
-	"github.com/PowerPenguini/corral/internal/store"
-	"github.com/PowerPenguini/corral/internal/volume"
+	"github.com/PowerPenguini/murder/internal/runtime"
+	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/volume"
 )
 
 const (
@@ -288,7 +288,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(t.TempDir(), "corral.db")
+	statePath := filepath.Join(t.TempDir(), "murder.db")
 	if err := store.Init(statePath, "test-node"); err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestNewTenantGetsAHealthyContainer(t *testing.T) {
 	record := f.create(t, "acme")
 	f.reconcile(t)
 	container := f.runtime.only(t)
-	if !container.Running || container.Name != "corral-acme" || container.spec.Network != "corral-acme" {
+	if !container.Running || container.Name != "murder-acme" || container.spec.Network != "murder-acme" {
 		t.Fatalf("container = %+v", container)
 	}
 	env := strings.Join(container.spec.Env, "\n")
@@ -607,7 +607,7 @@ func TestArchiveClearsTheRuntimeAndKeepsTheData(t *testing.T) {
 	f.reconcile(t)
 	f.archive(t, "acme")
 	f.reconcile(t)
-	if f.runtime.count() != 0 || f.runtime.networks["corral-acme"] != nil {
+	if f.runtime.count() != 0 || f.runtime.networks["murder-acme"] != nil {
 		t.Fatalf("left behind: %d containers, networks %v", f.runtime.count(), f.runtime.networks)
 	}
 	if len(f.volumes.removed) != 0 {
@@ -646,7 +646,7 @@ func TestArchivedTenantKeepsItsSubnetUntilPurged(t *testing.T) {
 		t.Fatal(err)
 	}
 	containers, _ := f.runtime.List(context.Background())
-	if f.runtime.networks["corral-acme"] != nil || slices.ContainsFunc(containers, func(c runtime.Container) bool { return c.Labels[runtime.LabelTenant] == "acme" }) {
+	if f.runtime.networks["murder-acme"] != nil || slices.ContainsFunc(containers, func(c runtime.Container) bool { return c.Labels[runtime.LabelTenant] == "acme" }) {
 		t.Fatal("a purge left the tenant's runtime")
 	}
 	if gamma := f.create(t, "gamma"); gamma.Subnet != old.Subnet {
@@ -678,11 +678,11 @@ func TestQuickRestoreKeepsTheNetwork(t *testing.T) {
 func TestOutdatedNetworkIsRebuilt(t *testing.T) {
 	f := newFixture(t)
 	record := f.create(t, "acme")
-	f.runtime.networks["corral-acme"] = map[string]string{runtime.LabelTenant: "acme"}
-	f.runtime.subnets["corral-acme"] = "10.240.9.0/28"
+	f.runtime.networks["murder-acme"] = map[string]string{runtime.LabelTenant: "acme"}
+	f.runtime.subnets["murder-acme"] = "10.240.9.0/28"
 	f.reconcile(t)
-	if f.runtime.subnets["corral-acme"] != record.Subnet {
-		t.Fatalf("network subnet = %s, want %s", f.runtime.subnets["corral-acme"], record.Subnet)
+	if f.runtime.subnets["murder-acme"] != record.Subnet {
+		t.Fatalf("network subnet = %s, want %s", f.runtime.subnets["murder-acme"], record.Subnet)
 	}
 	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseRunning || !status.Healthy {
 		t.Fatalf("status = %+v", status)
@@ -709,12 +709,12 @@ func TestOrphanNetworkOfAMissingTenantIsRemoved(t *testing.T) {
 	f.reconcile(t)
 	f.suspend(t, "acme", true)
 	f.reconcile(t)
-	if f.runtime.networks["corral-acme"] == nil {
+	if f.runtime.networks["murder-acme"] == nil {
 		t.Fatal("a suspended tenant keeps its network")
 	}
 	f.archive(t, "acme")
 	f.reconcile(t)
-	if f.runtime.networks["corral-acme"] != nil {
+	if f.runtime.networks["murder-acme"] != nil {
 		t.Fatal("the network of a tenant without a record was left behind")
 	}
 }

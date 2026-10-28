@@ -160,7 +160,7 @@ func TestNames(t *testing.T) {
 			t.Errorf("ValidName(%q) = %v", name, err)
 		}
 	}
-	for _, name := range []string{"", "-a", "a-", "a.b", "A", "a_b", strings.Repeat("a", 41), "www", "corral"} {
+	for _, name := range []string{"", "-a", "a-", "a.b", "A", "a_b", strings.Repeat("a", 41), "www", "murder"} {
 		if ValidName(name) == nil {
 			t.Errorf("ValidName(%q) accepted", name)
 		}

@@ -25,16 +25,16 @@ func TestParseFillsDefaults(t *testing.T) {
 func TestParseFullConfig(t *testing.T) {
 	agent, err := Parse([]byte(`
 baseDomain: example.com
-volumes: {driver: zfs, parent: tank/corral/tenants, mountRoot: /srv/corral/tenants}
+volumes: {driver: zfs, parent: tank/murder/tenants, mountRoot: /srv/murder/tenants}
 edge:
-  tls: {mode: acme, email: ops@example.com, dnsProvider: hetzner, dnsTokenFile: /etc/corral/dns.token}
+  tls: {mode: acme, email: ops@example.com, dnsProvider: hetzner, dnsTokenFile: /etc/murder/dns.token}
 reconcileInterval: 5s
 defaults: {memoryMB: 768}
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agent.Volumes.Parent != "tank/corral/tenants" || agent.ReconcileInterval.Duration != 5*time.Second || agent.Scheme() != "https" || agent.Defaults.MemoryMB != 768 {
+	if agent.Volumes.Parent != "tank/murder/tenants" || agent.ReconcileInterval.Duration != 5*time.Second || agent.Scheme() != "https" || agent.Defaults.MemoryMB != 768 {
 		t.Fatalf("config = %+v", agent)
 	}
 }

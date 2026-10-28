@@ -1,27 +1,27 @@
-# /etc/corral/agent.yaml
-node: node-fsn-1                   # stored by "corral init" (host name if unset); must match afterwards
+# /etc/murder/agent.yaml
+node: node-fsn-1                   # stored by "murder init" (host name if unset); must match afterwards
 baseDomain: example.com            # tenants live at <tenant>.example.com
-database: /var/lib/corral/corral.db  # apps, tenants, sealed secrets, audit log (SQLite)
-masterKeyFile: /etc/corral/master.key
-socket: /run/corral/agent.sock
-socketGroup: corral                # members may run the corral CLI without root (they control every tenant)
+database: /var/lib/murder/murder.db  # apps, tenants, sealed secrets, audit log (SQLite)
+masterKeyFile: /etc/murder/master.key
+socket: /run/murder/agent.sock
+socketGroup: murder                # members may run the murder CLI without root (they control every tenant)
 dockerSocket: /var/run/docker.sock
-registryAuthFile: /etc/corral/registry.json   # docker config.json with "auths" for private registries
+registryAuthFile: /etc/murder/registry.json   # docker config.json with "auths" for private registries
 networkPool: 10.240.0.0/16         # one /28 per tenant network (the tenant at .2); must not overlap host or Docker networks
 
 volumes:
-  driver: zfs                      # or: driver: dir, root: /srv/corral/tenants
-  parent: tank/corral/tenants      # datasets mount below /srv/corral/tenants (mountRoot)
+  driver: zfs                      # or: driver: dir, root: /srv/murder/tenants
+  parent: tank/murder/tenants      # datasets mount below /srv/murder/tenants (mountRoot)
 
 edge:
   http: ":80"
   https: ":443"
   tls:
     mode: acme                     # off | internal | acme
-    storage: /var/lib/corral/certs
+    storage: /var/lib/murder/certs
     email: ops@example.com
     dnsProvider: hetzner           # hetzner (Hetzner Cloud DNS) | namecheap
-    dnsTokenFile: /etc/corral/dns.token
+    dnsTokenFile: /etc/murder/dns.token
 
 defaults: {memoryMB: 512, cpus: 1, pids: 512}
 reconcileInterval: 10s

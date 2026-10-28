@@ -1,4 +1,4 @@
-// Command testapp is a tiny tenant app for Corral's integration tests: it
+// Command testapp is a tiny tenant app for Murder's integration tests: it
 // reports what it sees and keeps one value in its data directory.
 package main
 

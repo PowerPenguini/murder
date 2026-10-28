@@ -9,7 +9,7 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/PowerPenguini/corral/internal/spec"
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 // ErrNotFound reports a tenant or app that does not exist.
@@ -39,7 +39,7 @@ type App struct {
 	UpdatedAt time.Time   `json:"updatedAt"`
 }
 
-// Record is one tenant's desired state plus what Corral assigned to it.
+// Record is one tenant's desired state plus what Murder assigned to it.
 type Record struct {
 	// Spec is what the tenant runs: its app's spec with its overrides, and
 	// its suspension.
