@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"io"
@@ -36,11 +37,10 @@ func TestFlagsMayFollowArguments(t *testing.T) {
 
 // fakeAgent answers the API calls the CLI makes, over a unix socket.
 type fakeAgent struct {
-	mu       sync.Mutex
-	tenants  map[string]api.Tenant
-	archived []api.ArchivedTenant
-	calls    []string
-	bodies   map[string][]byte
+	mu      sync.Mutex
+	tenants map[string]api.Tenant
+	calls   []string
+	bodies  map[string][]byte
 }
 
 func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,8 +57,6 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			views = append(views, a.tenants[name])
 		}
 		_ = json.NewEncoder(w).Encode(views)
-	case r.Method == http.MethodGet && r.URL.Path == "/v1/archive":
-		_ = json.NewEncoder(w).Encode(a.archived)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tenants/"):
 		// "slow" never becomes healthy; everything else already is.
 		name := strings.TrimPrefix(r.URL.Path, "/v1/tenants/")
@@ -66,6 +64,10 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not found"}`))
+			return
+		}
+		if tenant.Archived() {
+			_ = json.NewEncoder(w).Encode(tenant)
 			return
 		}
 		tenant.Status = &reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: name != "slow", Message: "health check: HTTP 500", CheckedAt: time.Now()}
@@ -79,20 +81,11 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/v1/tenants/")
 		var request api.TenantRequest
 		_ = json.Unmarshal(body, &request)
-		tenant, live := a.tenants[name]
+		tenant := a.tenants[name]
 		changed := tenant.App != request.App || !tenant.Overrides.Equal(request.Overrides)
-		if !live {
-			for _, entry := range a.archived {
-				if entry.Name == name {
-					changed = entry.App != request.App || !entry.Overrides.Equal(request.Overrides)
-				}
-			}
-		}
 		tenant.App, tenant.Overrides = request.App, request.Overrides
-		if live {
-			a.tenants[name] = tenant
-		}
-		_ = json.NewEncoder(w).Encode(api.Applied{Tenant: tenant, Changed: changed, Archived: !live})
+		a.tenants[name] = tenant
+		_ = json.NewEncoder(w).Encode(api.Applied{Tenant: tenant, Changed: changed})
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/tenants":
 		var request api.TenantRequest
 		_ = json.Unmarshal(body, &request)
@@ -171,17 +164,19 @@ func TestAppApplyReadsEveryFileFirst(t *testing.T) {
 }
 
 // One unhealthy tenant fails the apply but does not use up the wait of the
-// others; every tenant of the app is waited for, changed or not.
+// others; every live tenant of the app is waited for, changed or not.
 func TestAppApplyWaitsForEveryTenantSideBySide(t *testing.T) {
 	tenant := func(name, app string) api.Tenant { return api.Tenant{Spec: spec.Tenant{Name: name}, App: app} }
-	_, socket := startAgent(t, tenant("slow", "web"), tenant("a", "web"), tenant("b", "web"), tenant("other", "shop"))
+	archived := tenant("old", "web")
+	archived.ArchivedAt = time.Now()
+	_, socket := startAgent(t, tenant("slow", "web"), tenant("a", "web"), tenant("b", "web"), tenant("other", "shop"), archived)
 	file := writeFile(t, t.TempDir(), "web.yaml", "image: nginx:1.27\nuser: \"101:101\"\n")
 	out := capture(t)
 	err := runApp([]string{"apply", file, "-socket", socket, "-wait", "2s"})
 	if err == nil || !strings.Contains(err.Error(), "1 problem(s)") || !strings.Contains(err.Error(), "slow did not become healthy within 2s: health check: HTTP 500") {
 		t.Fatalf("apply = %v", err)
 	}
-	if !strings.Contains(out.String(), "a is healthy") || !strings.Contains(out.String(), "b is healthy") || strings.Contains(out.String(), "other") {
+	if !strings.Contains(out.String(), "a is healthy") || !strings.Contains(out.String(), "b is healthy") || strings.Contains(out.String(), "other") || strings.Contains(err.Error(), "old") {
 		t.Fatalf("output:\n%s", out)
 	}
 }
@@ -224,8 +219,7 @@ func TestTenantSetChangesOnlyWhatItIsTold(t *testing.T) {
 
 // set works on an archived tenant too, and sends the generation it read.
 func TestTenantSetOnAnArchivedTenant(t *testing.T) {
-	agent, socket := startAgent(t)
-	agent.archived = []api.ArchivedTenant{{Name: "old", App: "web", Generation: 7, Overrides: spec.Overrides{Env: map[string]string{"A": "1"}}}}
+	agent, socket := startAgent(t, api.Tenant{Spec: spec.Tenant{Name: "old"}, App: "web", Generation: 7, ArchivedAt: time.Now(), Overrides: spec.Overrides{Env: map[string]string{"A": "1"}}})
 	capture(t)
 	if err := runTenant([]string{"set", "old", "-env", "B=2", "-socket", socket}); err != nil {
 		t.Fatal(err)
@@ -244,6 +238,16 @@ func TestTenantSetOnAnArchivedTenant(t *testing.T) {
 	}
 }
 
+// A wait ends at once when the tenant is archived meanwhile.
+func TestWaitEndsWhenTheTenantIsArchived(t *testing.T) {
+	agent, socket := startAgent(t, api.Tenant{Spec: spec.Tenant{Name: "acme"}, App: "web", ArchivedAt: time.Now()})
+	started := time.Now()
+	err := waitFor(context.Background(), api.NewClient(socket), agent.tenants["acme"], time.Minute, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "archived") || time.Since(started) > 5*time.Second {
+		t.Fatalf("wait = %v after %v", err, time.Since(started))
+	}
+}
+
 func TestExampleAppIsValid(t *testing.T) {
 	name, app, err := loadApp(filepath.Join("..", "..", "examples", "apps", "web.yaml"))
 	if err != nil {
@@ -254,5 +258,20 @@ func TestExampleAppIsValid(t *testing.T) {
 	}
 	if err := spec.Compose(app, "acme", spec.Overrides{}).ValidateUnpinned(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// list shows archived tenants with the others.
+func TestTenantListShowsArchivedTenants(t *testing.T) {
+	_, socket := startAgent(t,
+		api.Tenant{Spec: spec.Tenant{Name: "acme"}, App: "web"},
+		api.Tenant{Spec: spec.Tenant{Name: "old"}, App: "web", ArchivedAt: time.Now()})
+	out := capture(t)
+	if err := runTenant([]string{"list", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[1], "acme") || !strings.Contains(lines[1], "pending") || !strings.HasPrefix(lines[2], "old") || !strings.Contains(lines[2], "archived "+time.Now().Format(time.DateOnly)) {
+		t.Fatalf("list:\n%s", out)
 	}
 }

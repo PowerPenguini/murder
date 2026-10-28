@@ -51,8 +51,9 @@ type Record struct {
 	// rotation and only deleted by a purge.
 	Sealed map[string]string `json:"-"`
 	// Subnet is the tenant network's IPv4 range; the tenant's address in it
-	// is fixed (see runtime.Addresses). An archived tenant holds it until
-	// the reconciler releases it.
+	// is fixed (see runtime.Addresses). A tenant keeps it until it is
+	// purged, archived or not, so no other tenant can be routed to a
+	// container still running at its address.
 	Subnet string `json:"subnet"`
 	// DataImage is the image whose container last owned the data. It is
 	// observed state: the reconciler sets it and it does not bump Generation.
@@ -61,7 +62,15 @@ type Record struct {
 	Generation int64     `json:"generation"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
+	// ArchivedAt is set while the tenant is archived: out of service, with
+	// its data, secrets and overrides kept so it can be restored. Its
+	// secrets in particular must survive, because the app's data may be
+	// encrypted or signed with them. A restore runs the app's current spec.
+	ArchivedAt time.Time `json:"archivedAt,omitzero"`
 }
+
+// Archived reports whether the tenant is archived.
+func (r Record) Archived() bool { return !r.ArchivedAt.IsZero() }
 
 func (r Record) clone() Record {
 	r.Spec.Env = maps.Clone(r.Spec.Env)
@@ -71,16 +80,6 @@ func (r Record) clone() Record {
 	r.Overrides.Secrets = maps.Clone(r.Overrides.Secrets)
 	r.Sealed = maps.Clone(r.Sealed)
 	return r
-}
-
-// Archived is an archived tenant: its record, kept with its data so it can
-// be restored. Its secrets in particular must survive, because the app's
-// data may be encrypted or signed with them. It keeps its subnet only until
-// its container and network are gone. A restore runs the app's current
-// spec.
-type Archived struct {
-	Record     Record    `json:"record"`
-	ArchivedAt time.Time `json:"archivedAt"`
 }
 
 // NewTenant is a tenant to create.
@@ -141,8 +140,14 @@ type Store interface {
 	// DeleteApp removes an app no tenant runs.
 	DeleteApp(name, actor string) error
 
+	// List returns every tenant, archived ones too, by name.
 	List() []Record
+	// Get returns a tenant, archived or not.
 	Get(name string) (Record, error)
+	// Live returns a tenant that is not archived; an archived one is
+	// refused with ErrArchived. Anything that acts on a running tenant uses
+	// it.
+	Live(name string) (Record, error)
 	// Create adds a tenant, assigning its subnet. A name held
 	// by an archived tenant is refused with ErrArchived.
 	Create(tenant NewTenant, actor string) (Record, error)
@@ -159,16 +164,12 @@ type Store interface {
 	// Observe records the image that now owns a tenant's data.
 	Observe(name, dataImage string) error
 
-	// Archive moves a tenant to the archive in one write; the reconciler
-	// then removes its container and network and calls Release, which frees
-	// its subnet. Restore brings it back, on its own subnet if not yet
-	// released; Forget deletes it for good.
+	// Archive takes a live tenant out of service in one write; the
+	// reconciler then removes its container and network. Restore brings it
+	// back; Forget deletes an archived tenant for good.
 	Archive(name, actor string) error
-	Release(name string) error
 	Restore(name, actor string) (Record, error)
 	Forget(name, actor string) error
-	ArchivedTenant(name string) (Archived, bool)
-	ListArchived() []Archived
 
 	Events(query EventQuery) ([]Event, error)
 	// Changed is signalled after every successful change of desired state.

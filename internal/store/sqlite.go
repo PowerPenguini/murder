@@ -42,28 +42,35 @@ type SQLite struct {
 }
 
 type snapshot struct {
-	node     string
-	apps     map[string]App
-	live     map[string]Record
-	archived map[string]Archived
+	node    string
+	apps    map[string]App
+	tenants map[string]Record
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
 	lastEvent int64
 }
 
+const pragmas = "_pragma=foreign_keys(1)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)&_txlock=immediate"
+
 // dsn escapes path, so "#", "?" or "%" in it cannot be read as URI syntax
 // and open another file than the one Init created and Open locks.
-func dsn(path string) string {
+func dsn(path string) string { return uri(path, pragmas+"&_pragma=journal_mode(WAL)") }
+
+// initDSN leaves the journal mode alone, so init does not change a database
+// it then refuses; Open switches it to WAL.
+func initDSN(path string) string { return uri(path, pragmas) }
+
+func uri(path, query string) string {
 	// A relative path would read as a URI authority.
 	if absolute, err := filepath.Abs(path); err == nil {
 		path = absolute
 	}
-	uri := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)&_txlock=immediate"}
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: query}
 	return uri.String()
 }
 
-func openDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dsn(path))
+func openDB(dsn string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -77,10 +84,9 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// Init creates an empty database for node at path, refusing to overwrite
-// one. It is built under a temporary name and linked into place complete, so
-// an interrupted init never leaves a half-made database at path; leftovers
-// of one are removed by the next.
+// Init creates the database for node at path, refusing to overwrite one.
+// The schema and the node name are written in one transaction, so an
+// interrupted init leaves an empty database, which the next init completes.
 func Init(path, node string) error {
 	if !nodePattern.MatchString(node) {
 		return fmt.Errorf("node name %q must be 1-63 letters, digits, dots or hyphens", node)
@@ -89,46 +95,49 @@ func Init(path, node string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("database %s already exists", path)
-	}
-	stale, _ := filepath.Glob(filepath.Join(dir, ".corral-init-*"))
-	for _, file := range stale {
-		_ = os.Remove(file)
-	}
-	temp, err := os.CreateTemp(dir, ".corral-init-*.db") // mode 0600
+	// Owner-only from the start; SQLite gives its -wal and -shm files the
+	// database's mode.
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
-	_ = temp.Close()
-	defer func() {
-		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-			_ = os.Remove(temp.Name() + suffix)
-		}
-	}()
-	if err := initDB(temp.Name(), node); err != nil {
+	_ = file.Close()
+	db, err := openDB(initDSN(path))
+	if err != nil {
 		return err
 	}
-	if err := os.Link(temp.Name(), path); errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("database %s already exists", path)
-	} else if err != nil {
+	if err := errors.Join(initDB(db, path, node), db.Close()); err != nil {
 		return err
 	}
 	return syncDir(dir)
 }
 
-// initDB writes the schema and the node name; closing the database folds
-// the write-ahead log into the file.
-func initDB(path, node string) error {
-	db, err := openDB(path)
+func initDB(db *sql.DB, path, node string) error {
+	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	err = migrate(db)
-	if err == nil {
-		_, err = db.Exec(`INSERT INTO meta (key, value) VALUES ('node', ?)`, node)
+	defer tx.Rollback()
+	var version, objects int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("database %s: %w", path, err)
 	}
-	return errors.Join(err, db.Close())
+	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_schema`).Scan(&objects); err != nil {
+		return err
+	}
+	if version != 0 || objects != 0 {
+		return fmt.Errorf("database %s already exists", path)
+	}
+	if _, err := tx.Exec(schema); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('node', ?)`, node); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func syncDir(dir string) error {
@@ -168,13 +177,13 @@ func Open(path string, options Options) (*SQLite, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	db, err := openDB(path)
+	db, err := openDB(dsn(path))
 	if err != nil {
 		_ = lock.Close()
 		return nil, err
 	}
 	s := &SQLite{db: db, options: options, now: time.Now, lock: lock, changed: make(chan struct{}, 1)}
-	if err := migrate(db); err != nil {
+	if err := checkSchema(db); err != nil {
 		_ = s.Close()
 		return nil, fmt.Errorf("database %s: %w", path, err)
 	}
@@ -230,7 +239,7 @@ type querier interface {
 
 // load reads the whole state. It is small: one row per app and tenant.
 func load(q querier) (*snapshot, error) {
-	state := &snapshot{apps: map[string]App{}, live: map[string]Record{}, archived: map[string]Archived{}}
+	state := &snapshot{apps: map[string]App{}, tenants: map[string]Record{}}
 	if err := q.QueryRow(`SELECT value FROM meta WHERE key = 'node'`).Scan(&state.node); err != nil {
 		return nil, fmt.Errorf("read the node name: %w", err)
 	}
@@ -285,8 +294,8 @@ func load(q querier) (*snapshot, error) {
 		var record Record
 		var name, overrides, created, updated string
 		var suspended bool
-		var subnet, archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &subnet, &record.DataImage, &record.Generation, &created, &updated, &archivedAt); err != nil {
+		var archivedAt sql.NullString
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.Generation, &created, &updated, &archivedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -296,14 +305,12 @@ func load(q querier) (*snapshot, error) {
 		}
 		record.Spec = spec.Compose(state.apps[record.App].Spec, name, record.Overrides)
 		record.Spec.Suspended = suspended
-		record.Subnet = subnet.String
 		record.Sealed = sealed[name]
 		record.CreatedAt, record.UpdatedAt = parseTime(created), parseTime(updated)
 		if archivedAt.Valid {
-			state.archived[name] = Archived{Record: record, ArchivedAt: parseTime(archivedAt.String)}
-		} else {
-			state.live[name] = record
+			record.ArchivedAt = parseTime(archivedAt.String)
 		}
+		state.tenants[name] = record
 	}
 	if err := closeRows(rows); err != nil {
 		return nil, err
@@ -424,9 +431,9 @@ func normalizeApp(app spec.Tenant) spec.Tenant {
 // checked when they are restored, and can be reconfigured meanwhile.
 func checkTenants(state *snapshot, app string, next spec.Tenant, validate func(spec.Tenant) error) error {
 	var problems []string
-	for _, name := range slices.Sorted(maps.Keys(state.live)) {
-		record := state.live[name]
-		if record.App != app || record.Spec.Validate() != nil {
+	for _, name := range slices.Sorted(maps.Keys(state.tenants)) {
+		record := state.tenants[name]
+		if record.App != app || record.Archived() || record.Spec.Validate() != nil {
 			continue
 		}
 		if err := validate(spec.Compose(next, name, record.Overrides)); err != nil {
@@ -476,9 +483,9 @@ func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
 		if found {
 			detail = "changed " + changed + "; " + detail
 		}
-		for _, name := range slices.Sorted(maps.Keys(current.live)) {
-			record := current.live[name]
-			if record.App != app.Name {
+		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
+			record := current.tenants[name]
+			if record.App != app.Name || record.Archived() {
 				continue
 			}
 			composed := spec.Compose(app.Spec, name, record.Overrides)
@@ -539,33 +546,18 @@ func changedFields(before, after spec.Tenant) []string {
 // errUnchanged ends a write that would change nothing.
 var errUnchanged = errors.New("unchanged")
 
-// tenantsOf returns the live and archived tenants of app.
-func tenantsOf(state *snapshot, app string) []Record {
-	var records []Record
-	for _, record := range state.live {
-		if record.App == app {
-			records = append(records, record)
-		}
-	}
-	for _, archived := range state.archived {
-		if archived.Record.App == app {
-			records = append(records, archived.Record)
-		}
-	}
-	return records
-}
-
 func (s *SQLite) DeleteApp(name, actor string) error {
 	_, err := s.write(false, func(tx *sql.Tx, current *snapshot, now time.Time) error {
 		if _, ok := current.apps[name]; !ok {
 			return fmt.Errorf("app %s: %w", name, ErrNotFound)
 		}
-		if users := tenantsOf(current, name); len(users) > 0 {
-			names := make([]string, 0, len(users))
-			for _, record := range users {
-				names = append(names, record.Spec.Name)
+		var names []string
+		for _, tenant := range slices.Sorted(maps.Keys(current.tenants)) {
+			if current.tenants[tenant].App == name {
+				names = append(names, tenant)
 			}
-			slices.Sort(names)
+		}
+		if len(names) > 0 {
 			return fmt.Errorf("%w: tenants %v run app %s (archived ones count until purged)", ErrInUse, names, name)
 		}
 		if _, err := tx.Exec(`DELETE FROM apps WHERE name = ?`, name); err != nil {
@@ -578,30 +570,39 @@ func (s *SQLite) DeleteApp(name, actor string) error {
 
 func (s *SQLite) List() []Record {
 	state := s.state.Load()
-	records := make([]Record, 0, len(state.live))
-	for _, name := range slices.Sorted(maps.Keys(state.live)) {
-		records = append(records, state.live[name].clone())
+	records := make([]Record, 0, len(state.tenants))
+	for _, name := range slices.Sorted(maps.Keys(state.tenants)) {
+		records = append(records, state.tenants[name].clone())
 	}
 	return records
 }
 
 func (s *SQLite) Get(name string) (Record, error) {
-	record, ok := s.state.Load().live[name]
+	record, ok := s.state.Load().tenants[name]
 	if !ok {
 		return Record{}, fmt.Errorf("tenant %s: %w", name, ErrNotFound)
 	}
 	return record.clone(), nil
 }
 
+func (s *SQLite) Live(name string) (Record, error) {
+	record, err := liveTenant(s.state.Load(), name)
+	if err != nil {
+		return Record{}, err
+	}
+	return record.clone(), nil
+}
+
 // liveTenant returns a live tenant, explaining an archived one.
 func liveTenant(state *snapshot, name string) (Record, error) {
-	if record, ok := state.live[name]; ok {
-		return record, nil
-	}
-	if _, ok := state.archived[name]; ok {
+	record, ok := state.tenants[name]
+	switch {
+	case !ok:
+		return Record{}, fmt.Errorf("tenant %s: %w", name, ErrNotFound)
+	case record.Archived():
 		return Record{}, fmt.Errorf("tenant %s: %w", name, ErrArchived)
 	}
-	return Record{}, fmt.Errorf("tenant %s: %w", name, ErrNotFound)
+	return record, nil
 }
 
 // prepare returns the spec a tenant of app with overrides runs, validated.
@@ -620,11 +621,10 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 	}
 	overrides := tenant.Overrides.Normalized()
 	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
-		if _, ok := current.live[tenant.Name]; ok {
-			return ErrExists
-		}
-		if _, ok := current.archived[tenant.Name]; ok {
+		if existing, ok := current.tenants[tenant.Name]; ok && existing.Archived() {
 			return ErrArchived
+		} else if ok {
+			return ErrExists
 		}
 		composed, err := prepare(current, tenant.Name, tenant.App, overrides)
 		if err != nil {
@@ -647,7 +647,7 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	return next.live[tenant.Name].clone(), nil
+	return next.tenants[tenant.Name].clone(), nil
 }
 
 // overridesDetail names what a tenant overrides, without env values: the
@@ -676,13 +676,9 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 	overrides = overrides.Normalized()
 	var unchanged Record
 	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
-		record, live := current.live[name]
-		if !live {
-			archived, ok := current.archived[name]
-			if !ok {
-				return fmt.Errorf("tenant %s: %w", name, ErrNotFound)
-			}
-			record = archived.Record
+		record, ok := current.tenants[name]
+		if !ok {
+			return fmt.Errorf("tenant %s: %w", name, ErrNotFound)
 		}
 		if generation != 0 && record.Generation != generation {
 			return fmt.Errorf("%w: tenant %s is at generation %d, not %d; read it again", ErrConflict, name, record.Generation, generation)
@@ -700,7 +696,7 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 			return err
 		}
 		// An archived tenant gets missing secrets when it is restored.
-		if live {
+		if !record.Archived() {
 			if err := s.sealMissing(tx, now, composed, record.Sealed); err != nil {
 				return err
 			}
@@ -720,10 +716,7 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 	if err != nil {
 		return Record{}, false, err
 	}
-	if record, ok := next.live[name]; ok {
-		return record.clone(), true, nil
-	}
-	return next.archived[name].Record.clone(), true, nil
+	return next.tenants[name].clone(), true, nil
 }
 
 func (s *SQLite) SetSuspended(name string, suspended bool, actor string) (Record, error) {
@@ -745,7 +738,7 @@ func (s *SQLite) SetSuspended(name string, suspended bool, actor string) (Record
 	if err != nil {
 		return Record{}, err
 	}
-	return next.live[name].clone(), nil
+	return next.tenants[name].clone(), nil
 }
 
 func (s *SQLite) Rotate(name, secret, actor string) (Record, error) {
@@ -775,11 +768,11 @@ func (s *SQLite) Rotate(name, secret, actor string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	return next.live[name].clone(), nil
+	return next.tenants[name].clone(), nil
 }
 
 func (s *SQLite) Observe(name, dataImage string) error {
-	if record, ok := s.state.Load().live[name]; ok && record.DataImage == dataImage {
+	if record, ok := s.state.Load().tenants[name]; ok && record.DataImage == dataImage {
 		return nil
 	}
 	_, err := s.write(false, func(tx *sql.Tx, current *snapshot, _ time.Time) error {
@@ -792,11 +785,8 @@ func (s *SQLite) Observe(name, dataImage string) error {
 	return err
 }
 
-// Archive moves a live tenant to the archive in one write; the edge stops
-// routing to it at once. Its suspension is kept for the restore. It keeps
-// its subnet until the reconciler has removed its container and network
-// and calls Release: until then a container may still run at the address,
-// and no other tenant may be routed there.
+// Archive takes a live tenant out of service in one write; the edge stops
+// routing to it at once. Its suspension is kept for the restore.
 func (s *SQLite) Archive(name, actor string) error {
 	_, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)
@@ -814,28 +804,19 @@ func (s *SQLite) Archive(name, actor string) error {
 
 func (s *SQLite) Restore(name, actor string) (Record, error) {
 	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
-		archived, ok := current.archived[name]
-		if !ok {
-			if _, live := current.live[name]; live {
-				return fmt.Errorf("tenant %s: %w", name, ErrNotArchived)
-			}
+		record, ok := current.tenants[name]
+		switch {
+		case !ok:
 			return fmt.Errorf("archived tenant %s: %w", name, ErrNotFound)
+		case !record.Archived():
+			return fmt.Errorf("tenant %s: %w", name, ErrNotArchived)
 		}
-		record := archived.Record
 		composed, err := prepare(current, name, record.App, record.Overrides)
 		if err != nil {
 			return fmt.Errorf("tenant %s cannot run app %s as it is now; change it with \"corral tenant set\" first: %w", name, record.App, err)
 		}
-		// Back on its own subnet if it still holds it (its network may still
-		// stand); otherwise on a free one.
-		subnet := record.Subnet
-		if subnet == "" {
-			if subnet, err = s.assign(current); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.Exec(`UPDATE tenants SET subnet = ?, archived_at = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
-			subnet, formatTime(now), name); err != nil {
+		if _, err := tx.Exec(`UPDATE tenants SET archived_at = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
+			formatTime(now), name); err != nil {
 			return err
 		}
 		if err := s.sealMissing(tx, now, composed, record.Sealed); err != nil {
@@ -846,33 +827,20 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	return next.live[name].clone(), nil
-}
-
-// Release frees the subnet of an archived tenant once the reconciler has
-// removed everything that used it. It does nothing for a tenant that is not
-// archived or holds none.
-func (s *SQLite) Release(name string) error {
-	if archived, ok := s.state.Load().archived[name]; !ok || archived.Record.Subnet == "" {
-		return nil
-	}
-	_, err := s.write(false, func(tx *sql.Tx, current *snapshot, _ time.Time) error {
-		_, err := tx.Exec(`UPDATE tenants SET subnet = NULL WHERE name = ? AND archived_at IS NOT NULL`, name)
-		return err
-	})
-	return err
+	return next.tenants[name].clone(), nil
 }
 
 // Forget deletes an archived tenant and its secrets. It also records the
 // purge of data no archive entry accounted for.
 func (s *SQLite) Forget(name, actor string) error {
 	_, err := s.write(false, func(tx *sql.Tx, current *snapshot, now time.Time) error {
-		if _, live := current.live[name]; live {
+		record, ok := current.tenants[name]
+		if ok && !record.Archived() {
 			return fmt.Errorf("tenant %s: %w", name, ErrNotArchived)
 		}
 		app, detail := "", "leftover data"
-		if archived, ok := current.archived[name]; ok {
-			app, detail = archived.Record.App, ""
+		if ok {
+			app, detail = record.App, ""
 			if _, err := tx.Exec(`DELETE FROM tenants WHERE name = ?`, name); err != nil {
 				return err
 			}
@@ -880,26 +848,6 @@ func (s *SQLite) Forget(name, actor string) error {
 		return event(tx, now, actor, "tenant.purged", name, app, detail)
 	})
 	return err
-}
-
-func (s *SQLite) ArchivedTenant(name string) (Archived, bool) {
-	archived, ok := s.state.Load().archived[name]
-	if !ok {
-		return Archived{}, false
-	}
-	archived.Record = archived.Record.clone()
-	return archived, true
-}
-
-func (s *SQLite) ListArchived() []Archived {
-	state := s.state.Load()
-	archived := make([]Archived, 0, len(state.archived))
-	for _, name := range slices.Sorted(maps.Keys(state.archived)) {
-		entry := state.archived[name]
-		entry.Record = entry.Record.clone()
-		archived = append(archived, entry)
-	}
-	return archived
 }
 
 func (s *SQLite) Events(query EventQuery) ([]Event, error) {
@@ -939,17 +887,11 @@ func (s *SQLite) Events(query EventQuery) ([]Event, error) {
 	return events, closeRows(rows)
 }
 
-// assign returns a subnet no tenant holds, live or archived and not yet
-// released.
+// assign returns a subnet no tenant holds, live or archived.
 func (s *SQLite) assign(state *snapshot) (string, error) {
 	usedSubnets := map[string]bool{}
-	for _, record := range state.live {
+	for _, record := range state.tenants {
 		usedSubnets[record.Subnet] = true
-	}
-	for _, archived := range state.archived {
-		if archived.Record.Subnet != "" {
-			usedSubnets[archived.Record.Subnet] = true
-		}
 	}
 	pool := s.options.NetworkPool
 	base := pool.Masked().Addr().As4()
@@ -963,5 +905,5 @@ func (s *SQLite) assign(state *snapshot) (string, error) {
 			return subnet, nil
 		}
 	}
-	return "", fmt.Errorf("network pool %v has no free /%d", pool, subnetBits)
+	return "", fmt.Errorf("network pool %v has no free /%d; archived tenants keep theirs until they are purged", pool, subnetBits)
 }

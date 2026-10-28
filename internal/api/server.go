@@ -30,12 +30,18 @@ type Tenant struct {
 	Host      string         `json:"host"`
 	URL       string         `json:"url"`
 	// Address is where the tenant listens, reachable from this node only.
-	Address    string            `json:"address,omitempty"`
-	Generation int64             `json:"generation"`
-	CreatedAt  time.Time         `json:"createdAt"`
-	UpdatedAt  time.Time         `json:"updatedAt"`
+	Address    string    `json:"address,omitempty"`
+	Generation int64     `json:"generation"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	// ArchivedAt is set for an archived tenant, which runs nothing until it
+	// is restored.
+	ArchivedAt time.Time         `json:"archivedAt,omitzero"`
 	Status     *reconcile.Status `json:"status,omitempty"`
 }
+
+// Archived reports whether the tenant is archived.
+func (t Tenant) Archived() bool { return !t.ArchivedAt.IsZero() }
 
 // TenantRequest creates a tenant (with Name) or reconfigures one.
 type TenantRequest struct {
@@ -55,9 +61,6 @@ type Applied struct {
 	// Note explains how an image was pinned when it fell back to a local
 	// image.
 	Note string `json:"note,omitempty"`
-	// Archived is set for an archived tenant: it runs the change only once
-	// restored.
-	Archived bool `json:"archived,omitempty"`
 }
 
 // App is what the API shows about an app.
@@ -78,17 +81,6 @@ type AppApplied struct {
 	// Tenants are the live tenants the change rolls out to.
 	Tenants []Tenant `json:"tenants"`
 	Note    string   `json:"note,omitempty"`
-}
-
-// ArchivedTenant is what the API shows about an archived tenant.
-type ArchivedTenant struct {
-	Name       string         `json:"name"`
-	App        string         `json:"app"`
-	Overrides  spec.Overrides `json:"overrides"`
-	Image      string         `json:"image"`
-	Suspended  bool           `json:"suspended"`
-	Generation int64          `json:"generation"`
-	ArchivedAt time.Time      `json:"archivedAt"`
 }
 
 // SecretValue carries one secret to an operator.
@@ -124,12 +116,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tenants/{name}/suspend", s.suspend(true))
 	mux.HandleFunc("POST /v1/tenants/{name}/resume", s.suspend(false))
 	mux.HandleFunc("POST /v1/tenants/{name}/archive", s.archive)
+	mux.HandleFunc("POST /v1/tenants/{name}/restore", s.restore)
+	mux.HandleFunc("DELETE /v1/tenants/{name}", s.purge)
 	mux.HandleFunc("GET /v1/tenants/{name}/secrets/{key}", s.secret)
 	mux.HandleFunc("POST /v1/tenants/{name}/secrets/{key}/rotate", s.rotate)
 	mux.HandleFunc("GET /v1/tenants/{name}/logs", s.logs)
-	mux.HandleFunc("GET /v1/archive", s.listArchived)
-	mux.HandleFunc("POST /v1/archive/{name}/restore", s.restore)
-	mux.HandleFunc("DELETE /v1/archive/{name}", s.purge)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
 	return mux
@@ -139,7 +130,10 @@ func (s *Server) view(record store.Record) Tenant {
 	view := Tenant{
 		Spec: record.Spec, App: record.App, Overrides: record.Overrides,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
-		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
+	}
+	if record.Archived() {
+		return view
 	}
 	if address, err := reconcile.Backend(record); err == nil {
 		view.Address = address
@@ -153,7 +147,7 @@ func (s *Server) view(record store.Record) Tenant {
 func (s *Server) appView(app store.App) App {
 	view := App{Name: app.Name, Spec: app.Spec, Tenants: []string{}, CreatedAt: app.CreatedAt, UpdatedAt: app.UpdatedAt}
 	for _, record := range s.store.List() {
-		if record.App == app.Name {
+		if record.App == app.Name && !record.Archived() {
 			view.Tenants = append(view.Tenants, record.Spec.Name)
 		}
 	}
@@ -242,11 +236,7 @@ func (s *Server) list(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	record, err := s.store.Get(name)
-	if _, archived := s.store.ArchivedTenant(name); err != nil && archived {
-		err = notFound(fmt.Errorf("tenant %s is archived; restore it first", name))
-	}
+	record, err := s.store.Get(r.PathValue("name"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -310,11 +300,10 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		if err := r.Context().Err(); err != nil {
 			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err))
 		}
-		if _, err := s.store.Get(request.Name); err == nil {
-			return store.ErrExists
-		}
-		if _, archived := s.store.ArchivedTenant(request.Name); archived {
+		if existing, err := s.store.Get(request.Name); err == nil && existing.Archived() {
 			return store.ErrArchived
+		} else if err == nil {
+			return store.ErrExists
 		}
 		exists, err := s.reconciler.DataExists(ctx, request.Name)
 		if err != nil {
@@ -349,9 +338,8 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(fmt.Errorf("request names tenant %q, not %q", request.Name, name)))
 		return
 	}
-	_, liveErr := s.store.Get(name)
-	if _, archived := s.store.ArchivedTenant(name); liveErr != nil && !archived {
-		writeError(w, liveErr)
+	if _, err := s.store.Get(name); err != nil {
+		writeError(w, err)
 		return
 	}
 	// Checked against what exists now; the store checks again when it
@@ -373,8 +361,7 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		s.log.Info("tenant updated", "tenant", name, "app", request.App, "generation", record.Generation, "image", record.Spec.Image)
 	}
-	_, archived := s.store.ArchivedTenant(name)
-	writeJSON(w, http.StatusOK, Applied{Tenant: s.view(record), Changed: changed, Note: note, Archived: archived})
+	writeJSON(w, http.StatusOK, Applied{Tenant: s.view(record), Changed: changed, Note: note})
 }
 
 func (s *Server) suspend(suspended bool) http.HandlerFunc {
@@ -400,16 +387,6 @@ func (s *Server) archive(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("tenant archived", "tenant", name)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) listArchived(w http.ResponseWriter, _ *http.Request) {
-	archived := s.store.ListArchived()
-	views := make([]ArchivedTenant, 0, len(archived))
-	for _, entry := range archived {
-		record := entry.Record
-		views = append(views, ArchivedTenant{Name: record.Spec.Name, App: record.App, Overrides: record.Overrides, Image: record.Spec.Image, Suspended: record.Spec.Suspended, Generation: record.Generation, ArchivedAt: entry.ArchivedAt})
-	}
-	writeJSON(w, http.StatusOK, views)
 }
 
 func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
@@ -453,7 +430,7 @@ func detached(r *http.Request) (context.Context, context.CancelFunc) {
 
 func (s *Server) secret(w http.ResponseWriter, r *http.Request) {
 	name, key := r.PathValue("name"), r.PathValue("key")
-	record, err := s.store.Get(name)
+	record, err := s.store.Live(name)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -488,7 +465,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if _, err := s.store.Get(name); err != nil {
+	if _, err := s.store.Live(name); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -559,7 +536,7 @@ type Routes struct {
 }
 
 func (r Routes) Route(tenant string) (edge.Route, bool) {
-	record, err := r.Store.Get(tenant)
+	record, err := r.Store.Live(tenant)
 	if err != nil {
 		return edge.Route{}, false
 	}
