@@ -50,19 +50,27 @@ type snapshot struct {
 	lastEvent int64
 }
 
+const pragmas = "_pragma=foreign_keys(1)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)&_txlock=immediate"
+
 // dsn escapes path, so "#", "?" or "%" in it cannot be read as URI syntax
 // and open another file than the one Init created and Open locks.
-func dsn(path string) string {
+func dsn(path string) string { return uri(path, pragmas+"&_pragma=journal_mode(WAL)") }
+
+// initDSN leaves the journal mode alone, so init does not change a database
+// it then refuses; Open switches it to WAL.
+func initDSN(path string) string { return uri(path, pragmas) }
+
+func uri(path, query string) string {
 	// A relative path would read as a URI authority.
 	if absolute, err := filepath.Abs(path); err == nil {
 		path = absolute
 	}
-	uri := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)&_txlock=immediate"}
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: query}
 	return uri.String()
 }
 
-func openDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dsn(path))
+func openDB(dsn string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -94,11 +102,10 @@ func Init(path, node string) error {
 		return err
 	}
 	_ = file.Close()
-	db, err := openDB(path)
+	db, err := openDB(initDSN(path))
 	if err != nil {
 		return err
 	}
-	// Closing the database folds the write-ahead log into the file.
 	if err := errors.Join(initDB(db, path, node), db.Close()); err != nil {
 		return err
 	}
@@ -170,7 +177,7 @@ func Open(path string, options Options) (*SQLite, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	db, err := openDB(path)
+	db, err := openDB(dsn(path))
 	if err != nil {
 		_ = lock.Close()
 		return nil, err
@@ -578,6 +585,14 @@ func (s *SQLite) Get(name string) (Record, error) {
 	return record.clone(), nil
 }
 
+func (s *SQLite) Live(name string) (Record, error) {
+	record, err := liveTenant(s.state.Load(), name)
+	if err != nil {
+		return Record{}, err
+	}
+	return record.clone(), nil
+}
+
 // liveTenant returns a live tenant, explaining an archived one.
 func liveTenant(state *snapshot, name string) (Record, error) {
 	record, ok := state.tenants[name]
@@ -890,5 +905,5 @@ func (s *SQLite) assign(state *snapshot) (string, error) {
 			return subnet, nil
 		}
 	}
-	return "", fmt.Errorf("network pool %v has no free /%d", pool, subnetBits)
+	return "", fmt.Errorf("network pool %v has no free /%d; archived tenants keep theirs until they are purged", pool, subnetBits)
 }

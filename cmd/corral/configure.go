@@ -122,7 +122,7 @@ func configureTenant(command string, args []string) error {
 	if err != nil {
 		return err
 	}
-	archived := !result.Tenant.ArchivedAt.IsZero()
+	archived := result.Tenant.Archived()
 	switch {
 	case command == "create":
 		fmt.Fprintf(stdout, "%s created at %s, running app %s (%s)\n", name, result.Tenant.URL, result.Tenant.App, shortImage(result.Tenant.Spec.Image))

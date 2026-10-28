@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"io"
@@ -65,7 +66,7 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"error":"not found"}`))
 			return
 		}
-		if !tenant.ArchivedAt.IsZero() {
+		if tenant.Archived() {
 			_ = json.NewEncoder(w).Encode(tenant)
 			return
 		}
@@ -163,17 +164,19 @@ func TestAppApplyReadsEveryFileFirst(t *testing.T) {
 }
 
 // One unhealthy tenant fails the apply but does not use up the wait of the
-// others; every tenant of the app is waited for, changed or not.
+// others; every live tenant of the app is waited for, changed or not.
 func TestAppApplyWaitsForEveryTenantSideBySide(t *testing.T) {
 	tenant := func(name, app string) api.Tenant { return api.Tenant{Spec: spec.Tenant{Name: name}, App: app} }
-	_, socket := startAgent(t, tenant("slow", "web"), tenant("a", "web"), tenant("b", "web"), tenant("other", "shop"))
+	archived := tenant("old", "web")
+	archived.ArchivedAt = time.Now()
+	_, socket := startAgent(t, tenant("slow", "web"), tenant("a", "web"), tenant("b", "web"), tenant("other", "shop"), archived)
 	file := writeFile(t, t.TempDir(), "web.yaml", "image: nginx:1.27\nuser: \"101:101\"\n")
 	out := capture(t)
 	err := runApp([]string{"apply", file, "-socket", socket, "-wait", "2s"})
 	if err == nil || !strings.Contains(err.Error(), "1 problem(s)") || !strings.Contains(err.Error(), "slow did not become healthy within 2s: health check: HTTP 500") {
 		t.Fatalf("apply = %v", err)
 	}
-	if !strings.Contains(out.String(), "a is healthy") || !strings.Contains(out.String(), "b is healthy") || strings.Contains(out.String(), "other") {
+	if !strings.Contains(out.String(), "a is healthy") || !strings.Contains(out.String(), "b is healthy") || strings.Contains(out.String(), "other") || strings.Contains(err.Error(), "old") {
 		t.Fatalf("output:\n%s", out)
 	}
 }
@@ -235,6 +238,16 @@ func TestTenantSetOnAnArchivedTenant(t *testing.T) {
 	}
 }
 
+// A wait ends at once when the tenant is archived meanwhile.
+func TestWaitEndsWhenTheTenantIsArchived(t *testing.T) {
+	agent, socket := startAgent(t, api.Tenant{Spec: spec.Tenant{Name: "acme"}, App: "web", ArchivedAt: time.Now()})
+	started := time.Now()
+	err := waitFor(context.Background(), api.NewClient(socket), agent.tenants["acme"], time.Minute, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "archived") || time.Since(started) > 5*time.Second {
+		t.Fatalf("wait = %v after %v", err, time.Since(started))
+	}
+}
+
 func TestExampleAppIsValid(t *testing.T) {
 	name, app, err := loadApp(filepath.Join("..", "..", "examples", "apps", "web.yaml"))
 	if err != nil {
@@ -258,7 +271,7 @@ func TestTenantListShowsArchivedTenants(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 3 || !strings.HasPrefix(lines[1], "acme") || !strings.Contains(lines[1], "pending") || !strings.HasPrefix(lines[2], "old") || !strings.Contains(lines[2], "archived") {
+	if len(lines) != 3 || !strings.HasPrefix(lines[1], "acme") || !strings.Contains(lines[1], "pending") || !strings.HasPrefix(lines[2], "old") || !strings.Contains(lines[2], "archived "+time.Now().Format(time.DateOnly)) {
 		t.Fatalf("list:\n%s", out)
 	}
 }

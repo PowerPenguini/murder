@@ -421,9 +421,14 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if shown, err := f.client.Get(ctx, "acme"); err != nil || shown.ArchivedAt.IsZero() {
 		t.Fatalf("show an archived tenant = %+v, %v", shown, err)
 	}
-	_, err = f.client.Suspend(ctx, "acme", true)
-	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 {
-		t.Fatalf("suspend an archived tenant = %v", err)
+	// What acts on a running tenant refuses an archived one.
+	_, suspendErr := f.client.Suspend(ctx, "acme", true)
+	_, secretErr := f.client.Secret(ctx, "acme", "SESSION_SECRET")
+	_, logsErr := f.client.Logs(ctx, "acme", 10)
+	for what, err := range map[string]error{"suspend": suspendErr, "secret": secretErr, "logs": logsErr} {
+		if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
+			t.Fatalf("%s an archived tenant = %v", what, err)
+		}
 	}
 	_, err = f.client.Create(ctx, tenantOf("acme"))
 	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {

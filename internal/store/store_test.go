@@ -129,7 +129,7 @@ func TestOpenRefusesMissingLockedOrNewerDatabases(t *testing.T) {
 	if err := Init(newer, "node-1"); err != nil {
 		t.Fatal(err)
 	}
-	for version, want := range map[int]string{schemaVersion + 1: "upgrade Corral", 2: "development release", 0: "corral init"} {
+	for version, want := range map[int]string{schemaVersion + 1: "upgrade Corral", 2: "development release", 0: "not a Corral database"} {
 		db, err := sql.Open("sqlite", dsn(newer))
 		if err != nil {
 			t.Fatal(err)
@@ -141,6 +141,13 @@ func TestOpenRefusesMissingLockedOrNewerDatabases(t *testing.T) {
 		if _, err := Open(newer, options()); err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("schema version %d = %v", version, err)
 		}
+	}
+	empty := filepath.Join(t.TempDir(), "empty.db")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(empty, options()); err == nil || !strings.Contains(err.Error(), "not initialized") {
+		t.Fatalf("an empty database = %v", err)
 	}
 	_, valid := openNew(t, options())
 	for name, opts := range map[string]Options{
@@ -353,6 +360,9 @@ func TestArchiveKeepsEverythingARestoreNeeds(t *testing.T) {
 	}
 	if _, err := st.SetSuspended("acme", true, "a"); !errors.Is(err, ErrArchived) {
 		t.Fatalf("suspend an archived tenant = %v", err)
+	}
+	if _, err := st.Live("acme"); !errors.Is(err, ErrArchived) {
+		t.Fatalf("Live on an archived tenant = %v", err)
 	}
 	if err := st.Archive("acme", "a"); !errors.Is(err, ErrArchived) {
 		t.Fatalf("archive twice = %v", err)
@@ -664,8 +674,9 @@ func TestRelativePathAndInterruptedInit(t *testing.T) {
 	if st.Node() != "node-1" {
 		t.Fatalf("node = %q", st.Node())
 	}
+	// Another program's database, in the default rollback-journal mode.
 	other := filepath.Join(dir, "other.db")
-	db, err := sql.Open("sqlite", dsn(other))
+	db, err := sql.Open("sqlite", "file:"+other)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -675,6 +686,22 @@ func TestRelativePathAndInterruptedInit(t *testing.T) {
 	_ = db.Close()
 	if err := Init(other, "node-1"); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("init over another database = %v", err)
+	}
+	// It is left as it was: still in its own journal mode, with no WAL.
+	if _, err := os.Stat(other + "-wal"); !os.IsNotExist(err) {
+		t.Fatalf("init made a write-ahead log for a database it refused: %v", err)
+	}
+	db, err = sql.Open("sqlite", "file:"+other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mode string
+	if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "delete" {
+		t.Fatalf("journal mode = %q, %v", mode, err)
+	}
+	_ = db.Close()
+	if _, err := Open(other, options()); err == nil || !strings.Contains(err.Error(), "not a Corral database") {
+		t.Fatalf("open another database = %v", err)
 	}
 }
 

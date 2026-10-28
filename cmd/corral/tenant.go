@@ -271,6 +271,9 @@ func waitFor(ctx context.Context, client *api.Client, tenant api.Tenant, timeout
 			}
 			return err
 		}
+		if current.Archived() {
+			return fmt.Errorf("%s was archived while waiting for it", tenant.Spec.Name)
+		}
 		// Only a pass that started after the change counts; a tenant of the
 		// same name archived earlier may have left an old status behind.
 		if status := current.Status; status != nil && status.Generation >= tenant.Generation && status.CheckedAt.After(tenant.UpdatedAt) {
@@ -309,16 +312,17 @@ func printTable(tenants []api.Tenant) error {
 	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(table, "NAME\tAPP\tSTATE\tHEALTHY\tIMAGE\tURL")
 	for _, tenant := range tenants {
-		state, healthy := "pending", "-"
-		if !tenant.ArchivedAt.IsZero() {
-			state = "archived"
+		state, healthy, url := "pending", "-", tenant.URL
+		if tenant.Archived() {
+			// Not routed; when it was archived helps decide what to purge.
+			state, url = "archived "+tenant.ArchivedAt.Local().Format(time.DateOnly), "-"
 		} else if tenant.Status != nil {
 			state = tenant.Status.Phase
 			if tenant.Status.Phase == reconcile.PhaseRunning {
 				healthy = fmt.Sprint(tenant.Status.Healthy)
 			}
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", tenant.Spec.Name, tenant.App, state, healthy, shortImage(tenant.Spec.Image), tenant.URL)
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", tenant.Spec.Name, tenant.App, state, healthy, shortImage(tenant.Spec.Image), url)
 	}
 	return table.Flush()
 }

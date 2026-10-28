@@ -163,7 +163,7 @@ func applyApps(ctx context.Context, client *api.Client, paths []string, wait tim
 		}
 		var tenants []api.Tenant
 		for _, tenant := range current {
-			if applied[tenant.App] {
+			if applied[tenant.App] && !tenant.Archived() {
 				tenants = append(tenants, tenant)
 			}
 		}

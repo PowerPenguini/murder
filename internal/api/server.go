@@ -40,6 +40,9 @@ type Tenant struct {
 	Status     *reconcile.Status `json:"status,omitempty"`
 }
 
+// Archived reports whether the tenant is archived.
+func (t Tenant) Archived() bool { return !t.ArchivedAt.IsZero() }
+
 // TenantRequest creates a tenant (with Name) or reconfigures one.
 type TenantRequest struct {
 	Name      string         `json:"name,omitempty"`
@@ -427,7 +430,7 @@ func detached(r *http.Request) (context.Context, context.CancelFunc) {
 
 func (s *Server) secret(w http.ResponseWriter, r *http.Request) {
 	name, key := r.PathValue("name"), r.PathValue("key")
-	record, err := s.store.Get(name)
+	record, err := s.store.Live(name)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -462,7 +465,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if _, err := s.store.Get(name); err != nil {
+	if _, err := s.store.Live(name); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -533,8 +536,8 @@ type Routes struct {
 }
 
 func (r Routes) Route(tenant string) (edge.Route, bool) {
-	record, err := r.Store.Get(tenant)
-	if err != nil || record.Archived() {
+	record, err := r.Store.Live(tenant)
+	if err != nil {
 		return edge.Route{}, false
 	}
 	backend, err := reconcile.Backend(record)

@@ -76,6 +76,13 @@ func checkSchema(q querier) error {
 	case version == schemaVersion:
 		return nil
 	case version == 0:
+		var objects int
+		if err := q.QueryRow(`SELECT count(*) FROM sqlite_schema`).Scan(&objects); err != nil {
+			return err
+		}
+		if objects > 0 {
+			return errors.New("it is not a Corral database")
+		}
 		return errors.New(`it is not initialized; run "corral init"`)
 	case version > schemaVersion:
 		return fmt.Errorf("it has schema version %d; this release knows only %d — upgrade Corral", version, schemaVersion)

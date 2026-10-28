@@ -144,6 +144,10 @@ type Store interface {
 	List() []Record
 	// Get returns a tenant, archived or not.
 	Get(name string) (Record, error)
+	// Live returns a tenant that is not archived; an archived one is
+	// refused with ErrArchived. Anything that acts on a running tenant uses
+	// it.
+	Live(name string) (Record, error)
 	// Create adds a tenant, assigning its subnet. A name held
 	// by an archived tenant is refused with ErrArchived.
 	Create(tenant NewTenant, actor string) (Record, error)
