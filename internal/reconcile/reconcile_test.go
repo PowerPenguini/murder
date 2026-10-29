@@ -49,6 +49,9 @@ type fakeRuntime struct {
 	// name the ID of an image known by another name.
 	removedImages []string
 	aliases       map[string]string
+	// onImageID runs when an image's ID is looked up, as a write through the
+	// API could meanwhile.
+	onImageID func(ref string)
 	// restartAfterList makes the next List report every container stopped
 	// and then starts them, as a restart policy would during a pass.
 	restartAfterList bool
@@ -86,6 +89,9 @@ func (f *fakeRuntime) imageID(ref string) string {
 }
 
 func (f *fakeRuntime) ImageID(_ context.Context, ref string) (string, error) {
+	if f.onImageID != nil {
+		f.onImageID(ref)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.imageID(ref), nil
@@ -582,6 +588,31 @@ func TestUnusedRegistryImagesAreRemoved(t *testing.T) {
 	f.reconcile(t)
 	if left := f.store.Images(); len(left) != 0 {
 		t.Fatalf("still tracked: %v", left)
+	}
+}
+
+// An image a tenant is given while the sweep runs is not removed.
+func TestImageGivenDuringTheSweepStays(t *testing.T) {
+	const old = "registry.test/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	f := newFixture(t)
+	f.runtime.images[old] = true
+	f.create(t, "acme")
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = old })
+	f.reconcile(t)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.reconcile(t)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageA })
+	f.runtime.onImageID = func(ref string) {
+		if ref == old {
+			f.runtime.onImageID = nil
+			f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = old }) // a rollback
+		}
+	}
+	if err := f.reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !f.runtime.images[old] {
+		t.Fatal("removed the image a rollback was just given")
 	}
 }
 

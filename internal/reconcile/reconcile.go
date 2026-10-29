@@ -448,6 +448,8 @@ func (r *Reconciler) sweepImages(ctx context.Context) {
 		case neededIDs[id]:
 			r.imageRetryAt[image] = now.Add(imageRetry) // needed under another name
 			continue
+		case r.needed(image):
+			continue // a tenant was given it since the sweep began
 		}
 		switch err := r.runtime.RemoveImage(ctx, id); {
 		case errors.Is(err, runtime.ErrInUse):
@@ -460,6 +462,17 @@ func (r *Reconciler) sweepImages(ctx context.Context) {
 			r.forgetImage(image)
 		}
 	}
+}
+
+// needed reports whether a tenant needs image now, read from the store
+// right before it is removed: API writes do not wait for the pass.
+func (r *Reconciler) needed(image string) bool {
+	for _, record := range r.store.List() {
+		if record.Spec.Image == image || record.DataImage == image || record.PreviousImage == image {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) forgetImage(image string) {
