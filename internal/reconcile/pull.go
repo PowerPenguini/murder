@@ -31,6 +31,7 @@ type pulls struct {
 
 	mu      sync.Mutex
 	images  map[string]*pullState
+	started int
 	running sync.WaitGroup
 }
 
@@ -62,6 +63,7 @@ func (p *pulls) fetch(image string) error {
 		return fmt.Errorf("%w (attempt %d; next at %s)", state.err, state.failures, state.retryAt.UTC().Format(time.TimeOnly))
 	}
 	state.running = true
+	p.started++
 	p.running.Add(1)
 	go func() {
 		defer p.running.Done()
@@ -111,6 +113,37 @@ func (p *pulls) keep(wanted map[string]bool) {
 		if !wanted[image] && !state.running {
 			delete(p.images, image)
 		}
+	}
+}
+
+// startedCount counts the pulls started so far.
+func (p *pulls) startedCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.started
+}
+
+// pulling reports whether image is being pulled.
+func (p *pulls) pulling(image string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	state := p.images[image]
+	return state != nil && state.running
+}
+
+// waitContext waits for the running pulls, and reports false if ctx ended
+// first.
+func (p *pulls) waitContext(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() {
+		p.wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

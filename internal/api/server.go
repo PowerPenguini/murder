@@ -521,12 +521,11 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 // reconcileNow runs a pass at once, retrying failed pulls without waiting
-// for their delay.
+// for their delay and waiting for the pulls it starts.
 func (s *Server) reconcileNow(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := detached(r)
 	defer cancel()
-	s.reconciler.RetryPulls()
-	if err := s.reconciler.Reconcile(ctx); err != nil {
+	if err := s.reconciler.ReconcileNow(ctx); err != nil {
 		writeError(w, err)
 		return
 	}

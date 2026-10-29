@@ -26,7 +26,8 @@ Stage 2 — a single server — is what this code does today.
   them. Images are pulled in the background: a tenant waiting for one shows
   `pulling` while its old container keeps serving, and a failed pull is
   retried after 10 s, doubling up to 10 minutes (`murder reconcile` retries
-  at once, say after fixing credentials). Health checks run side by side.
+  at once, say after fixing credentials, and waits for the pulls to report
+  how they went). Health checks run side by side.
 - **Edge proxy.** Routes `<tenant>.<baseDomain>` to the tenant's container. It
   streams responses (server-sent events) and replaces any client-sent
   `X-Forwarded-*` headers. Over HTTPS it adds `Strict-Transport-Security` (one
@@ -196,8 +197,10 @@ container of it that is still running.
     IPv6 (say from Docker's `default-network-opts`) is refused.
   - They cover `networkPool` and every tenant's subnet, read from the
     database, so tenants left on an earlier pool stay guarded.
-  - `firewall: off` turns it off, for development only. A test in the test
-    VM checks it from a real container.
+  - `firewall: off` turns it off, for development only. Two tests check it:
+    `go test -tags netns ./internal/firewall` loads it in network
+    namespaces of its own (no root needed) and probes from a tenant
+    network, and a test in the test VM probes from a real container.
 - **Tenant data is out of reach of host users.** Data directories sit below a
   root-only (`0700`) directory, and ZFS datasets are created with `setuid=off`
   and `devices=off`. A setuid file a tenant writes there is useless to host

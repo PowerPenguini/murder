@@ -138,9 +138,24 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// RetryPulls lets failed pulls be tried again on the next pass instead of
-// after their delay; "murder reconcile" uses it.
-func (r *Reconciler) RetryPulls() { r.pulls.retryNow() }
+// ReconcileNow runs a pass for "murder reconcile": failed pulls are tried
+// again at once, and the pulls the pass starts are waited for, so their
+// failures are reported too.
+func (r *Reconciler) ReconcileNow(ctx context.Context) error {
+	r.pulls.retryNow()
+	for {
+		before := r.pulls.startedCount()
+		err := r.Reconcile(ctx)
+		if r.pulls.startedCount() == before {
+			return err
+		}
+		// The pass started pulls: wait for them and pass again, to use the
+		// images or report their failures.
+		if !r.pulls.waitContext(ctx) {
+			return errors.Join(err, ctx.Err())
+		}
+	}
+}
 
 // Reconcile performs one full pass. A failing tenant does not stop the pass;
 // every failure is returned joined.
@@ -196,13 +211,20 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	var checks sync.WaitGroup
 	limit := make(chan struct{}, healthChecks)
 	for i, record := range records {
-		if statuses[i].Phase != PhaseRunning {
+		// While its image is pulled, the old container still serves: its
+		// health is the tenant's.
+		serving := statuses[i].Phase == PhasePulling && statuses[i].ContainerID != ""
+		if statuses[i].Phase != PhaseRunning && !serving {
 			continue
 		}
 		checks.Go(func() {
 			limit <- struct{}{}
 			defer func() { <-limit }()
-			statuses[i].Healthy, statuses[i].Message = r.checkHealth(ctx, record)
+			healthy, message := r.checkHealth(ctx, record)
+			statuses[i].Healthy = healthy
+			if message != "" {
+				statuses[i].Message = message
+			}
 		})
 	}
 	checks.Wait()
@@ -332,13 +354,13 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		}
 	}
 	if current == nil {
-		id, err := r.replace(ctx, record, desired, outdated)
+		id, removed, err := r.replace(ctx, record, desired, outdated)
 		if err != nil {
-			// The old container keeps serving until the new one can start;
-			// its logs stay at hand.
-			status := Status{}
+			// The status names the container whose logs tell most: the old
+			// one while it still serves, else the new one, if created.
+			status := Status{ContainerID: id}
 			for _, container := range outdated {
-				if container.Running {
+				if container.Running && !removed {
 					status.ContainerID = container.ID
 					break
 				}
@@ -383,17 +405,20 @@ func (r *Reconciler) servesData(ctx context.Context, record store.Record, id str
 // data has been snapshotted. The snapshot is taken while the old container
 // runs: apps are only onboarded once they recover from point-in-time
 // snapshots, and a failed snapshot then blocks the change without an outage.
-func (r *Reconciler) replace(ctx context.Context, record store.Record, desired runtime.ContainerSpec, outdated []runtime.Container) (string, error) {
+//
+// It returns the new container's ID, once created, and whether the outdated
+// containers are gone: until then the old one still serves.
+func (r *Reconciler) replace(ctx context.Context, record store.Record, desired runtime.ContainerSpec, outdated []runtime.Container) (id string, removed bool, err error) {
 	tenant := record.Spec
 	if err := r.image(ctx, tenant.Image); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if record.DataImage != "" && record.DataImage != tenant.Image {
 		name, err := r.volumes.Snapshot(ctx, tenant.Name, "image-change")
 		switch {
 		case errors.Is(err, volume.ErrSnapshotsUnsupported):
 		case err != nil:
-			return "", fmt.Errorf("snapshot before the image change (the old container keeps running): %w", err)
+			return "", false, fmt.Errorf("snapshot before the image change (the old container keeps running): %w", err)
 		default:
 			r.log.Info("snapshot before image change", "tenant", tenant.Name, "snapshot", name, "from", record.DataImage, "to", tenant.Image)
 			if err := r.volumes.Prune(ctx, tenant.Name, "image-change", snapshotsKept); err != nil {
@@ -404,20 +429,20 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	// From here on the data belongs to the new image: a later pass must not
 	// snapshot again for the same change.
 	if err := r.store.Observe(tenant.Name, tenant.Image); err != nil {
-		return "", fmt.Errorf("record the data's image: %w", err)
+		return "", false, fmt.Errorf("record the data's image: %w", err)
 	}
 	if err := r.removeContainers(ctx, outdated); err != nil {
-		return "", err
+		return "", false, err
 	}
-	id, err := r.runtime.Create(ctx, desired)
+	id, err = r.runtime.Create(ctx, desired)
 	if err != nil {
-		return "", err
+		return "", true, err
 	}
 	if err := r.runtime.Start(ctx, id); err != nil {
-		return "", fmt.Errorf("start: %w", err)
+		return id, true, fmt.Errorf("start: %w", err)
 	}
 	r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
-	return id, nil
+	return id, true, nil
 }
 
 // image returns nil once image is present. Until then a pull runs in the
@@ -499,6 +524,8 @@ func (r *Reconciler) sweepImages(ctx context.Context) {
 		case err != nil:
 			r.log.Warn("inspect an image no tenant needs", "image", image, "error", err)
 			continue
+		case id == "" && r.pulls.pulling(image):
+			continue // its pull may still bring it
 		case id == "":
 			r.forgetImage(image) // gone already
 			continue
