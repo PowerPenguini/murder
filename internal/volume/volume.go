@@ -24,8 +24,9 @@ var ErrSnapshotsUnsupported = errors.New("volume driver does not support snapsho
 // file a tenant writes there is useless to them.
 type Volumes interface {
 	// Ensure creates the tenant's data directory if needed, owned by uid:gid,
-	// mounts it if it is not, and returns its host path.
-	Ensure(ctx context.Context, tenant string, uid, gid int) (string, error)
+	// mounts it if it is not, limits it to diskGB (0 is no limit) where the
+	// driver can, and returns its host path.
+	Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (string, error)
 	// Exists reports whether the tenant has data, for example left behind by
 	// a deleted tenant of the same name.
 	Exists(ctx context.Context, tenant string) (bool, error)
@@ -44,14 +45,15 @@ type Volumes interface {
 
 func checkTenant(tenant string) error { return spec.ValidLabel(tenant) }
 
-// Dir keeps each tenant's data in a directory below Root. It cannot snapshot.
+// Dir keeps each tenant's data in a directory below Root. It can neither
+// snapshot nor limit disk use.
 type Dir struct {
 	Root string
 }
 
 func (d Dir) path(tenant string) string { return filepath.Join(d.Root, tenant) }
 
-func (d Dir) Ensure(_ context.Context, tenant string, uid, gid int) (string, error) {
+func (d Dir) Ensure(_ context.Context, tenant string, uid, gid, _ int) (string, error) {
 	if err := checkTenant(tenant); err != nil {
 		return "", err
 	}
@@ -152,22 +154,36 @@ func (z ZFS) now() time.Time {
 	return time.Now()
 }
 
-// properties returns the dataset's owner, mounted state and mountpoint, or
-// ok=false if the dataset does not exist.
-func (z ZFS) properties(ctx context.Context, dataset string) (owner, mounted, mountpoint string, ok bool, err error) {
-	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", ownerProperty+",mounted,mountpoint", dataset)
+// properties are what Murder reads of a dataset.
+type properties struct {
+	owner, mounted, mountpoint string
+	// refquota is the limit on the dataset's own data in bytes; 0 is none.
+	refquota int64
+}
+
+// properties returns the dataset's properties, or ok=false if the dataset
+// does not exist.
+func (z ZFS) properties(ctx context.Context, dataset string) (properties, bool, error) {
+	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", ownerProperty+",mounted,mountpoint,refquota", dataset)
 	if err != nil {
 		if strings.Contains(string(output), "does not exist") {
-			return "", "", "", false, nil
+			return properties{}, false, nil
 		}
-		return "", "", "", false, err
+		return properties{}, false, err
 	}
 	values := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
-	if len(values) != 3 {
-		return "", "", "", false, fmt.Errorf("zfs get %s: unexpected output %q", dataset, output)
+	if len(values) != 4 {
+		return properties{}, false, fmt.Errorf("zfs get %s: unexpected output %q", dataset, output)
 	}
-	return values[0], values[1], values[2], true, nil
+	refquota, err := strconv.ParseInt(values[3], 10, 64)
+	if err != nil {
+		return properties{}, false, fmt.Errorf("zfs get %s: refquota %q", dataset, values[3])
+	}
+	return properties{owner: values[0], mounted: values[1], mountpoint: values[2], refquota: refquota}, true, nil
 }
+
+// diskBytes is the refquota for diskGB; 0 is none.
+func diskBytes(diskGB int) int64 { return int64(diskGB) << 30 }
 
 // owned checks that dataset was made by Murder for tenant and is mounted
 // where Murder expects; anything else is refused rather than used.
@@ -182,7 +198,9 @@ func (z ZFS) owned(tenant, owner, mountpoint string) error {
 	return nil
 }
 
-func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid int) (string, error) {
+// Ensure limits the dataset's own data with refquota, so snapshots Murder
+// takes never count against the tenant.
+func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (string, error) {
 	if err := checkTenant(tenant); err != nil {
 		return "", err
 	}
@@ -191,22 +209,27 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid int) (string, e
 	}
 	dataset := z.dataset(tenant)
 	mountpoint := filepath.Join(z.MountRoot, tenant)
-	owner, mounted, current, exists, err := z.properties(ctx, dataset)
+	current, exists, err := z.properties(ctx, dataset)
 	if err != nil {
 		return "", err
 	}
 	if !exists {
 		if _, err := z.Run(ctx, "zfs", "create", "-p",
 			"-o", "mountpoint="+mountpoint, "-o", "setuid=off", "-o", "devices=off",
-			"-o", ownerProperty+"="+tenant, dataset); err != nil {
+			"-o", "refquota="+refquota(diskGB), "-o", ownerProperty+"="+tenant, dataset); err != nil {
 			return "", err
 		}
 		return mountpoint, chownIfNeeded(mountpoint, uid, gid)
 	}
-	if err := z.owned(tenant, owner, current); err != nil {
+	if err := z.owned(tenant, current.owner, current.mountpoint); err != nil {
 		return "", err
 	}
-	if mounted != "yes" {
+	if current.refquota != diskBytes(diskGB) {
+		if _, err := z.Run(ctx, "zfs", "set", "refquota="+refquota(diskGB), dataset); err != nil {
+			return "", fmt.Errorf("set the disk limit to %s: %w", diskLimit(diskGB), err)
+		}
+	}
+	if current.mounted != "yes" {
 		if _, err := z.Run(ctx, "zfs", "mount", dataset); err != nil {
 			return "", err
 		}
@@ -214,11 +237,25 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid int) (string, e
 	return mountpoint, chownIfNeeded(mountpoint, uid, gid)
 }
 
+func refquota(diskGB int) string {
+	if diskGB == 0 {
+		return "none"
+	}
+	return strconv.FormatInt(diskBytes(diskGB), 10)
+}
+
+func diskLimit(diskGB int) string {
+	if diskGB == 0 {
+		return "none"
+	}
+	return strconv.Itoa(diskGB) + " GB"
+}
+
 func (z ZFS) Exists(ctx context.Context, tenant string) (bool, error) {
 	if err := checkTenant(tenant); err != nil {
 		return false, err
 	}
-	_, _, _, exists, err := z.properties(ctx, z.dataset(tenant))
+	_, exists, err := z.properties(ctx, z.dataset(tenant))
 	return exists, err
 }
 
@@ -307,11 +344,11 @@ func (z ZFS) Remove(ctx context.Context, tenant string) error {
 	if err := checkTenant(tenant); err != nil {
 		return err
 	}
-	owner, _, mountpoint, exists, err := z.properties(ctx, z.dataset(tenant))
+	current, exists, err := z.properties(ctx, z.dataset(tenant))
 	if err != nil || !exists {
 		return err
 	}
-	if err := z.owned(tenant, owner, mountpoint); err != nil {
+	if err := z.owned(tenant, current.owner, current.mountpoint); err != nil {
 		return err
 	}
 	_, err = z.Run(ctx, "zfs", "destroy", "-r", z.dataset(tenant))

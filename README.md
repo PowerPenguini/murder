@@ -28,8 +28,11 @@ Stage 2 — a single server — is what this code does today.
 - **Database.** One SQLite file holds the node's apps, tenants, sealed secrets
   and an audit log of every change: who (the socket user, plus the person a
   panel acts for), what and when.
-- **Volumes.** The `zfs` driver gives each tenant a dataset. The `dir` driver
-  uses plain directories and is for development.
+- **Volumes.** The `zfs` driver gives each tenant a dataset, limited to its
+  disk limit (`refquota`, so snapshots do not count). The `dir` driver uses
+  plain directories, cannot limit disk use and is for development.
+- **Firewall.** An nftables table (`inet murder`) keeps tenants away from
+  the host and private networks; see the security model.
 - **Secrets.** Generated per tenant and sealed with the node's master key
   (AES-256-GCM, bound to tenant and name). The database never holds them in
   the clear.
@@ -37,6 +40,7 @@ Stage 2 — a single server — is what this code does today.
 ## Install on a node
 
 ```bash
+sudo apt install nftables               # the agent loads the tenant firewall with nft
 sudo install -m 0755 murder /usr/local/bin/murder
 sudo install -d -m 0755 /etc/murder
 sudo install -m 0644 deploy/agent.example.yaml /etc/murder/agent.yaml   # then edit it
@@ -96,7 +100,7 @@ one budget for all the apps' tenants, watched side by side, so a retry after
 a failed rollout fails until they are healthy.
 
 **Overrides** are the tenant's own `-image`, `-env`, `-secret` and limits
-(`-memory`, `-cpus`, `-pids`). `tenant set` changes only the flags it is
+(`-memory`, `-cpus`, `-pids`, `-disk`). `tenant set` changes only the flags it is
 given, and refuses to overwrite a change someone made since it read the
 tenant; `-unset-env`, `-unset-secret` and `-app-image` drop an override, and a
 limit of 0 goes back to the app's.
@@ -157,12 +161,22 @@ container of it that is still running.
 - **Tenants never run as root.** Specs that set user 0 are refused, and
   images must not default to root.
 - **Every container is locked down.** It drops all capabilities, runs with
-  `no-new-privileges` and has resource limits.
+  `no-new-privileges` and has limits on memory, CPU, processes and (with
+  ZFS) disk.
 - **Tenants cannot reach each other.** Each has its own network (a /28 with
   inter-container traffic off, and Docker isolates networks from each
   other). Nothing is published on the host: the edge proxy, on the host,
   connects to the tenant's fixed address in its network, which other
   tenants cannot reach. An integration test checks this on Docker.
+- **Tenants cannot reach the host or private networks.** The agent loads an
+  nftables table before any tenant runs, and again every minute. From the
+  tenant networks it lets through only connections to the internet, to the
+  edge ports (a tenant's own public address resolves to this host) and
+  replies to connections the host opened (the edge and health checks). The
+  host's other services (SSH, monitoring), other servers on a private
+  network and the cloud metadata service (`169.254.169.254`) are out of
+  reach. `firewall: off` turns it off, for development only. A test in the
+  test VM checks it from a real container.
 - **Tenant data is out of reach of host users.** Data directories sit below a
   root-only (`0700`) directory, and ZFS datasets are created with `setuid=off`
   and `devices=off`. A setuid file a tenant writes there is useless to host

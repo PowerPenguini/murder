@@ -219,7 +219,7 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		return Status{}, fmt.Errorf("stored spec no longer valid; correct the app or the tenant: %w", err)
 	}
 	uid, gid := tenant.Owner()
-	dataPath, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid)
+	dataPath, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid, tenant.Limits.Or(r.config.DefaultLimits).DiskGB)
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
 	}
@@ -406,16 +406,7 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 	for _, name := range slices.Sorted(maps.Keys(env)) {
 		pairs = append(pairs, name+"="+env[name])
 	}
-	limits := tenant.Limits
-	if limits.MemoryMB == 0 {
-		limits.MemoryMB = r.config.DefaultLimits.MemoryMB
-	}
-	if limits.CPUs == 0 {
-		limits.CPUs = r.config.DefaultLimits.CPUs
-	}
-	if limits.PIDs == 0 {
-		limits.PIDs = r.config.DefaultLimits.PIDs
-	}
+	limits := tenant.Limits.Or(r.config.DefaultLimits)
 	var tmpfs map[string]string
 	if len(tenant.Tmpfs) > 0 {
 		tmpfs = maps.Clone(tenant.Tmpfs)

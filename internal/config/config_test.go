@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,9 @@ func TestParseFillsDefaults(t *testing.T) {
 	if agent.Node != "" || agent.NetworkPool != "10.240.0.0/16" {
 		t.Fatalf("node = %q, pool = %q", agent.Node, agent.NetworkPool)
 	}
+	if ports, err := agent.EdgePorts(); agent.Firewall != FirewallNftables || err != nil || !slices.Equal(ports, []int{80}) {
+		t.Fatalf("firewall = %q, edge ports = %v, %v", agent.Firewall, ports, err)
+	}
 }
 
 func TestParseFullConfig(t *testing.T) {
@@ -37,6 +41,9 @@ defaults: {memoryMB: 768}
 	if agent.Volumes.Parent != "tank/murder/tenants" || agent.ReconcileInterval.Duration != 5*time.Second || agent.Scheme() != "https" || agent.Defaults.MemoryMB != 768 {
 		t.Fatalf("config = %+v", agent)
 	}
+	if ports, err := agent.EdgePorts(); err != nil || !slices.Equal(ports, []int{80, 443}) {
+		t.Fatalf("edge ports with TLS = %v, %v", ports, err)
+	}
 }
 
 func TestParseRejectsBadConfig(t *testing.T) {
@@ -44,6 +51,8 @@ func TestParseRejectsBadConfig(t *testing.T) {
 		"empty":         "",
 		"unknown field": "baseDomain: example.com\nbaseDomian: typo.com\n",
 		"two documents": "baseDomain: example.com\n---\nnode: other\n",
+		"firewall":      "baseDomain: example.com\nfirewall: iptables\n",
+		"edge port":     "baseDomain: example.com\nedge: {http: \":http\"}\n",
 		"bad driver":    "baseDomain: example.com\nvolumes: {driver: nfs}\n",
 		"zfs no parent": "baseDomain: example.com\nvolumes: {driver: zfs, mountRoot: /srv}\n",
 		"acme partial":  "baseDomain: example.com\nedge: {tls: {mode: acme}}\n",

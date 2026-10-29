@@ -39,7 +39,8 @@ Overrides (repeatable where it makes sense; set changes only what is given):
   -unset-env KEY         (set) drop an env override
   -secret KEY[=KIND]     add a secret (KIND hex, base64 or password; default hex)
   -unset-secret KEY      (set) drop a secret override; its value is kept
-  -memory MB, -cpus N, -pids N   limits; 0 goes back to the app's
+  -memory MB, -cpus N, -pids N, -disk GB   limits; 0 goes back to the app's
+                         (-disk needs zfs volumes)
 
 Every command accepts -socket (default $MURDER_SOCKET or /run/murder/agent.sock).
 create, set, resume, restore and rotate accept -wait to block until the

@@ -56,7 +56,7 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	volumes := ZFS{Parent: pool + "/murder/tenants", MountRoot: mountRoot, Run: Exec}
 	ctx := context.Background()
 
-	path, err := volumes.Ensure(ctx, "acme", 10001, 10002)
+	path, err := volumes.Ensure(ctx, "acme", 10001, 10002, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	if stat := info.Sys().(*syscall.Stat_t); stat.Uid != 10001 || stat.Gid != 10002 {
 		t.Fatalf("data directory owned by %d:%d, want 10001:10002", stat.Uid, stat.Gid)
 	}
-	if got := strings.Fields(zfsOutput(t, "get", "-H", "-o", "value", "mountpoint,setuid,devices,"+ownerProperty, pool+"/murder/tenants/acme")); strings.Join(got, " ") != path+" off off acme" {
+	if got := strings.Fields(zfsOutput(t, "get", "-H", "-p", "-o", "value", "mountpoint,setuid,devices,refquota,"+ownerProperty, pool+"/murder/tenants/acme")); strings.Join(got, " ") != path+" off off 1073741824 acme" {
 		t.Fatalf("dataset properties = %v", got)
 	}
 	if info, err := os.Stat(mountRoot); err != nil || info.Mode().Perm() != 0o700 {
@@ -99,8 +99,11 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	// An unmounted dataset (as after a reboot that skipped zfs-mount) is
 	// mounted again, with its data.
 	zfsOutput(t, "unmount", pool+"/murder/tenants/acme")
-	if _, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil {
+	if _, err := volumes.Ensure(ctx, "acme", 10001, 10002, 2); err != nil {
 		t.Fatalf("Ensure of an unmounted dataset = %v", err)
+	}
+	if got := strings.TrimSpace(zfsOutput(t, "get", "-H", "-p", "-o", "value", "refquota", pool+"/murder/tenants/acme")); got != "2147483648" {
+		t.Fatalf("refquota after a change = %s", got)
 	}
 	if data, err := os.ReadFile(filepath.Join(path, "data.db")); err != nil || string(data) != "after" {
 		t.Fatalf("data after remount = %q, %v", data, err)
@@ -118,13 +121,13 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	if serving, err := volumes.Serving(ctx, "acme", os.Getpid()); err != nil || serving {
 		t.Fatalf("Serving while unmounted = %v, %v", serving, err)
 	}
-	if _, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil {
+	if _, err := volumes.Ensure(ctx, "acme", 10001, 10002, 0); err != nil {
 		t.Fatal(err)
 	}
 
 	// A dataset made by hand below the parent is neither used nor destroyed.
 	zfsOutput(t, "create", "-o", "mountpoint="+filepath.Join(mountRoot, "manual"), pool+"/murder/tenants/manual")
-	if _, err := volumes.Ensure(ctx, "manual", 10001, 10002); err == nil {
+	if _, err := volumes.Ensure(ctx, "manual", 10001, 10002, 0); err == nil {
 		t.Fatal("Ensure adopted a dataset murder did not create")
 	}
 	if err := volumes.Remove(ctx, "manual"); err == nil {

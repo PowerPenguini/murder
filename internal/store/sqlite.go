@@ -664,7 +664,7 @@ func overridesDetail(overrides spec.Overrides) string {
 		parts = append(parts, "secrets "+strings.Join(slices.Sorted(maps.Keys(overrides.Secrets)), ","))
 	}
 	if limits := overrides.Limits; limits != (spec.Limits{}) {
-		parts = append(parts, fmt.Sprintf("limits memoryMB=%d cpus=%g pids=%d", limits.MemoryMB, limits.CPUs, limits.PIDs))
+		parts = append(parts, fmt.Sprintf("limits memoryMB=%d cpus=%g pids=%d diskGB=%d", limits.MemoryMB, limits.CPUs, limits.PIDs, limits.DiskGB))
 	}
 	if len(parts) == 0 {
 		return ""

@@ -22,6 +22,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
@@ -100,6 +101,16 @@ func runAgent(args []string) error {
 		return err
 	}
 	reconciler := reconcile.New(st, docker, volumes, key, reconcile.Config{BaseDomain: cfg.BaseDomain, Scheme: cfg.Scheme(), DefaultLimits: cfg.Defaults}, log)
+	pool := netip.MustParsePrefix(cfg.NetworkPool)
+	edgePorts, _ := cfg.EdgePorts() // validated with the config
+	if cfg.Firewall == config.FirewallNftables {
+		// Before any tenant runs: none may run without it.
+		if err := firewall.Apply(context.Background(), pool, edgePorts); err != nil {
+			return fmt.Errorf("%w (firewall: off in %s runs tenants without it)", err, *configPath)
+		}
+	} else {
+		log.Warn("the tenant firewall is off: tenants can reach the host's services and private networks")
+	}
 
 	// Bind every listener before serving, so a taken port stops the agent at
 	// once instead of leaving it up without an edge.
@@ -133,6 +144,9 @@ func runAgent(args []string) error {
 	apiServer := &http.Server{Handler: api.NewServer(st, reconciler, docker, key, log).Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
 	go serve("api", apiServer, apiListener)
 	go reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
+	if cfg.Firewall == config.FirewallNftables {
+		go keepFirewall(ctx, pool, edgePorts, log)
+	}
 
 	proxy := edge.NewProxy(cfg.BaseDomain, api.Routes{Store: st}, log)
 	servers := []*http.Server{apiServer}
@@ -226,6 +240,23 @@ func listenSocket(path, group string) (net.Listener, error) {
 		return nil, err
 	}
 	return listener, nil
+}
+
+// keepFirewall loads the tenant firewall again every minute, so a firewall
+// reload that dropped Murder's table does not leave tenants unguarded.
+func keepFirewall(ctx context.Context, pool netip.Prefix, edgePorts []int, log *slog.Logger) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := firewall.Apply(ctx, pool, edgePorts); err != nil && ctx.Err() == nil {
+				log.Error("reload the tenant firewall", "error", err)
+			}
+		}
+	}
 }
 
 // publicServer has no write timeout: tenants stream server-sent events.
