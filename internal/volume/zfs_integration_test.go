@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // These tests need root and the ZFS tools; test/vm/go-test.sh runs them in a
@@ -94,6 +95,23 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	snapshotFile := filepath.Join(path, ".zfs", "snapshot", strings.SplitN(snapshot, "@", 2)[1], "data.db")
 	if data, err := os.ReadFile(snapshotFile); err != nil || string(data) != "before" {
 		t.Fatalf("snapshot content = %q, %v", data, err)
+	}
+
+	// Pruning keeps the newest snapshots of the reason.
+	clock := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	timed := volumes
+	timed.Now = func() time.Time { clock = clock.Add(time.Second); return clock }
+	var newest string
+	for range 3 {
+		if newest, err = timed.Snapshot(ctx, "acme", "image-change"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := volumes.Prune(ctx, "acme", "image-change", 1); err != nil {
+		t.Fatal(err)
+	}
+	if left := strings.Fields(zfsOutput(t, "list", "-H", "-o", "name", "-t", "snapshot", "-d", "1", pool+"/murder/tenants/acme")); len(left) != 1 || left[0] != newest {
+		t.Fatalf("snapshots after pruning = %v, want only %s", left, newest)
 	}
 
 	// An unmounted dataset (as after a reboot that skipped zfs-mount) is

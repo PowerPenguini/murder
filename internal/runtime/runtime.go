@@ -20,6 +20,9 @@ var ErrNotRunning = errors.New("container is not running")
 // not own; Murder leaves it alone.
 var ErrNotOwned = errors.New("not owned by this node")
 
+// ErrInUse reports an image a container still uses.
+var ErrInUse = errors.New("in use")
+
 // ErrNetworkMismatch reports a network that exists with another subnet.
 var ErrNetworkMismatch = errors.New("network has another subnet")
 
@@ -50,6 +53,11 @@ type Runtime interface {
 	// HasImage reports whether ref is present locally; PullImage fetches it.
 	HasImage(ctx context.Context, ref string) (bool, error)
 	PullImage(ctx context.Context, ref string) error
+	// RemoveImage deletes the image ref names, with every name it has in
+	// its repository. An image a container uses, stopped or not, or one
+	// named in several repositories, is kept and reported with ErrInUse; a
+	// missing one is no error.
+	RemoveImage(ctx context.Context, ref string) error
 	// Resolve pins an image reference: a digest reference or image ID comes
 	// back unchanged; a tag is pulled and replaced by its registry digest,
 	// or by the local image ID if it has none or cannot be pulled. note

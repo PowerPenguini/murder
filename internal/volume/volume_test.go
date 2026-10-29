@@ -63,8 +63,9 @@ type fakeDataset struct {
 
 // fakeZFS answers zfs commands from an in-memory set of datasets.
 type fakeZFS struct {
-	datasets map[string]*fakeDataset
-	calls    []string
+	datasets  map[string]*fakeDataset
+	snapshots []string // what "zfs list -t snapshot" prints
+	calls     []string
 }
 
 func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -116,6 +117,8 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		return nil, nil
 	case "snapshot", "destroy":
 		return nil, nil
+	case "list":
+		return []byte(strings.Join(f.snapshots, "\n") + "\n"), nil
 	}
 	return nil, errors.New("unexpected command " + call)
 }
@@ -260,5 +263,32 @@ func TestZFSServingChecksTheContainersMount(t *testing.T) {
 	}
 	if !volumes.LateMounts() || (Dir{}).LateMounts() {
 		t.Fatal("LateMounts: only ZFS can mount late")
+	}
+}
+
+// Prune keeps the newest snapshots of a reason and never touches others.
+func TestZFSPruneKeepsTheNewest(t *testing.T) {
+	fake := &fakeZFS{datasets: map[string]*fakeDataset{}, snapshots: []string{
+		"tank/murder/acme@murder-image-change-20261025T120000.000Z",
+		"tank/murder/acme@before-upgrade",
+		"tank/murder/acme@murder-image-change-20261027T120000.000Z",
+		"tank/murder/acme@murder-image-change-20261026T120000.000Z",
+		"tank/murder/acme@murder-replica-20261020T120000.000Z",
+	}}
+	volumes := ZFS{Parent: "tank/murder", MountRoot: t.TempDir(), Run: fake.run}
+	if err := volumes.Prune(context.Background(), "acme", "image-change", 2); err != nil {
+		t.Fatal(err)
+	}
+	var destroyed []string
+	for _, call := range fake.calls {
+		if name, ok := strings.CutPrefix(call, "zfs destroy "); ok {
+			destroyed = append(destroyed, name)
+		}
+	}
+	if len(destroyed) != 1 || destroyed[0] != "tank/murder/acme@murder-image-change-20261025T120000.000Z" {
+		t.Fatalf("destroyed %v", destroyed)
+	}
+	if err := volumes.Prune(context.Background(), "acme", "image-change", 0); err == nil {
+		t.Fatal("pruned with keep 0")
 	}
 }

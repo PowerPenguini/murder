@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,8 @@ type Volumes interface {
 	Serving(ctx context.Context, tenant string, pid int) (bool, error)
 	// Snapshot records the data as it is now and returns the snapshot name.
 	Snapshot(ctx context.Context, tenant, reason string) (string, error)
+	// Prune destroys all but the newest keep snapshots taken for reason.
+	Prune(ctx context.Context, tenant, reason string, keep int) error
 	// Remove deletes the tenant's data and snapshots.
 	Remove(ctx context.Context, tenant string) error
 }
@@ -90,6 +93,8 @@ func (d Dir) Serving(context.Context, string, int) (bool, error) { return true, 
 func (d Dir) Snapshot(context.Context, string, string) (string, error) {
 	return "", ErrSnapshotsUnsupported
 }
+
+func (d Dir) Prune(context.Context, string, string, int) error { return nil }
 
 func (d Dir) Remove(_ context.Context, tenant string) error {
 	if err := checkTenant(tenant); err != nil {
@@ -333,6 +338,37 @@ func (z ZFS) Snapshot(ctx context.Context, tenant, reason string) (string, error
 		return "", err
 	}
 	return name, nil
+}
+
+// Prune lists the dataset's own snapshots and destroys the oldest ones
+// Murder took for reason; their names sort by time. Other snapshots, such
+// as an operator's, are never touched.
+func (z ZFS) Prune(ctx context.Context, tenant, reason string, keep int) error {
+	if err := checkTenant(tenant); err != nil {
+		return err
+	}
+	if !snapshotReason(reason) || keep < 1 {
+		return fmt.Errorf("prune %s: reason %q, keep %d", tenant, reason, keep)
+	}
+	dataset := z.dataset(tenant)
+	output, err := z.Run(ctx, "zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-d", "1", dataset)
+	if err != nil {
+		return err
+	}
+	prefix := dataset + "@murder-" + reason + "-"
+	var taken []string
+	for _, name := range strings.Fields(string(output)) {
+		if strings.HasPrefix(name, prefix) {
+			taken = append(taken, name)
+		}
+	}
+	sort.Strings(taken)
+	for _, name := range taken[:max(0, len(taken)-keep)] {
+		if _, err := z.Run(ctx, "zfs", "destroy", name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func snapshotReason(reason string) bool {

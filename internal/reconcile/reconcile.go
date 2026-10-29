@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,10 @@ import (
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/volume"
 )
+
+// snapshotsKept is how many snapshots before image changes a tenant keeps:
+// enough to go back a few releases without keeping old data forever.
+const snapshotsKept = 5
 
 // Phases a tenant can be in, as seen by the reconciler.
 const (
@@ -335,6 +340,9 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 			return "", fmt.Errorf("snapshot before the image change (the old container keeps running): %w", err)
 		default:
 			r.log.Info("snapshot before image change", "tenant", tenant.Name, "snapshot", name, "from", record.DataImage, "to", tenant.Image)
+			if err := r.volumes.Prune(ctx, tenant.Name, "image-change", snapshotsKept); err != nil {
+				r.log.Warn("prune old snapshots", "tenant", tenant.Name, "error", err)
+			}
 		}
 	}
 	// From here on the data belongs to the new image: a later pass must not
@@ -353,6 +361,9 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 		return "", fmt.Errorf("start: %w", err)
 	}
 	r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
+	// The image the data had before, when no container of it was left to
+	// remove here, say after a suspension.
+	r.dropImage(ctx, record.DataImage)
 	return id, nil
 }
 
@@ -378,9 +389,34 @@ func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.
 		}
 		if err := r.runtime.Remove(ctx, container.ID); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", container.Name, err))
+			continue
 		}
+		r.dropImage(ctx, container.Labels[runtime.LabelImage])
 	}
 	return errors.Join(errs...)
+}
+
+// dropImage removes an image no tenant runs, live, suspended or archived,
+// so old releases do not fill the disk. Only images pinned by registry
+// digest go: they can be pulled again to roll back, a local image could
+// not. One another container still uses stays; whichever goes last
+// removes it.
+func (r *Reconciler) dropImage(ctx context.Context, image string) {
+	if !strings.Contains(image, "@sha256:") {
+		return
+	}
+	for _, record := range r.store.List() {
+		if record.Spec.Image == image {
+			return
+		}
+	}
+	switch err := r.runtime.RemoveImage(ctx, image); {
+	case errors.Is(err, runtime.ErrInUse):
+	case err != nil:
+		r.log.Warn("remove an image no tenant runs", "image", image, "error", err)
+	default:
+		r.log.Info("removed an image no tenant runs", "image", image)
+	}
 }
 
 // Backend is where a tenant listens: its fixed address in its network and
@@ -524,7 +560,11 @@ func (r *Reconciler) Purge(ctx context.Context, name, actor string) error {
 	if err := r.volumes.Remove(ctx, name); err != nil {
 		return err
 	}
-	return r.store.Forget(name, actor)
+	if err := r.store.Forget(name, actor); err != nil {
+		return err
+	}
+	r.dropImage(ctx, record.Spec.Image)
+	return nil
 }
 
 // clearRuntime makes sure no container or network of the tenant remains.

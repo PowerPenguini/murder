@@ -169,6 +169,31 @@ func (d *Docker) HasImage(ctx context.Context, ref string) (bool, error) {
 	return err == nil, err
 }
 
+// RemoveImage removes the image by its ID, so its tags in the repository go
+// too; the engine refuses, with 409, an image a container uses or one named
+// in several repositories.
+func (d *Docker) RemoveImage(ctx context.Context, ref string) error {
+	var image struct {
+		ID string `json:"Id"`
+	}
+	err := d.do(ctx, request{method: http.MethodGet, path: "/images/" + url.PathEscape(ref) + "/json"}, &image)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = d.do(ctx, request{method: http.MethodDelete, path: "/images/" + url.PathEscape(image.ID)}, nil)
+	var apiErr *apiError
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return nil
+	case errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict:
+		return fmt.Errorf("image %s: %w: %s", ref, ErrInUse, apiErr.Message)
+	}
+	return err
+}
+
 // PullImage pulls a digest-pinned reference.
 func (d *Docker) PullImage(ctx context.Context, ref string) error {
 	repository, digest, ok := strings.Cut(ref, "@")

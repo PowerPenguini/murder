@@ -44,6 +44,8 @@ type fakeRuntime struct {
 	failCreate error
 	failPull   error
 	failRemove error
+	// removedImages are the images RemoveImage deleted.
+	removedImages []string
 	// restartAfterList makes the next List report every container stopped
 	// and then starts them, as a restart policy would during a pass.
 	restartAfterList bool
@@ -67,6 +69,22 @@ func (f *fakeRuntime) HasImage(_ context.Context, ref string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.images[ref], nil
+}
+
+// RemoveImage refuses, like the engine, an image a container uses.
+func (f *fakeRuntime) RemoveImage(_ context.Context, ref string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, container := range f.containers {
+		if container.spec.Image == ref {
+			return fmt.Errorf("image %s: %w", ref, runtime.ErrInUse)
+		}
+	}
+	if f.images[ref] {
+		delete(f.images, ref)
+		f.removedImages = append(f.removedImages, ref)
+	}
+	return nil
 }
 
 func (f *fakeRuntime) PullImage(_ context.Context, ref string) error {
@@ -233,6 +251,8 @@ type fakeVolumes struct {
 	snapshots    []string
 	removed      []string
 	failSnapshot error
+	failPrune    error
+	pruned       []string
 	notServing   bool
 	diskGB       map[string]int
 	limitErr     error
@@ -264,6 +284,11 @@ func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string
 	}
 	f.snapshots = append(f.snapshots, tenant+"@"+reason)
 	return tenant + "@" + reason, nil
+}
+
+func (f *fakeVolumes) Prune(_ context.Context, tenant, reason string, keep int) error {
+	f.pruned = append(f.pruned, fmt.Sprintf("%s@%s keep %d", tenant, reason, keep))
+	return f.failPrune
 }
 
 func (f *fakeVolumes) Remove(ctx context.Context, tenant string) error {
@@ -436,6 +461,13 @@ func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 	if !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) || !slices.Equal(f.runtime.pulled, []string{imageB}) {
 		t.Fatalf("snapshots = %v, pulled = %v", f.volumes.snapshots, f.runtime.pulled)
 	}
+	if !slices.Equal(f.volumes.pruned, []string{"acme@image-change keep 5"}) {
+		t.Fatalf("pruned = %v", f.volumes.pruned)
+	}
+	// imageA is a local image, which could not be pulled again: it stays.
+	if len(f.runtime.removedImages) != 0 {
+		t.Fatalf("removed images = %v", f.runtime.removedImages)
+	}
 	events := strings.Join(f.runtime.takeEvents(), ",")
 	if events != fmt.Sprintf("stop %s,remove %s,create %s,start %s", old, old, replacement.ID, replacement.ID) {
 		t.Fatalf("events = %v", events)
@@ -448,6 +480,68 @@ func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 	f.reconcile(t)
 	if len(f.volumes.snapshots) != 1 {
 		t.Fatalf("an env change took a snapshot: %v", f.volumes.snapshots)
+	}
+}
+
+// A failed prune is logged; the image change goes on.
+func TestFailedPruneDoesNotBlockTheChange(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.volumes.failPrune = errors.New("dataset is busy")
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.reconcile(t)
+	if f.runtime.only(t).spec.Image != imageB {
+		t.Fatal("a failed prune blocked the image change")
+	}
+}
+
+// A registry image no tenant runs any more is removed once its last
+// container goes; one a tenant still runs, or another container uses, stays.
+func TestUnusedRegistryImagesAreRemoved(t *testing.T) {
+	const (
+		release1 = "registry.test/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		release2 = "registry.test/app@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	)
+	f := newFixture(t)
+	f.runtime.images[release1] = true
+	for _, name := range []string{"acme", "beta"} {
+		f.create(t, name)
+		f.updateApp(t, name, func(app *spec.Tenant) { app.Image = release1 })
+	}
+	f.reconcile(t)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = release2 })
+	f.reconcile(t)
+	if len(f.runtime.removedImages) != 0 {
+		t.Fatalf("removed %v while beta still runs it", f.runtime.removedImages)
+	}
+	// Suspended, beta still runs release1 when resumed: it stays.
+	f.suspend(t, "beta", true)
+	f.reconcile(t)
+	if len(f.runtime.removedImages) != 0 {
+		t.Fatalf("removed %v that a suspended tenant runs", f.runtime.removedImages)
+	}
+	f.updateApp(t, "beta", func(app *spec.Tenant) { app.Image = release2 })
+	f.suspend(t, "beta", false)
+	f.reconcile(t)
+	if !slices.Equal(f.runtime.removedImages, []string{release1}) {
+		t.Fatalf("removed images = %v, want release1 only", f.runtime.removedImages)
+	}
+	// Purging the last tenants of release2 removes it too.
+	for _, name := range []string{"acme", "beta"} {
+		f.archive(t, name)
+	}
+	f.reconcile(t)
+	if len(f.runtime.removedImages) != 1 {
+		t.Fatalf("removed %v that archived tenants run", f.runtime.removedImages)
+	}
+	for _, name := range []string{"acme", "beta"} {
+		if err := f.reconciler.Purge(context.Background(), name, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(f.runtime.removedImages, []string{release1, release2}) {
+		t.Fatalf("removed images after purge = %v", f.runtime.removedImages)
 	}
 }
 

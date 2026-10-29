@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -375,5 +376,38 @@ func TestTenantsCannotReachEachOther(t *testing.T) {
 		if body == "connected" || !strings.HasPrefix(body, "refused") {
 			t.Fatalf("%s reached the other tenant at %s: %s", name, other, body)
 		}
+	}
+}
+
+// The engine keeps an image a container uses; once it is gone, RemoveImage
+// deletes the image with its tags.
+func TestRemoveImageOnDocker(t *testing.T) {
+	if _, err := os.Stat(dockerSocket()); err != nil {
+		t.Skip("no Docker engine")
+	}
+	ctx := context.Background()
+	docker := runtime.NewDocker(runtime.DockerOptions{Socket: dockerSocket(), Node: "gc-test"})
+	tag := "murder-it/gc:" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	id := buildTestImage(t, "gc", tag)
+	output, err := exec.Command("docker", "create", tag).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := strings.TrimSpace(string(output))
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", container).Run() })
+	if err := docker.RemoveImage(ctx, tag); !errors.Is(err, runtime.ErrInUse) {
+		t.Fatalf("remove an image a container uses = %v", err)
+	}
+	if err := exec.Command("docker", "rm", container).Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.RemoveImage(ctx, tag); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := docker.HasImage(ctx, id); err != nil || present {
+		t.Fatalf("image after removal: present %v, %v", present, err)
+	}
+	if err := docker.RemoveImage(ctx, tag); err != nil {
+		t.Fatalf("remove a missing image = %v", err)
 	}
 }

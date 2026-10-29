@@ -37,6 +37,7 @@ type memoryRuntime struct {
 
 func (m *memoryRuntime) HasImage(context.Context, string) (bool, error) { return true, nil }
 func (m *memoryRuntime) PullImage(context.Context, string) error        { return nil }
+func (m *memoryRuntime) RemoveImage(context.Context, string) error      { return nil }
 func (m *memoryRuntime) EnsureNetwork(context.Context, string, string, map[string]string) error {
 	return nil
 }
