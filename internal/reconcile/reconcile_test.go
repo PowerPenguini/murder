@@ -44,6 +44,9 @@ type fakeRuntime struct {
 	failCreate error
 	failPull   error
 	failRemove error
+	// restartAfterList makes the next List report every container stopped
+	// and then starts them, as a restart policy would during a pass.
+	restartAfterList bool
 	// exitBeforeInspect makes the next Pid call see the container gone, as
 	// if it exited between List and the inspection.
 	exitBeforeInspect bool
@@ -124,8 +127,16 @@ func (f *fakeRuntime) List(context.Context) ([]runtime.Container, error) {
 	defer f.mu.Unlock()
 	var out []runtime.Container
 	for _, container := range f.containers {
+		if f.restartAfterList {
+			listed := container.Container
+			listed.Running = false
+			out = append(out, listed)
+			container.Running = true
+			continue
+		}
 		out = append(out, container.Container)
 	}
+	f.restartAfterList = false
 	slices.SortFunc(out, func(a, b runtime.Container) int { return strings.Compare(a.ID, b.ID) })
 	return out, nil
 }
@@ -222,7 +233,6 @@ type fakeVolumes struct {
 	snapshots    []string
 	removed      []string
 	failSnapshot error
-	mountNext    bool
 	notServing   bool
 }
 
@@ -232,13 +242,6 @@ func (f *fakeVolumes) Serving(context.Context, string, int) (bool, error) {
 	serving := !f.notServing
 	f.notServing = false
 	return serving, nil
-}
-
-func (f *fakeVolumes) Ensure(ctx context.Context, tenant string, uid, gid int) (string, bool, error) {
-	path, _, err := f.Dir.Ensure(ctx, tenant, uid, gid)
-	mounted := f.mountNext
-	f.mountNext = false
-	return path, mounted, err
 }
 
 func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string, error) {
@@ -511,20 +514,6 @@ func TestImageChangedWhileSuspendedIsSnapshottedOnResume(t *testing.T) {
 	}
 }
 
-// A container started before its dataset was mounted sees the empty
-// directory underneath; it must be replaced, not adopted.
-func TestContainerIsRecreatedWhenItsDataWasMountedLate(t *testing.T) {
-	f := newFixture(t)
-	f.create(t, "acme")
-	f.reconcile(t)
-	old := f.runtime.only(t).ID
-	f.volumes.mountNext = true
-	f.reconcile(t)
-	if container := f.runtime.only(t); container.ID == old || !container.Running {
-		t.Fatalf("container after a late mount = %+v", container)
-	}
-}
-
 // A container that sees something other than the tenant's data at its data
 // path (its dataset was mounted after it started) is replaced.
 func TestContainerNotServingTheDataIsReplaced(t *testing.T) {
@@ -536,6 +525,21 @@ func TestContainerNotServingTheDataIsReplaced(t *testing.T) {
 	f.reconcile(t)
 	if container := f.runtime.only(t); container.ID == old || !container.Running {
 		t.Fatalf("container after a mount check failure = %+v", container)
+	}
+}
+
+// A container listed as stopped that its restart policy starts during the
+// pass, before its dataset is mounted, is checked and replaced too.
+func TestContainerRestartedDuringThePassIsCheckedForItsData(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	f.runtime.restartAfterList = true
+	f.volumes.notServing = true
+	f.reconcile(t)
+	if container := f.runtime.only(t); container.ID == old || !container.Running {
+		t.Fatalf("container restarted on the empty directory = %+v", container)
 	}
 }
 

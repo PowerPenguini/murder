@@ -219,7 +219,7 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		return Status{}, fmt.Errorf("stored spec no longer valid; correct the app or the tenant: %w", err)
 	}
 	uid, gid := tenant.Owner()
-	dataPath, mountedNow, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid)
+	dataPath, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid)
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
 	}
@@ -245,19 +245,22 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	var current *runtime.Container
 	var outdated []runtime.Container
 	for i := range existing {
-		// A container started before its dataset was mounted runs on the
-		// empty directory underneath; it is replaced, not adopted.
-		if current == nil && !mountedNow && existing[i].Labels[runtime.LabelHash] == desired.Labels[runtime.LabelHash] {
+		if current == nil && existing[i].Labels[runtime.LabelHash] == desired.Labels[runtime.LabelHash] {
 			current = &existing[i]
 			continue
 		}
 		outdated = append(outdated, existing[i])
 	}
-	if current != nil && current.Running && r.volumes.LateMounts() {
+	// A container started before its dataset was mounted runs on the empty
+	// directory underneath; it is replaced, not adopted. One listed as
+	// stopped is checked too: its restart policy may have started it since,
+	// possibly before Ensure mounted the dataset. One still stopped sees the
+	// dataset once started.
+	if current != nil && r.volumes.LateMounts() {
 		serving, err := r.servesData(ctx, record, current.ID)
 		switch {
 		case errors.Is(err, runtime.ErrNotRunning):
-			current.Running = false // it exited since List; started below
+			current.Running = false // stopped, or exited since List; started below
 		case errors.Is(err, runtime.ErrNotFound):
 			current = nil // it was removed since List; recreated below
 		case err != nil:
@@ -266,6 +269,8 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 			r.log.Warn("container does not see the tenant's data; replacing it", "tenant", tenant.Name, "container", current.ID)
 			outdated = append(outdated, *current)
 			current = nil
+		default:
+			current.Running = true
 		}
 	}
 	if current == nil {

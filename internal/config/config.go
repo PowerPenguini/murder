@@ -2,7 +2,6 @@
 package config
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
 // Agent configures one node's agent.
@@ -43,9 +43,6 @@ type Agent struct {
 	NetworkPool string  `yaml:"networkPool"`
 	Volumes     Volumes `yaml:"volumes"`
 	Edge        Edge    `yaml:"edge"`
-	// RetiredPorts catches the "ports" setting of earlier releases, so its
-	// error says what to do instead of naming an unknown field.
-	RetiredPorts any `yaml:"ports"`
 
 	// Defaults fill in tenant limits left at zero.
 	Defaults          spec.Limits `yaml:"defaults"`
@@ -103,11 +100,9 @@ func Parse(data []byte) (Agent, error) {
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
 	// An empty document keeps every default; Validate then reports the
 	// missing base domain.
-	if err := decoder.Decode(&agent); err != nil && !errors.Is(err, io.EOF) {
+	if err := strictyaml.Decode(data, &agent); err != nil && !errors.Is(err, io.EOF) {
 		return Agent{}, fmt.Errorf("parse config: %w", err)
 	}
 	return agent, agent.Validate()
@@ -116,9 +111,6 @@ func Parse(data []byte) (Agent, error) {
 // Validate reports settings that cannot work.
 func (a Agent) Validate() error {
 	var problems []string
-	if a.RetiredPorts != nil {
-		problems = append(problems, "ports is no longer used (tenants are reached at their own address, nothing is published on the host); remove it")
-	}
 	if a.BaseDomain == "" || strings.HasPrefix(a.BaseDomain, ".") || strings.Contains(a.BaseDomain, "/") {
 		problems = append(problems, "baseDomain must be a domain name")
 	}

@@ -24,10 +24,8 @@ var ErrSnapshotsUnsupported = errors.New("volume driver does not support snapsho
 // file a tenant writes there is useless to them.
 type Volumes interface {
 	// Ensure creates the tenant's data directory if needed, owned by uid:gid,
-	// and returns its host path. mounted reports that the data had to be
-	// mounted just now, so a container started earlier sees the empty
-	// directory underneath and must be recreated.
-	Ensure(ctx context.Context, tenant string, uid, gid int) (path string, mounted bool, err error)
+	// mounts it if it is not, and returns its host path.
+	Ensure(ctx context.Context, tenant string, uid, gid int) (string, error)
 	// Exists reports whether the tenant has data, for example left behind by
 	// a deleted tenant of the same name.
 	Exists(ctx context.Context, tenant string) (bool, error)
@@ -36,7 +34,7 @@ type Volumes interface {
 	LateMounts() bool
 	// Serving reports whether the container process pid has the tenant's
 	// data mounted. A container started before its data was mounted holds
-	// the empty directory underneath instead.
+	// the empty directory underneath instead, and must be replaced.
 	Serving(ctx context.Context, tenant string, pid int) (bool, error)
 	// Snapshot records the data as it is now and returns the snapshot name.
 	Snapshot(ctx context.Context, tenant, reason string) (string, error)
@@ -53,18 +51,18 @@ type Dir struct {
 
 func (d Dir) path(tenant string) string { return filepath.Join(d.Root, tenant) }
 
-func (d Dir) Ensure(_ context.Context, tenant string, uid, gid int) (string, bool, error) {
+func (d Dir) Ensure(_ context.Context, tenant string, uid, gid int) (string, error) {
 	if err := checkTenant(tenant); err != nil {
-		return "", false, err
+		return "", err
 	}
 	if err := privateDir(d.Root); err != nil {
-		return "", false, err
+		return "", err
 	}
 	path := d.path(tenant)
 	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return "", false, err
+		return "", err
 	}
-	return path, false, chownIfNeeded(path, uid, gid)
+	return path, chownIfNeeded(path, uid, gid)
 }
 
 func (d Dir) Exists(_ context.Context, tenant string) (bool, error) {
@@ -184,38 +182,36 @@ func (z ZFS) owned(tenant, owner, mountpoint string) error {
 	return nil
 }
 
-func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid int) (string, bool, error) {
+func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid int) (string, error) {
 	if err := checkTenant(tenant); err != nil {
-		return "", false, err
+		return "", err
 	}
 	if err := privateDir(z.MountRoot); err != nil {
-		return "", false, err
+		return "", err
 	}
 	dataset := z.dataset(tenant)
 	mountpoint := filepath.Join(z.MountRoot, tenant)
 	owner, mounted, current, exists, err := z.properties(ctx, dataset)
 	if err != nil {
-		return "", false, err
+		return "", err
 	}
 	if !exists {
 		if _, err := z.Run(ctx, "zfs", "create", "-p",
 			"-o", "mountpoint="+mountpoint, "-o", "setuid=off", "-o", "devices=off",
 			"-o", ownerProperty+"="+tenant, dataset); err != nil {
-			return "", false, err
+			return "", err
 		}
-		return mountpoint, false, chownIfNeeded(mountpoint, uid, gid)
+		return mountpoint, chownIfNeeded(mountpoint, uid, gid)
 	}
 	if err := z.owned(tenant, owner, current); err != nil {
-		return "", false, err
+		return "", err
 	}
-	mountedNow := false
 	if mounted != "yes" {
 		if _, err := z.Run(ctx, "zfs", "mount", dataset); err != nil {
-			return "", false, err
+			return "", err
 		}
-		mountedNow = true
 	}
-	return mountpoint, mountedNow, chownIfNeeded(mountpoint, uid, gid)
+	return mountpoint, chownIfNeeded(mountpoint, uid, gid)
 }
 
 func (z ZFS) Exists(ctx context.Context, tenant string) (bool, error) {

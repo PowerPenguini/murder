@@ -8,13 +8,12 @@ import (
 	"maps"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
 // Tenant is the desired definition of one tenant: the app it runs and how.
@@ -95,7 +94,7 @@ func (s *Secrets) UnmarshalYAML(node *yaml.Node) error {
 			var secret Secret
 			if value.Kind == yaml.ScalarNode {
 				secret.Kind = value.Value
-			} else if err := strictyaml.DecodeNode(value, &secret); err != nil {
+			} else if err := decodeSecret(value, &secret); err != nil {
 				return fmt.Errorf("secret %s: %w", name, err)
 			}
 			secrets[name] = secret
@@ -104,6 +103,25 @@ func (s *Secrets) UnmarshalYAML(node *yaml.Node) error {
 		return fmt.Errorf("secrets must be a list of names or a mapping")
 	}
 	*s = secrets
+	return nil
+}
+
+// decodeSecret decodes the full {kind, bytes} form, refusing unknown fields:
+// Node.Decode does not inherit the file decoder's strictness. yaml.v3 itself
+// refuses an alias that contains itself and excessive aliasing.
+func decodeSecret(node *yaml.Node, secret *Secret) error {
+	var strict struct {
+		Secret  `yaml:",inline"`
+		Unknown map[string]yaml.Node `yaml:",inline"`
+	}
+	if err := node.Decode(&strict); err != nil {
+		return err
+	}
+	if len(strict.Unknown) > 0 {
+		field := slices.Min(slices.Collect(maps.Keys(strict.Unknown)))
+		return fmt.Errorf("line %d: unknown field %q", strict.Unknown[field].Line, field)
+	}
+	*secret = strict.Secret
 	return nil
 }
 

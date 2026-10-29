@@ -41,18 +41,18 @@ defaults: {memoryMB: 768}
 
 func TestParseRejectsBadConfig(t *testing.T) {
 	for name, document := range map[string]string{
-		"empty":          "",
-		"unknown field":  "baseDomain: example.com\nbaseDomian: typo.com\n",
-		"bad driver":     "baseDomain: example.com\nvolumes: {driver: nfs}\n",
-		"zfs no parent":  "baseDomain: example.com\nvolumes: {driver: zfs, mountRoot: /srv}\n",
-		"no longer used": "baseDomain: example.com\nports: {from: 20000, to: 29999}\n",
-		"acme partial":   "baseDomain: example.com\nedge: {tls: {mode: acme}}\n",
-		"interval":       "baseDomain: example.com\nreconcileInterval: 10ms\n",
-		"duration":       "baseDomain: example.com\nreconcileInterval: soon\n",
-		"pool":           "baseDomain: example.com\nnetworkPool: 10.0.0.0/28\n",
-		"node":           "baseDomain: example.com\nnode: \"a b\"\n",
-		"dns provider":   "baseDomain: example.com\nedge: {tls: {mode: acme, email: a@b.c, dnsTokenFile: /t, dnsProvider: cloudflare}}\n",
-		"tls storage":    "baseDomain: example.com\nedge: {tls: {mode: internal, storage: \"\"}}\n",
+		"empty":         "",
+		"unknown field": "baseDomain: example.com\nbaseDomian: typo.com\n",
+		"two documents": "baseDomain: example.com\n---\nnode: other\n",
+		"bad driver":    "baseDomain: example.com\nvolumes: {driver: nfs}\n",
+		"zfs no parent": "baseDomain: example.com\nvolumes: {driver: zfs, mountRoot: /srv}\n",
+		"acme partial":  "baseDomain: example.com\nedge: {tls: {mode: acme}}\n",
+		"interval":      "baseDomain: example.com\nreconcileInterval: 10ms\n",
+		"duration":      "baseDomain: example.com\nreconcileInterval: soon\n",
+		"pool":          "baseDomain: example.com\nnetworkPool: 10.0.0.0/28\n",
+		"node":          "baseDomain: example.com\nnode: \"a b\"\n",
+		"dns provider":  "baseDomain: example.com\nedge: {tls: {mode: acme, email: a@b.c, dnsTokenFile: /t, dnsProvider: cloudflare}}\n",
+		"tls storage":   "baseDomain: example.com\nedge: {tls: {mode: internal, storage: \"\"}}\n",
 	} {
 		if _, err := Parse([]byte(document)); err == nil {
 			t.Errorf("%s: accepted", name)
