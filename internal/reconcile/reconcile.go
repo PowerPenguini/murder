@@ -99,6 +99,10 @@ type Reconciler struct {
 	imageRetryAt map[string]time.Time
 	mu           sync.RWMutex
 	statuses     map[string]Status
+	// passAt is when the last whole pass ended, passErrors how many errors
+	// it had.
+	passAt     time.Time
+	passErrors int
 }
 
 // New returns a reconciler. All dependencies are required.
@@ -287,6 +291,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	r.statuses = byName
+	r.passAt, r.passErrors = time.Now(), len(errs)
 	r.mu.Unlock()
 	images := map[string]bool{}
 	for _, record := range records {
@@ -769,6 +774,14 @@ func (r *Reconciler) Status(tenant string) (Status, bool) {
 	defer r.mu.RUnlock()
 	status, ok := r.statuses[tenant]
 	return status, ok
+}
+
+// LastPass returns when the last whole pass ended (zero before the first)
+// and how many errors it had, not counting failures to remove images.
+func (r *Reconciler) LastPass() (time.Time, int) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.passAt, r.passErrors
 }
 
 // DataExists reports whether a tenant name still has data on this node.

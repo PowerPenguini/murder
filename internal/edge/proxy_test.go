@@ -2,6 +2,7 @@ package edge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -15,6 +16,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PowerPenguini/murder/internal/metrics"
+	"go.uber.org/zap"
 )
 
 type staticRoutes map[string]Route
@@ -162,10 +166,14 @@ func TestRedirectToHTTPS(t *testing.T) {
 func TestInternalTLSServesTenantsAndKeepsItsCA(t *testing.T) {
 	dir := t.TempDir()
 	config := TLSConfig{Mode: TLSInternal, Storage: dir}
-	tlsConfig, err := NewTLS(context.Background(), config, "example.com", quietLog())
+	certificates, err := NewTLS(context.Background(), config, "example.com", quietLog())
 	if err != nil {
 		t.Fatal(err)
 	}
+	if left := time.Until(certificates.NotAfter()); left < 89*24*time.Hour || left > 90*24*time.Hour {
+		t.Fatalf("the certificate expires in %s, want 90 days", left)
+	}
+	tlsConfig := certificates.Config
 	caPEM, err := os.ReadFile(filepath.Join(dir, "ca.pem"))
 	if err != nil {
 		t.Fatal(err)
@@ -243,5 +251,136 @@ func TestProxyAddsHSTSOverHTTPS(t *testing.T) {
 		if got := recorder.Header().Values("Strict-Transport-Security"); strings.Join(got, ",") != want {
 			t.Errorf("%s: Strict-Transport-Security = %q, want %q", target, got, want)
 		}
+	}
+}
+
+// The proxy counts responses per tenant, including the protocol switch of
+// an upgraded connection, which still works through the counter.
+func TestProxyCountsRequests(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/fail":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/upgrade":
+			conn, buffered, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer conn.Close()
+			_, _ = buffered.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+			_ = buffered.Flush()
+			line, _ := buffered.ReadString('\n')
+			_, _ = conn.Write([]byte(line))
+		default:
+			_, _ = io.WriteString(w, "ok")
+		}
+	}))
+	defer backend.Close()
+	proxy := NewProxy("example.com", staticRoutes{
+		"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")},
+		"down": {Backend: "127.0.0.1:1"},
+	}, quietLog())
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+	get := func(host, path string) {
+		request, _ := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		request.Host = host
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+	}
+	get("acme.example.com", "/")
+	get("acme.example.com", "/")
+	get("acme.example.com", "/fail")
+	get("down.example.com", "/")
+	get("nobody.example.com", "/")
+	get("example.org", "/")
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = io.WriteString(conn, "GET /upgrade HTTP/1.1\r\nHost: acme.example.com\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+	reader := bufio.NewReader(conn)
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil || response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade = %v, %v", response, err)
+	}
+	_, _ = io.WriteString(conn, "ping\n")
+	if line, err := reader.ReadString('\n'); err != nil || line != "ping\n" {
+		t.Fatalf("echo through the upgraded connection = %q, %v", line, err)
+	}
+	conn.Close()
+
+	var out strings.Builder
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out.Reset()
+		writer := metrics.NewWriter(&out)
+		proxy.Stats().Write(writer)
+		// The upgraded connection is counted once the proxy lets it go.
+		if strings.Contains(out.String(), `murder_edge_requests_total{tenant="acme",code="1xx"} 1`) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, want := range []string{
+		`murder_edge_requests_total{tenant="acme",code="1xx"} 1`,
+		`murder_edge_requests_total{tenant="acme",code="2xx"} 2`,
+		`murder_edge_requests_total{tenant="acme",code="5xx"} 1`,
+		`murder_edge_requests_total{tenant="down",code="5xx"} 1`,
+		`murder_edge_response_seconds_count{tenant="acme"} 4`,
+		`murder_edge_response_seconds_bucket{tenant="acme",le="+Inf"} 4`,
+		`murder_edge_backend_errors_total{tenant="acme"} 0`,
+		`murder_edge_backend_errors_total{tenant="down"} 1`,
+		`murder_edge_unrouted_requests_total 2`,
+	} {
+		if !strings.Contains(out.String(), want+"\n") {
+			t.Errorf("missing %s in:\n%s", want, out.String())
+		}
+	}
+}
+
+// An agent running for months keeps a valid internal certificate: a new one
+// is signed, by the same CA, once less than a third of its life is left.
+func TestInternalCertificateIsRenewed(t *testing.T) {
+	now := time.Now()
+	issuer := &internalIssuer{dir: t.TempDir(), names: []string{"*.example.com", "example.com"}, now: func() time.Time { return now }}
+	first, err := issuer.certificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(59 * 24 * time.Hour)
+	if same, _ := issuer.certificate(); same != first {
+		t.Fatal("renewed with two thirds of its life left")
+	}
+	now = now.Add(2 * 24 * time.Hour)
+	renewed, err := issuer.certificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renewed == first || !renewed.Leaf.NotAfter.After(first.Leaf.NotAfter) || issuer.notAfter() != renewed.Leaf.NotAfter {
+		t.Fatalf("not renewed: %v then %v", first.Leaf.NotAfter, renewed.Leaf.NotAfter)
+	}
+	if !bytes.Equal(renewed.Certificate[1], first.Certificate[1]) {
+		t.Fatal("the renewed certificate has another CA")
+	}
+}
+
+// certmagic's logs reach the agent's logger with their fields.
+func TestCertmagicLogsGoToTheAgentLog(t *testing.T) {
+	var out bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := zap.New(slogCore{log: log}).Named("obtain").With(zap.String("identifier", "*.example.com"))
+	logger.Debug("hidden")
+	logger.Error("could not get certificate", zap.Int("attempt", 3))
+	text := out.String()
+	if strings.Contains(text, "hidden") || !strings.Contains(text, `level=ERROR msg="could not get certificate" logger=obtain attempt=3 identifier=*.example.com`) {
+		t.Fatalf("log:\n%s", text)
 	}
 }

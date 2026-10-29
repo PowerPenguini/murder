@@ -104,10 +104,13 @@ func runAgent(args []string) error {
 	// murder-firewall.service loads the rules before Docker starts the
 	// tenants at boot; loading them here covers a node without that unit
 	// and a ruleset flushed since.
+	var firewallLoaded *atomic.Int64
 	if cfg.Firewall == config.FirewallNftables {
 		if err := loadFirewall(context.Background(), cfg, storeSubnets(st)); err != nil {
 			return fmt.Errorf("%w (firewall: off in %s runs tenants without it)", err, *configPath)
 		}
+		firewallLoaded = new(atomic.Int64)
+		firewallLoaded.Store(time.Now().UnixNano())
 	} else {
 		log.Warn("the tenant firewall is off: tenants can reach the host's services and private networks")
 	}
@@ -131,6 +134,12 @@ func runAgent(args []string) error {
 		}
 		_ = probe.Close()
 	}
+	var metricsListener net.Listener
+	if cfg.Metrics != "" {
+		if metricsListener, err = net.Listen("tcp", cfg.Metrics); err != nil {
+			return fmt.Errorf("metrics: %w", err)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -141,7 +150,8 @@ func runAgent(args []string) error {
 		}
 	}
 
-	apiServer := &http.Server{Handler: api.NewServer(st, reconciler, docker, key, log).Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
+	apiHandler := api.NewServer(st, reconciler, docker, key, log)
+	apiServer := &http.Server{Handler: apiHandler.Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
 	go serve("api", apiServer, apiListener)
 	reconciled := make(chan struct{})
 	go func() {
@@ -149,11 +159,17 @@ func runAgent(args []string) error {
 		reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
 	}()
 	if cfg.Firewall == config.FirewallNftables {
-		go keepFirewall(ctx, cfg, st, log)
+		go keepFirewall(ctx, cfg, st, log, firewallLoaded)
 	}
 
 	proxy := edge.NewProxy(cfg.BaseDomain, api.Routes{Store: st}, log)
 	servers := []*http.Server{apiServer}
+	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, edge: proxy.Stats(), firewall: firewallLoaded}
+	if metricsListener != nil {
+		metricsServer := &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}
+		servers = append(servers, metricsServer)
+		go serve("metrics", metricsServer, metricsListener)
+	}
 	if cfg.Edge.TLS.Mode == edge.TLSOff {
 		plain := publicServer(proxy)
 		servers = append(servers, plain)
@@ -165,10 +181,11 @@ func runAgent(args []string) error {
 		servers = append(servers, redirect, secure)
 		go serve("edge http", redirect, httpListener)
 		go func() {
-			tlsConfig := obtainTLS(ctx, cfg, log)
-			if tlsConfig == nil {
+			certificates := obtainTLS(ctx, cfg, log)
+			if certificates == nil {
 				return
 			}
+			observed.certificates.Store(certificates)
 			listener, err := net.Listen("tcp", cfg.Edge.HTTPS)
 			if err != nil {
 				failed <- fmt.Errorf("edge https: %w", err)
@@ -176,7 +193,7 @@ func runAgent(args []string) error {
 			}
 			ready.Store(true)
 			log.Info("edge https ready")
-			serve("edge https", secure, tls.NewListener(listener, tlsConfig))
+			serve("edge https", secure, tls.NewListener(listener, certificates.Config))
 		}()
 	}
 	log.Info("murder agent started", "node", node, "baseDomain", cfg.BaseDomain, "volumes", cfg.Volumes.Driver, "tls", cfg.Edge.TLS.Mode)
@@ -257,7 +274,7 @@ const firewallInterval = 15 * time.Second
 // keepFirewall loads the tenant firewall again and again, so a firewall
 // reload that dropped Murder's table does not leave tenants unguarded and
 // a changed DNS server is let through.
-func keepFirewall(ctx context.Context, cfg config.Agent, st store.Store, log *slog.Logger) {
+func keepFirewall(ctx context.Context, cfg config.Agent, st store.Store, log *slog.Logger, loaded *atomic.Int64) {
 	ticker := time.NewTicker(firewallInterval)
 	defer ticker.Stop()
 	for {
@@ -265,7 +282,11 @@ func keepFirewall(ctx context.Context, cfg config.Agent, st store.Store, log *sl
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := loadFirewall(ctx, cfg, storeSubnets(st)); err != nil && ctx.Err() == nil {
+			err := loadFirewall(ctx, cfg, storeSubnets(st))
+			switch {
+			case err == nil:
+				loaded.Store(time.Now().UnixNano())
+			case ctx.Err() == nil:
 				log.Error("reload the tenant firewall", "error", err)
 			}
 		}
@@ -324,12 +345,12 @@ func publicServer(handler http.Handler) *http.Server {
 
 // obtainTLS retries until the certificate is available or ctx ends; the
 // reconciler and the plain listener keep working meanwhile.
-func obtainTLS(ctx context.Context, cfg config.Agent, log *slog.Logger) *tls.Config {
+func obtainTLS(ctx context.Context, cfg config.Agent, log *slog.Logger) *edge.Certificates {
 	delay := 10 * time.Second
 	for {
-		tlsConfig, err := edge.NewTLS(ctx, cfg.Edge.TLS, cfg.BaseDomain, log)
+		certificates, err := edge.NewTLS(ctx, cfg.Edge.TLS, cfg.BaseDomain, log)
 		if err == nil {
-			return tlsConfig
+			return certificates
 		}
 		log.Error("obtain TLS certificate", "error", err, "retryIn", delay.String())
 		select {

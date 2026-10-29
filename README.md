@@ -51,6 +51,14 @@ Stage 2 — a single server — is what this code does today.
   plain directories, cannot limit disk use and is for development.
 - **Firewall.** An nftables table (`inet murder`) keeps tenants away from
   the host and private networks; see the security model.
+- **Metrics.** With `metrics:` set (say `127.0.0.1:9464`), `/metrics` serves,
+  in the Prometheus text format: per tenant, the edge's responses by status
+  class, how long their headers took and requests it could not pass on; each
+  live tenant's phase, health, restarts and warning; when the last whole
+  reconcile pass ended and its error count; when the firewall was last
+  loaded, a backup last sent (since the agent started) and the certificate
+  expires. Enough to alert on a tenant down or crashing, a stuck agent, a
+  missing backup or a certificate not renewed.
 - **Secrets.** Generated per tenant and sealed with the node's master key
   (AES-256-GCM, bound to tenant and name). The database never holds them in
   the clear.

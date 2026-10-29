@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/edge"
@@ -95,6 +96,8 @@ type Server struct {
 	runtime    runtime.Runtime
 	key        *secrets.Key
 	log        *slog.Logger
+	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
+	lastBackup atomic.Int64
 }
 
 // NewServer returns the API server.
@@ -548,6 +551,16 @@ func (s *Server) backup(w http.ResponseWriter, _ *http.Request) {
 		s.log.Error("back up the database", "error", err)
 		panic(http.ErrAbortHandler)
 	}
+	s.lastBackup.Store(time.Now().UnixNano())
+}
+
+// LastBackup returns when a backup was last sent whole since the agent
+// started; zero if none was.
+func (s *Server) LastBackup() time.Time {
+	if at := s.lastBackup.Load(); at != 0 {
+		return time.Unix(0, at)
+	}
+	return time.Time{}
 }
 
 type countingWriter struct {

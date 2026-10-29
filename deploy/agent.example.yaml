@@ -9,6 +9,7 @@ dockerSocket: /var/run/docker.sock
 registryAuthFile: /etc/murder/registry.json   # docker config.json with "auths" for private registries
 networkPool: 10.240.0.0/16         # one /28 per tenant network (the tenant at .2); must not overlap host or Docker networks
 firewall: nftables                 # keeps tenants from the host and private networks; off only for development
+metrics: 127.0.0.1:9464            # /metrics for Prometheus or VictoriaMetrics (tenant names: keep it private); unset = off
 
 volumes:
   driver: zfs                      # or: driver: dir, root: /srv/murder/tenants

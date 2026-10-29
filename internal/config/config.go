@@ -49,6 +49,10 @@ type Agent struct {
 	Firewall string  `yaml:"firewall"`
 	Volumes  Volumes `yaml:"volumes"`
 	Edge     Edge    `yaml:"edge"`
+	// Metrics, if set, is where the agent serves /metrics for Prometheus
+	// or VictoriaMetrics: tenant names and their traffic, so a loopback or
+	// private address. Tenants cannot reach it while the firewall is on.
+	Metrics string `yaml:"metrics"`
 
 	// Defaults fill in tenant limits left at zero. Disk use is unlimited
 	// unless diskGB is set (with the zfs driver).
@@ -162,6 +166,11 @@ func (a Agent) Validate() error {
 		}
 		if !slices.Contains(edge.DNSProviders, a.Edge.TLS.DNSProvider) {
 			problems = append(problems, fmt.Sprintf("edge.tls.dnsProvider must be one of %v", edge.DNSProviders))
+		}
+	}
+	if a.Metrics != "" {
+		if host, _, err := net.SplitHostPort(a.Metrics); err != nil || host == "" {
+			problems = append(problems, "metrics must be a host and port, such as 127.0.0.1:9464")
 		}
 	}
 	for _, problem := range a.Defaults.Problems() {

@@ -1198,6 +1198,10 @@ func TestCancelledPassFinishesTheReplacementUnderWay(t *testing.T) {
 		before[container.Labels[runtime.LabelTenant]] = container.ID
 	}
 	statusBefore, _ := f.reconciler.Status("acme")
+	passBefore, _ := f.reconciler.LastPass()
+	if passBefore.IsZero() {
+		t.Fatal("a whole pass left no time")
+	}
 	for _, name := range []string{"acme", "beta"} {
 		f.updateApp(t, name, func(app *spec.Tenant) { app.Env["NEW"] = "1" })
 	}
@@ -1219,6 +1223,9 @@ func TestCancelledPassFinishesTheReplacementUnderWay(t *testing.T) {
 	}
 	if status, _ := f.reconciler.Status("acme"); status != statusBefore {
 		t.Fatalf("status after an interrupted pass = %+v, want the last whole pass's %+v", status, statusBefore)
+	}
+	if pass, _ := f.reconciler.LastPass(); pass != passBefore {
+		t.Fatalf("an interrupted pass counts as whole: %v, want %v", pass, passBefore)
 	}
 }
 
