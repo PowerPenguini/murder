@@ -222,3 +222,26 @@ func TestTLSConfigRejectsIncompleteACME(t *testing.T) {
 		t.Fatal("unknown mode accepted")
 	}
 }
+
+// Over HTTPS the edge adds Strict-Transport-Security unless the app sets
+// its own; over plain HTTP it adds nothing.
+func TestProxyAddsHSTSOverHTTPS(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/own" {
+			w.Header().Set("Strict-Transport-Security", "max-age=60")
+		}
+	}))
+	defer backend.Close()
+	proxy := NewProxy("example.com", staticRoutes{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}}, quietLog())
+	for target, want := range map[string]string{
+		"https://acme.example.com/":    "max-age=31536000",
+		"https://acme.example.com/own": "max-age=60",
+		"http://acme.example.com/":     "",
+	} {
+		recorder := httptest.NewRecorder()
+		proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		if got := recorder.Header().Values("Strict-Transport-Security"); strings.Join(got, ",") != want {
+			t.Errorf("%s: Strict-Transport-Security = %q, want %q", target, got, want)
+		}
+	}
+}

@@ -34,7 +34,13 @@ const (
 	PhaseRunning   = "running"
 	PhaseSuspended = "suspended"
 	PhaseFailed    = "failed"
+	// PhasePulling waits for the tenant's image; a container already
+	// running keeps serving meanwhile.
+	PhasePulling = "pulling"
 )
+
+// healthChecks is how many health checks run at once.
+const healthChecks = 16
 
 // Status is the observed state of one tenant.
 type Status struct {
@@ -73,6 +79,9 @@ type Reconciler struct {
 	// address the container is created with. Tests point it at their own
 	// server.
 	backend func(store.Record) (string, error)
+	pulls   *pulls
+	// stop ends the background pulls.
+	stop context.CancelFunc
 
 	// pass serializes reconcile passes and the removal of tenants.
 	pass sync.Mutex
@@ -93,12 +102,15 @@ func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secret
 	if config.Scheme == "" {
 		config.Scheme = "https"
 	}
+	pullCtx, stop := context.WithCancel(context.Background())
 	return &Reconciler{
 		store: st, runtime: rt, volumes: volumes, key: key, config: config, log: log,
 		health:       &http.Client{Timeout: config.HealthTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		statuses:     map[string]Status{},
 		imageRetryAt: map[string]time.Time{},
 		backend:      Backend,
+		pulls:        newPulls(pullCtx, rt.PullImage),
+		stop:         stop,
 	}
 }
 
@@ -106,9 +118,10 @@ func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secret
 func ContainerName(tenant string) string { return "murder-" + tenant }
 func NetworkName(tenant string) string   { return "murder-" + tenant }
 
-// Run reconciles every interval and whenever the store changes, until ctx
-// ends.
+// Run reconciles every interval, whenever the store changes and whenever a
+// pull ends, until ctx ends; then it stops the pulls.
 func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
+	defer r.stop()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -120,6 +133,7 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 		case <-r.store.Changed():
+		case <-r.pulls.done:
 		}
 	}
 }
@@ -164,20 +178,38 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	if err := r.removeOrphanNetworks(ctx, wanted); err != nil {
 		errs = append(errs, err)
 	}
-	statuses := map[string]Status{}
-	for _, record := range records {
-		name := record.Spec.Name
-		status, err := r.reconcileTenant(ctx, record, byTenant[name])
-		status.Generation = record.Generation
-		status.CheckedAt = time.Now().UTC()
+	statuses := make([]Status, len(records))
+	for i, record := range records {
+		status, err := r.reconcileTenant(ctx, record, byTenant[record.Spec.Name])
 		if err != nil {
 			status.Phase, status.Healthy, status.Message = PhaseFailed, false, err.Error()
-			errs = append(errs, fmt.Errorf("tenant %s: %w", name, err))
+			errs = append(errs, fmt.Errorf("tenant %s: %w", record.Spec.Name, err))
 		}
-		statuses[name] = status
+		statuses[i] = status
+	}
+	// Side by side, so tenants that do not answer cost one timeout, not one
+	// each.
+	var checks sync.WaitGroup
+	limit := make(chan struct{}, healthChecks)
+	for i, record := range records {
+		if statuses[i].Phase != PhaseRunning {
+			continue
+		}
+		checks.Go(func() {
+			limit <- struct{}{}
+			defer func() { <-limit }()
+			statuses[i].Healthy, statuses[i].Message = r.checkHealth(ctx, record)
+		})
+	}
+	checks.Wait()
+	byName := make(map[string]Status, len(records))
+	for i, record := range records {
+		statuses[i].Generation = record.Generation
+		statuses[i].CheckedAt = time.Now().UTC()
+		byName[record.Spec.Name] = statuses[i]
 	}
 	r.mu.Lock()
-	r.statuses = statuses
+	r.statuses = byName
 	r.mu.Unlock()
 	r.sweepImages(ctx)
 	return errors.Join(errs...)
@@ -292,6 +324,16 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	}
 	if current == nil {
 		id, err := r.replace(ctx, record, desired, outdated)
+		if errors.Is(err, errPulling) {
+			status := Status{Phase: PhasePulling, Message: "pulling " + tenant.Image}
+			for _, container := range outdated {
+				if container.Running {
+					status.ContainerID = container.ID // still serving
+					break
+				}
+			}
+			return status, nil
+		}
 		if err != nil {
 			return Status{}, err
 		}
@@ -307,9 +349,7 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 			r.log.Info("restarted stopped tenant container", "tenant", tenant.Name, "container", current.ID)
 		}
 	}
-	status = Status{Phase: PhaseRunning, ContainerID: current.ID}
-	status.Healthy, status.Message = r.checkHealth(ctx, record)
-	return status, nil
+	return Status{Phase: PhaseRunning, ContainerID: current.ID}, nil
 }
 
 // servesData reports whether a running container sees the tenant's data.
@@ -326,13 +366,14 @@ func (r *Reconciler) servesData(ctx context.Context, record store.Record, id str
 }
 
 // replace starts the desired container in place of outdated ones. Nothing is
-// stopped until the new image is present and, after an image change, the
+// stopped until the new image is present (errPulling until then) and, after
+// an image change, the
 // data has been snapshotted. The snapshot is taken while the old container
 // runs: apps are only onboarded once they recover from point-in-time
 // snapshots, and a failed snapshot then blocks the change without an outage.
 func (r *Reconciler) replace(ctx context.Context, record store.Record, desired runtime.ContainerSpec, outdated []runtime.Container) (string, error) {
 	tenant := record.Spec
-	if err := r.ensureImage(ctx, tenant.Image); err != nil {
+	if err := r.image(ctx, tenant.Image); err != nil {
 		return "", err
 	}
 	if record.DataImage != "" && record.DataImage != tenant.Image {
@@ -367,15 +408,19 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	return id, nil
 }
 
-func (r *Reconciler) ensureImage(ctx context.Context, image string) error {
+// image returns nil once image is present. Until then a pull runs in the
+// background and image returns errPulling, or the failure of the last
+// attempt until the next one is due.
+func (r *Reconciler) image(ctx context.Context, image string) error {
 	present, err := r.runtime.HasImage(ctx, image)
 	if err != nil {
 		return fmt.Errorf("inspect image: %w", err)
 	}
 	if present {
+		r.pulls.present(image)
 		return nil
 	}
-	return r.runtime.PullImage(ctx, image)
+	return r.pulls.fetch(image)
 }
 
 func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.Container) error {

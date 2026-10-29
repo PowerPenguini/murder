@@ -22,6 +22,10 @@ var spoofable = []string{
 	"Client-Ip", "Front-End-Https", "X-Arr-Ssl", "X-Arr-Log-Id", "X-Proxyuser-Ip", "Wl-Proxy-Client-Ip",
 }
 
+// hsts tells a browser that reached a tenant over HTTPS to use nothing else
+// for a year.
+const hsts = "max-age=31536000"
+
 // Route says where a tenant's traffic goes.
 type Route struct {
 	// Backend is the tenant container's address and port, which only the
@@ -86,6 +90,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	backend := &url.URL{Scheme: "http", Host: route.Backend}
+	secure := r.TLS != nil
 	proxy := &httputil.ReverseProxy{
 		// The app sees only what this proxy observed: Rewrite drops
 		// Forwarded and X-Forwarded-For/-Host/-Proto, and every other header
@@ -106,6 +111,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out.Out.Host = out.In.Host
 		},
 		Transport: p.transport,
+		// An app's own Strict-Transport-Security wins.
+		ModifyResponse: func(response *http.Response) error {
+			if secure && response.Header.Get("Strict-Transport-Security") == "" {
+				response.Header.Set("Strict-Transport-Security", hsts)
+			}
+			return nil
+		},
 		// Stream responses as they come, for server-sent events.
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
