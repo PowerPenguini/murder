@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -140,8 +139,10 @@ func (a Agent) Validate() error {
 	if a.Firewall != FirewallNftables && a.Firewall != FirewallOff {
 		problems = append(problems, fmt.Sprintf("firewall must be %q or %q", FirewallNftables, FirewallOff))
 	}
-	if _, err := a.EdgePorts(); err != nil {
-		problems = append(problems, err.Error())
+	if a.Firewall == FirewallNftables {
+		if _, err := a.EdgePorts(); err != nil {
+			problems = append(problems, err.Error())
+		}
 	}
 	if strings.ContainsAny(a.Node, " \t\n=") {
 		problems = append(problems, "node must be a name without spaces or '='")
@@ -186,12 +187,15 @@ func (a Agent) EdgePorts() ([]int, error) {
 	}
 	var ports []int
 	for _, address := range addresses {
-		_, text, err := net.SplitHostPort(address)
-		port, convErr := strconv.Atoi(text)
-		if err != nil || convErr != nil || port < 1 || port > 65535 {
-			return nil, fmt.Errorf("edge address %q must be host:port with a numeric port", address)
+		_, service, err := net.SplitHostPort(address)
+		if err == nil {
+			var port int
+			if port, err = net.LookupPort("tcp", service); err == nil && port > 0 {
+				ports = append(ports, port)
+				continue
+			}
 		}
-		ports = append(ports, port)
+		return nil, fmt.Errorf("edge address %q needs a port the firewall can open", address)
 	}
 	return ports, nil
 }

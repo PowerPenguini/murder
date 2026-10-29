@@ -101,11 +101,11 @@ func runAgent(args []string) error {
 		return err
 	}
 	reconciler := reconcile.New(st, docker, volumes, key, reconcile.Config{BaseDomain: cfg.BaseDomain, Scheme: cfg.Scheme(), DefaultLimits: cfg.Defaults}, log)
-	pool := netip.MustParsePrefix(cfg.NetworkPool)
-	edgePorts, _ := cfg.EdgePorts() // validated with the config
+	// murder-firewall.service loads the rules before Docker starts the
+	// tenants at boot; loading them here covers a node without that unit
+	// and a ruleset flushed since.
 	if cfg.Firewall == config.FirewallNftables {
-		// Before any tenant runs: none may run without it.
-		if err := firewall.Apply(context.Background(), pool, edgePorts); err != nil {
+		if err := loadFirewall(context.Background(), cfg); err != nil {
 			return fmt.Errorf("%w (firewall: off in %s runs tenants without it)", err, *configPath)
 		}
 	} else {
@@ -145,7 +145,7 @@ func runAgent(args []string) error {
 	go serve("api", apiServer, apiListener)
 	go reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
 	if cfg.Firewall == config.FirewallNftables {
-		go keepFirewall(ctx, pool, edgePorts, log)
+		go keepFirewall(ctx, cfg, log)
 	}
 
 	proxy := edge.NewProxy(cfg.BaseDomain, api.Routes{Store: st}, log)
@@ -242,21 +242,55 @@ func listenSocket(path, group string) (net.Listener, error) {
 	return listener, nil
 }
 
-// keepFirewall loads the tenant firewall again every minute, so a firewall
-// reload that dropped Murder's table does not leave tenants unguarded.
-func keepFirewall(ctx context.Context, pool netip.Prefix, edgePorts []int, log *slog.Logger) {
-	ticker := time.NewTicker(time.Minute)
+// firewallInterval is how often the agent loads the tenant firewall again:
+// the longest a flushed ruleset or a changed DNS server goes unnoticed.
+const firewallInterval = 15 * time.Second
+
+// keepFirewall loads the tenant firewall again and again, so a firewall
+// reload that dropped Murder's table does not leave tenants unguarded and
+// a changed DNS server is let through.
+func keepFirewall(ctx context.Context, cfg config.Agent, log *slog.Logger) {
+	ticker := time.NewTicker(firewallInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := firewall.Apply(ctx, pool, edgePorts); err != nil && ctx.Err() == nil {
+			if err := loadFirewall(ctx, cfg); err != nil && ctx.Err() == nil {
 				log.Error("reload the tenant firewall", "error", err)
 			}
 		}
 	}
+}
+
+// loadFirewall loads the tenant firewall the config describes, with the
+// host's DNS servers as they are now.
+func loadFirewall(ctx context.Context, cfg config.Agent) error {
+	edgePorts, err := cfg.EdgePorts()
+	if err != nil {
+		return err
+	}
+	return firewall.Apply(ctx, netip.MustParsePrefix(cfg.NetworkPool), edgePorts, firewall.Resolvers())
+}
+
+// runFirewall loads the tenant firewall once, for murder-firewall.service,
+// which runs before Docker starts the tenants at boot.
+func runFirewall(args []string) error {
+	flags := flag.NewFlagSet("firewall", flag.ContinueOnError)
+	configPath := flags.String("config", defaultConfig, "agent configuration file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Firewall != config.FirewallNftables {
+		fmt.Println("the tenant firewall is off in", *configPath)
+		return nil
+	}
+	return loadFirewall(context.Background(), cfg)
 }
 
 // publicServer has no write timeout: tenants stream server-sent events.

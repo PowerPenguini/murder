@@ -1,0 +1,18 @@
+[Unit]
+Description=Murder tenant firewall
+Documentation=https://github.com/PowerPenguini/murder
+# Docker starts tenant containers at boot (their restart policy), before the
+# agent runs: the rules must already be loaded then. The agent loads them
+# again every 15 seconds.
+Before=docker.service
+After=network-pre.target nftables.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/murder firewall -config /etc/murder/agent.yaml
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=docker.service

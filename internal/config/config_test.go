@@ -44,6 +44,14 @@ defaults: {memoryMB: 768}
 	if ports, err := agent.EdgePorts(); err != nil || !slices.Equal(ports, []int{80, 443}) {
 		t.Fatalf("edge ports with TLS = %v, %v", ports, err)
 	}
+	// A service name is a port too; without the firewall nothing is checked.
+	named, err := Parse([]byte("baseDomain: example.com\nedge: {http: \":http\"}\n"))
+	if ports, _ := named.EdgePorts(); err != nil || !slices.Equal(ports, []int{80}) {
+		t.Fatalf("edge port by name = %v, %v", ports, err)
+	}
+	if _, err := Parse([]byte("baseDomain: example.com\nfirewall: \"off\"\nedge: {http: \"localhost\"}\n")); err != nil {
+		t.Fatalf("edge address without the firewall = %v", err)
+	}
 }
 
 func TestParseRejectsBadConfig(t *testing.T) {
@@ -52,7 +60,7 @@ func TestParseRejectsBadConfig(t *testing.T) {
 		"unknown field": "baseDomain: example.com\nbaseDomian: typo.com\n",
 		"two documents": "baseDomain: example.com\n---\nnode: other\n",
 		"firewall":      "baseDomain: example.com\nfirewall: iptables\n",
-		"edge port":     "baseDomain: example.com\nedge: {http: \":http\"}\n",
+		"edge port":     "baseDomain: example.com\nedge: {http: \"localhost\"}\n",
 		"bad driver":    "baseDomain: example.com\nvolumes: {driver: nfs}\n",
 		"zfs no parent": "baseDomain: example.com\nvolumes: {driver: zfs, mountRoot: /srv}\n",
 		"acme partial":  "baseDomain: example.com\nedge: {tls: {mode: acme}}\n",

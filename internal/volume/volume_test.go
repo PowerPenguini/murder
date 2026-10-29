@@ -58,7 +58,7 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 type fakeDataset struct {
 	owner, mountpoint string
 	mounted           bool
-	refquota          int64
+	refquota, used    int64
 }
 
 // fakeZFS answers zfs commands from an in-memory set of datasets.
@@ -109,6 +109,9 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		return nil, nil
 	case "set":
 		_, value, _ := strings.Cut(args[1], "=")
+		if quota := parseQuota(value); quota != 0 && quota < f.datasets[dataset].used {
+			return []byte("cannot set property for '" + dataset + "': size is less than current used or reserved space\n"), errors.New("exit status 1")
+		}
 		f.datasets[dataset].refquota = parseQuota(value)
 		return nil, nil
 	case "snapshot", "destroy":
@@ -160,6 +163,13 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 		if _, err := volumes.Ensure(ctx, "acme", uid, gid, step.diskGB); err != nil || !fake.ran("zfs set "+step.set+" tank/murder/acme") {
 			t.Fatalf("Ensure with %d GB = %v, calls %v", step.diskGB, err, fake.calls)
 		}
+	}
+	// A limit below what the tenant stores is reported, and the data is
+	// still mounted and usable.
+	fake.datasets["tank/murder/acme"].used = 3 << 30
+	fake.datasets["tank/murder/acme"].mounted = false
+	if got, err := volumes.Ensure(ctx, "acme", uid, gid, 2); !errors.Is(err, ErrDiskLimit) || got != path || !fake.datasets["tank/murder/acme"].mounted {
+		t.Fatalf("Ensure below usage = %q, %v", got, err)
 	}
 	if exists, err := volumes.Exists(ctx, "acme"); err != nil || !exists {
 		t.Fatalf("Exists = %v, %v", exists, err)

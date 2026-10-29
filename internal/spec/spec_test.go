@@ -236,3 +236,20 @@ func TestOverridesCompareNormalized(t *testing.T) {
 		t.Fatal("different overrides are equal")
 	}
 }
+
+// Limits are bounded both ways, so the byte counts made of them cannot
+// overflow.
+func TestLimitsAreBounded(t *testing.T) {
+	for _, limits := range []Limits{{DiskGB: -1}, {DiskGB: maxDiskGB + 1}, {MemoryMB: maxMemoryMB + 1}, {CPUs: maxCPUs + 1}, {PIDs: maxPIDs + 1}} {
+		tenant := validTenant()
+		tenant.Limits = limits
+		if err := tenant.Validate(); err == nil {
+			t.Errorf("limits %+v accepted", limits)
+		}
+	}
+	tenant := validTenant()
+	tenant.Limits = Limits{MemoryMB: maxMemoryMB, CPUs: maxCPUs, PIDs: maxPIDs, DiskGB: maxDiskGB}
+	if err := tenant.Validate(); err != nil {
+		t.Fatalf("the largest limits = %v", err)
+	}
+}

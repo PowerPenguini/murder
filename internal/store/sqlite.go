@@ -192,6 +192,14 @@ func Open(path string, options Options) (*SQLite, error) {
 		_ = s.Close()
 		return nil, fmt.Errorf("database %s: %w", path, err)
 	}
+	// The tenant firewall covers the pool only: a tenant outside it would
+	// run unguarded.
+	for _, name := range slices.Sorted(maps.Keys(state.tenants)) {
+		if subnet, err := netip.ParsePrefix(state.tenants[name].Subnet); err != nil || !options.NetworkPool.Contains(subnet.Addr()) || subnet.Bits() < options.NetworkPool.Bits() {
+			_ = s.Close()
+			return nil, fmt.Errorf("tenant %s has subnet %s, outside the network pool %v, which the tenant firewall covers; put the pool back", name, state.tenants[name].Subnet, options.NetworkPool)
+		}
+	}
 	s.state.Store(state)
 	return s, nil
 }

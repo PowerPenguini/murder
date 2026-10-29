@@ -319,6 +319,9 @@ func printTable(tenants []api.Tenant) error {
 			state, url = "archived "+tenant.ArchivedAt.Local().Format(time.DateOnly), "-"
 		} else if tenant.Status != nil {
 			state = tenant.Status.Phase
+			if tenant.Status.Warning != "" {
+				state += " (warning)" // tenant show tells what
+			}
 			if tenant.Status.Phase == reconcile.PhaseRunning {
 				healthy = fmt.Sprint(tenant.Status.Healthy)
 			}

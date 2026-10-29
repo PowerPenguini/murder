@@ -16,6 +16,10 @@ import (
 	"github.com/PowerPenguini/murder/internal/spec"
 )
 
+// ErrDiskLimit reports a disk limit that could not be applied, such as one
+// below what the tenant already stores. The data is usable all the same.
+var ErrDiskLimit = errors.New("disk limit not applied")
+
 // ErrSnapshotsUnsupported is returned by drivers that cannot snapshot.
 var ErrSnapshotsUnsupported = errors.New("volume driver does not support snapshots")
 
@@ -25,7 +29,8 @@ var ErrSnapshotsUnsupported = errors.New("volume driver does not support snapsho
 type Volumes interface {
 	// Ensure creates the tenant's data directory if needed, owned by uid:gid,
 	// mounts it if it is not, limits it to diskGB (0 is no limit) where the
-	// driver can, and returns its host path.
+	// driver can, and returns its host path. A limit it cannot apply is
+	// reported with ErrDiskLimit next to a usable path.
 	Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (string, error)
 	// Exists reports whether the tenant has data, for example left behind by
 	// a deleted tenant of the same name.
@@ -224,9 +229,10 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (s
 	if err := z.owned(tenant, current.owner, current.mountpoint); err != nil {
 		return "", err
 	}
+	var limitErr error
 	if current.refquota != diskBytes(diskGB) {
 		if _, err := z.Run(ctx, "zfs", "set", "refquota="+refquota(diskGB), dataset); err != nil {
-			return "", fmt.Errorf("set the disk limit to %s: %w", diskLimit(diskGB), err)
+			limitErr = fmt.Errorf("%w: %s: %w", ErrDiskLimit, diskLimit(diskGB), err)
 		}
 	}
 	if current.mounted != "yes" {
@@ -234,7 +240,10 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (s
 			return "", err
 		}
 	}
-	return mountpoint, chownIfNeeded(mountpoint, uid, gid)
+	if err := chownIfNeeded(mountpoint, uid, gid); err != nil {
+		return "", err
+	}
+	return mountpoint, limitErr
 }
 
 func refquota(diskGB int) string {

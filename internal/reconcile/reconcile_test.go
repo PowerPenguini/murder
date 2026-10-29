@@ -235,6 +235,7 @@ type fakeVolumes struct {
 	failSnapshot error
 	notServing   bool
 	diskGB       map[string]int
+	limitErr     error
 }
 
 func (f *fakeVolumes) LateMounts() bool { return true }
@@ -250,7 +251,11 @@ func (f *fakeVolumes) Ensure(ctx context.Context, tenant string, uid, gid, diskG
 		f.diskGB = map[string]int{}
 	}
 	f.diskGB[tenant] = diskGB
-	return f.Dir.Ensure(ctx, tenant, uid, gid, diskGB)
+	path, err := f.Dir.Ensure(ctx, tenant, uid, gid, diskGB)
+	if err == nil {
+		err = f.limitErr
+	}
+	return path, err
 }
 
 func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string, error) {
@@ -520,6 +525,23 @@ func TestImageChangedWhileSuspendedIsSnapshottedOnResume(t *testing.T) {
 	f.reconcile(t)
 	if f.runtime.only(t).spec.Image != imageB || !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) {
 		t.Fatalf("resume with a new image: snapshots = %v", f.volumes.snapshots)
+	}
+}
+
+// A disk limit that cannot be applied is a warning; the tenant runs.
+func TestDiskLimitProblemIsAWarning(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.volumes.limitErr = fmt.Errorf("%w: 7 GB: size is less than current used", volume.ErrDiskLimit)
+	f.reconcile(t)
+	status, _ := f.reconciler.Status("acme")
+	if status.Phase != PhaseRunning || !status.Healthy || !strings.Contains(status.Warning, "less than current used") || !f.runtime.only(t).Running {
+		t.Fatalf("status = %+v", status)
+	}
+	f.volumes.limitErr = nil
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.Warning != "" {
+		t.Fatalf("the warning outlived its cause: %+v", status)
 	}
 }
 

@@ -152,6 +152,15 @@ func (l Limits) Or(defaults Limits) Limits {
 	return l
 }
 
+// Upper bounds of limits, far above any server, so the byte counts made of
+// them cannot overflow.
+const (
+	maxMemoryMB = 1 << 24 // 16 TB
+	maxCPUs     = 4096
+	maxPIDs     = 1 << 22
+	maxDiskGB   = 1 << 20 // 1 PB
+)
+
 // Defaults applied by WithDefaults.
 const (
 	DefaultPort       = 8080
@@ -332,6 +341,9 @@ func (t Tenant) validate(checkImage func(string) error) error {
 	}
 	if t.Limits.MemoryMB < 0 || t.Limits.CPUs < 0 || t.Limits.PIDs < 0 || t.Limits.DiskGB < 0 {
 		problems = append(problems, "limits must not be negative")
+	}
+	if t.Limits.MemoryMB > maxMemoryMB || t.Limits.CPUs > maxCPUs || t.Limits.PIDs > maxPIDs || t.Limits.DiskGB > maxDiskGB {
+		problems = append(problems, fmt.Sprintf("limits must be at most %d MB memory, %d CPUs, %d processes and %d GB disk", maxMemoryMB, maxCPUs, maxPIDs, maxDiskGB))
 	}
 	if len(problems) == 0 {
 		return nil

@@ -314,14 +314,16 @@ func (d *Docker) registryAuth(repository string) (string, error) {
 }
 
 func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels map[string]string) error {
-	existing, owned, err := d.inspectNetwork(ctx, name)
+	existing, err := d.inspectNetwork(ctx, name)
 	switch {
-	case err == nil && !owned:
+	case err == nil && !existing.owned:
 		return fmt.Errorf("network %s exists but is %w (node %s)", name, ErrNotOwned, d.node)
-	case err == nil && existing == subnet:
+	case err == nil && existing.ipv6:
+		return ipv6Error(name)
+	case err == nil && existing.subnet == subnet:
 		return nil
 	case err == nil:
-		return fmt.Errorf("%w: network %s has subnet %s, want %s", ErrNetworkMismatch, name, existing, subnet)
+		return fmt.Errorf("%w: network %s has subnet %s, want %s", ErrNetworkMismatch, name, existing.subnet, subnet)
 	case !errors.Is(err, ErrNotFound):
 		return err
 	}
@@ -333,7 +335,9 @@ func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels 
 		"Name":           name,
 		"Driver":         "bridge",
 		"CheckDuplicate": true,
-		"Labels":         d.ownLabels(labels),
+		// IPv4 only: the tenant firewall has no IPv6 rules.
+		"EnableIPv6": false,
+		"Labels":     d.ownLabels(labels),
 		// Murder assigns each tenant a small subnet from its own pool, so the
 		// engine's default pools (about thirty networks) are never used up.
 		"IPAM": map[string]any{"Driver": "default", "Config": []map[string]string{{"Subnet": subnet, "Gateway": gateway.String()}}},
@@ -345,38 +349,66 @@ func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels 
 	if err := d.do(ctx, request{method: http.MethodPost, path: "/networks/create", body: create}, nil); err != nil {
 		return fmt.Errorf("create network %s: %w", name, err)
 	}
+	// The engine's default-network-opts may still have turned IPv6 on.
+	created, err := d.inspectNetwork(ctx, name)
+	if err != nil {
+		return err
+	}
+	if created.ipv6 {
+		_ = d.do(ctx, request{method: http.MethodDelete, path: "/networks/" + url.PathEscape(name)}, nil)
+		return ipv6Error(name)
+	}
 	return nil
 }
 
-// inspectNetwork returns a network's IPv4 subnet ("" if it has none) and
-// whether this node owns it.
-func (d *Docker) inspectNetwork(ctx context.Context, name string) (string, bool, error) {
-	var network struct {
-		Labels map[string]string `json:"Labels"`
-		IPAM   struct {
+func ipv6Error(name string) error {
+	return fmt.Errorf("network %s has IPv6, which the tenant firewall does not cover; turn IPv6 off in Docker's default-network-opts", name)
+}
+
+// network is what Murder reads of a network.
+type network struct {
+	// subnet is the IPv4 subnet, "" if there is none.
+	subnet string
+	owned  bool
+	ipv6   bool
+}
+
+func (d *Docker) inspectNetwork(ctx context.Context, name string) (network, error) {
+	var inspected struct {
+		Labels     map[string]string `json:"Labels"`
+		EnableIPv6 bool              `json:"EnableIPv6"`
+		IPAM       struct {
 			Config []struct {
 				Subnet string `json:"Subnet"`
 			} `json:"Config"`
 		} `json:"IPAM"`
 	}
-	if err := d.do(ctx, request{method: http.MethodGet, path: "/networks/" + url.PathEscape(name)}, &network); err != nil {
-		return "", false, err
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/networks/" + url.PathEscape(name)}, &inspected); err != nil {
+		return network{}, err
 	}
-	owned := network.Labels[LabelManaged] == "true" && network.Labels[LabelNode] == d.node
-	for _, config := range network.IPAM.Config {
-		if config.Subnet != "" && !strings.Contains(config.Subnet, ":") {
-			return config.Subnet, owned, nil
+	result := network{
+		owned: inspected.Labels[LabelManaged] == "true" && inspected.Labels[LabelNode] == d.node,
+		ipv6:  inspected.EnableIPv6,
+	}
+	for _, config := range inspected.IPAM.Config {
+		if config.Subnet == "" {
+			continue
+		}
+		if strings.Contains(config.Subnet, ":") {
+			result.ipv6 = true
+		} else if result.subnet == "" {
+			result.subnet = config.Subnet
 		}
 	}
-	return "", owned, nil
+	return result, nil
 }
 
 func (d *Docker) RemoveNetwork(ctx context.Context, name string) error {
-	_, owned, err := d.inspectNetwork(ctx, name)
+	existing, err := d.inspectNetwork(ctx, name)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
-	if err == nil && !owned {
+	if err == nil && !existing.owned {
 		return fmt.Errorf("network %s is %w (node %s); left in place", name, ErrNotOwned, d.node)
 	}
 	if err != nil {

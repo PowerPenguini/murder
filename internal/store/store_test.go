@@ -725,3 +725,26 @@ func TestPurgeFreesTheSubnet(t *testing.T) {
 		t.Fatalf("gamma = %+v, %v; want the purged %s", gamma, err, acme.Subnet)
 	}
 }
+
+// A tenant outside the network pool would escape the tenant firewall, so a
+// store opened with another pool is refused.
+func TestOpenRefusesTenantsOutsideThePool(t *testing.T) {
+	st, path := withApp(t, options())
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Archive("acme", "a"); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	moved := options()
+	moved.NetworkPool = netip.MustParsePrefix("10.250.0.0/16")
+	if _, err := Open(path, moved); err == nil || !strings.Contains(err.Error(), "outside the network pool") {
+		t.Fatalf("open with another pool = %v", err)
+	}
+	reopened, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reopened.Close()
+}
