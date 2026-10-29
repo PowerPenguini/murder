@@ -154,6 +154,9 @@ func runRestore(args []string) error {
 	}
 	kept, err := store.Restore(from, cfg.Database)
 	if err != nil {
+		if kept != "" {
+			return fmt.Errorf("%w; part of the database it was replacing is now at %s*", err, kept)
+		}
 		return err
 	}
 	fmt.Fprintf(stdout, "restored node %s (%d tenants) from %s\n", info.Node, info.Tenants, from)

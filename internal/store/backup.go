@@ -142,7 +142,8 @@ func CheckBackup(path string) (BackupInfo, error) {
 // Restore puts the backup at from in place of the database at path. The
 // agent must be stopped: Restore takes its lock. The database it replaces,
 // if any, is kept beside it, with its write-ahead log, under the name
-// returned; the log is never left to be applied to the restored copy.
+// returned, also with an error if Restore stopped while moving it; the log
+// is never left to be applied to the restored copy.
 func Restore(from, path string) (kept string, err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -185,14 +186,15 @@ func Restore(from, path string) (kept string, err error) {
 	}
 	// Whatever is there goes aside, the log even without its database: a
 	// log left beside the restored copy would be applied to it.
-	name := path + ".before-restore-" + time.Now().UTC().Format("20060102T150405Z")
+	name := path + ".before-restore-" + time.Now().UTC().Format("20060102T150405.000000000Z")
 	for _, suffix := range []string{"-wal", "-shm", "-journal", ""} {
 		err := os.Rename(path+suffix, name+suffix)
 		switch {
 		case err == nil:
 			kept = name
 		case !errors.Is(err, os.ErrNotExist):
-			return "", fmt.Errorf("keep the current database: %w", err)
+			// What was moved stays where it went; the caller says where.
+			return kept, fmt.Errorf("keep the current database: %w", err)
 		}
 	}
 	if err := os.Rename(temp.Name(), path); err != nil {
