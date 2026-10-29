@@ -13,9 +13,6 @@ import (
 // ErrNotFound reports a missing container, network or image.
 var ErrNotFound = errors.New("not found")
 
-// ErrNotRunning reports a container that has no running process.
-var ErrNotRunning = errors.New("container is not running")
-
 // ErrNotOwned reports an object with the expected name that this node does
 // not own; Murder leaves it alone.
 var ErrNotOwned = errors.New("not owned by this node")
@@ -82,8 +79,26 @@ type Runtime interface {
 	Remove(ctx context.Context, id string) error
 	// Logs returns the last lines of a container's output.
 	Logs(ctx context.Context, id string, tail int) ([]byte, error)
-	// Pid returns the host PID of a running container's main process.
-	Pid(ctx context.Context, id string) (int, error)
+	// Inspect returns what the engine knows about a container's process.
+	Inspect(ctx context.Context, id string) (ContainerState, error)
+}
+
+// ContainerState is the state of a container's process.
+type ContainerState struct {
+	// Pid is the host PID of the main process; 0 when none runs.
+	Pid int
+	// Restarting is set while the engine waits to restart the container
+	// after its process exited; Restarts counts those restarts since the
+	// container was last started by hand (or by Murder).
+	Restarting bool
+	Restarts   int
+	// ExitedAt is when the process last exited; zero if it never did.
+	// ExitCode is that exit's code, known only until the process runs
+	// again; OOMKilled reports whether the kernel killed it for going over
+	// the memory limit.
+	ExitedAt  time.Time
+	ExitCode  int
+	OOMKilled bool
 }
 
 // Container is the observed state of one managed container.

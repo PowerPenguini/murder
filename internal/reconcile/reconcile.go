@@ -37,6 +37,9 @@ const (
 	// PhasePulling waits for the tenant's image; a container already
 	// running keeps serving meanwhile.
 	PhasePulling = "pulling"
+	// PhaseRestarting is a container whose process exited and that the
+	// engine is about to start again; LastExit says why it exited.
+	PhaseRestarting = "restarting"
 )
 
 // healthChecks is how many health checks run at once.
@@ -49,7 +52,12 @@ type Status struct {
 	Message string `json:"message,omitempty"`
 	// Warning reports a problem that does not stop the tenant, such as a
 	// disk limit below what it already stores.
-	Warning     string    `json:"warning,omitempty"`
+	Warning string `json:"warning,omitempty"`
+	// Restarts counts how often the engine restarted the container after
+	// its process exited; LastExit says when it last exited and, if known,
+	// why. Both start again with a new container.
+	Restarts    int       `json:"restarts,omitempty"`
+	LastExit    string    `json:"lastExit,omitempty"`
 	ContainerID string    `json:"containerID,omitempty"`
 	Generation  int64     `json:"generation"`
 	CheckedAt   time.Time `json:"checkedAt"`
@@ -165,8 +173,15 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	return r.reconcile(ctx)
 }
 
+// reconcile is cancelled with ctx between tenants: a tenant whose step has
+// begun, such as a container replacement, finishes it (within
+// stepGrace), so stopping the agent or interrupting "murder reconcile"
+// never leaves a tenant with its old container removed and no new one.
+// An interrupted pass keeps the statuses of the last whole one.
 func (r *Reconciler) reconcile(ctx context.Context) error {
-	containers, err := r.runtime.List(ctx)
+	step, cancel := outlive(ctx, r.config.StopTimeout+stepGrace)
+	defer cancel()
+	containers, err := r.runtime.List(step)
 	if err != nil {
 		return fmt.Errorf("list containers: %w", err)
 	}
@@ -188,18 +203,24 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		if wanted[tenant] {
 			continue
 		}
-		if err := r.removeContainers(ctx, byTenant[tenant]); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := r.removeContainers(step, byTenant[tenant]); err != nil {
 			errs = append(errs, fmt.Errorf("remove containers of %q, which no tenant wants: %w", tenant, err))
 			continue
 		}
 		r.log.Info("removed the containers of a tenant no longer wanted", "tenant", tenant)
 	}
-	if err := r.removeOrphanNetworks(ctx, wanted); err != nil {
+	if err := r.removeOrphanNetworks(step, wanted); err != nil {
 		errs = append(errs, err)
 	}
 	statuses := make([]Status, len(records))
 	for i, record := range records {
-		status, err := r.reconcileTenant(ctx, record, byTenant[record.Spec.Name])
+		if ctx.Err() != nil {
+			return errors.Join(append(errs, ctx.Err())...)
+		}
+		status, err := r.reconcileTenant(step, record, byTenant[record.Spec.Name])
 		if err != nil {
 			status.Phase, status.Healthy, status.Message = PhaseFailed, false, err.Error()
 			errs = append(errs, fmt.Errorf("tenant %s: %w", record.Spec.Name, err))
@@ -228,6 +249,9 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		})
 	}
 	checks.Wait()
+	if ctx.Err() != nil {
+		return errors.Join(append(errs, ctx.Err())...)
+	}
 	byName := make(map[string]Status, len(records))
 	for i, record := range records {
 		statuses[i].Generation = record.Generation
@@ -244,6 +268,30 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	r.pulls.keep(images)
 	r.sweepImages(ctx)
 	return errors.Join(errs...)
+}
+
+// stepGrace is how long, beyond the stop timeout, a tenant's step may go on
+// once its pass is cancelled. It keeps the agent's stop within systemd's
+// default 90 s.
+const stepGrace = 30 * time.Second
+
+// outlive returns a context that ends grace after ctx ends, or when cancel
+// is called: a step begun under ctx gets that long to finish.
+func outlive(ctx context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
+	step, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancel()
+		case <-step.Done():
+		}
+	})
+	return step, func() {
+		stop()
+		cancel()
+	}
 }
 
 // removeOrphanNetworks removes the networks of tenants not running here,
@@ -331,26 +379,31 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		}
 		outdated = append(outdated, existing[i])
 	}
-	// A container started before its dataset was mounted runs on the empty
-	// directory underneath; it is replaced, not adopted. One listed as
-	// stopped is checked too: its restart policy may have started it since,
-	// possibly before Ensure mounted the dataset. One still stopped sees the
-	// dataset once started.
-	if current != nil && r.volumes.LateMounts() {
-		serving, err := r.servesData(ctx, record, current.ID)
+	// What List said may be out of date: a stopped container may have been
+	// started by its restart policy since (possibly before Ensure mounted
+	// the dataset), a running one may have exited.
+	var state runtime.ContainerState
+	if current != nil {
+		state, err = r.runtime.Inspect(ctx, current.ID)
 		switch {
-		case errors.Is(err, runtime.ErrNotRunning):
-			current.Running = false // stopped, or exited since List; started below
 		case errors.Is(err, runtime.ErrNotFound):
-			current = nil // it was removed since List; recreated below
+			current = nil // removed since List; recreated below
 		case err != nil:
-			return Status{}, err
-		case !serving:
+			return Status{}, fmt.Errorf("inspect container: %w", err)
+		}
+	}
+	// A container started before its dataset was mounted runs on the empty
+	// directory underneath; it is replaced, not adopted. One not running
+	// sees the dataset once started.
+	if current != nil && state.Pid > 0 && r.volumes.LateMounts() {
+		serving, err := r.volumes.Serving(ctx, tenant.Name, state.Pid)
+		if err != nil {
+			return Status{}, fmt.Errorf("check the container's data mount: %w", err)
+		}
+		if !serving {
 			r.log.Warn("container does not see the tenant's data; replacing it", "tenant", tenant.Name, "container", current.ID)
 			outdated = append(outdated, *current)
 			current = nil
-		default:
-			current.Running = true
 		}
 	}
 	if current == nil {
@@ -376,27 +429,40 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		if err := r.removeContainers(ctx, outdated); err != nil {
 			return Status{}, err
 		}
-		if !current.Running {
+		// One the engine is restarting is left to it.
+		if state.Pid == 0 && !state.Restarting {
 			if err := r.runtime.Start(ctx, current.ID); err != nil {
 				return Status{}, fmt.Errorf("start: %w", err)
 			}
 			r.log.Info("restarted stopped tenant container", "tenant", tenant.Name, "container", current.ID)
 		}
 	}
-	return Status{Phase: PhaseRunning, ContainerID: current.ID}, nil
+	status = Status{Phase: PhaseRunning, ContainerID: current.ID, Restarts: state.Restarts}
+	// An exit the container was not restarted after was Murder's or the
+	// host's doing, not the app's.
+	if state.Restarts > 0 {
+		status.LastExit = lastExit(state, tenant.Limits.Or(r.config.DefaultLimits).MemoryMB)
+	}
+	if state.Restarting {
+		status.Phase, status.Message = PhaseRestarting, "the app keeps exiting; the engine restarts it"
+	}
+	return status, nil
 }
 
-// servesData reports whether a running container sees the tenant's data.
-func (r *Reconciler) servesData(ctx context.Context, record store.Record, id string) (bool, error) {
-	pid, err := r.runtime.Pid(ctx, id)
-	if err != nil {
-		return false, fmt.Errorf("inspect container: %w", err)
+// lastExit describes the last exit of a container's process.
+func lastExit(state runtime.ContainerState, memoryMB int) string {
+	if state.ExitedAt.IsZero() {
+		return ""
 	}
-	serving, err := r.volumes.Serving(ctx, record.Spec.Name, pid)
-	if err != nil {
-		return false, fmt.Errorf("check the container's data mount: %w", err)
+	at := state.ExitedAt.UTC().Format(time.RFC3339)
+	switch {
+	case state.OOMKilled:
+		return fmt.Sprintf("killed for using more than its %d MB of memory, at %s", memoryMB, at)
+	case state.Pid == 0:
+		return fmt.Sprintf("exited with code %d at %s", state.ExitCode, at)
+	default:
+		return "exited at " + at // the code is gone once it runs again
 	}
-	return serving, nil
 }
 
 // replace starts the desired container in place of outdated ones. Nothing is

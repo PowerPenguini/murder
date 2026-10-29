@@ -57,9 +57,13 @@ type fakeRuntime struct {
 	// restartAfterList makes the next List report every container stopped
 	// and then starts them, as a restart policy would during a pass.
 	restartAfterList bool
-	// exitBeforeInspect makes the next Pid call see the container gone, as
-	// if it exited between List and the inspection.
+	// exitBeforeInspect makes the next Inspect call see the container's
+	// process gone, as if it exited between List and the inspection.
 	exitBeforeInspect bool
+	// state is what Inspect reports beyond the PID: restarts and the last
+	// exit. onStop runs when Stop is called.
+	state  runtime.ContainerState
+	onStop func()
 }
 
 type fakeContainer struct {
@@ -214,7 +218,13 @@ func (f *fakeRuntime) Start(_ context.Context, id string) error {
 	return nil
 }
 
-func (f *fakeRuntime) Stop(_ context.Context, id string, _ time.Duration) error {
+func (f *fakeRuntime) Stop(ctx context.Context, id string, _ time.Duration) error {
+	if f.onStop != nil {
+		f.onStop()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.containers[id].Running, f.containers[id].State = false, "exited"
@@ -239,14 +249,19 @@ func (f *fakeRuntime) Resolve(_ context.Context, ref string) (string, string, er
 	return ref, "", nil
 }
 
-func (f *fakeRuntime) Pid(_ context.Context, id string) (int, error) {
+func (f *fakeRuntime) Inspect(_ context.Context, id string) (runtime.ContainerState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if container, ok := f.containers[id]; !ok || !container.Running || f.exitBeforeInspect {
-		f.exitBeforeInspect = false
-		return 0, fmt.Errorf("container %s: %w", id, runtime.ErrNotRunning)
+	container, ok := f.containers[id]
+	if !ok {
+		return runtime.ContainerState{}, fmt.Errorf("container %s: %w", id, runtime.ErrNotFound)
 	}
-	return 4242, nil
+	state := f.state
+	if container.Running && !state.Restarting && !f.exitBeforeInspect {
+		state.Pid = 4242
+	}
+	f.exitBeforeInspect = false
+	return state, nil
 }
 
 func (f *fakeRuntime) only(t *testing.T) *fakeContainer {
@@ -1167,5 +1182,82 @@ func TestSpecHashIsStable(t *testing.T) {
 	moved, _ := f.reconciler.containerSpec(record, "/srv/acme")
 	if moved.Labels[runtime.LabelHash] == first.Labels[runtime.LabelHash] {
 		t.Fatal("a different subnet kept the same hash")
+	}
+}
+
+// Stopping the agent while a container is replaced lets the replacement
+// finish, so the tenant is not left without a container, and stops the
+// pass before the next tenant.
+func TestCancelledPassFinishesTheReplacementUnderWay(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.create(t, "beta")
+	f.reconcile(t)
+	before := map[string]string{}
+	for _, container := range f.runtime.containers {
+		before[container.Labels[runtime.LabelTenant]] = container.ID
+	}
+	statusBefore, _ := f.reconciler.Status("acme")
+	for _, name := range []string{"acme", "beta"} {
+		f.updateApp(t, name, func(app *spec.Tenant) { app.Env["NEW"] = "1" })
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.runtime.onStop = cancel // the signal arrives while the old one stops
+	if err := f.reconciler.Reconcile(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Reconcile = %v, want context.Canceled", err)
+	}
+	after := map[string]*fakeContainer{}
+	for _, container := range f.runtime.containers {
+		after[container.Labels[runtime.LabelTenant]] = container
+	}
+	if acme := after["acme"]; acme == nil || acme.ID == before["acme"] || !acme.Running {
+		t.Fatalf("acme after the cancelled pass = %+v, want its replacement running", acme)
+	}
+	if beta := after["beta"]; beta == nil || beta.ID != before["beta"] || !beta.Running {
+		t.Fatalf("beta after the cancelled pass = %+v, want it untouched", beta)
+	}
+	if status, _ := f.reconciler.Status("acme"); status != statusBefore {
+		t.Fatalf("status after an interrupted pass = %+v, want the last whole pass's %+v", status, statusBefore)
+	}
+}
+
+// A container the engine is restarting after a crash is left to it, and
+// its status tells why it exited.
+func TestRestartingContainerReportsWhyItExited(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	exited := time.Date(2026, 10, 29, 15, 2, 0, 0, time.UTC)
+	f.runtime.state = runtime.ContainerState{Restarting: true, Restarts: 3, OOMKilled: true, ExitCode: 137, ExitedAt: exited}
+	f.runtime.takeEvents()
+	f.reconcile(t)
+	if events := f.runtime.takeEvents(); len(events) != 0 {
+		t.Fatalf("events = %v, want the engine left to restart it", events)
+	}
+	status, _ := f.reconciler.Status("acme")
+	if status.Phase != PhaseRestarting || status.Healthy || status.Restarts != 3 ||
+		status.LastExit != "killed for using more than its 256 MB of memory, at 2026-10-29T15:02:00Z" {
+		t.Fatalf("status = %+v", status)
+	}
+	// Running again, it still tells how often and when it last exited.
+	f.runtime.state = runtime.ContainerState{Restarts: 4, ExitedAt: exited}
+	f.reconcile(t)
+	status, _ = f.reconciler.Status("acme")
+	if status.Phase != PhaseRunning || !status.Healthy || status.Restarts != 4 || status.LastExit != "exited at 2026-10-29T15:02:00Z" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+// An exit the container was not restarted after (Murder or the host
+// stopped it) is not reported as the app's.
+func TestExitWithoutRestartIsNotReported(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.runtime.state = runtime.ContainerState{ExitCode: 143, ExitedAt: time.Now()}
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.LastExit != "" || status.Restarts != 0 {
+		t.Fatalf("status = %+v", status)
 	}
 }

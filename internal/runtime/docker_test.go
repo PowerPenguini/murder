@@ -97,6 +97,9 @@ func TestCreateSendsHardenedContainer(t *testing.T) {
 	if endpoint["IPAMConfig"].(map[string]any)["IPv4Address"] != "10.240.0.18" {
 		t.Errorf("endpoint = %v, want the fixed address", endpoint)
 	}
+	if host["Memory"] != float64(512<<20) || host["MemorySwap"] != float64(512<<20) {
+		t.Errorf("memory = %v, swap = %v; want 512 MB and no swap beyond it", host["Memory"], host["MemorySwap"])
+	}
 	if host["ReadonlyRootfs"] != true || host["NetworkMode"] != "murder-acme" || host["PidsLimit"] != float64(256) {
 		t.Errorf("host config = %v", host)
 	}
@@ -406,5 +409,26 @@ func TestImageIDAndRemoveImage(t *testing.T) {
 		if strings.HasPrefix(request, "DELETE") && strings.Contains(request, "force") {
 			t.Fatalf("forced a removal: %s", request)
 		}
+	}
+}
+
+func TestInspectReportsRestartsAndTheLastExit(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	engine.handlers["GET /containers/crashing/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"RestartCount":3,"State":{"Pid":0,"Restarting":true,"OOMKilled":true,"ExitCode":137,"FinishedAt":"2026-10-29T15:02:00.123Z"}}`))
+	}
+	engine.handlers["GET /containers/fresh/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"RestartCount":0,"State":{"Pid":4242,"FinishedAt":"0001-01-01T00:00:00Z"}}`))
+	}
+	state, err := docker.Inspect(context.Background(), "crashing")
+	want := ContainerState{Restarting: true, Restarts: 3, OOMKilled: true, ExitCode: 137, ExitedAt: time.Date(2026, 10, 29, 15, 2, 0, 123e6, time.UTC)}
+	if err != nil || state != want {
+		t.Fatalf("Inspect = %+v, %v; want %+v", state, err, want)
+	}
+	if state, err := docker.Inspect(context.Background(), "fresh"); err != nil || state != (ContainerState{Pid: 4242}) {
+		t.Fatalf("Inspect = %+v, %v; want only the PID", state, err)
+	}
+	if _, err := docker.Inspect(context.Background(), "gone"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Inspect of a missing container = %v", err)
 	}
 }

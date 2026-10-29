@@ -318,9 +318,17 @@ func printTable(tenants []api.Tenant) error {
 			// Not routed; when it was archived helps decide what to purge.
 			state, url = "archived "+tenant.ArchivedAt.Local().Format(time.DateOnly), "-"
 		} else if tenant.Status != nil {
+			// tenant show tells what the warning is and why it restarted.
 			state = tenant.Status.Phase
+			var notes []string
+			if n := tenant.Status.Restarts; n > 0 {
+				notes = append(notes, fmt.Sprintf("%d restarts", n))
+			}
 			if tenant.Status.Warning != "" {
-				state += " (warning)" // tenant show tells what
+				notes = append(notes, "warning")
+			}
+			if len(notes) > 0 {
+				state += " (" + strings.Join(notes, ", ") + ")"
 			}
 			if tenant.Status.Phase == reconcile.PhaseRunning {
 				healthy = fmt.Sprint(tenant.Status.Healthy)

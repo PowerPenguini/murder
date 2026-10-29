@@ -503,6 +503,12 @@ func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error)
 		"NetworkMode":    spec.Network,
 		"LogConfig":      map[string]any{"Type": "json-file", "Config": map[string]string{"max-size": "10m", "max-file": "3"}},
 	}
+	// No swap on top of the memory limit (the engine would allow as much
+	// again): an app over its limit is killed and says so, rather than
+	// slowing the whole host down.
+	if spec.MemoryBytes > 0 {
+		host["MemorySwap"] = spec.MemoryBytes
+	}
 	body := map[string]any{
 		"Image":            spec.Image,
 		"Env":              spec.Env,
@@ -543,19 +549,32 @@ func (d *Docker) Remove(ctx context.Context, id string) error {
 	return err
 }
 
-func (d *Docker) Pid(ctx context.Context, id string) (int, error) {
+func (d *Docker) Inspect(ctx context.Context, id string) (ContainerState, error) {
 	var inspected struct {
-		State struct {
-			Pid int `json:"Pid"`
+		RestartCount int `json:"RestartCount"`
+		State        struct {
+			Pid        int       `json:"Pid"`
+			Restarting bool      `json:"Restarting"`
+			OOMKilled  bool      `json:"OOMKilled"`
+			ExitCode   int       `json:"ExitCode"`
+			FinishedAt time.Time `json:"FinishedAt"`
 		} `json:"State"`
 	}
 	if err := d.do(ctx, request{method: http.MethodGet, path: "/containers/" + url.PathEscape(id) + "/json"}, &inspected); err != nil {
-		return 0, err
+		return ContainerState{}, err
 	}
-	if inspected.State.Pid <= 0 {
-		return 0, fmt.Errorf("container %s: %w", id, ErrNotRunning)
+	state := ContainerState{
+		Pid:        max(inspected.State.Pid, 0),
+		Restarting: inspected.State.Restarting,
+		Restarts:   inspected.RestartCount,
+		OOMKilled:  inspected.State.OOMKilled,
+		ExitCode:   inspected.State.ExitCode,
 	}
-	return inspected.State.Pid, nil
+	// The engine reports "never" as the zero time, 0001-01-01T00:00:00Z.
+	if inspected.State.FinishedAt.Year() > 1 {
+		state.ExitedAt = inspected.State.FinishedAt.UTC()
+	}
+	return state, nil
 }
 
 func (d *Docker) Logs(ctx context.Context, id string, tail int) ([]byte, error) {

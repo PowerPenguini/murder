@@ -414,3 +414,43 @@ func TestRemoveImageOnDocker(t *testing.T) {
 		t.Fatalf("remove a missing image = %v", err)
 	}
 }
+
+// An app that goes over its memory limit is killed, restarted by the
+// engine and reported with why it exited.
+func TestOutOfMemoryIsReportedOnDocker(t *testing.T) {
+	if _, err := os.Stat(dockerSocket()); err != nil {
+		t.Skipf("no Docker socket: %v", err)
+	}
+	suffix := make([]byte, 3)
+	_, _ = rand.Read(suffix)
+	tenant := "it-oom-" + hex.EncodeToString(suffix)
+	image := buildTestImage(t, "oom", "murder-it/"+tenant+":oom")
+	cleanupTenant(t, tenant)
+	n := newNode(t, tenant)
+	ctx := context.Background()
+	app := spec.Tenant{
+		Image: image, HealthPath: "/health",
+		User:   strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
+		Limits: spec.Limits{MemoryMB: 16, CPUs: 0.5, PIDs: 64},
+	}
+	if _, err := n.client.PutApp(ctx, "it-oom", app); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.client.Create(ctx, api.TenantRequest{Name: tenant, App: "it-oom"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	var status reconcile.Status
+	for time.Now().Before(deadline) {
+		_ = n.reconciler.Reconcile(ctx)
+		status, _ = n.reconciler.Status(tenant)
+		if status.Restarts > 0 && strings.Contains(status.LastExit, "more than its 16 MB of memory") {
+			if status.Healthy {
+				t.Fatalf("a tenant killed again and again is healthy: %+v", status)
+			}
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatalf("status = %+v, want restarts and an out-of-memory exit", status)
+}

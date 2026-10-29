@@ -14,6 +14,18 @@ import (
 )
 
 func main() {
+	if os.Getenv("VARIANT") == "oom" {
+		// Use memory until the kernel kills the process for going over its
+		// limit, as a leaking app would.
+		var held [][]byte
+		for {
+			block := make([]byte, 1<<20)
+			for i := range block {
+				block[i] = 1
+			}
+			held = append(held, block)
+		}
+	}
 	dataDir := os.Getenv("DATA_DIR")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })

@@ -143,7 +143,11 @@ func runAgent(args []string) error {
 
 	apiServer := &http.Server{Handler: api.NewServer(st, reconciler, docker, key, log).Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
 	go serve("api", apiServer, apiListener)
-	go reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
+	reconciled := make(chan struct{})
+	go func() {
+		defer close(reconciled)
+		reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
+	}()
 	if cfg.Firewall == config.FirewallNftables {
 		go keepFirewall(ctx, cfg, st, log)
 	}
@@ -189,6 +193,9 @@ func runAgent(args []string) error {
 	for _, server := range servers {
 		_ = server.Shutdown(shutdown)
 	}
+	// A tenant whose container is being replaced gets its new one first.
+	stop()
+	<-reconciled
 	log.Info("murder agent stopped")
 	return runErr
 }

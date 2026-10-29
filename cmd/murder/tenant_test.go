@@ -275,3 +275,18 @@ func TestTenantListShowsArchivedTenants(t *testing.T) {
 		t.Fatalf("list:\n%s", out)
 	}
 }
+
+// list says how often a tenant restarted and whether it has a warning.
+func TestTenantListShowsRestartsAndWarnings(t *testing.T) {
+	_, socket := startAgent(t,
+		api.Tenant{Spec: spec.Tenant{Name: "acme"}, App: "web", Status: &reconcile.Status{Phase: reconcile.PhaseRestarting, Restarts: 3, Warning: "disk"}},
+		api.Tenant{Spec: spec.Tenant{Name: "beta"}, App: "web", Status: &reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true}})
+	out := capture(t)
+	if err := runTenant([]string{"list", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[1], "restarting (3 restarts, warning)") || !strings.Contains(lines[2], "running ") || strings.Contains(lines[2], "(") {
+		t.Fatalf("list:\n%s", out)
+	}
+}
