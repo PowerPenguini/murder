@@ -373,3 +373,38 @@ func TestAddresses(t *testing.T) {
 		}
 	}
 }
+
+// ImageID finds an image's ID; RemoveImage deletes by ID, so the tags go
+// with the digest, and reports an image the engine keeps.
+func TestImageIDAndRemoveImage(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	ctx := context.Background()
+	engine.handlers["GET /images/ghcr.io/x/app@sha256:old/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Id":"sha256:id-old"}`))
+	}
+	if id, err := docker.ImageID(ctx, "ghcr.io/x/app@sha256:old"); err != nil || id != "sha256:id-old" {
+		t.Fatalf("ImageID = %q, %v", id, err)
+	}
+	if id, err := docker.ImageID(ctx, "ghcr.io/x/app@sha256:gone"); err != nil || id != "" {
+		t.Fatalf("ImageID of a missing image = %q, %v", id, err)
+	}
+	engine.handlers["DELETE /images/sha256:id-old"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`[]`)) }
+	if err := docker.RemoveImage(ctx, "sha256:id-old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.RemoveImage(ctx, "sha256:id-gone"); err != nil {
+		t.Fatalf("a missing image = %v", err)
+	}
+	engine.handlers["DELETE /images/sha256:id-used"] = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"conflict: unable to delete (cannot be forced) - image is being used by running container"}`))
+	}
+	if err := docker.RemoveImage(ctx, "sha256:id-used"); !errors.Is(err, ErrInUse) {
+		t.Fatalf("an image in use = %v", err)
+	}
+	for _, request := range engine.requests {
+		if strings.HasPrefix(request, "DELETE") && strings.Contains(request, "force") {
+			t.Fatalf("forced a removal: %s", request)
+		}
+	}
+}

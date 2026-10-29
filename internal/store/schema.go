@@ -6,10 +6,10 @@ import (
 )
 
 // schemaVersion is the version of the schema below, kept in PRAGMA
-// user_version. Versions 1 and 2 were development releases that never ran in
+// user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. A later change of
 // the schema adds a migration from this version.
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schema = `
 CREATE TABLE meta (
@@ -34,6 +34,8 @@ CREATE TABLE tenants (
 	suspended   INTEGER NOT NULL CHECK (suspended IN (0, 1)),
 	subnet      TEXT NOT NULL UNIQUE,
 	data_image  TEXT NOT NULL,
+	-- The image the data had before data_image, kept for a quick rollback.
+	previous_image TEXT NOT NULL,
 	generation  INTEGER NOT NULL,
 	created_at  TEXT NOT NULL,
 	updated_at  TEXT NOT NULL,
@@ -41,6 +43,12 @@ CREATE TABLE tenants (
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
+
+-- Every image a tenant was given or ran: the candidates for removal once
+-- no tenant needs them.
+CREATE TABLE images (
+	ref TEXT PRIMARY KEY
+) STRICT;
 
 -- Sealed secret values, kept until a purge deletes the tenant.
 CREATE TABLE secrets (

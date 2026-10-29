@@ -58,6 +58,9 @@ type Record struct {
 	// DataImage is the image whose container last owned the data. It is
 	// observed state: the reconciler sets it and it does not bump Generation.
 	DataImage string `json:"dataImage,omitempty"`
+	// PreviousImage is the image the data had before DataImage, kept on
+	// the node so a rollback needs no registry.
+	PreviousImage string `json:"previousImage,omitempty"`
 	// Generation counts changes of the desired state.
 	Generation int64     `json:"generation"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -161,8 +164,13 @@ type Store interface {
 	SetSuspended(name string, suspended bool, actor string) (Record, error)
 	// Rotate gives one secret of the tenant's spec a new value.
 	Rotate(name, secret, actor string) (Record, error)
-	// Observe records the image that now owns a tenant's data.
+	// Observe records the image that now owns a tenant's data; the one
+	// before becomes PreviousImage.
 	Observe(name, dataImage string) error
+	// Images lists every image a tenant was given or ran, still needed or
+	// not; ForgetImage drops one that is gone from the node.
+	Images() []string
+	ForgetImage(ref string) error
 
 	// Archive takes a live tenant out of service in one write; the
 	// reconciler then removes its container and network. Restore brings it

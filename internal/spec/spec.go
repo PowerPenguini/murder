@@ -274,6 +274,10 @@ func ValidName(name string) error {
 	return nil
 }
 
+// RegistryPinned reports whether image names exact content in a registry,
+// so it can be pulled again; a local image ID cannot.
+func RegistryPinned(image string) bool { return digestRef.MatchString(image) }
+
 // Pinned reports whether image names exact content.
 func Pinned(image string) bool {
 	return digestRef.MatchString(image) || imageID.MatchString(image)

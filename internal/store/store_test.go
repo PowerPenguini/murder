@@ -754,3 +754,42 @@ func TestSubnetsReadsEveryTenant(t *testing.T) {
 		t.Fatalf("a new tenant after a pool change = %+v, %v", gamma, err)
 	}
 }
+
+// Observe keeps the image the data had before, and every image a tenant is
+// given or runs is tracked until forgotten.
+func TestPreviousImageAndTrackedImages(t *testing.T) {
+	st, _ := withApp(t, options())
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "a"); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct{ data, previous string }{{image, ""}, {otherImage, image}, {otherImage, image}, {image, otherImage}} {
+		if err := st.Observe("acme", step.data); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := st.Get("acme"); got.DataImage != step.data || got.PreviousImage != step.previous {
+			t.Fatalf("after observing %s: data %s, previous %s", step.data, got.DataImage, got.PreviousImage)
+		}
+	}
+	if images := st.Images(); !slices.Equal(images, []string{image, otherImage}) {
+		t.Fatalf("tracked = %v", images)
+	}
+	// An image a tenant still has stays tracked; one none has goes.
+	if err := st.ForgetImage(otherImage); err != nil {
+		t.Fatal(err)
+	}
+	if images := st.Images(); !slices.Equal(images, []string{image, otherImage}) {
+		t.Fatalf("forgot an image acme still has: %v", images)
+	}
+	if err := st.Archive("acme", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Forget("acme", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ForgetImage(otherImage); err != nil {
+		t.Fatal(err)
+	}
+	if images := st.Images(); !slices.Equal(images, []string{image}) {
+		t.Fatalf("tracked after forgetting = %v", images)
+	}
+}

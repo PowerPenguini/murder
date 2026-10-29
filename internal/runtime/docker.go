@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 // apiVersion is the oldest Engine API that every supported Docker serves
@@ -169,6 +171,32 @@ func (d *Docker) HasImage(ctx context.Context, ref string) (bool, error) {
 	return err == nil, err
 }
 
+func (d *Docker) ImageID(ctx context.Context, ref string) (string, error) {
+	var image struct {
+		ID string `json:"Id"`
+	}
+	err := d.do(ctx, request{method: http.MethodGet, path: "/images/" + url.PathEscape(ref) + "/json"}, &image)
+	if errors.Is(err, ErrNotFound) {
+		return "", nil
+	}
+	return image.ID, err
+}
+
+// RemoveImage removes the image by its ID, so its tags in the repository go
+// too; the engine refuses, with 409, an image a container uses or one named
+// in several repositories.
+func (d *Docker) RemoveImage(ctx context.Context, id string) error {
+	err := d.do(ctx, request{method: http.MethodDelete, path: "/images/" + url.PathEscape(id)}, nil)
+	var apiErr *apiError
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return nil
+	case errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict:
+		return fmt.Errorf("image %s: %w: %s", id, ErrInUse, apiErr.Message)
+	}
+	return err
+}
+
 // PullImage pulls a digest-pinned reference.
 func (d *Docker) PullImage(ctx context.Context, ref string) error {
 	repository, digest, ok := strings.Cut(ref, "@")
@@ -216,7 +244,7 @@ func (d *Docker) pull(ctx context.Context, repository, tag string) error {
 }
 
 func (d *Docker) Resolve(ctx context.Context, ref string) (string, string, error) {
-	if strings.Contains(ref, "@sha256:") || strings.HasPrefix(ref, "sha256:") {
+	if spec.Pinned(ref) {
 		return ref, "", nil
 	}
 	repository, tag := splitTag(ref)

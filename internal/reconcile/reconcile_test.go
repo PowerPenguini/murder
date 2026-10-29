@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -44,6 +45,13 @@ type fakeRuntime struct {
 	failCreate error
 	failPull   error
 	failRemove error
+	// removedImages are the images RemoveImage deleted; aliases gives a
+	// name the ID of an image known by another name.
+	removedImages []string
+	aliases       map[string]string
+	// onImageID runs when an image's ID is looked up, as a write through the
+	// API could meanwhile.
+	onImageID func(ref string)
 	// restartAfterList makes the next List report every container stopped
 	// and then starts them, as a restart policy would during a pass.
 	restartAfterList bool
@@ -67,6 +75,45 @@ func (f *fakeRuntime) HasImage(_ context.Context, ref string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.images[ref], nil
+}
+
+// imageID is the ID of a present image: its alias, or the name itself.
+func (f *fakeRuntime) imageID(ref string) string {
+	if !f.images[ref] {
+		return ""
+	}
+	if id, ok := f.aliases[ref]; ok {
+		return id
+	}
+	return ref
+}
+
+func (f *fakeRuntime) ImageID(_ context.Context, ref string) (string, error) {
+	if f.onImageID != nil {
+		f.onImageID(ref)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.imageID(ref), nil
+}
+
+// RemoveImage refuses, like the engine, an image a container uses, and
+// removes every name of the image.
+func (f *fakeRuntime) RemoveImage(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, container := range f.containers {
+		if f.imageID(container.spec.Image) == id {
+			return fmt.Errorf("image %s: %w", id, runtime.ErrInUse)
+		}
+	}
+	for _, ref := range slices.Sorted(maps.Keys(f.images)) {
+		if f.imageID(ref) == id {
+			delete(f.images, ref)
+			f.removedImages = append(f.removedImages, ref)
+		}
+	}
+	return nil
 }
 
 func (f *fakeRuntime) PullImage(_ context.Context, ref string) error {
@@ -233,6 +280,8 @@ type fakeVolumes struct {
 	snapshots    []string
 	removed      []string
 	failSnapshot error
+	failPrune    error
+	pruned       []string
 	notServing   bool
 	diskGB       map[string]int
 	limitErr     error
@@ -264,6 +313,11 @@ func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string
 	}
 	f.snapshots = append(f.snapshots, tenant+"@"+reason)
 	return tenant + "@" + reason, nil
+}
+
+func (f *fakeVolumes) Prune(_ context.Context, tenant, reason string, keep int) error {
+	f.pruned = append(f.pruned, fmt.Sprintf("%s@%s keep %d", tenant, reason, keep))
+	return f.failPrune
 }
 
 func (f *fakeVolumes) Remove(ctx context.Context, tenant string) error {
@@ -436,6 +490,13 @@ func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 	if !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) || !slices.Equal(f.runtime.pulled, []string{imageB}) {
 		t.Fatalf("snapshots = %v, pulled = %v", f.volumes.snapshots, f.runtime.pulled)
 	}
+	if !slices.Equal(f.volumes.pruned, []string{"acme@image-change keep 5"}) {
+		t.Fatalf("pruned = %v", f.volumes.pruned)
+	}
+	// imageA is a local image, which could not be pulled again: it stays.
+	if len(f.runtime.removedImages) != 0 {
+		t.Fatalf("removed images = %v", f.runtime.removedImages)
+	}
 	events := strings.Join(f.runtime.takeEvents(), ",")
 	if events != fmt.Sprintf("stop %s,remove %s,create %s,start %s", old, old, replacement.ID, replacement.ID) {
 		t.Fatalf("events = %v", events)
@@ -448,6 +509,139 @@ func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 	f.reconcile(t)
 	if len(f.volumes.snapshots) != 1 {
 		t.Fatalf("an env change took a snapshot: %v", f.volumes.snapshots)
+	}
+}
+
+// A failed prune is logged; the image change goes on.
+func TestFailedPruneDoesNotBlockTheChange(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.volumes.failPrune = errors.New("dataset is busy")
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.reconcile(t)
+	if f.runtime.only(t).spec.Image != imageB {
+		t.Fatal("a failed prune blocked the image change")
+	}
+}
+
+// A registry image no tenant needs is removed: tenants need the image they
+// run, the one their data has and the one before, for a rollback. A local
+// image is never removed, and an image a tenant needs under another name
+// stays.
+func TestUnusedRegistryImagesAreRemoved(t *testing.T) {
+	release := func(n int) string {
+		return "registry.test/app@sha256:" + strings.Repeat(strconv.Itoa(n), 64)
+	}
+	f := newFixture(t)
+	for n := 1; n <= 4; n++ {
+		f.runtime.images[release(n)] = true
+	}
+	for _, name := range []string{"acme", "beta"} {
+		f.create(t, name)
+		f.updateApp(t, name, func(app *spec.Tenant) { app.Image = release(1) })
+	}
+	f.reconcile(t)
+	// imageA, which the tenants first got, is local: it stays.
+	for _, name := range []string{"acme", "beta"} {
+		f.updateApp(t, name, func(app *spec.Tenant) { app.Image = release(2) })
+	}
+	f.reconcile(t)
+	if len(f.runtime.removedImages) != 0 || !f.runtime.images[imageA] {
+		t.Fatalf("removed %v, though release1 is every tenant's previous image", f.runtime.removedImages)
+	}
+	// acme moves on; beta still keeps release1 as its previous image.
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = release(3) })
+	f.reconcile(t)
+	if len(f.runtime.removedImages) != 0 {
+		t.Fatalf("removed %v that beta keeps for a rollback", f.runtime.removedImages)
+	}
+	f.updateApp(t, "beta", func(app *spec.Tenant) { app.Image = release(3) })
+	f.reconcile(t)
+	if !slices.Equal(f.runtime.removedImages, []string{release(1)}) || !f.runtime.images[imageA] {
+		t.Fatalf("removed images = %v, want release1 only", f.runtime.removedImages)
+	}
+	// release2 is known to acme under another name too: it stays.
+	f.runtime.aliases = map[string]string{release(2): "id-2", release(4): "id-2"}
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = release(4) })
+	f.updateApp(t, "beta", func(app *spec.Tenant) { app.Image = release(4) })
+	f.reconcile(t)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = release(4) })
+	if !f.runtime.images[release(4)] || !f.runtime.images[release(2)] {
+		t.Fatalf("removed an image a tenant runs under another name: %v", f.runtime.removedImages)
+	}
+	// Purged tenants need nothing: their images go with the next pass.
+	for _, name := range []string{"acme", "beta"} {
+		f.archive(t, name)
+		f.reconcile(t)
+		if err := f.reconciler.Purge(context.Background(), name, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.reconcile(t)
+	if f.runtime.images[release(3)] || f.runtime.images[release(4)] || !f.runtime.images[imageA] {
+		t.Fatalf("after the purge: removed %v, left %v", f.runtime.removedImages, f.runtime.images)
+	}
+	// release2 was held back as release4's other name; once its delay is
+	// up, the next pass finds it gone and stops tracking it.
+	clear(f.reconciler.imageRetryAt)
+	f.reconcile(t)
+	if left := f.store.Images(); len(left) != 0 {
+		t.Fatalf("still tracked: %v", left)
+	}
+}
+
+// An image a tenant is given while the sweep runs is not removed.
+func TestImageGivenDuringTheSweepStays(t *testing.T) {
+	const old = "registry.test/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	f := newFixture(t)
+	f.runtime.images[old] = true
+	f.create(t, "acme")
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = old })
+	f.reconcile(t)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.reconcile(t)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageA })
+	f.runtime.onImageID = func(ref string) {
+		if ref == old {
+			f.runtime.onImageID = nil
+			f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = old }) // a rollback
+		}
+	}
+	if err := f.reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !f.runtime.images[old] {
+		t.Fatal("removed the image a rollback was just given")
+	}
+}
+
+// An image a container outside Murder uses is kept and tried again later,
+// not on every pass.
+func TestImageInUseIsRetriedLater(t *testing.T) {
+	const old = "registry.test/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	f := newFixture(t)
+	f.runtime.images[old] = true
+	f.create(t, "acme")
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = old })
+	f.reconcile(t)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.reconcile(t)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageA })
+	f.runtime.containers["outside"] = &fakeContainer{spec: runtime.ContainerSpec{Image: old}}
+	f.reconcile(t)
+	if !f.runtime.images[old] || f.reconciler.imageRetryAt[old].IsZero() {
+		t.Fatalf("an image in use: present %v, retry at %v", f.runtime.images[old], f.reconciler.imageRetryAt[old])
+	}
+	delete(f.runtime.containers, "outside")
+	f.reconcile(t)
+	if !f.runtime.images[old] {
+		t.Fatal("retried before the delay was up")
+	}
+	f.reconciler.imageRetryAt[old] = time.Time{}
+	f.reconcile(t)
+	if f.runtime.images[old] {
+		t.Fatal("not removed once free")
 	}
 }
 

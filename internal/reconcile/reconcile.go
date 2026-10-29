@@ -25,6 +25,10 @@ import (
 	"github.com/PowerPenguini/murder/internal/volume"
 )
 
+// snapshotsKept is how many snapshots before image changes a tenant keeps:
+// enough to go back a few releases without keeping old data forever.
+const snapshotsKept = 5
+
 // Phases a tenant can be in, as seen by the reconciler.
 const (
 	PhaseRunning   = "running"
@@ -71,9 +75,11 @@ type Reconciler struct {
 	backend func(store.Record) (string, error)
 
 	// pass serializes reconcile passes and the removal of tenants.
-	pass     sync.Mutex
-	mu       sync.RWMutex
-	statuses map[string]Status
+	pass sync.Mutex
+	// imageRetryAt holds back images the engine kept; only passes use it.
+	imageRetryAt map[string]time.Time
+	mu           sync.RWMutex
+	statuses     map[string]Status
 }
 
 // New returns a reconciler. All dependencies are required.
@@ -89,9 +95,10 @@ func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secret
 	}
 	return &Reconciler{
 		store: st, runtime: rt, volumes: volumes, key: key, config: config, log: log,
-		health:   &http.Client{Timeout: config.HealthTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		statuses: map[string]Status{},
-		backend:  Backend,
+		health:       &http.Client{Timeout: config.HealthTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		statuses:     map[string]Status{},
+		imageRetryAt: map[string]time.Time{},
+		backend:      Backend,
 	}
 }
 
@@ -172,6 +179,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	r.mu.Lock()
 	r.statuses = statuses
 	r.mu.Unlock()
+	r.sweepImages(ctx)
 	return errors.Join(errs...)
 }
 
@@ -335,6 +343,9 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 			return "", fmt.Errorf("snapshot before the image change (the old container keeps running): %w", err)
 		default:
 			r.log.Info("snapshot before image change", "tenant", tenant.Name, "snapshot", name, "from", record.DataImage, "to", tenant.Image)
+			if err := r.volumes.Prune(ctx, tenant.Name, "image-change", snapshotsKept); err != nil {
+				r.log.Warn("prune old snapshots", "tenant", tenant.Name, "error", err)
+			}
 		}
 	}
 	// From here on the data belongs to the new image: a later pass must not
@@ -381,6 +392,94 @@ func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// imageRetry is how long an image the engine kept, in use by a container,
+// waits before the next attempt to remove it.
+const imageRetry = time.Hour
+
+// sweepImages removes images no tenant needs any more, so old releases do
+// not fill the disk. A tenant needs the image it runs, the one its data has
+// and the one before (a rollback then needs no registry). Only images
+// pinned by registry digest go: those can be pulled again, a local image
+// could not. Images are compared by ID, so an image a tenant needs under
+// another name stays.
+func (r *Reconciler) sweepImages(ctx context.Context) {
+	needed := map[string]bool{}
+	for _, record := range r.store.List() {
+		for _, image := range []string{record.Spec.Image, record.DataImage, record.PreviousImage} {
+			if image != "" {
+				needed[image] = true
+			}
+		}
+	}
+	now := time.Now()
+	var candidates []string
+	for _, image := range r.store.Images() {
+		switch {
+		case needed[image] || now.Before(r.imageRetryAt[image]):
+		case !spec.RegistryPinned(image):
+			r.forgetImage(image) // a local image stays on the node, untracked
+		default:
+			candidates = append(candidates, image)
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	neededIDs := map[string]bool{}
+	for image := range needed {
+		id, err := r.runtime.ImageID(ctx, image)
+		if err != nil {
+			r.log.Warn("inspect an image a tenant needs; no image is removed this pass", "image", image, "error", err)
+			return
+		}
+		neededIDs[id] = true
+	}
+	for _, image := range candidates {
+		id, err := r.runtime.ImageID(ctx, image)
+		switch {
+		case err != nil:
+			r.log.Warn("inspect an image no tenant needs", "image", image, "error", err)
+			continue
+		case id == "":
+			r.forgetImage(image) // gone already
+			continue
+		case neededIDs[id]:
+			r.imageRetryAt[image] = now.Add(imageRetry) // needed under another name
+			continue
+		case r.needed(image):
+			continue // a tenant was given it since the sweep began
+		}
+		switch err := r.runtime.RemoveImage(ctx, id); {
+		case errors.Is(err, runtime.ErrInUse):
+			r.imageRetryAt[image] = now.Add(imageRetry)
+		case err != nil:
+			r.log.Warn("remove an image no tenant needs", "image", image, "error", err)
+			r.imageRetryAt[image] = now.Add(imageRetry)
+		default:
+			r.log.Info("removed an image no tenant needs", "image", image)
+			r.forgetImage(image)
+		}
+	}
+}
+
+// needed reports whether a tenant needs image now, read from the store
+// right before it is removed: API writes do not wait for the pass.
+func (r *Reconciler) needed(image string) bool {
+	for _, record := range r.store.List() {
+		if record.Spec.Image == image || record.DataImage == image || record.PreviousImage == image {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Reconciler) forgetImage(image string) {
+	delete(r.imageRetryAt, image)
+	if err := r.store.ForgetImage(image); err != nil {
+		r.log.Warn("forget an image", "image", image, "error", err)
+	}
 }
 
 // Backend is where a tenant listens: its fixed address in its network and

@@ -15,8 +15,13 @@ Stage 2 — a single server — is what this code does today.
 
 - **Reconciler.** Keeps Docker in line with the desired state. Each tenant gets
   its own container, network and data volume. A container is replaced when its
-  spec changes, and the volume is snapshotted first if the image changed.
-  Containers of archived or unknown tenants are removed. Tenants keep running
+  spec changes, and the volume is snapshotted first if the image changed; a
+  tenant keeps the last five of those snapshots. Each pass removes registry
+  images no tenant needs: a tenant needs the image it runs, the one its data
+  has and the one before, so a rollback by one release needs no registry.
+  Images are compared by ID, one a container still uses is tried again an
+  hour later, and local images stay (they could not be pulled again). Containers of archived or unknown tenants are
+  removed. Tenants keep running
   while the agent is down; a restarted agent adopts them without restarting
   them.
 - **Edge proxy.** Routes `<tenant>.<baseDomain>` to the tenant's container. It
