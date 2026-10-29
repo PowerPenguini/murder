@@ -75,6 +75,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	case *[]byte:
 		*out, err = io.ReadAll(response.Body)
 		return err
+	case io.Writer:
+		_, err = io.Copy(out, response.Body)
+		return err
 	default:
 		return json.NewDecoder(response.Body).Decode(out)
 	}
@@ -207,4 +210,9 @@ func (c *Client) Logs(ctx context.Context, name string, tail int) ([]byte, error
 
 func (c *Client) Reconcile(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/reconcile", nil, nil)
+}
+
+// Backup writes a copy of the agent's database to w.
+func (c *Client) Backup(ctx context.Context, w io.Writer) error {
+	return c.do(ctx, http.MethodGet, "/v1/backup", nil, w)
 }

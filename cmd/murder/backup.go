@@ -1,0 +1,136 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"time"
+
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/store"
+)
+
+// backupPattern matches the backups "murder backup" writes; their names
+// sort by time.
+const backupPattern = "murder-*.db"
+
+// runBackup asks the agent for a copy of its database and keeps it in a
+// directory as murder-<UTC time>.db, removing all but the newest keep.
+func runBackup(args []string) error {
+	flags := flag.NewFlagSet("backup", flag.ContinueOnError)
+	socket := socketPath(flags)
+	keep := flags.Int("keep", 48, "backups to keep in the directory, newest first; 0 keeps all")
+	flags.Usage = func() {
+		fmt.Fprintln(flags.Output(), "Usage: murder backup [-keep n] <directory>")
+		flags.PrintDefaults()
+	}
+	positional, err := parseInterspersed(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 || *keep < 0 {
+		flags.Usage()
+		return flag.ErrHelp
+	}
+	dir := positional[0]
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(dir, ".murder-backup-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temp.Name())
+	err = api.NewClient(*socket).Backup(context.Background(), temp)
+	if err = errors.Join(err, temp.Sync(), temp.Close()); err != nil {
+		return fmt.Errorf("back up the database: %w", err)
+	}
+	info, err := store.CheckBackup(temp.Name())
+	if err != nil {
+		return fmt.Errorf("the agent's copy is not usable: %w", err)
+	}
+	path := filepath.Join(dir, "murder-"+time.Now().UTC().Format("20060102T150405Z")+".db")
+	if err := os.Rename(temp.Name(), path); err != nil {
+		return err
+	}
+	if err := syncDir(dir); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "backed up node %s (%d tenants) to %s\n", info.Node, info.Tenants, path)
+	if *keep == 0 {
+		return nil
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, backupPattern))
+	if err != nil {
+		return err
+	}
+	slices.Sort(backups)
+	for _, old := range backups[:max(len(backups)-*keep, 0)] {
+		if err := os.Remove(old); err != nil {
+			return fmt.Errorf("remove an old backup: %w", err)
+		}
+	}
+	return nil
+}
+
+// runRestore puts a backup in place of the node's database while the agent
+// is stopped.
+func runRestore(args []string) error {
+	flags := flag.NewFlagSet("restore", flag.ContinueOnError)
+	configPath := flags.String("config", defaultConfig, "agent configuration file")
+	flags.Usage = func() {
+		fmt.Fprintln(flags.Output(), "Usage: murder restore [-config file] <backup>")
+		flags.PrintDefaults()
+	}
+	positional, err := parseInterspersed(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		flags.Usage()
+		return flag.ErrHelp
+	}
+	from := positional[0]
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	info, err := store.CheckBackup(from)
+	if err != nil {
+		return err
+	}
+	// Tenants whose secrets the node's key cannot open would not start.
+	if info.Secret != nil {
+		key, err := secrets.LoadKey(cfg.MasterKeyFile)
+		if err != nil {
+			return fmt.Errorf("%w (the backup's secrets need the master key of node %s)", err, info.Node)
+		}
+		if _, err := key.Open(secrets.Context(info.Secret.Tenant, info.Secret.Name), info.Secret.Sealed); err != nil {
+			return fmt.Errorf("the master key in %s does not open the backup's secrets: put the master key of node %s there first", cfg.MasterKeyFile, info.Node)
+		}
+	}
+	kept, err := store.Restore(from, cfg.Database)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "restored node %s (%d tenants) from %s\n", info.Node, info.Tenants, from)
+	if kept != "" {
+		fmt.Fprintf(stdout, "the database it replaced is kept as %s\n", kept)
+	}
+	return nil
+}
+
+func syncDir(dir string) error {
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}

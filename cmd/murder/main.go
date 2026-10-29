@@ -14,12 +14,14 @@ Node commands:
   init       create the master key and the database for a node
   agent      run the agent (reconciler, edge proxy and local API)
   firewall   load the tenant firewall (murder-firewall.service runs it at boot)
+  restore    put a backup in place of the node's database (agent stopped)
 
 Client commands (talk to the local agent):
   app        apply, list, show and delete apps (specs shared by tenants)
   tenant     create, configure, suspend, archive, restore and purge tenants
   events     show the audit log: who changed what, and when
   reconcile  run one reconcile pass now and report its errors
+  backup     save a copy of the agent's database to a directory
 
 Run "murder <command> -h" for a command's options.
 `
@@ -53,6 +55,10 @@ func run(args []string) error {
 		return runTenant(args[1:])
 	case "reconcile":
 		return runReconcile(args[1:])
+	case "backup":
+		return runBackup(args[1:])
+	case "restore":
+		return runRestore(args[1:])
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 		return nil

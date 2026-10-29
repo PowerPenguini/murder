@@ -32,6 +32,7 @@ var nodePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$`)
 // the whole state in memory, rebuilt inside every write transaction before
 // it commits, so memory and disk always agree.
 type SQLite struct {
+	path    string
 	db      *sql.DB
 	options Options
 	now     func() time.Time
@@ -183,7 +184,7 @@ func Open(path string, options Options) (*SQLite, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	s := &SQLite{db: db, options: options, now: time.Now, lock: lock, changed: make(chan struct{}, 1)}
+	s := &SQLite{path: path, db: db, options: options, now: time.Now, lock: lock, changed: make(chan struct{}, 1)}
 	if err := checkSchema(db); err != nil {
 		_ = s.Close()
 		return nil, fmt.Errorf("database %s: %w", path, err)
