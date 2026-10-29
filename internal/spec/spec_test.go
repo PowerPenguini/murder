@@ -207,20 +207,20 @@ func TestComposeAppliesOverridesWithoutChangingTheApp(t *testing.T) {
 	app := Tenant{
 		Image: "ghcr.io/example/app@" + digest, User: "10001:10001",
 		Env: map[string]string{"MODE": "prod", "TZ": "UTC"}, Secrets: Secrets{"SESSION_SECRET": {}},
-		Limits: Limits{MemoryMB: 512, CPUs: 1},
+		Limits: Limits{MemoryMB: 512, CPUs: 1, DiskGB: 10},
 	}
 	beta := Compose(app, "beta", Overrides{
 		Image: "ghcr.io/example/app:canary", Env: map[string]string{"TZ": "Europe/Berlin"},
-		Secrets: Secrets{"EXTRA": {Kind: "password"}}, Limits: Limits{MemoryMB: 768},
+		Secrets: Secrets{"EXTRA": {Kind: "password"}}, Limits: Limits{MemoryMB: 768, DiskGB: 50},
 	})
 	if beta.Name != "beta" || beta.Image != "ghcr.io/example/app:canary" || beta.Env["TZ"] != "Europe/Berlin" || beta.Env["MODE"] != "prod" {
 		t.Fatalf("beta = %+v", beta)
 	}
-	if beta.Limits.MemoryMB != 768 || beta.Limits.CPUs != 1 || beta.Secrets["EXTRA"].Bytes != 20 || beta.Secrets["SESSION_SECRET"].Bytes != 32 {
+	if beta.Limits != (Limits{MemoryMB: 768, CPUs: 1, DiskGB: 50}) || beta.Secrets["EXTRA"].Bytes != 20 || beta.Secrets["SESSION_SECRET"].Bytes != 32 {
 		t.Fatalf("beta limits or secrets = %+v %+v", beta.Limits, beta.Secrets)
 	}
 	acme := Compose(app, "acme", Overrides{})
-	if acme.Env["TZ"] != "UTC" || len(acme.Secrets) != 1 || acme.Image != app.Image || acme.Port != DefaultPort {
+	if acme.Env["TZ"] != "UTC" || len(acme.Secrets) != 1 || acme.Image != app.Image || acme.Port != DefaultPort || acme.Limits != app.Limits {
 		t.Fatalf("an override leaked into another tenant, or defaults are missing: %+v", acme)
 	}
 	if app.Env["TZ"] != "UTC" || len(app.Secrets) != 1 {
@@ -234,5 +234,22 @@ func TestOverridesCompareNormalized(t *testing.T) {
 	}
 	if (Overrides{Image: "a:1"}).Equal(Overrides{}) {
 		t.Fatal("different overrides are equal")
+	}
+}
+
+// Limits are bounded both ways, so the byte counts made of them cannot
+// overflow.
+func TestLimitsAreBounded(t *testing.T) {
+	for _, limits := range []Limits{{DiskGB: -1}, {DiskGB: maxDiskGB + 1}, {MemoryMB: maxMemoryMB + 1}, {CPUs: maxCPUs + 1}, {PIDs: maxPIDs + 1}} {
+		tenant := validTenant()
+		tenant.Limits = limits
+		if err := tenant.Validate(); err == nil {
+			t.Errorf("limits %+v accepted", limits)
+		}
+	}
+	tenant := validTenant()
+	tenant.Limits = Limits{MemoryMB: maxMemoryMB, CPUs: maxCPUs, PIDs: maxPIDs, DiskGB: maxDiskGB}
+	if err := tenant.Validate(); err != nil {
+		t.Fatalf("the largest limits = %v", err)
 	}
 }

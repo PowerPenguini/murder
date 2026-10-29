@@ -1,9 +1,11 @@
 # Test VM
 
-A local QEMU/KVM virtual machine for tests that need a real ZFS kernel module
-(and later Docker) on a host that has neither. It boots an Ubuntu 26.04 LTS
-cloud image, whose stock kernel ships `zfs.ko`, so cloud-init only installs
-`zfsutils-linux` with no DKMS build.
+A local QEMU/KVM virtual machine for tests that need a real ZFS kernel module,
+or root on a host with Docker and nftables (the tenant firewall), without
+touching the developer's machine. It boots an Ubuntu 26.04 LTS cloud image,
+whose stock kernel ships `zfs.ko`, so cloud-init only installs
+`zfsutils-linux`, `docker.io` and `nftables`, with no DKMS build. A VM made
+before Docker was added needs `destroy` and `up` to get it.
 
 ## Prerequisites
 
@@ -77,4 +79,5 @@ package fails to build or pass.
 - Tests should create and destroy their own pools, using unique pool names and
   `t.Cleanup`, because the VM is reused between runs.
 - `GO_TEST_TAGS` overrides the tag list (default `zfs`), for example
-  `GO_TEST_TAGS=zfs,docker` later on.
+  `GO_TEST_TAGS=firewall test/vm/go-test.sh ./internal/firewall` for the
+  tenant firewall.

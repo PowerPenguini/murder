@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 	if exists, err := dir.Exists(ctx, "acme"); err != nil || exists {
 		t.Fatalf("Exists before Ensure = %v, %v", exists, err)
 	}
-	path, err := dir.Ensure(ctx, "acme", uid, gid)
+	path, err := dir.Ensure(ctx, "acme", uid, gid, 5)
 	if err != nil || path != filepath.Join(root, "acme") {
 		t.Fatalf("Ensure = %q, %v", path, err)
 	}
@@ -31,7 +32,7 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, "data.db"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if again, err := dir.Ensure(ctx, "acme", uid, gid); err != nil || again != path {
+	if again, err := dir.Ensure(ctx, "acme", uid, gid, 5); err != nil || again != path {
 		t.Fatalf("second Ensure = %q, %v", again, err)
 	}
 	if _, err := os.Stat(filepath.Join(path, "data.db")); err != nil {
@@ -43,7 +44,7 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 	if _, err := dir.Snapshot(ctx, "acme", "image-change"); !errors.Is(err, ErrSnapshotsUnsupported) {
 		t.Fatalf("Snapshot = %v", err)
 	}
-	if _, err := dir.Ensure(ctx, "../etc", uid, gid); err == nil {
+	if _, err := dir.Ensure(ctx, "../etc", uid, gid, 0); err == nil {
 		t.Fatal("Ensure accepted a path-like tenant name")
 	}
 	if err := dir.Remove(ctx, "acme"); err != nil {
@@ -57,6 +58,7 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 type fakeDataset struct {
 	owner, mountpoint string
 	mounted           bool
+	refquota, used    int64
 }
 
 // fakeZFS answers zfs commands from an in-memory set of datasets.
@@ -83,7 +85,7 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		if owner == "" {
 			owner = "-"
 		}
-		return []byte(owner + "\n" + mounted + "\n" + d.mountpoint + "\n"), nil
+		return []byte(owner + "\n" + mounted + "\n" + d.mountpoint + "\n" + strconv.FormatInt(d.refquota, 10) + "\n"), nil
 	case "create":
 		d := &fakeDataset{mounted: true}
 		for i, arg := range args {
@@ -94,6 +96,8 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 			switch key {
 			case "mountpoint":
 				d.mountpoint = value
+			case "refquota":
+				d.refquota = parseQuota(value)
 			case ownerProperty:
 				d.owner = value
 			}
@@ -103,10 +107,22 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 	case "mount":
 		f.datasets[dataset].mounted = true
 		return nil, nil
+	case "set":
+		_, value, _ := strings.Cut(args[1], "=")
+		if quota := parseQuota(value); quota != 0 && quota < f.datasets[dataset].used {
+			return []byte("cannot set property for '" + dataset + "': size is less than current used or reserved space\n"), errors.New("exit status 1")
+		}
+		f.datasets[dataset].refquota = parseQuota(value)
+		return nil, nil
 	case "snapshot", "destroy":
 		return nil, nil
 	}
 	return nil, errors.New("unexpected command " + call)
+}
+
+func parseQuota(value string) int64 {
+	quota, _ := strconv.ParseInt(value, 10, 64) // "none" is 0
+	return quota
 }
 
 func (f *fakeZFS) ran(fragment string) bool {
@@ -119,11 +135,11 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	volumes := ZFS{Parent: "tank/murder", MountRoot: mountRoot, Run: fake.run, Now: func() time.Time { return time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC) }}
 	ctx := context.Background()
 	uid, gid := os.Getuid(), os.Getgid()
-	path, err := volumes.Ensure(ctx, "acme", uid, gid)
+	path, err := volumes.Ensure(ctx, "acme", uid, gid, 2)
 	if err != nil || path != filepath.Join(mountRoot, "acme") {
 		t.Fatalf("Ensure = %q, %v", path, err)
 	}
-	if !fake.ran("zfs create -p -o mountpoint=" + path + " -o setuid=off -o devices=off -o " + ownerProperty + "=acme tank/murder/acme") {
+	if !fake.ran("zfs create -p -o mountpoint=" + path + " -o setuid=off -o devices=off -o refquota=2147483648 -o " + ownerProperty + "=acme tank/murder/acme") {
 		t.Fatalf("calls = %v", fake.calls)
 	}
 	if info, _ := os.Stat(mountRoot); info.Mode().Perm() != 0o700 {
@@ -132,11 +148,28 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	// An existing but unmounted dataset is mounted, not recreated.
 	fake.datasets["tank/murder/acme"].mounted = false
 	fake.calls = nil
-	if _, err := volumes.Ensure(ctx, "acme", uid, gid); err != nil {
+	if _, err := volumes.Ensure(ctx, "acme", uid, gid, 2); err != nil {
 		t.Fatalf("Ensure of an unmounted dataset = %v", err)
 	}
-	if fake.ran("create") || !fake.ran("zfs mount tank/murder/acme") {
+	if fake.ran("create") || fake.ran("set") || !fake.ran("zfs mount tank/murder/acme") {
 		t.Fatalf("calls = %v", fake.calls)
+	}
+	// A changed limit is set on the dataset; no limit is "none".
+	for _, step := range []struct {
+		diskGB int
+		set    string
+	}{{5, "refquota=5368709120"}, {0, "refquota=none"}} {
+		fake.calls = nil
+		if _, err := volumes.Ensure(ctx, "acme", uid, gid, step.diskGB); err != nil || !fake.ran("zfs set "+step.set+" tank/murder/acme") {
+			t.Fatalf("Ensure with %d GB = %v, calls %v", step.diskGB, err, fake.calls)
+		}
+	}
+	// A limit below what the tenant stores is reported, and the data is
+	// still mounted and usable.
+	fake.datasets["tank/murder/acme"].used = 3 << 30
+	fake.datasets["tank/murder/acme"].mounted = false
+	if got, err := volumes.Ensure(ctx, "acme", uid, gid, 2); !errors.Is(err, ErrDiskLimit) || got != path || !fake.datasets["tank/murder/acme"].mounted {
+		t.Fatalf("Ensure below usage = %q, %v", got, err)
 	}
 	if exists, err := volumes.Exists(ctx, "acme"); err != nil || !exists {
 		t.Fatalf("Exists = %v, %v", exists, err)
@@ -172,7 +205,7 @@ func TestZFSRefusesForeignDatasets(t *testing.T) {
 	volumes := ZFS{Parent: "tank", MountRoot: mountRoot, Run: fake.run}
 	ctx := context.Background()
 	for _, tenant := range []string{"home", "other", "moved"} {
-		if _, err := volumes.Ensure(ctx, tenant, 1000, 1000); err == nil {
+		if _, err := volumes.Ensure(ctx, tenant, 1000, 1000, 0); err == nil {
 			t.Errorf("Ensure used foreign dataset tank/%s", tenant)
 		}
 		if err := volumes.Remove(ctx, tenant); err == nil {

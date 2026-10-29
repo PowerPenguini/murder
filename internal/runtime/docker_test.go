@@ -145,7 +145,12 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write([]byte(`{"Labels":{"io.murder.managed":"true","io.murder.node":"node-1"},"IPAM":{"Config":[{"Subnet":"fd00::/64"},{"Subnet":"10.240.0.16/28"}]}}`))
+		_, _ = w.Write([]byte(`{"Labels":{"io.murder.managed":"true","io.murder.node":"node-1"},"IPAM":{"Config":[{"Subnet":"10.240.0.16/28"}]}}`))
+	}
+	// A network with IPv6 (the engine's defaults can turn it on) is refused:
+	// the tenant firewall covers IPv4 only.
+	engine.handlers["GET /networks/murder-v6"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"EnableIPv6":true,"Labels":{"io.murder.managed":"true","io.murder.node":"node-1"},"IPAM":{"Config":[{"Subnet":"fd00::/64"},{"Subnet":"10.240.0.32/28"}]}}`))
 	}
 	engine.handlers["GET /networks/murder-foreign"] = func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"Labels":{"io.murder.managed":"true","io.murder.node":"node-2"},"IPAM":{"Config":[{"Subnet":"10.240.0.16/28"}]}}`))
@@ -155,7 +160,7 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		ipam := body["IPAM"].(map[string]any)["Config"].([]any)[0].(map[string]any)
 		labels := body["Labels"].(map[string]any)
-		if body["Name"] != "murder-acme" || ipam["Subnet"] != "10.240.0.16/28" || ipam["Gateway"] != "10.240.0.17" || labels[LabelNode] != "node-1" || body["Options"].(map[string]any)["com.docker.network.bridge.enable_icc"] != "false" {
+		if body["Name"] != "murder-acme" || ipam["Subnet"] != "10.240.0.16/28" || ipam["Gateway"] != "10.240.0.17" || labels[LabelNode] != "node-1" || body["Options"].(map[string]any)["com.docker.network.bridge.enable_icc"] != "false" || body["EnableIPv6"] != false {
 			t.Errorf("network create = %v", body)
 		}
 		created = true
@@ -167,6 +172,9 @@ func TestListStopRemoveAndNetwork(t *testing.T) {
 	}
 	if err := docker.EnsureNetwork(ctx, "murder-acme", "10.240.0.16/28", nil); err != nil {
 		t.Fatalf("an existing network with the right subnet = %v", err)
+	}
+	if err := docker.EnsureNetwork(ctx, "murder-v6", "10.240.0.32/28", nil); err == nil || !strings.Contains(err.Error(), "IPv6") {
+		t.Fatalf("a network with IPv6 = %v", err)
 	}
 	if err := docker.EnsureNetwork(ctx, "murder-acme", "10.240.0.32/28", nil); !errors.Is(err, ErrNetworkMismatch) {
 		t.Fatalf("an existing network with another subnet = %v", err)

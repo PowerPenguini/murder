@@ -117,6 +117,8 @@ package_update: true
 package_upgrade: false
 packages:
   - zfsutils-linux
+  - docker.io
+  - nftables
 runcmd:
   # Keep apt quiet so tests never race background upgrades for the dpkg lock.
   - [systemctl, disable, --now, apt-daily.timer, apt-daily-upgrade.timer, unattended-upgrades.service]
@@ -190,6 +192,8 @@ cmd_up() {
   # cloud-init exits 2 for "done with recoverable errors"; zfs checks below decide.
   ((rc == 0 || rc == 2)) || die "cloud-init failed (rc=$rc); try: $0 ssh sudo cloud-init status --long"
   vssh 'sudo modprobe zfs && zfs version' >&2 || die "zfs is not usable in the VM; try: $0 ssh sudo cloud-init status --long"
+  vssh 'sudo docker version --format "docker {{.Server.Version}}" && sudo nft --version' >&2 \
+    || die "docker or nft is not usable in the VM (a VM made before they were added needs destroy and up)"
   log "ready (ssh 127.0.0.1:$(ssh_port))"
 }
 

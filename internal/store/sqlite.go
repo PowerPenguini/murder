@@ -196,6 +196,43 @@ func Open(path string, options Options) (*SQLite, error) {
 	return s, nil
 }
 
+// Subnets returns every tenant's subnet, archived or not, from the database
+// at path, which it only reads, without the agent's lock: the tenant
+// firewall loads before the agent runs, and while it runs. A missing
+// database has none.
+func Subnets(path string) ([]netip.Prefix, error) {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	db, err := sql.Open("sqlite", uri(path, "mode=ro&_pragma=busy_timeout(5000)"))
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	if err := checkSchema(db); err != nil {
+		return nil, fmt.Errorf("database %s: %w", path, err)
+	}
+	rows, err := db.Query(`SELECT subnet FROM tenants`)
+	if err != nil {
+		return nil, err
+	}
+	var subnets []netip.Prefix
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		subnet, err := netip.ParsePrefix(text)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("database %s: subnet %q: %w", path, text, err)
+		}
+		subnets = append(subnets, subnet)
+	}
+	return subnets, closeRows(rows)
+}
+
 // ownerOnly makes a database, and its write-ahead log files, readable by
 // their owner only, as Init creates them: one copied into place from a
 // backup may have come with a wider mode. It changes nothing already
@@ -664,7 +701,7 @@ func overridesDetail(overrides spec.Overrides) string {
 		parts = append(parts, "secrets "+strings.Join(slices.Sorted(maps.Keys(overrides.Secrets)), ","))
 	}
 	if limits := overrides.Limits; limits != (spec.Limits{}) {
-		parts = append(parts, fmt.Sprintf("limits memoryMB=%d cpus=%g pids=%d", limits.MemoryMB, limits.CPUs, limits.PIDs))
+		parts = append(parts, fmt.Sprintf("limits memoryMB=%d cpus=%g pids=%d diskGB=%d", limits.MemoryMB, limits.CPUs, limits.PIDs, limits.DiskGB))
 	}
 	if len(parts) == 0 {
 		return ""

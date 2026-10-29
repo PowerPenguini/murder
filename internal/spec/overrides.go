@@ -76,14 +76,6 @@ func Compose(app Tenant, name string, overrides Overrides) Tenant {
 		}
 		maps.Copy(tenant.Secrets, overrides.Secrets)
 	}
-	if overrides.Limits.MemoryMB != 0 {
-		tenant.Limits.MemoryMB = overrides.Limits.MemoryMB
-	}
-	if overrides.Limits.CPUs != 0 {
-		tenant.Limits.CPUs = overrides.Limits.CPUs
-	}
-	if overrides.Limits.PIDs != 0 {
-		tenant.Limits.PIDs = overrides.Limits.PIDs
-	}
+	tenant.Limits = overrides.Limits.Or(tenant.Limits)
 	return tenant.WithDefaults()
 }

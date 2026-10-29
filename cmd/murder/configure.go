@@ -31,6 +31,7 @@ func configureTenant(command string, args []string) error {
 	memory := flags.Int("memory", 0, "memory limit in MB; 0 is the app's")
 	cpus := flags.Float64("cpus", 0, "CPU limit; 0 is the app's")
 	pids := flags.Int("pids", 0, "process limit; 0 is the app's")
+	disk := flags.Int("disk", 0, "data limit in GB (zfs volumes only); 0 is the app's")
 	var env, unsetEnv, secrets, unsetSecrets listFlag
 	flags.Var(&env, "env", "add or replace an env value: KEY=VALUE (repeatable)")
 	flags.Var(&unsetEnv, "unset-env", "drop an env override: KEY (repeatable)")
@@ -111,6 +112,9 @@ func configureTenant(command string, args []string) error {
 	}
 	if given["pids"] {
 		overrides.Limits.PIDs = *pids
+	}
+	if given["disk"] {
+		overrides.Limits.DiskGB = *disk
 	}
 
 	var result api.Applied

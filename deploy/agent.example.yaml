@@ -8,6 +8,7 @@ socketGroup: murder                # members may run the murder CLI without root
 dockerSocket: /var/run/docker.sock
 registryAuthFile: /etc/murder/registry.json   # docker config.json with "auths" for private registries
 networkPool: 10.240.0.0/16         # one /28 per tenant network (the tenant at .2); must not overlap host or Docker networks
+firewall: nftables                 # keeps tenants from the host and private networks; off only for development
 
 volumes:
   driver: zfs                      # or: driver: dir, root: /srv/murder/tenants
@@ -23,5 +24,5 @@ edge:
     dnsProvider: hetzner           # hetzner (Hetzner Cloud DNS) | namecheap
     dnsTokenFile: /etc/murder/dns.token
 
-defaults: {memoryMB: 512, cpus: 1, pids: 512}
+defaults: {memoryMB: 512, cpus: 1, pids: 512, diskGB: 20}   # diskGB needs the zfs driver
 reconcileInterval: 10s

@@ -13,6 +13,7 @@ const usage = `Usage: murder <command> [arguments]
 Node commands:
   init       create the master key and the database for a node
   agent      run the agent (reconciler, edge proxy and local API)
+  firewall   load the tenant firewall (murder-firewall.service runs it at boot)
 
 Client commands (talk to the local agent):
   app        apply, list, show and delete apps (specs shared by tenants)
@@ -42,6 +43,8 @@ func run(args []string) error {
 		return runInit(args[1:])
 	case "agent":
 		return runAgent(args[1:])
+	case "firewall":
+		return runFirewall(args[1:])
 	case "app":
 		return runApp(args[1:])
 	case "events":

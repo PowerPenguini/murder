@@ -22,6 +22,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
@@ -100,6 +101,16 @@ func runAgent(args []string) error {
 		return err
 	}
 	reconciler := reconcile.New(st, docker, volumes, key, reconcile.Config{BaseDomain: cfg.BaseDomain, Scheme: cfg.Scheme(), DefaultLimits: cfg.Defaults}, log)
+	// murder-firewall.service loads the rules before Docker starts the
+	// tenants at boot; loading them here covers a node without that unit
+	// and a ruleset flushed since.
+	if cfg.Firewall == config.FirewallNftables {
+		if err := loadFirewall(context.Background(), cfg, storeSubnets(st)); err != nil {
+			return fmt.Errorf("%w (firewall: off in %s runs tenants without it)", err, *configPath)
+		}
+	} else {
+		log.Warn("the tenant firewall is off: tenants can reach the host's services and private networks")
+	}
 
 	// Bind every listener before serving, so a taken port stops the agent at
 	// once instead of leaving it up without an edge.
@@ -133,6 +144,9 @@ func runAgent(args []string) error {
 	apiServer := &http.Server{Handler: api.NewServer(st, reconciler, docker, key, log).Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
 	go serve("api", apiServer, apiListener)
 	go reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
+	if cfg.Firewall == config.FirewallNftables {
+		go keepFirewall(ctx, cfg, st, log)
+	}
 
 	proxy := edge.NewProxy(cfg.BaseDomain, api.Routes{Store: st}, log)
 	servers := []*http.Server{apiServer}
@@ -226,6 +240,73 @@ func listenSocket(path, group string) (net.Listener, error) {
 		return nil, err
 	}
 	return listener, nil
+}
+
+// firewallInterval is how often the agent loads the tenant firewall again:
+// the longest a flushed ruleset or a changed DNS server goes unnoticed.
+const firewallInterval = 15 * time.Second
+
+// keepFirewall loads the tenant firewall again and again, so a firewall
+// reload that dropped Murder's table does not leave tenants unguarded and
+// a changed DNS server is let through.
+func keepFirewall(ctx context.Context, cfg config.Agent, st store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(firewallInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := loadFirewall(ctx, cfg, storeSubnets(st)); err != nil && ctx.Err() == nil {
+				log.Error("reload the tenant firewall", "error", err)
+			}
+		}
+	}
+}
+
+// loadFirewall loads the tenant firewall the config describes for the pool
+// and the tenant subnets (some may lie outside the pool after it changed),
+// with the host's DNS servers as they are now.
+func loadFirewall(ctx context.Context, cfg config.Agent, subnets []netip.Prefix) error {
+	edgePorts, err := cfg.EdgePorts()
+	if err != nil {
+		return err
+	}
+	sources := append([]netip.Prefix{netip.MustParsePrefix(cfg.NetworkPool)}, subnets...)
+	return firewall.Apply(ctx, sources, edgePorts, firewall.Resolvers())
+}
+
+func storeSubnets(st store.Store) []netip.Prefix {
+	var subnets []netip.Prefix
+	for _, record := range st.List() {
+		if subnet, err := netip.ParsePrefix(record.Subnet); err == nil {
+			subnets = append(subnets, subnet)
+		}
+	}
+	return subnets
+}
+
+// runFirewall loads the tenant firewall once, for murder-firewall.service,
+// which runs before Docker starts the tenants at boot.
+func runFirewall(args []string) error {
+	flags := flag.NewFlagSet("firewall", flag.ContinueOnError)
+	configPath := flags.String("config", defaultConfig, "agent configuration file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Firewall != config.FirewallNftables {
+		fmt.Println("the tenant firewall is off in", *configPath)
+		return nil
+	}
+	subnets, err := store.Subnets(cfg.Database)
+	if err != nil {
+		return err
+	}
+	return loadFirewall(context.Background(), cfg, subnets)
 }
 
 // publicServer has no write timeout: tenants stream server-sent events.

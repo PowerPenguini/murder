@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"os"
 	"slices"
@@ -40,11 +41,17 @@ type Agent struct {
 	RegistryAuthFile string `yaml:"registryAuthFile"`
 	// NetworkPool is split into one /28 per tenant network. It must not
 	// overlap networks the host or Docker already use.
-	NetworkPool string  `yaml:"networkPool"`
-	Volumes     Volumes `yaml:"volumes"`
-	Edge        Edge    `yaml:"edge"`
+	NetworkPool string `yaml:"networkPool"`
+	// Firewall is "nftables" (the default) or "off". With nftables the agent
+	// keeps tenants from opening connections to the host, other than to
+	// the edge ports, and to private and link-local addresses, which
+	// include the cloud's metadata service and other servers.
+	Firewall string  `yaml:"firewall"`
+	Volumes  Volumes `yaml:"volumes"`
+	Edge     Edge    `yaml:"edge"`
 
-	// Defaults fill in tenant limits left at zero.
+	// Defaults fill in tenant limits left at zero. Disk use is unlimited
+	// unless diskGB is set (with the zfs driver).
 	Defaults          spec.Limits `yaml:"defaults"`
 	ReconcileInterval Duration    `yaml:"reconcileInterval"`
 }
@@ -96,6 +103,7 @@ func Parse(data []byte) (Agent, error) {
 		DockerSocket:      "/var/run/docker.sock",
 		Volumes:           Volumes{Driver: "dir", Root: "/srv/murder/tenants", MountRoot: "/srv/murder/tenants"},
 		NetworkPool:       "10.240.0.0/16",
+		Firewall:          FirewallNftables,
 		Edge:              Edge{HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/murder/certs"}},
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
@@ -129,6 +137,14 @@ func (a Agent) Validate() error {
 	if pool, err := netip.ParsePrefix(a.NetworkPool); err != nil || !pool.Addr().Is4() || pool.Bits() > 24 {
 		problems = append(problems, "networkPool must be an IPv4 prefix of /24 or larger")
 	}
+	if a.Firewall != FirewallNftables && a.Firewall != FirewallOff {
+		problems = append(problems, fmt.Sprintf("firewall must be %q or %q", FirewallNftables, FirewallOff))
+	}
+	if a.Firewall == FirewallNftables {
+		if _, err := a.EdgePorts(); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
 	if strings.ContainsAny(a.Node, " \t\n=") {
 		problems = append(problems, "node must be a name without spaces or '='")
 	}
@@ -148,6 +164,9 @@ func (a Agent) Validate() error {
 			problems = append(problems, fmt.Sprintf("edge.tls.dnsProvider must be one of %v", edge.DNSProviders))
 		}
 	}
+	for _, problem := range a.Defaults.Problems() {
+		problems = append(problems, "defaults: "+problem)
+	}
 	if a.ReconcileInterval.Duration < time.Second {
 		problems = append(problems, "reconcileInterval must be at least 1s")
 	}
@@ -155,6 +174,34 @@ func (a Agent) Validate() error {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// Firewall settings.
+const (
+	FirewallNftables = "nftables"
+	FirewallOff      = "off"
+)
+
+// EdgePorts are the ports the edge listens on, which tenants may reach on
+// the host: their own public address resolves to it.
+func (a Agent) EdgePorts() ([]int, error) {
+	addresses := []string{a.Edge.HTTP}
+	if a.Edge.TLS.Mode != edge.TLSOff {
+		addresses = append(addresses, a.Edge.HTTPS)
+	}
+	var ports []int
+	for _, address := range addresses {
+		_, service, err := net.SplitHostPort(address)
+		if err == nil {
+			var port int
+			if port, err = net.LookupPort("tcp", service); err == nil && port > 0 {
+				ports = append(ports, port)
+				continue
+			}
+		}
+		return nil, fmt.Errorf("edge address %q needs a port the firewall can open", address)
+	}
+	return ports, nil
 }
 
 // Scheme is the public URL scheme tenants are served with.

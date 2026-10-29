@@ -725,3 +725,32 @@ func TestPurgeFreesTheSubnet(t *testing.T) {
 		t.Fatalf("gamma = %+v, %v; want the purged %s", gamma, err, acme.Subnet)
 	}
 }
+
+// Subnets reads every tenant's subnet, archived ones too, while the agent
+// holds the database, and from a database opened with another pool.
+func TestSubnetsReadsEveryTenant(t *testing.T) {
+	st, path := withApp(t, options())
+	acme, _ := st.Create(NewTenant{Name: "acme", App: "web"}, "a")
+	beta, _ := st.Create(NewTenant{Name: "beta", App: "web"}, "a")
+	if err := st.Archive("beta", "a"); err != nil {
+		t.Fatal(err)
+	}
+	subnets, err := Subnets(path)
+	if err != nil || len(subnets) != 2 || !slices.ContainsFunc(subnets, func(p netip.Prefix) bool { return p.String() == acme.Subnet }) || !slices.ContainsFunc(subnets, func(p netip.Prefix) bool { return p.String() == beta.Subnet }) {
+		t.Fatalf("Subnets = %v, %v", subnets, err)
+	}
+	if none, err := Subnets(filepath.Join(t.TempDir(), "missing.db")); err != nil || len(none) != 0 {
+		t.Fatalf("Subnets of a missing database = %v, %v", none, err)
+	}
+	_ = st.Close()
+	moved := options()
+	moved.NetworkPool = netip.MustParsePrefix("10.250.0.0/16")
+	reopened, err := Open(path, moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if gamma, err := reopened.Create(NewTenant{Name: "gamma", App: "web"}, "a"); err != nil || !moved.NetworkPool.Contains(netip.MustParsePrefix(gamma.Subnet).Addr()) {
+		t.Fatalf("a new tenant after a pool change = %+v, %v", gamma, err)
+	}
+}

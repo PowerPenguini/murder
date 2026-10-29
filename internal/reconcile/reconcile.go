@@ -34,9 +34,12 @@ const (
 
 // Status is the observed state of one tenant.
 type Status struct {
-	Phase       string    `json:"phase"`
-	Healthy     bool      `json:"healthy"`
-	Message     string    `json:"message,omitempty"`
+	Phase   string `json:"phase"`
+	Healthy bool   `json:"healthy"`
+	Message string `json:"message,omitempty"`
+	// Warning reports a problem that does not stop the tenant, such as a
+	// disk limit below what it already stores.
+	Warning     string    `json:"warning,omitempty"`
 	ContainerID string    `json:"containerID,omitempty"`
 	Generation  int64     `json:"generation"`
 	CheckedAt   time.Time `json:"checkedAt"`
@@ -205,7 +208,7 @@ func hasTenant(containers []runtime.Container, tenant string) bool {
 	return false
 }
 
-func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, existing []runtime.Container) (Status, error) {
+func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, existing []runtime.Container) (status Status, err error) {
 	tenant := record.Spec
 	if tenant.Suspended {
 		if err := r.removeContainers(ctx, existing); err != nil {
@@ -219,7 +222,13 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		return Status{}, fmt.Errorf("stored spec no longer valid; correct the app or the tenant: %w", err)
 	}
 	uid, gid := tenant.Owner()
-	dataPath, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid)
+	dataPath, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid, tenant.Limits.Or(r.config.DefaultLimits).DiskGB)
+	if errors.Is(err, volume.ErrDiskLimit) {
+		r.log.Warn("disk limit", "tenant", tenant.Name, "error", err)
+		warning := err.Error()
+		defer func() { status.Warning = warning }()
+		err = nil
+	}
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
 	}
@@ -290,7 +299,7 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 			r.log.Info("restarted stopped tenant container", "tenant", tenant.Name, "container", current.ID)
 		}
 	}
-	status := Status{Phase: PhaseRunning, ContainerID: current.ID}
+	status = Status{Phase: PhaseRunning, ContainerID: current.ID}
 	status.Healthy, status.Message = r.checkHealth(ctx, record)
 	return status, nil
 }
@@ -406,16 +415,7 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 	for _, name := range slices.Sorted(maps.Keys(env)) {
 		pairs = append(pairs, name+"="+env[name])
 	}
-	limits := tenant.Limits
-	if limits.MemoryMB == 0 {
-		limits.MemoryMB = r.config.DefaultLimits.MemoryMB
-	}
-	if limits.CPUs == 0 {
-		limits.CPUs = r.config.DefaultLimits.CPUs
-	}
-	if limits.PIDs == 0 {
-		limits.PIDs = r.config.DefaultLimits.PIDs
-	}
+	limits := tenant.Limits.Or(r.config.DefaultLimits)
 	var tmpfs map[string]string
 	if len(tenant.Tmpfs) > 0 {
 		tmpfs = maps.Clone(tenant.Tmpfs)

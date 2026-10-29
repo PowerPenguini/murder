@@ -234,6 +234,8 @@ type fakeVolumes struct {
 	removed      []string
 	failSnapshot error
 	notServing   bool
+	diskGB       map[string]int
+	limitErr     error
 }
 
 func (f *fakeVolumes) LateMounts() bool { return true }
@@ -242,6 +244,18 @@ func (f *fakeVolumes) Serving(context.Context, string, int) (bool, error) {
 	serving := !f.notServing
 	f.notServing = false
 	return serving, nil
+}
+
+func (f *fakeVolumes) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (string, error) {
+	if f.diskGB == nil {
+		f.diskGB = map[string]int{}
+	}
+	f.diskGB[tenant] = diskGB
+	path, err := f.Dir.Ensure(ctx, tenant, uid, gid, diskGB)
+	if err == nil {
+		err = f.limitErr
+	}
+	return path, err
 }
 
 func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string, error) {
@@ -307,7 +321,7 @@ func newFixture(t *testing.T) *fixture {
 	rt := newFakeRuntime()
 	volumes := &fakeVolumes{Dir: volume.Dir{Root: filepath.Join(t.TempDir(), "tenants")}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	reconciler := New(st, rt, volumes, key, Config{BaseDomain: "example.test", DefaultLimits: spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128}}, log)
+	reconciler := New(st, rt, volumes, key, Config{BaseDomain: "example.test", DefaultLimits: spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128, DiskGB: 7}}, log)
 	// Every tenant's health is checked at the test server.
 	reconciler.backend = func(store.Record) (string, error) { return "127.0.0.1:" + strconv.Itoa(port), nil }
 	return &fixture{store: st, storePath: statePath, runtime: rt, volumes: volumes, key: key, reconciler: reconciler}
@@ -373,8 +387,8 @@ func TestNewTenantGetsAHealthyContainer(t *testing.T) {
 			t.Errorf("env lacks %q:\n%s", want, env)
 		}
 	}
-	if container.spec.MemoryBytes != 256<<20 || container.spec.NanoCPUs != 5e8 || container.spec.PIDs != 128 {
-		t.Errorf("default limits not applied: %+v", container.spec)
+	if container.spec.MemoryBytes != 256<<20 || container.spec.NanoCPUs != 5e8 || container.spec.PIDs != 128 || f.volumes.diskGB["acme"] != 7 {
+		t.Errorf("default limits not applied: %+v, disk %d GB", container.spec, f.volumes.diskGB["acme"])
 	}
 	if container.spec.Mounts[0].Target != "/data" || container.spec.Mounts[0].Source != filepath.Join(f.volumes.Root, "acme") {
 		t.Errorf("mount = %+v", container.spec.Mounts)
@@ -511,6 +525,23 @@ func TestImageChangedWhileSuspendedIsSnapshottedOnResume(t *testing.T) {
 	f.reconcile(t)
 	if f.runtime.only(t).spec.Image != imageB || !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) {
 		t.Fatalf("resume with a new image: snapshots = %v", f.volumes.snapshots)
+	}
+}
+
+// A disk limit that cannot be applied is a warning; the tenant runs.
+func TestDiskLimitProblemIsAWarning(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.volumes.limitErr = fmt.Errorf("%w: 7 GB: size is less than current used", volume.ErrDiskLimit)
+	f.reconcile(t)
+	status, _ := f.reconciler.Status("acme")
+	if status.Phase != PhaseRunning || !status.Healthy || !strings.Contains(status.Warning, "less than current used") || !f.runtime.only(t).Running {
+		t.Fatalf("status = %+v", status)
+	}
+	f.volumes.limitErr = nil
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.Warning != "" {
+		t.Fatalf("the warning outlived its cause: %+v", status)
 	}
 }
 

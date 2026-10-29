@@ -130,7 +130,49 @@ type Limits struct {
 	MemoryMB int     `json:"memoryMB,omitempty" yaml:"memoryMB,omitempty"`
 	CPUs     float64 `json:"cpus,omitempty" yaml:"cpus,omitempty"`
 	PIDs     int     `json:"pids,omitempty" yaml:"pids,omitempty"`
+	// DiskGB caps the tenant's data, not counting snapshots. Only the zfs
+	// volume driver enforces it.
+	DiskGB int `json:"diskGB,omitempty" yaml:"diskGB,omitempty"`
 }
+
+// Problems describes what is out of range in l: limits are not negative
+// and stay far below what would overflow the byte counts made of them.
+func (l Limits) Problems() []string {
+	var problems []string
+	if l.MemoryMB < 0 || l.CPUs < 0 || l.PIDs < 0 || l.DiskGB < 0 {
+		problems = append(problems, "limits must not be negative")
+	}
+	if l.MemoryMB > maxMemoryMB || l.CPUs > maxCPUs || l.PIDs > maxPIDs || l.DiskGB > maxDiskGB {
+		problems = append(problems, fmt.Sprintf("limits must be at most %d MB memory, %d CPUs, %d processes and %d GB disk", maxMemoryMB, maxCPUs, maxPIDs, maxDiskGB))
+	}
+	return problems
+}
+
+// Or returns l with every field left at zero taken from defaults.
+func (l Limits) Or(defaults Limits) Limits {
+	if l.MemoryMB == 0 {
+		l.MemoryMB = defaults.MemoryMB
+	}
+	if l.CPUs == 0 {
+		l.CPUs = defaults.CPUs
+	}
+	if l.PIDs == 0 {
+		l.PIDs = defaults.PIDs
+	}
+	if l.DiskGB == 0 {
+		l.DiskGB = defaults.DiskGB
+	}
+	return l
+}
+
+// Upper bounds of limits, far above any server, so the byte counts made of
+// them cannot overflow.
+const (
+	maxMemoryMB = 1 << 24 // 16 TB
+	maxCPUs     = 4096
+	maxPIDs     = 1 << 22
+	maxDiskGB   = 1 << 20 // 1 PB
+)
 
 // Defaults applied by WithDefaults.
 const (
@@ -310,9 +352,7 @@ func (t Tenant) validate(checkImage func(string) error) error {
 			problems = append(problems, fmt.Sprintf("tmpfs path %q is invalid", mount))
 		}
 	}
-	if t.Limits.MemoryMB < 0 || t.Limits.CPUs < 0 || t.Limits.PIDs < 0 {
-		problems = append(problems, "limits must not be negative")
-	}
+	problems = append(problems, t.Limits.Problems()...)
 	if len(problems) == 0 {
 		return nil
 	}
