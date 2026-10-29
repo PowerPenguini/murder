@@ -97,8 +97,9 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 		t.Fatalf("snapshot content = %q, %v", data, err)
 	}
 
-	// Pruning keeps the newest snapshots of the reason.
-	clock := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	// Pruning keeps the newest snapshots of the reason. The clock runs a day
+	// ahead, so these sort after the snapshot taken above.
+	clock := time.Now().Add(24 * time.Hour)
 	timed := volumes
 	timed.Now = func() time.Time { clock = clock.Add(time.Second); return clock }
 	var newest string

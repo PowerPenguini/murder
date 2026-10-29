@@ -342,7 +342,8 @@ func (z ZFS) Snapshot(ctx context.Context, tenant, reason string) (string, error
 
 // Prune lists the dataset's own snapshots and destroys the oldest ones
 // Murder took for reason; their names sort by time. Other snapshots, such
-// as an operator's, are never touched.
+// as an operator's, are never touched. One that cannot be destroyed (held,
+// or cloned) does not stop the others.
 func (z ZFS) Prune(ctx context.Context, tenant, reason string, keep int) error {
 	if err := checkTenant(tenant); err != nil {
 		return err
@@ -357,18 +358,19 @@ func (z ZFS) Prune(ctx context.Context, tenant, reason string, keep int) error {
 	}
 	prefix := dataset + "@murder-" + reason + "-"
 	var taken []string
-	for _, name := range strings.Fields(string(output)) {
+	for _, name := range strings.Split(string(output), "\n") {
 		if strings.HasPrefix(name, prefix) {
 			taken = append(taken, name)
 		}
 	}
 	sort.Strings(taken)
+	var errs []error
 	for _, name := range taken[:max(0, len(taken)-keep)] {
 		if _, err := z.Run(ctx, "zfs", "destroy", name); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func snapshotReason(reason string) bool {

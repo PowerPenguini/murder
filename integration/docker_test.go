@@ -395,19 +395,22 @@ func TestRemoveImageOnDocker(t *testing.T) {
 	}
 	container := strings.TrimSpace(string(output))
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", container).Run() })
-	if err := docker.RemoveImage(ctx, tag); !errors.Is(err, runtime.ErrInUse) {
+	if got, err := docker.ImageID(ctx, tag); err != nil || got != id {
+		t.Fatalf("ImageID = %q, %v; want %s", got, err, id)
+	}
+	if err := docker.RemoveImage(ctx, id); !errors.Is(err, runtime.ErrInUse) {
 		t.Fatalf("remove an image a container uses = %v", err)
 	}
 	if err := exec.Command("docker", "rm", container).Run(); err != nil {
 		t.Fatal(err)
 	}
-	if err := docker.RemoveImage(ctx, tag); err != nil {
+	if err := docker.RemoveImage(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	if present, err := docker.HasImage(ctx, id); err != nil || present {
-		t.Fatalf("image after removal: present %v, %v", present, err)
+	if got, err := docker.ImageID(ctx, tag); err != nil || got != "" {
+		t.Fatalf("the tag after removal = %q, %v", got, err)
 	}
-	if err := docker.RemoveImage(ctx, tag); err != nil {
+	if err := docker.RemoveImage(ctx, id); err != nil {
 		t.Fatalf("remove a missing image = %v", err)
 	}
 }

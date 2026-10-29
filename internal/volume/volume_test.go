@@ -65,6 +65,7 @@ type fakeDataset struct {
 type fakeZFS struct {
 	datasets  map[string]*fakeDataset
 	snapshots []string // what "zfs list -t snapshot" prints
+	held      string   // a snapshot that cannot be destroyed
 	calls     []string
 }
 
@@ -115,7 +116,12 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		}
 		f.datasets[dataset].refquota = parseQuota(value)
 		return nil, nil
-	case "snapshot", "destroy":
+	case "snapshot":
+		return nil, nil
+	case "destroy":
+		if dataset == f.held {
+			return []byte("cannot destroy snapshot " + dataset + ": dataset is busy\n"), errors.New("exit status 1")
+		}
 		return nil, nil
 	case "list":
 		return []byte(strings.Join(f.snapshots, "\n") + "\n"), nil
@@ -268,7 +274,8 @@ func TestZFSServingChecksTheContainersMount(t *testing.T) {
 
 // Prune keeps the newest snapshots of a reason and never touches others.
 func TestZFSPruneKeepsTheNewest(t *testing.T) {
-	fake := &fakeZFS{datasets: map[string]*fakeDataset{}, snapshots: []string{
+	fake := &fakeZFS{datasets: map[string]*fakeDataset{}, held: "tank/murder/acme@murder-image-change-20261024T120000.000Z", snapshots: []string{
+		"tank/murder/acme@murder-image-change-20261024T120000.000Z",
 		"tank/murder/acme@murder-image-change-20261025T120000.000Z",
 		"tank/murder/acme@before-upgrade",
 		"tank/murder/acme@murder-image-change-20261027T120000.000Z",
@@ -276,8 +283,9 @@ func TestZFSPruneKeepsTheNewest(t *testing.T) {
 		"tank/murder/acme@murder-replica-20261020T120000.000Z",
 	}}
 	volumes := ZFS{Parent: "tank/murder", MountRoot: t.TempDir(), Run: fake.run}
-	if err := volumes.Prune(context.Background(), "acme", "image-change", 2); err != nil {
-		t.Fatal(err)
+	// The oldest is held: it is reported, and the next one still goes.
+	if err := volumes.Prune(context.Background(), "acme", "image-change", 2); err == nil {
+		t.Fatalf("Prune with a held snapshot = %v", err)
 	}
 	var destroyed []string
 	for _, call := range fake.calls {
@@ -285,7 +293,7 @@ func TestZFSPruneKeepsTheNewest(t *testing.T) {
 			destroyed = append(destroyed, name)
 		}
 	}
-	if len(destroyed) != 1 || destroyed[0] != "tank/murder/acme@murder-image-change-20261025T120000.000Z" {
+	if len(destroyed) != 2 || destroyed[1] != "tank/murder/acme@murder-image-change-20261025T120000.000Z" {
 		t.Fatalf("destroyed %v", destroyed)
 	}
 	if err := volumes.Prune(context.Background(), "acme", "image-change", 0); err == nil {

@@ -45,6 +45,7 @@ type snapshot struct {
 	node    string
 	apps    map[string]App
 	tenants map[string]Record
+	images  map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
 	lastEvent int64
@@ -276,7 +277,7 @@ type querier interface {
 
 // load reads the whole state. It is small: one row per app and tenant.
 func load(q querier) (*snapshot, error) {
-	state := &snapshot{apps: map[string]App{}, tenants: map[string]Record{}}
+	state := &snapshot{apps: map[string]App{}, tenants: map[string]Record{}, images: map[string]bool{}}
 	if err := q.QueryRow(`SELECT value FROM meta WHERE key = 'node'`).Scan(&state.node); err != nil {
 		return nil, fmt.Errorf("read the node name: %w", err)
 	}
@@ -323,7 +324,7 @@ func load(q querier) (*snapshot, error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, generation, created_at, updated_at, archived_at FROM tenants`)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at FROM tenants`)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +333,7 @@ func load(q querier) (*snapshot, error) {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.Generation, &created, &updated, &archivedAt); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -352,7 +353,38 @@ func load(q querier) (*snapshot, error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
+	rows, err = q.Query(`SELECT ref FROM images`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		state.images[ref] = true
+	}
+	if err := closeRows(rows); err != nil {
+		return nil, err
+	}
 	return state, nil
+}
+
+// recordImages adds every image a tenant now has to the images table.
+func recordImages(tx *sql.Tx, state *snapshot) error {
+	for _, record := range state.tenants {
+		for _, image := range []string{record.Spec.Image, record.DataImage, record.PreviousImage} {
+			if image == "" || state.images[image] {
+				continue
+			}
+			if _, err := tx.Exec(`INSERT INTO images (ref) VALUES (?) ON CONFLICT DO NOTHING`, image); err != nil {
+				return err
+			}
+			state.images[image] = true
+		}
+	}
+	return nil
 }
 
 func closeRows(rows *sql.Rows) error {
@@ -382,6 +414,9 @@ func (s *SQLite) write(signal bool, change func(tx *sql.Tx, current *snapshot, n
 	}
 	next, err := load(tx)
 	if err != nil {
+		return nil, err
+	}
+	if err := recordImages(tx, next); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -672,8 +707,8 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 			return err
 		}
 		stamp := formatTime(now)
-		if _, err := tx.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, generation, created_at, updated_at)
-			VALUES (?, ?, ?, 0, ?, '', 1, ?, ?)`, tenant.Name, tenant.App, marshal(overrides), subnet, stamp, stamp); err != nil {
+		if _, err := tx.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at)
+			VALUES (?, ?, ?, 0, ?, '', '', 1, ?, ?)`, tenant.Name, tenant.App, marshal(overrides), subnet, stamp, stamp); err != nil {
 			return err
 		}
 		if err := s.sealMissing(tx, now, composed, nil); err != nil {
@@ -816,7 +851,7 @@ func (s *SQLite) Observe(name, dataImage string) error {
 		if _, err := liveTenant(current, name); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`UPDATE tenants SET data_image = ? WHERE name = ?`, dataImage, name)
+		_, err := tx.Exec(`UPDATE tenants SET previous_image = CASE WHEN data_image = '' THEN previous_image ELSE data_image END, data_image = ? WHERE name = ?`, dataImage, name)
 		return err
 	})
 	return err
@@ -922,6 +957,21 @@ func (s *SQLite) Events(query EventQuery) ([]Event, error) {
 		events = append(events, e)
 	}
 	return events, closeRows(rows)
+}
+
+func (s *SQLite) Images() []string {
+	return slices.Sorted(maps.Keys(s.state.Load().images))
+}
+
+func (s *SQLite) ForgetImage(ref string) error {
+	if !s.state.Load().images[ref] {
+		return nil
+	}
+	_, err := s.write(false, func(tx *sql.Tx, _ *snapshot, _ time.Time) error {
+		_, err := tx.Exec(`DELETE FROM images WHERE ref = ?`, ref)
+		return err
+	})
+	return err
 }
 
 // assign returns a subnet no tenant holds, live or archived.

@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -76,9 +75,11 @@ type Reconciler struct {
 	backend func(store.Record) (string, error)
 
 	// pass serializes reconcile passes and the removal of tenants.
-	pass     sync.Mutex
-	mu       sync.RWMutex
-	statuses map[string]Status
+	pass sync.Mutex
+	// imageRetryAt holds back images the engine kept; only passes use it.
+	imageRetryAt map[string]time.Time
+	mu           sync.RWMutex
+	statuses     map[string]Status
 }
 
 // New returns a reconciler. All dependencies are required.
@@ -94,9 +95,10 @@ func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secret
 	}
 	return &Reconciler{
 		store: st, runtime: rt, volumes: volumes, key: key, config: config, log: log,
-		health:   &http.Client{Timeout: config.HealthTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		statuses: map[string]Status{},
-		backend:  Backend,
+		health:       &http.Client{Timeout: config.HealthTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		statuses:     map[string]Status{},
+		imageRetryAt: map[string]time.Time{},
+		backend:      Backend,
 	}
 }
 
@@ -177,6 +179,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	r.mu.Lock()
 	r.statuses = statuses
 	r.mu.Unlock()
+	r.sweepImages(ctx)
 	return errors.Join(errs...)
 }
 
@@ -361,9 +364,6 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 		return "", fmt.Errorf("start: %w", err)
 	}
 	r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
-	// The image the data had before, when no container of it was left to
-	// remove here, say after a suspension.
-	r.dropImage(ctx, record.DataImage)
 	return id, nil
 }
 
@@ -389,33 +389,83 @@ func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.
 		}
 		if err := r.runtime.Remove(ctx, container.ID); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", container.Name, err))
-			continue
 		}
-		r.dropImage(ctx, container.Labels[runtime.LabelImage])
 	}
 	return errors.Join(errs...)
 }
 
-// dropImage removes an image no tenant runs, live, suspended or archived,
-// so old releases do not fill the disk. Only images pinned by registry
-// digest go: they can be pulled again to roll back, a local image could
-// not. One another container still uses stays; whichever goes last
-// removes it.
-func (r *Reconciler) dropImage(ctx context.Context, image string) {
-	if !strings.Contains(image, "@sha256:") {
-		return
-	}
+// imageRetry is how long an image the engine kept, in use by a container,
+// waits before the next attempt to remove it.
+const imageRetry = time.Hour
+
+// sweepImages removes images no tenant needs any more, so old releases do
+// not fill the disk. A tenant needs the image it runs, the one its data has
+// and the one before (a rollback then needs no registry). Only images
+// pinned by registry digest go: those can be pulled again, a local image
+// could not. Images are compared by ID, so an image a tenant needs under
+// another name stays.
+func (r *Reconciler) sweepImages(ctx context.Context) {
+	needed := map[string]bool{}
 	for _, record := range r.store.List() {
-		if record.Spec.Image == image {
-			return
+		for _, image := range []string{record.Spec.Image, record.DataImage, record.PreviousImage} {
+			if image != "" {
+				needed[image] = true
+			}
 		}
 	}
-	switch err := r.runtime.RemoveImage(ctx, image); {
-	case errors.Is(err, runtime.ErrInUse):
-	case err != nil:
-		r.log.Warn("remove an image no tenant runs", "image", image, "error", err)
-	default:
-		r.log.Info("removed an image no tenant runs", "image", image)
+	now := time.Now()
+	var candidates []string
+	for _, image := range r.store.Images() {
+		switch {
+		case needed[image] || now.Before(r.imageRetryAt[image]):
+		case !spec.RegistryPinned(image):
+			r.forgetImage(image) // a local image stays on the node, untracked
+		default:
+			candidates = append(candidates, image)
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	neededIDs := map[string]bool{}
+	for image := range needed {
+		id, err := r.runtime.ImageID(ctx, image)
+		if err != nil {
+			r.log.Warn("inspect an image a tenant needs; no image is removed this pass", "image", image, "error", err)
+			return
+		}
+		neededIDs[id] = true
+	}
+	for _, image := range candidates {
+		id, err := r.runtime.ImageID(ctx, image)
+		switch {
+		case err != nil:
+			r.log.Warn("inspect an image no tenant needs", "image", image, "error", err)
+			continue
+		case id == "":
+			r.forgetImage(image) // gone already
+			continue
+		case neededIDs[id]:
+			r.imageRetryAt[image] = now.Add(imageRetry) // needed under another name
+			continue
+		}
+		switch err := r.runtime.RemoveImage(ctx, id); {
+		case errors.Is(err, runtime.ErrInUse):
+			r.imageRetryAt[image] = now.Add(imageRetry)
+		case err != nil:
+			r.log.Warn("remove an image no tenant needs", "image", image, "error", err)
+			r.imageRetryAt[image] = now.Add(imageRetry)
+		default:
+			r.log.Info("removed an image no tenant needs", "image", image)
+			r.forgetImage(image)
+		}
+	}
+}
+
+func (r *Reconciler) forgetImage(image string) {
+	delete(r.imageRetryAt, image)
+	if err := r.store.ForgetImage(image); err != nil {
+		r.log.Warn("forget an image", "image", image, "error", err)
 	}
 }
 
@@ -560,11 +610,7 @@ func (r *Reconciler) Purge(ctx context.Context, name, actor string) error {
 	if err := r.volumes.Remove(ctx, name); err != nil {
 		return err
 	}
-	if err := r.store.Forget(name, actor); err != nil {
-		return err
-	}
-	r.dropImage(ctx, record.Spec.Image)
-	return nil
+	return r.store.Forget(name, actor)
 }
 
 // clearRuntime makes sure no container or network of the tenant remains.
