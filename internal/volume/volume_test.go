@@ -18,9 +18,9 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 	if exists, err := dir.Exists(ctx, "acme"); err != nil || exists {
 		t.Fatalf("Exists before Ensure = %v, %v", exists, err)
 	}
-	path, mounted, err := dir.Ensure(ctx, "acme", uid, gid)
-	if err != nil || path != filepath.Join(root, "acme") || mounted {
-		t.Fatalf("Ensure = %q, %v, %v", path, mounted, err)
+	path, err := dir.Ensure(ctx, "acme", uid, gid)
+	if err != nil || path != filepath.Join(root, "acme") {
+		t.Fatalf("Ensure = %q, %v", path, err)
 	}
 	if exists, err := dir.Exists(ctx, "acme"); err != nil || !exists {
 		t.Fatalf("Exists after Ensure = %v, %v", exists, err)
@@ -31,7 +31,7 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, "data.db"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if again, _, err := dir.Ensure(ctx, "acme", uid, gid); err != nil || again != path {
+	if again, err := dir.Ensure(ctx, "acme", uid, gid); err != nil || again != path {
 		t.Fatalf("second Ensure = %q, %v", again, err)
 	}
 	if _, err := os.Stat(filepath.Join(path, "data.db")); err != nil {
@@ -43,7 +43,7 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 	if _, err := dir.Snapshot(ctx, "acme", "image-change"); !errors.Is(err, ErrSnapshotsUnsupported) {
 		t.Fatalf("Snapshot = %v", err)
 	}
-	if _, _, err := dir.Ensure(ctx, "../etc", uid, gid); err == nil {
+	if _, err := dir.Ensure(ctx, "../etc", uid, gid); err == nil {
 		t.Fatal("Ensure accepted a path-like tenant name")
 	}
 	if err := dir.Remove(ctx, "acme"); err != nil {
@@ -119,9 +119,9 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	volumes := ZFS{Parent: "tank/murder", MountRoot: mountRoot, Run: fake.run, Now: func() time.Time { return time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC) }}
 	ctx := context.Background()
 	uid, gid := os.Getuid(), os.Getgid()
-	path, mounted, err := volumes.Ensure(ctx, "acme", uid, gid)
-	if err != nil || path != filepath.Join(mountRoot, "acme") || mounted {
-		t.Fatalf("Ensure = %q, %v, %v", path, mounted, err)
+	path, err := volumes.Ensure(ctx, "acme", uid, gid)
+	if err != nil || path != filepath.Join(mountRoot, "acme") {
+		t.Fatalf("Ensure = %q, %v", path, err)
 	}
 	if !fake.ran("zfs create -p -o mountpoint=" + path + " -o setuid=off -o devices=off -o " + ownerProperty + "=acme tank/murder/acme") {
 		t.Fatalf("calls = %v", fake.calls)
@@ -129,12 +129,11 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	if info, _ := os.Stat(mountRoot); info.Mode().Perm() != 0o700 {
 		t.Fatalf("mount root mode = %v", info.Mode().Perm())
 	}
-	// An existing but unmounted dataset is mounted, not recreated, and the
-	// caller learns that it was.
+	// An existing but unmounted dataset is mounted, not recreated.
 	fake.datasets["tank/murder/acme"].mounted = false
 	fake.calls = nil
-	if _, mounted, err := volumes.Ensure(ctx, "acme", uid, gid); err != nil || !mounted {
-		t.Fatalf("Ensure of an unmounted dataset = %v, %v", mounted, err)
+	if _, err := volumes.Ensure(ctx, "acme", uid, gid); err != nil {
+		t.Fatalf("Ensure of an unmounted dataset = %v", err)
 	}
 	if fake.ran("create") || !fake.ran("zfs mount tank/murder/acme") {
 		t.Fatalf("calls = %v", fake.calls)
@@ -173,7 +172,7 @@ func TestZFSRefusesForeignDatasets(t *testing.T) {
 	volumes := ZFS{Parent: "tank", MountRoot: mountRoot, Run: fake.run}
 	ctx := context.Background()
 	for _, tenant := range []string{"home", "other", "moved"} {
-		if _, _, err := volumes.Ensure(ctx, tenant, 1000, 1000); err == nil {
+		if _, err := volumes.Ensure(ctx, tenant, 1000, 1000); err == nil {
 			t.Errorf("Ensure used foreign dataset tank/%s", tenant)
 		}
 		if err := volumes.Remove(ctx, tenant); err == nil {

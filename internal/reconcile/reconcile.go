@@ -219,7 +219,7 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		return Status{}, fmt.Errorf("stored spec no longer valid; correct the app or the tenant: %w", err)
 	}
 	uid, gid := tenant.Owner()
-	dataPath, mountedNow, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid)
+	dataPath, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid)
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
 	}
@@ -245,14 +245,15 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	var current *runtime.Container
 	var outdated []runtime.Container
 	for i := range existing {
-		// A container started before its dataset was mounted runs on the
-		// empty directory underneath; it is replaced, not adopted.
-		if current == nil && !mountedNow && existing[i].Labels[runtime.LabelHash] == desired.Labels[runtime.LabelHash] {
+		if current == nil && existing[i].Labels[runtime.LabelHash] == desired.Labels[runtime.LabelHash] {
 			current = &existing[i]
 			continue
 		}
 		outdated = append(outdated, existing[i])
 	}
+	// A container started before its dataset was mounted runs on the empty
+	// directory underneath; it is replaced, not adopted. A stopped one sees
+	// the dataset once started.
 	if current != nil && current.Running && r.volumes.LateMounts() {
 		serving, err := r.servesData(ctx, record, current.ID)
 		switch {

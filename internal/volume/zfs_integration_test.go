@@ -56,9 +56,9 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	volumes := ZFS{Parent: pool + "/murder/tenants", MountRoot: mountRoot, Run: Exec}
 	ctx := context.Background()
 
-	path, mounted, err := volumes.Ensure(ctx, "acme", 10001, 10002)
-	if err != nil || mounted {
-		t.Fatalf("Ensure = %v, %v", mounted, err)
+	path, err := volumes.Ensure(ctx, "acme", 10001, 10002)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if path != filepath.Join(mountRoot, "acme") {
 		t.Fatalf("path = %q", path)
@@ -99,8 +99,8 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	// An unmounted dataset (as after a reboot that skipped zfs-mount) is
 	// mounted again, with its data.
 	zfsOutput(t, "unmount", pool+"/murder/tenants/acme")
-	if _, mounted, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil || !mounted {
-		t.Fatalf("Ensure of an unmounted dataset = %v, %v", mounted, err)
+	if _, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil {
+		t.Fatalf("Ensure of an unmounted dataset = %v", err)
 	}
 	if data, err := os.ReadFile(filepath.Join(path, "data.db")); err != nil || string(data) != "after" {
 		t.Fatalf("data after remount = %q, %v", data, err)
@@ -118,13 +118,13 @@ func TestZFSDriverOnRealZFS(t *testing.T) {
 	if serving, err := volumes.Serving(ctx, "acme", os.Getpid()); err != nil || serving {
 		t.Fatalf("Serving while unmounted = %v, %v", serving, err)
 	}
-	if _, _, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil {
+	if _, err := volumes.Ensure(ctx, "acme", 10001, 10002); err != nil {
 		t.Fatal(err)
 	}
 
 	// A dataset made by hand below the parent is neither used nor destroyed.
 	zfsOutput(t, "create", "-o", "mountpoint="+filepath.Join(mountRoot, "manual"), pool+"/murder/tenants/manual")
-	if _, _, err := volumes.Ensure(ctx, "manual", 10001, 10002); err == nil {
+	if _, err := volumes.Ensure(ctx, "manual", 10001, 10002); err == nil {
 		t.Fatal("Ensure adopted a dataset murder did not create")
 	}
 	if err := volumes.Remove(ctx, "manual"); err == nil {

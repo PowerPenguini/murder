@@ -51,6 +51,7 @@ func TestSecretsInYAML(t *testing.T) {
 		"secrets: [A, B]":                      {"A": {Kind: "hex"}, "B": {Kind: "hex"}},
 		"secrets: {A: password, B: base64}":    {"A": {Kind: "password"}, "B": {Kind: "base64"}},
 		"secrets: {A: {kind: hex, bytes: 64}}": {"A": {Kind: "hex", Bytes: 64}},
+		"x: &k {kind: base64, bytes: 48}\nsecrets: {A: *k, B: {<<: *k, kind: hex}}": {"A": {Kind: "base64", Bytes: 48}, "B": {Kind: "hex", Bytes: 48}},
 	} {
 		app.Secrets = nil
 		if err := yaml.Unmarshal([]byte(document), &app); err != nil {
@@ -71,6 +72,23 @@ func TestSecretsInYAML(t *testing.T) {
 		decoder.KnownFields(true)
 		if err := decoder.Decode(&app); err == nil {
 			t.Errorf("%q accepted", document)
+		}
+	}
+	// Aliases cannot blow up a secret: each level merges the one before
+	// eight times, and yaml.v3 refuses it before expanding it.
+	bomb, previous := "a: &a {kind: hex}\n", "a"
+	for _, level := range []string{"b", "c", "d", "e", "f", "g", "h", "i"} {
+		bomb += level + ": &" + level + " {<<: [" + strings.Repeat("*"+previous+", ", 7) + "*" + previous + "]}\n"
+		previous = level
+	}
+	for document, want := range map[string]string{
+		bomb + "secrets: {A: {<<: *i}}":                  "excessive aliasing",
+		"secrets: {A: &x {kind: hex, nested: {<<: *x}}}": `unknown field "nested"`,
+		"secrets: {A: {kind: hex, bytes: [1, 2]}}":       "cannot unmarshal",
+	} {
+		app.Secrets = nil
+		if err := yaml.Unmarshal([]byte(document), &app); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%.40q = %v, want %q", document, err, want)
 		}
 	}
 }

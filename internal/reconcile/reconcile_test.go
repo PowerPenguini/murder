@@ -222,7 +222,6 @@ type fakeVolumes struct {
 	snapshots    []string
 	removed      []string
 	failSnapshot error
-	mountNext    bool
 	notServing   bool
 }
 
@@ -232,13 +231,6 @@ func (f *fakeVolumes) Serving(context.Context, string, int) (bool, error) {
 	serving := !f.notServing
 	f.notServing = false
 	return serving, nil
-}
-
-func (f *fakeVolumes) Ensure(ctx context.Context, tenant string, uid, gid int) (string, bool, error) {
-	path, _, err := f.Dir.Ensure(ctx, tenant, uid, gid)
-	mounted := f.mountNext
-	f.mountNext = false
-	return path, mounted, err
 }
 
 func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string, error) {
@@ -508,20 +500,6 @@ func TestImageChangedWhileSuspendedIsSnapshottedOnResume(t *testing.T) {
 	f.reconcile(t)
 	if f.runtime.only(t).spec.Image != imageB || !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) {
 		t.Fatalf("resume with a new image: snapshots = %v", f.volumes.snapshots)
-	}
-}
-
-// A container started before its dataset was mounted sees the empty
-// directory underneath; it must be replaced, not adopted.
-func TestContainerIsRecreatedWhenItsDataWasMountedLate(t *testing.T) {
-	f := newFixture(t)
-	f.create(t, "acme")
-	f.reconcile(t)
-	old := f.runtime.only(t).ID
-	f.volumes.mountNext = true
-	f.reconcile(t)
-	if container := f.runtime.only(t); container.ID == old || !container.Running {
-		t.Fatalf("container after a late mount = %+v", container)
 	}
 }
 

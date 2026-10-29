@@ -13,8 +13,6 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
 // Tenant is the desired definition of one tenant: the app it runs and how.
@@ -95,7 +93,7 @@ func (s *Secrets) UnmarshalYAML(node *yaml.Node) error {
 			var secret Secret
 			if value.Kind == yaml.ScalarNode {
 				secret.Kind = value.Value
-			} else if err := strictyaml.DecodeNode(value, &secret); err != nil {
+			} else if err := decodeSecret(value, &secret); err != nil {
 				return fmt.Errorf("secret %s: %w", name, err)
 			}
 			secrets[name] = secret
@@ -105,6 +103,22 @@ func (s *Secrets) UnmarshalYAML(node *yaml.Node) error {
 	}
 	*s = secrets
 	return nil
+}
+
+// decodeSecret decodes the full {kind, bytes} form, refusing unknown fields:
+// Node.Decode does not inherit the file decoder's strictness. yaml.v3 itself
+// refuses an alias that contains itself and excessive aliasing.
+func decodeSecret(node *yaml.Node, secret *Secret) error {
+	var fields map[string]yaml.Node
+	if err := node.Decode(&fields); err != nil {
+		return err
+	}
+	for field := range fields {
+		if field != "kind" && field != "bytes" {
+			return fmt.Errorf("unknown field %q", field)
+		}
+	}
+	return node.Decode(secret)
 }
 
 // Limits caps a tenant's resources. Zero means the agent's default.
