@@ -135,6 +135,19 @@ type Limits struct {
 	DiskGB int `json:"diskGB,omitempty" yaml:"diskGB,omitempty"`
 }
 
+// Problems describes what is out of range in l: limits are not negative
+// and stay far below what would overflow the byte counts made of them.
+func (l Limits) Problems() []string {
+	var problems []string
+	if l.MemoryMB < 0 || l.CPUs < 0 || l.PIDs < 0 || l.DiskGB < 0 {
+		problems = append(problems, "limits must not be negative")
+	}
+	if l.MemoryMB > maxMemoryMB || l.CPUs > maxCPUs || l.PIDs > maxPIDs || l.DiskGB > maxDiskGB {
+		problems = append(problems, fmt.Sprintf("limits must be at most %d MB memory, %d CPUs, %d processes and %d GB disk", maxMemoryMB, maxCPUs, maxPIDs, maxDiskGB))
+	}
+	return problems
+}
+
 // Or returns l with every field left at zero taken from defaults.
 func (l Limits) Or(defaults Limits) Limits {
 	if l.MemoryMB == 0 {
@@ -339,12 +352,7 @@ func (t Tenant) validate(checkImage func(string) error) error {
 			problems = append(problems, fmt.Sprintf("tmpfs path %q is invalid", mount))
 		}
 	}
-	if t.Limits.MemoryMB < 0 || t.Limits.CPUs < 0 || t.Limits.PIDs < 0 || t.Limits.DiskGB < 0 {
-		problems = append(problems, "limits must not be negative")
-	}
-	if t.Limits.MemoryMB > maxMemoryMB || t.Limits.CPUs > maxCPUs || t.Limits.PIDs > maxPIDs || t.Limits.DiskGB > maxDiskGB {
-		problems = append(problems, fmt.Sprintf("limits must be at most %d MB memory, %d CPUs, %d processes and %d GB disk", maxMemoryMB, maxCPUs, maxPIDs, maxDiskGB))
-	}
+	problems = append(problems, t.Limits.Problems()...)
 	if len(problems) == 0 {
 		return nil
 	}

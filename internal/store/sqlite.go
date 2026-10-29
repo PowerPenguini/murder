@@ -192,16 +192,45 @@ func Open(path string, options Options) (*SQLite, error) {
 		_ = s.Close()
 		return nil, fmt.Errorf("database %s: %w", path, err)
 	}
-	// The tenant firewall covers the pool only: a tenant outside it would
-	// run unguarded.
-	for _, name := range slices.Sorted(maps.Keys(state.tenants)) {
-		if subnet, err := netip.ParsePrefix(state.tenants[name].Subnet); err != nil || !options.NetworkPool.Contains(subnet.Addr()) || subnet.Bits() < options.NetworkPool.Bits() {
-			_ = s.Close()
-			return nil, fmt.Errorf("tenant %s has subnet %s, outside the network pool %v, which the tenant firewall covers; put the pool back", name, state.tenants[name].Subnet, options.NetworkPool)
-		}
-	}
 	s.state.Store(state)
 	return s, nil
+}
+
+// Subnets returns every tenant's subnet, archived or not, from the database
+// at path, which it only reads, without the agent's lock: the tenant
+// firewall loads before the agent runs, and while it runs. A missing
+// database has none.
+func Subnets(path string) ([]netip.Prefix, error) {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	db, err := sql.Open("sqlite", uri(path, "mode=ro&_pragma=busy_timeout(5000)"))
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	if err := checkSchema(db); err != nil {
+		return nil, fmt.Errorf("database %s: %w", path, err)
+	}
+	rows, err := db.Query(`SELECT subnet FROM tenants`)
+	if err != nil {
+		return nil, err
+	}
+	var subnets []netip.Prefix
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		subnet, err := netip.ParsePrefix(text)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("database %s: subnet %q: %w", path, text, err)
+		}
+		subnets = append(subnets, subnet)
+	}
+	return subnets, closeRows(rows)
 }
 
 // ownerOnly makes a database, and its write-ahead log files, readable by

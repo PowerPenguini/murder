@@ -50,7 +50,8 @@ type Agent struct {
 	Volumes  Volumes `yaml:"volumes"`
 	Edge     Edge    `yaml:"edge"`
 
-	// Defaults fill in tenant limits left at zero.
+	// Defaults fill in tenant limits left at zero. Disk use is unlimited
+	// unless diskGB is set (with the zfs driver).
 	Defaults          spec.Limits `yaml:"defaults"`
 	ReconcileInterval Duration    `yaml:"reconcileInterval"`
 }
@@ -104,7 +105,7 @@ func Parse(data []byte) (Agent, error) {
 		NetworkPool:       "10.240.0.0/16",
 		Firewall:          FirewallNftables,
 		Edge:              Edge{HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/murder/certs"}},
-		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512, DiskGB: 20},
+		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
 	}
 	// An empty document keeps every default; Validate then reports the
@@ -162,6 +163,9 @@ func (a Agent) Validate() error {
 		if !slices.Contains(edge.DNSProviders, a.Edge.TLS.DNSProvider) {
 			problems = append(problems, fmt.Sprintf("edge.tls.dnsProvider must be one of %v", edge.DNSProviders))
 		}
+	}
+	for _, problem := range a.Defaults.Problems() {
+		problems = append(problems, "defaults: "+problem)
 	}
 	if a.ReconcileInterval.Duration < time.Second {
 		problems = append(problems, "reconcileInterval must be at least 1s")

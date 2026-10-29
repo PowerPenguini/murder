@@ -59,6 +59,7 @@ func TestParseRejectsBadConfig(t *testing.T) {
 		"empty":         "",
 		"unknown field": "baseDomain: example.com\nbaseDomian: typo.com\n",
 		"two documents": "baseDomain: example.com\n---\nnode: other\n",
+		"defaults":      "baseDomain: example.com\ndefaults: {diskGB: 9000000000}\n",
 		"firewall":      "baseDomain: example.com\nfirewall: iptables\n",
 		"edge port":     "baseDomain: example.com\nedge: {http: \"localhost\"}\n",
 		"bad driver":    "baseDomain: example.com\nvolumes: {driver: nfs}\n",

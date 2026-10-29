@@ -164,7 +164,7 @@ container of it that is still running.
   images must not default to root.
 - **Every container is locked down.** It drops all capabilities, runs with
   `no-new-privileges` and has limits on memory, CPU, processes and (with
-  ZFS) disk.
+  ZFS, once `defaults.diskGB` or the tenant's `diskGB` is set) disk.
 - **Tenants cannot reach each other.** Each has its own network (a /28 with
   inter-container traffic off, and Docker isolates networks from each
   other). Nothing is published on the host: the edge proxy, on the host,
@@ -179,14 +179,14 @@ container of it that is still running.
   other servers on a private network and the cloud metadata service
   (`169.254.169.254`) are out of reach.
   - `murder-firewall.service` loads it at boot before Docker, which starts
-    the tenants; Docker requires it, so a node whose firewall cannot load
-    runs no tenants. The agent loads it again at start and every 15
-    seconds, which undoes a flushed ruleset and follows changed DNS servers.
+    the tenants (`systemctl restart murder-firewall` reloads it without
+    touching Docker). The agent loads it again at start, refusing to start
+    without it, and every 15 seconds, which undoes a flushed ruleset and
+    follows changed DNS servers.
   - The rules are IPv4: tenant networks are made without IPv6, and one with
     IPv6 (say from Docker's `default-network-opts`) is refused.
-  - They cover `networkPool`; the agent refuses to start while a tenant's
-    subnet lies outside it, so changing the pool cannot leave tenants
-    unguarded.
+  - They cover `networkPool` and every tenant's subnet, read from the
+    database, so tenants left on an earlier pool stay guarded.
   - `firewall: off` turns it off, for development only. A test in the test
     VM checks it from a real container.
 - **Tenant data is out of reach of host users.** Data directories sit below a

@@ -105,7 +105,7 @@ func runAgent(args []string) error {
 	// tenants at boot; loading them here covers a node without that unit
 	// and a ruleset flushed since.
 	if cfg.Firewall == config.FirewallNftables {
-		if err := loadFirewall(context.Background(), cfg); err != nil {
+		if err := loadFirewall(context.Background(), cfg, storeSubnets(st)); err != nil {
 			return fmt.Errorf("%w (firewall: off in %s runs tenants without it)", err, *configPath)
 		}
 	} else {
@@ -145,7 +145,7 @@ func runAgent(args []string) error {
 	go serve("api", apiServer, apiListener)
 	go reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
 	if cfg.Firewall == config.FirewallNftables {
-		go keepFirewall(ctx, cfg, log)
+		go keepFirewall(ctx, cfg, st, log)
 	}
 
 	proxy := edge.NewProxy(cfg.BaseDomain, api.Routes{Store: st}, log)
@@ -249,7 +249,7 @@ const firewallInterval = 15 * time.Second
 // keepFirewall loads the tenant firewall again and again, so a firewall
 // reload that dropped Murder's table does not leave tenants unguarded and
 // a changed DNS server is let through.
-func keepFirewall(ctx context.Context, cfg config.Agent, log *slog.Logger) {
+func keepFirewall(ctx context.Context, cfg config.Agent, st store.Store, log *slog.Logger) {
 	ticker := time.NewTicker(firewallInterval)
 	defer ticker.Stop()
 	for {
@@ -257,21 +257,33 @@ func keepFirewall(ctx context.Context, cfg config.Agent, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := loadFirewall(ctx, cfg); err != nil && ctx.Err() == nil {
+			if err := loadFirewall(ctx, cfg, storeSubnets(st)); err != nil && ctx.Err() == nil {
 				log.Error("reload the tenant firewall", "error", err)
 			}
 		}
 	}
 }
 
-// loadFirewall loads the tenant firewall the config describes, with the
-// host's DNS servers as they are now.
-func loadFirewall(ctx context.Context, cfg config.Agent) error {
+// loadFirewall loads the tenant firewall the config describes for the pool
+// and the tenant subnets (some may lie outside the pool after it changed),
+// with the host's DNS servers as they are now.
+func loadFirewall(ctx context.Context, cfg config.Agent, subnets []netip.Prefix) error {
 	edgePorts, err := cfg.EdgePorts()
 	if err != nil {
 		return err
 	}
-	return firewall.Apply(ctx, netip.MustParsePrefix(cfg.NetworkPool), edgePorts, firewall.Resolvers())
+	sources := append([]netip.Prefix{netip.MustParsePrefix(cfg.NetworkPool)}, subnets...)
+	return firewall.Apply(ctx, sources, edgePorts, firewall.Resolvers())
+}
+
+func storeSubnets(st store.Store) []netip.Prefix {
+	var subnets []netip.Prefix
+	for _, record := range st.List() {
+		if subnet, err := netip.ParsePrefix(record.Subnet); err == nil {
+			subnets = append(subnets, subnet)
+		}
+	}
+	return subnets
 }
 
 // runFirewall loads the tenant firewall once, for murder-firewall.service,
@@ -290,7 +302,11 @@ func runFirewall(args []string) error {
 		fmt.Println("the tenant firewall is off in", *configPath)
 		return nil
 	}
-	return loadFirewall(context.Background(), cfg)
+	subnets, err := store.Subnets(cfg.Database)
+	if err != nil {
+		return err
+	}
+	return loadFirewall(context.Background(), cfg, subnets)
 }
 
 // publicServer has no write timeout: tenants stream server-sent events.

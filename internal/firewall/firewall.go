@@ -33,14 +33,19 @@ var private = []string{
 }
 
 // Rules returns the nftables script that replaces Murder's table. From
-// pool, traffic to the host is dropped unless it answers a connection the
+// the tenant networks (sources: the pool and any tenant subnet outside it,
+// left from an earlier pool), traffic to the host is dropped unless it answers a connection the
 // host opened (the edge proxy and health checks) or goes to an edge port,
 // so a tenant can still reach its own public address; traffic to a private
 // destination is dropped unless it is DNS to one of resolvers, which
 // Docker's embedded DNS server forwards to from the tenant's network. The
 // script is one transaction.
-func Rules(pool netip.Prefix, edgePorts []int, resolvers []netip.Addr) string {
-	source := "ip saddr " + pool.Masked().String()
+func Rules(sources []netip.Prefix, edgePorts []int, resolvers []netip.Addr) string {
+	masked := make([]netip.Prefix, len(sources))
+	for i, prefix := range sources {
+		masked[i] = prefix.Masked()
+	}
+	source := "ip saddr { " + strings.Join(sortedText(masked, netip.Prefix.String, comparePrefixes), ", ") + " }"
 	var script strings.Builder
 	fmt.Fprintf(&script, "table inet %s\ndelete table inet %s\ntable inet %s {\n", Table, Table, Table)
 	script.WriteString("\tchain input {\n\t\ttype filter hook input priority filter; policy accept;\n")
@@ -66,6 +71,13 @@ func dnsRule(source string, resolvers []netip.Addr) string {
 		return ""
 	}
 	return fmt.Sprintf("\t\t%s ip daddr { %s } meta l4proto { tcp, udp } th dport 53 accept\n", source, strings.Join(addresses, ", "))
+}
+
+func comparePrefixes(a, b netip.Prefix) int {
+	if c := a.Addr().Compare(b.Addr()); c != 0 {
+		return c
+	}
+	return a.Bits() - b.Bits()
 }
 
 // sortedText returns values sorted and without repeats, as text.
@@ -110,11 +122,11 @@ func Resolvers() []netip.Addr {
 }
 
 // Apply loads the rules with nft, replacing Murder's table at once.
-func Apply(ctx context.Context, pool netip.Prefix, edgePorts []int, resolvers []netip.Addr) error {
+func Apply(ctx context.Context, sources []netip.Prefix, edgePorts []int, resolvers []netip.Addr) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "nft", "-f", "-")
-	command.Stdin = strings.NewReader(Rules(pool, edgePorts, resolvers))
+	command.Stdin = strings.NewReader(Rules(sources, edgePorts, resolvers))
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("load the tenant firewall with nft: %w: %s", err, strings.TrimSpace(string(output)))
 	}
