@@ -173,18 +173,27 @@ type internalIssuer struct {
 	mu      sync.Mutex
 	current *tls.Certificate
 	expires time.Time
+	// retryAt holds back the next renewal after one failed.
+	retryAt time.Time
 }
+
+// renewRetry is how long a failed renewal waits before the next attempt.
+const renewRetry = time.Minute
 
 func (i *internalIssuer) certificate() (*tls.Certificate, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.current != nil && i.now().Before(i.expires.Add(-internalLifetime/3)) {
+	now := i.now()
+	if i.current != nil && (now.Before(i.expires.Add(-internalLifetime/3)) || now.Before(i.retryAt)) {
 		return i.current, nil
 	}
-	certificate, err := internalCertificate(i.dir, i.names, i.now())
+	// The CA is created on the first start only: a new one later would not
+	// be trusted by the clients that trust the first.
+	certificate, err := internalCertificate(i.dir, i.names, now, i.current == nil)
 	if err != nil {
-		if i.current != nil && i.now().Before(i.expires) {
-			return i.current, nil // try again on the next handshake
+		i.retryAt = now.Add(renewRetry)
+		if i.current != nil && now.Before(i.expires) {
+			return i.current, nil
 		}
 		return nil, err
 	}
@@ -228,11 +237,11 @@ func dnsProvider(name, tokenFile string) (certmagic.DNSProvider, error) {
 
 // internalCertificate signs the names with a local CA kept in dir, creating
 // the CA on first use. Clients must trust dir/ca.pem.
-func internalCertificate(dir string, names []string, now time.Time) (tls.Certificate, error) {
+func internalCertificate(dir string, names []string, now time.Time, createCA bool) (tls.Certificate, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return tls.Certificate{}, err
 	}
-	caCert, caKey, err := loadOrCreateCA(dir)
+	caCert, caKey, err := loadOrCreateCA(dir, createCA)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
@@ -260,10 +269,10 @@ func internalCertificate(dir string, names []string, now time.Time) (tls.Certifi
 	return tls.Certificate{Certificate: [][]byte{der, caCert.Raw}, PrivateKey: key, Leaf: leaf}, nil
 }
 
-func loadOrCreateCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
+func loadOrCreateCA(dir string, create bool) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	certPath, keyPath := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")
 	certPEM, err := os.ReadFile(certPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil && (!create || !errors.Is(err, os.ErrNotExist)) {
 		// Never replace a CA clients already trust because of a read error.
 		return nil, nil, err
 	}

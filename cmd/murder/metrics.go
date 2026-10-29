@@ -37,6 +37,13 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	out := metrics.NewWriter(w)
+	records := m.store.List()
+	known := make(map[string]bool, len(records))
+	for _, record := range records {
+		known[record.Spec.Name] = true
+	}
+	// A purged tenant's counts go; an archived one's stay for its return.
+	m.edge.Keep(func(tenant string) bool { return known[tenant] })
 	m.edge.Write(out)
 
 	type tenant struct {
@@ -45,7 +52,7 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		seen   bool
 	}
 	var tenants []tenant
-	for _, record := range m.store.List() {
+	for _, record := range records {
 		if !record.Archived() {
 			status, seen := m.reconciler.Status(record.Spec.Name)
 			tenants = append(tenants, tenant{record.Spec.Name, status, seen})

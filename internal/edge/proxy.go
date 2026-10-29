@@ -138,7 +138,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Stream responses as they come, for server-sent events.
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			if errors.Is(err, http.ErrAbortHandler) || r.Context().Err() != nil {
+			// Once the connection is taken over, a failure is the client's,
+			// and nothing can be written back.
+			if errors.Is(err, http.ErrAbortHandler) || r.Context().Err() != nil || recorder.hijacked {
 				return
 			}
 			p.stats.BackendError(tenant)
@@ -177,9 +179,10 @@ func (p *Proxy) RedirectToHTTPS(ready func() bool) http.Handler {
 // connections through it.
 type recorder struct {
 	http.ResponseWriter
-	start  time.Time
-	status int
-	wait   time.Duration
+	start    time.Time
+	status   int
+	wait     time.Duration
+	hijacked bool
 }
 
 func (r *recorder) WriteHeader(status int) {
@@ -204,8 +207,11 @@ func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 // the proxy then writes to it directly.
 func (r *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	conn, buffered, err := http.NewResponseController(r.ResponseWriter).Hijack()
-	if err == nil && r.status == 0 {
-		r.status, r.wait = http.StatusSwitchingProtocols, time.Since(r.start)
+	if err == nil {
+		r.hijacked = true
+		if r.status == 0 {
+			r.status, r.wait = http.StatusSwitchingProtocols, time.Since(r.start)
+		}
 	}
 	return conn, buffered, err
 }

@@ -56,6 +56,8 @@ func TestMetricsDescribeTheNode(t *testing.T) {
 	reconciler := reconcile.New(st, unusedRuntime{}, volume.Dir{Root: dir}, key, reconcile.Config{BaseDomain: "example.test"}, log)
 	edge := metrics.NewEdge()
 	edge.Request("acme", 200, 30*time.Millisecond)
+	edge.Request("gone", 200, time.Millisecond)   // archived: kept for its return
+	edge.Request("purged", 200, time.Millisecond) // forgotten
 	firewall := new(atomic.Int64)
 	firewall.Store(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC).UnixNano())
 	handler := &agentMetrics{store: st, reconciler: reconciler, api: api.NewServer(st, reconciler, nil, key, log), edge: edge, firewall: firewall}
@@ -70,6 +72,7 @@ func TestMetricsDescribeTheNode(t *testing.T) {
 		`murder_tenant_phase{tenant="acme",phase="running"} 0`,
 		`murder_tenant_healthy{tenant="acme"} 0`,
 		`murder_firewall_loaded_timestamp_seconds 1.7932752e+09`,
+		`murder_edge_requests_total{tenant="gone",code="2xx"} 1`,
 	} {
 		if !strings.Contains(text, want+"\n") {
 			t.Errorf("missing %s", want)
@@ -77,7 +80,7 @@ func TestMetricsDescribeTheNode(t *testing.T) {
 	}
 	// An archived tenant runs nothing; nothing before a first pass, backup
 	// or certificate is reported as if it happened.
-	for _, absent := range []string{`tenant="gone"`, "murder_reconcile_", "murder_backup_", "murder_tls_"} {
+	for _, absent := range []string{`tenant="purged"`, `murder_tenant_phase{tenant="gone"`, "murder_reconcile_", "murder_backup_", "murder_tls_"} {
 		if strings.Contains(text, absent) {
 			t.Errorf("unexpected %s", absent)
 		}

@@ -140,6 +140,17 @@ func (e *Edge) Unrouted() {
 	e.unrouted++
 }
 
+// Keep forgets the counts of tenants that no longer exist.
+func (e *Edge) Keep(exists func(tenant string) bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for name := range e.tenants {
+		if !exists(name) {
+			delete(e.tenants, name)
+		}
+	}
+}
+
 func (e *Edge) tenant(name string) *tenantRequests {
 	counts := e.tenants[name]
 	if counts == nil {

@@ -41,3 +41,15 @@ func TestResponseTimeBuckets(t *testing.T) {
 		}
 	}
 }
+
+func TestKeepForgetsTenantsThatAreGone(t *testing.T) {
+	edge := NewEdge()
+	edge.Request("acme", 200, time.Millisecond)
+	edge.BackendError("purged")
+	edge.Keep(func(tenant string) bool { return tenant == "acme" })
+	var out strings.Builder
+	edge.Write(NewWriter(&out))
+	if !strings.Contains(out.String(), `tenant="acme"`) || strings.Contains(out.String(), `tenant="purged"`) {
+		t.Fatalf("metrics:\n%s", out.String())
+	}
+}

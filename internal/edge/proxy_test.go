@@ -384,3 +384,41 @@ func TestCertmagicLogsGoToTheAgentLog(t *testing.T) {
 		t.Fatalf("log:\n%s", text)
 	}
 }
+
+// A renewal never makes a new CA, which clients would not trust, and a
+// failed one waits a minute before the next attempt.
+func TestInternalRenewalKeepsTheCA(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	issuer := &internalIssuer{dir: dir, names: []string{"*.example.com", "example.com"}, now: func() time.Time { return now }}
+	first, err := issuer.certificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPEM, _ := os.ReadFile(filepath.Join(dir, "ca.pem"))
+	if err := os.Rename(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.pem.away")); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(61 * 24 * time.Hour)
+	if same, err := issuer.certificate(); err != nil || same != first {
+		t.Fatalf("a failed renewal = %v, %v; want the current certificate", same, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.pem")); !os.IsNotExist(err) {
+		t.Fatalf("a renewal made a new CA: %v", err)
+	}
+	if err := os.Rename(filepath.Join(dir, "ca.pem.away"), filepath.Join(dir, "ca.pem")); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(30 * time.Second)
+	if same, _ := issuer.certificate(); same != first {
+		t.Fatal("renewal tried again within a minute")
+	}
+	now = now.Add(time.Minute)
+	renewed, err := issuer.certificate()
+	if err != nil || renewed == first {
+		t.Fatalf("renewal after the wait = %v, %v", renewed, err)
+	}
+	if again, _ := os.ReadFile(filepath.Join(dir, "ca.pem")); !bytes.Equal(again, caPEM) {
+		t.Fatal("the CA changed")
+	}
+}

@@ -139,6 +139,9 @@ func runAgent(args []string) error {
 		if metricsListener, err = net.Listen("tcp", cfg.Metrics); err != nil {
 			return fmt.Errorf("metrics: %w", err)
 		}
+		if host, _, _ := net.SplitHostPort(cfg.Metrics); !privateHost(host) {
+			log.Warn("metrics are served on a public address, without authentication: firewall the port", "metrics", cfg.Metrics)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -360,4 +363,11 @@ func obtainTLS(ctx context.Context, cfg config.Agent, log *slog.Logger) *edge.Ce
 		}
 		delay = min(2*delay, 10*time.Minute)
 	}
+}
+
+// privateHost reports whether host is a loopback or private address, or a
+// name (which the operator chose deliberately).
+func privateHost(host string) bool {
+	address, err := netip.ParseAddr(host)
+	return err != nil || address.IsLoopback() || address.IsPrivate()
 }
