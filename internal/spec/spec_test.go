@@ -83,7 +83,7 @@ func TestSecretsInYAML(t *testing.T) {
 	}
 	for document, want := range map[string]string{
 		bomb + "secrets: {A: {<<: *i}}":                  "excessive aliasing",
-		"secrets: {A: &x {kind: hex, nested: {<<: *x}}}": `unknown field "nested"`,
+		"secrets: {A: &x {kind: hex, nested: {<<: *x}}}": `line 1: unknown field "nested"`,
 		"secrets: {A: {kind: hex, bytes: [1, 2]}}":       "cannot unmarshal",
 	} {
 		app.Secrets = nil

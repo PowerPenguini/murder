@@ -44,6 +44,9 @@ type fakeRuntime struct {
 	failCreate error
 	failPull   error
 	failRemove error
+	// restartAfterList makes the next List report every container stopped
+	// and then starts them, as a restart policy would during a pass.
+	restartAfterList bool
 	// exitBeforeInspect makes the next Pid call see the container gone, as
 	// if it exited between List and the inspection.
 	exitBeforeInspect bool
@@ -124,8 +127,16 @@ func (f *fakeRuntime) List(context.Context) ([]runtime.Container, error) {
 	defer f.mu.Unlock()
 	var out []runtime.Container
 	for _, container := range f.containers {
+		if f.restartAfterList {
+			listed := container.Container
+			listed.Running = false
+			out = append(out, listed)
+			container.Running = true
+			continue
+		}
 		out = append(out, container.Container)
 	}
+	f.restartAfterList = false
 	slices.SortFunc(out, func(a, b runtime.Container) int { return strings.Compare(a.ID, b.ID) })
 	return out, nil
 }
@@ -514,6 +525,21 @@ func TestContainerNotServingTheDataIsReplaced(t *testing.T) {
 	f.reconcile(t)
 	if container := f.runtime.only(t); container.ID == old || !container.Running {
 		t.Fatalf("container after a mount check failure = %+v", container)
+	}
+}
+
+// A container listed as stopped that its restart policy starts during the
+// pass, before its dataset is mounted, is checked and replaced too.
+func TestContainerRestartedDuringThePassIsCheckedForItsData(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	f.runtime.restartAfterList = true
+	f.volumes.notServing = true
+	f.reconcile(t)
+	if container := f.runtime.only(t); container.ID == old || !container.Running {
+		t.Fatalf("container restarted on the empty directory = %+v", container)
 	}
 }
 

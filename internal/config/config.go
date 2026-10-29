@@ -2,7 +2,6 @@
 package config
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
 // Agent configures one node's agent.
@@ -100,11 +100,9 @@ func Parse(data []byte) (Agent, error) {
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
 	// An empty document keeps every default; Validate then reports the
 	// missing base domain.
-	if err := decoder.Decode(&agent); err != nil && !errors.Is(err, io.EOF) {
+	if err := strictyaml.Decode(data, &agent); err != nil && !errors.Is(err, io.EOF) {
 		return Agent{}, fmt.Errorf("parse config: %w", err)
 	}
 	return agent, agent.Validate()

@@ -8,6 +8,7 @@ import (
 	"maps"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -109,16 +110,19 @@ func (s *Secrets) UnmarshalYAML(node *yaml.Node) error {
 // Node.Decode does not inherit the file decoder's strictness. yaml.v3 itself
 // refuses an alias that contains itself and excessive aliasing.
 func decodeSecret(node *yaml.Node, secret *Secret) error {
-	var fields map[string]yaml.Node
-	if err := node.Decode(&fields); err != nil {
+	var strict struct {
+		Secret  `yaml:",inline"`
+		Unknown map[string]yaml.Node `yaml:",inline"`
+	}
+	if err := node.Decode(&strict); err != nil {
 		return err
 	}
-	for field := range fields {
-		if field != "kind" && field != "bytes" {
-			return fmt.Errorf("unknown field %q", field)
-		}
+	if len(strict.Unknown) > 0 {
+		field := slices.Min(slices.Collect(maps.Keys(strict.Unknown)))
+		return fmt.Errorf("line %d: unknown field %q", strict.Unknown[field].Line, field)
 	}
-	return node.Decode(secret)
+	*secret = strict.Secret
+	return nil
 }
 
 // Limits caps a tenant's resources. Zero means the agent's default.
