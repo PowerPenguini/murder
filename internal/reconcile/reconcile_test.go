@@ -682,7 +682,7 @@ func TestFailedPullKeepsTheOldContainer(t *testing.T) {
 			t.Fatalf("Reconcile = %v", err)
 		}
 	}
-	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseFailed || !strings.Contains(status.Message, "attempt 1") {
+	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseFailed || !strings.Contains(status.Message, "attempt 1") || status.ContainerID != old {
 		t.Fatalf("status after a failed pull = %+v", status)
 	}
 	if len(f.runtime.pulled) != 1 {
@@ -696,6 +696,13 @@ func TestFailedPullKeepsTheOldContainer(t *testing.T) {
 	}
 	if len(f.volumes.snapshots) != 0 {
 		t.Fatalf("snapshots taken for a change that never happened: %v", f.volumes.snapshots)
+	}
+	// "murder reconcile" retries at once, say after fixing credentials.
+	f.runtime.failPull = nil
+	f.reconciler.RetryPulls()
+	f.reconcile(t)
+	if container := f.runtime.only(t); len(f.runtime.pulled) != 2 || container.spec.Image != imageB {
+		t.Fatalf("after a retry: pulled %v, container %+v", f.runtime.pulled, container)
 	}
 }
 

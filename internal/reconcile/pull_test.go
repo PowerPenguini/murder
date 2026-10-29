@@ -58,3 +58,33 @@ func TestPullRetriesWithGrowingDelays(t *testing.T) {
 		t.Fatalf("a pull that works left state behind: %v, %+v", err, p.images)
 	}
 }
+
+// Failures of images no tenant wants are forgotten; one being pulled stays.
+func TestPullsKeepOnlyWantedImages(t *testing.T) {
+	release := make(chan struct{})
+	p := newPulls(context.Background(), func(_ context.Context, image string) error {
+		if image == "slow" {
+			<-release
+		}
+		return errors.New("registry down")
+	})
+	_ = p.fetch("old")
+	_ = p.fetch("slow")
+	p.mu.Lock()
+	for p.images["old"].running {
+		p.mu.Unlock()
+		time.Sleep(time.Millisecond)
+		p.mu.Lock()
+	}
+	p.mu.Unlock()
+	p.keep(map[string]bool{"new": true})
+	p.mu.Lock()
+	_, old := p.images["old"]
+	_, slow := p.images["slow"]
+	p.mu.Unlock()
+	if old || !slow {
+		t.Fatalf("after keep: old %v, slow %v", old, slow)
+	}
+	close(release)
+	p.wait()
+}

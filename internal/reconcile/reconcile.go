@@ -138,6 +138,10 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// RetryPulls lets failed pulls be tried again on the next pass instead of
+// after their delay; "murder reconcile" uses it.
+func (r *Reconciler) RetryPulls() { r.pulls.retryNow() }
+
 // Reconcile performs one full pass. A failing tenant does not stop the pass;
 // every failure is returned joined.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
@@ -211,6 +215,11 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	r.mu.Lock()
 	r.statuses = byName
 	r.mu.Unlock()
+	images := map[string]bool{}
+	for _, record := range records {
+		images[record.Spec.Image] = true
+	}
+	r.pulls.keep(images)
 	r.sweepImages(ctx)
 	return errors.Join(errs...)
 }
@@ -324,18 +333,21 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	}
 	if current == nil {
 		id, err := r.replace(ctx, record, desired, outdated)
-		if errors.Is(err, errPulling) {
-			status := Status{Phase: PhasePulling, Message: "pulling " + tenant.Image}
+		if err != nil {
+			// The old container keeps serving until the new one can start;
+			// its logs stay at hand.
+			status := Status{}
 			for _, container := range outdated {
 				if container.Running {
-					status.ContainerID = container.ID // still serving
+					status.ContainerID = container.ID
 					break
 				}
 			}
-			return status, nil
-		}
-		if err != nil {
-			return Status{}, err
+			if errors.Is(err, errPulling) {
+				status.Phase, status.Message = PhasePulling, "pulling "+tenant.Image
+				return status, nil
+			}
+			return status, err
 		}
 		current = &runtime.Container{ID: id, Running: true}
 	} else {

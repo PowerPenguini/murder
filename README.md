@@ -25,8 +25,8 @@ Stage 2 — a single server — is what this code does today.
   while the agent is down; a restarted agent adopts them without restarting
   them. Images are pulled in the background: a tenant waiting for one shows
   `pulling` while its old container keeps serving, and a failed pull is
-  retried after 10 s, doubling up to 10 minutes. Health checks run side by
-  side.
+  retried after 10 s, doubling up to 10 minutes (`murder reconcile` retries
+  at once, say after fixing credentials). Health checks run side by side.
 - **Edge proxy.** Routes `<tenant>.<baseDomain>` to the tenant's container. It
   streams responses (server-sent events) and replaces any client-sent
   `X-Forwarded-*` headers. Over HTTPS it adds `Strict-Transport-Security` (one

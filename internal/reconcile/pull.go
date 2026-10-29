@@ -93,5 +93,26 @@ func (p *pulls) present(image string) {
 	}
 }
 
+// retryNow lets every failed image be pulled again at once, say after the
+// registry credentials were fixed.
+func (p *pulls) retryNow() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, state := range p.images {
+		state.retryAt = time.Time{}
+	}
+}
+
+// keep forgets the failures of images no tenant wants any more.
+func (p *pulls) keep(wanted map[string]bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for image, state := range p.images {
+		if !wanted[image] && !state.running {
+			delete(p.images, image)
+		}
+	}
+}
+
 // wait returns once no pull runs.
 func (p *pulls) wait() { p.running.Wait() }
