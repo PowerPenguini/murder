@@ -30,9 +30,10 @@ Stage 2 — a single server — is what this code does today.
   how they went). Health checks run side by side. A tenant whose app keeps
   exiting shows `restarting` while the engine restarts it; `tenant list`
   counts its restarts and `tenant show` says when it last exited and why,
-  such as going over its memory limit (tenants get no swap beyond it).
-  Stopping the agent, or interrupting `murder reconcile`, lets a container
-  replacement under way finish first, so no tenant is left without one.
+  such as going over its memory limit (containers get no swap beyond it;
+  ones created before this release from their next replacement). Stopping
+  the agent lets a container replacement under way finish first, also in a
+  pass `murder reconcile` started, so no tenant is left without one.
 - **Edge proxy.** Routes `<tenant>.<baseDomain>` to the tenant's container. It
   streams responses (server-sent events) and replaces any client-sent
   `X-Forwarded-*` headers. Over HTTPS it adds `Strict-Transport-Security` (one

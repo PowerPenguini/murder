@@ -88,7 +88,9 @@ type Reconciler struct {
 	// server.
 	backend func(store.Record) (string, error)
 	pulls   *pulls
-	// stop ends the background pulls.
+	// life ends when Run's context does, and with it the background pulls
+	// and every pass, also one started through the API; stop ends it.
+	life context.Context
 	stop context.CancelFunc
 
 	// pass serializes reconcile passes and the removal of tenants.
@@ -110,14 +112,15 @@ func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secret
 	if config.Scheme == "" {
 		config.Scheme = "https"
 	}
-	pullCtx, stop := context.WithCancel(context.Background())
+	life, stop := context.WithCancel(context.Background())
 	return &Reconciler{
 		store: st, runtime: rt, volumes: volumes, key: key, config: config, log: log,
 		health:       &http.Client{Timeout: config.HealthTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		statuses:     map[string]Status{},
 		imageRetryAt: map[string]time.Time{},
 		backend:      Backend,
-		pulls:        newPulls(pullCtx, rt.PullImage),
+		pulls:        newPulls(life, rt.PullImage),
+		life:         life,
 		stop:         stop,
 	}
 }
@@ -127,9 +130,17 @@ func ContainerName(tenant string) string { return "murder-" + tenant }
 func NetworkName(tenant string) string   { return "murder-" + tenant }
 
 // Run reconciles every interval, whenever the store changes and whenever a
-// pull ends, until ctx ends; then it stops the pulls.
+// pull ends, until ctx ends. Then it stops the pulls and any pass, and
+// returns once the tenant step under way, if any, has finished.
 func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
-	defer r.stop()
+	context.AfterFunc(ctx, r.stop)
+	defer func() {
+		r.stop()
+		// Wait for the tenant step under way in a pass begun through the
+		// API; the pass stops after it.
+		r.pass.Lock()
+		defer r.pass.Unlock()
+	}()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -154,7 +165,7 @@ func (r *Reconciler) ReconcileNow(ctx context.Context) error {
 	for {
 		before := r.pulls.startedCount()
 		err := r.Reconcile(ctx)
-		if r.pulls.startedCount() == before {
+		if r.pulls.startedCount() == before || r.life.Err() != nil {
 			return err
 		}
 		// The pass started pulls: wait for them and pass again, to use the
@@ -168,16 +179,32 @@ func (r *Reconciler) ReconcileNow(ctx context.Context) error {
 // Reconcile performs one full pass. A failing tenant does not stop the pass;
 // every failure is returned joined.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(r.life, cancel)()
 	r.pass.Lock()
 	defer r.pass.Unlock()
+	if err := r.interrupted(ctx); err != nil {
+		return err
+	}
 	return r.reconcile(ctx)
+}
+
+// interrupted reports why a pass must not go on to its next tenant: ctx
+// ended, or the reconciler is stopping (which ends ctx too, but not at
+// once).
+func (r *Reconciler) interrupted(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.life.Err()
 }
 
 // reconcile is cancelled with ctx between tenants: a tenant whose step has
 // begun, such as a container replacement, finishes it (within
-// stepGrace), so stopping the agent or interrupting "murder reconcile"
-// never leaves a tenant with its old container removed and no new one.
-// An interrupted pass keeps the statuses of the last whole one.
+// stepGrace), so stopping the agent never leaves a tenant with its old
+// container removed and no new one. An interrupted pass keeps the
+// statuses of the last whole one.
 func (r *Reconciler) reconcile(ctx context.Context) error {
 	step, cancel := outlive(ctx, r.config.StopTimeout+stepGrace)
 	defer cancel()
@@ -203,8 +230,8 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		if wanted[tenant] {
 			continue
 		}
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if err := r.interrupted(ctx); err != nil {
+			return err
 		}
 		if err := r.removeContainers(step, byTenant[tenant]); err != nil {
 			errs = append(errs, fmt.Errorf("remove containers of %q, which no tenant wants: %w", tenant, err))
@@ -217,8 +244,8 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	}
 	statuses := make([]Status, len(records))
 	for i, record := range records {
-		if ctx.Err() != nil {
-			return errors.Join(append(errs, ctx.Err())...)
+		if err := r.interrupted(ctx); err != nil {
+			return errors.Join(append(errs, err)...)
 		}
 		status, err := r.reconcileTenant(step, record, byTenant[record.Spec.Name])
 		if err != nil {
@@ -249,8 +276,8 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		})
 	}
 	checks.Wait()
-	if ctx.Err() != nil {
-		return errors.Join(append(errs, ctx.Err())...)
+	if err := r.interrupted(ctx); err != nil {
+		return errors.Join(append(errs, err)...)
 	}
 	byName := make(map[string]Status, len(records))
 	for i, record := range records {
@@ -435,6 +462,9 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 				return Status{}, fmt.Errorf("start: %w", err)
 			}
 			r.log.Info("restarted stopped tenant container", "tenant", tenant.Name, "container", current.ID)
+			// The engine counts restarts again from here; the exit was not
+			// the app's to report.
+			state = runtime.ContainerState{}
 		}
 	}
 	status = Status{Phase: PhaseRunning, ContainerID: current.ID, Restarts: state.Restarts}
@@ -456,12 +486,12 @@ func lastExit(state runtime.ContainerState, memoryMB int) string {
 	}
 	at := state.ExitedAt.UTC().Format(time.RFC3339)
 	switch {
+	case !state.ExitKnown:
+		return "exited at " + at
 	case state.OOMKilled:
 		return fmt.Sprintf("killed for using more than its %d MB of memory, at %s", memoryMB, at)
-	case state.Pid == 0:
-		return fmt.Sprintf("exited with code %d at %s", state.ExitCode, at)
 	default:
-		return "exited at " + at // the code is gone once it runs again
+		return fmt.Sprintf("exited with code %d at %s", state.ExitCode, at)
 	}
 }
 

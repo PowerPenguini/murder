@@ -14,9 +14,11 @@ import (
 )
 
 func main() {
-	if os.Getenv("VARIANT") == "oom" {
-		// Use memory until the kernel kills the process for going over its
-		// limit, as a leaking app would.
+	dataDir := os.Getenv("DATA_DIR")
+	// The "oom" variant uses memory, once, until the kernel kills it for
+	// going over its limit, as a leaking app would; started again, it
+	// serves.
+	if os.Getenv("VARIANT") == "oom" && firstStart(filepath.Join(dataDir, "oomed")) {
 		var held [][]byte
 		for {
 			block := make([]byte, 1<<20)
@@ -26,7 +28,6 @@ func main() {
 			held = append(held, block)
 		}
 	}
-	dataDir := os.Getenv("DATA_DIR")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
 	mux.HandleFunc("GET /info", func(w http.ResponseWriter, r *http.Request) {
@@ -75,4 +76,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// firstStart reports whether marker did not exist, and creates it.
+func firstStart(marker string) bool {
+	file, err := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return false
+	}
+	_ = file.Close()
+	return true
 }

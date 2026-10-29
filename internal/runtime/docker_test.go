@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -421,7 +423,7 @@ func TestInspectReportsRestartsAndTheLastExit(t *testing.T) {
 		_, _ = w.Write([]byte(`{"RestartCount":0,"State":{"Pid":4242,"FinishedAt":"0001-01-01T00:00:00Z"}}`))
 	}
 	state, err := docker.Inspect(context.Background(), "crashing")
-	want := ContainerState{Restarting: true, Restarts: 3, OOMKilled: true, ExitCode: 137, ExitedAt: time.Date(2026, 10, 29, 15, 2, 0, 123e6, time.UTC)}
+	want := ContainerState{Restarting: true, Restarts: 3, ExitKnown: true, OOMKilled: true, ExitCode: 137, ExitedAt: time.Date(2026, 10, 29, 15, 2, 0, 123e6, time.UTC)}
 	if err != nil || state != want {
 		t.Fatalf("Inspect = %+v, %v; want %+v", state, err, want)
 	}
@@ -430,5 +432,37 @@ func TestInspectReportsRestartsAndTheLastExit(t *testing.T) {
 	}
 	if _, err := docker.Inspect(context.Background(), "gone"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Inspect of a missing container = %v", err)
+	}
+}
+
+// A process that runs again has its last exit looked up in the engine's
+// event log, once per exit.
+func TestInspectFindsTheLastExitInTheEventLog(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	exited := time.Date(2026, 10, 29, 15, 2, 0, 0, time.UTC)
+	engine.handlers["GET /containers/leaky/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"RestartCount":1,"State":{"Pid":4242,"OOMKilled":false,"ExitCode":0,"FinishedAt":"2026-10-29T15:02:00Z"}}`))
+	}
+	lookups := 0
+	engine.handlers["GET /events"] = func(w http.ResponseWriter, r *http.Request) {
+		lookups++
+		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+		until, _ := strconv.ParseInt(r.URL.Query().Get("until"), 10, 64)
+		if since > exited.Unix() || until <= exited.Unix() || !strings.Contains(r.URL.Query().Get("filters"), `"leaky"`) {
+			t.Errorf("events query = %v", r.URL.Query())
+		}
+		at := exited.UnixNano()
+		fmt.Fprintf(w, `{"Action":"die","timeNano":%d,"Actor":{"Attributes":{"exitCode":"1"}}}`+"\n", at-int64(3*time.Second))
+		fmt.Fprintf(w, `{"Action":"oom","timeNano":%d,"Actor":{"Attributes":{}}}`+"\n", at-int64(time.Millisecond))
+		fmt.Fprintf(w, `{"Action":"die","timeNano":%d,"Actor":{"Attributes":{"exitCode":"137"}}}`+"\n", at)
+	}
+	for range 2 {
+		state, err := docker.Inspect(context.Background(), "leaky")
+		if err != nil || !state.ExitKnown || state.ExitCode != 137 || !state.OOMKilled || state.Pid != 4242 || state.Restarts != 1 {
+			t.Fatalf("Inspect = %+v, %v", state, err)
+		}
+	}
+	if lookups != 1 {
+		t.Fatalf("the event log was read %d times for one exit", lookups)
 	}
 }

@@ -415,8 +415,8 @@ func TestRemoveImageOnDocker(t *testing.T) {
 	}
 }
 
-// An app that goes over its memory limit is killed, restarted by the
-// engine and reported with why it exited.
+// An app that goes over its memory limit is killed and restarted by the
+// engine; once it serves again, its status still says why it exited.
 func TestOutOfMemoryIsReportedOnDocker(t *testing.T) {
 	if _, err := os.Stat(dockerSocket()); err != nil {
 		t.Skipf("no Docker socket: %v", err)
@@ -431,6 +431,7 @@ func TestOutOfMemoryIsReportedOnDocker(t *testing.T) {
 	app := spec.Tenant{
 		Image: image, HealthPath: "/health",
 		User:   strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
+		Env:    map[string]string{"DATA_DIR": "/data"},
 		Limits: spec.Limits{MemoryMB: 16, CPUs: 0.5, PIDs: 64},
 	}
 	if _, err := n.client.PutApp(ctx, "it-oom", app); err != nil {
@@ -444,13 +445,13 @@ func TestOutOfMemoryIsReportedOnDocker(t *testing.T) {
 	for time.Now().Before(deadline) {
 		_ = n.reconciler.Reconcile(ctx)
 		status, _ = n.reconciler.Status(tenant)
-		if status.Restarts > 0 && strings.Contains(status.LastExit, "more than its 16 MB of memory") {
-			if status.Healthy {
-				t.Fatalf("a tenant killed again and again is healthy: %+v", status)
+		if status.Phase == reconcile.PhaseRunning && status.Healthy && status.Restarts == 1 {
+			if !strings.Contains(status.LastExit, "more than its 16 MB of memory") {
+				t.Fatalf("status = %+v, want the out-of-memory exit", status)
 			}
 			return
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	t.Fatalf("status = %+v, want restarts and an out-of-memory exit", status)
+	t.Fatalf("status = %+v, want it serving again after one restart", status)
 }

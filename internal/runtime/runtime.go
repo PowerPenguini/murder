@@ -93,10 +93,13 @@ type ContainerState struct {
 	Restarting bool
 	Restarts   int
 	// ExitedAt is when the process last exited; zero if it never did.
-	// ExitCode is that exit's code, known only until the process runs
-	// again; OOMKilled reports whether the kernel killed it for going over
-	// the memory limit.
+	// ExitCode is that exit's code and OOMKilled whether the kernel killed
+	// it for going over the memory limit; ExitKnown reports whether they
+	// are known. The engine forgets them once the process runs again;
+	// they are then looked up in its event log, which keeps recent events
+	// only.
 	ExitedAt  time.Time
+	ExitKnown bool
 	ExitCode  int
 	OOMKilled bool
 }

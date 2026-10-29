@@ -1229,7 +1229,7 @@ func TestRestartingContainerReportsWhyItExited(t *testing.T) {
 	f.create(t, "acme")
 	f.reconcile(t)
 	exited := time.Date(2026, 10, 29, 15, 2, 0, 0, time.UTC)
-	f.runtime.state = runtime.ContainerState{Restarting: true, Restarts: 3, OOMKilled: true, ExitCode: 137, ExitedAt: exited}
+	f.runtime.state = runtime.ContainerState{Restarting: true, Restarts: 3, ExitKnown: true, OOMKilled: true, ExitCode: 137, ExitedAt: exited}
 	f.runtime.takeEvents()
 	f.reconcile(t)
 	if events := f.runtime.takeEvents(); len(events) != 0 {
@@ -1240,12 +1240,87 @@ func TestRestartingContainerReportsWhyItExited(t *testing.T) {
 		status.LastExit != "killed for using more than its 256 MB of memory, at 2026-10-29T15:02:00Z" {
 		t.Fatalf("status = %+v", status)
 	}
-	// Running again, it still tells how often and when it last exited.
-	f.runtime.state = runtime.ContainerState{Restarts: 4, ExitedAt: exited}
+	// Running again, it still tells how often it exited, and why if the
+	// engine's event log knew.
+	f.runtime.state = runtime.ContainerState{Restarts: 4, ExitedAt: exited, ExitKnown: true, ExitCode: 2}
 	f.reconcile(t)
 	status, _ = f.reconciler.Status("acme")
-	if status.Phase != PhaseRunning || !status.Healthy || status.Restarts != 4 || status.LastExit != "exited at 2026-10-29T15:02:00Z" {
+	if status.Phase != PhaseRunning || !status.Healthy || status.Restarts != 4 || status.LastExit != "exited with code 2 at 2026-10-29T15:02:00Z" {
 		t.Fatalf("status = %+v", status)
+	}
+	f.runtime.state = runtime.ContainerState{Restarts: 5, ExitedAt: exited}
+	f.reconcile(t)
+	if status, _ = f.reconciler.Status("acme"); status.LastExit != "exited at 2026-10-29T15:02:00Z" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+// A container Murder starts again (someone stopped it) has no restarts of
+// the app's to report.
+func TestStartedContainerReportsNoRestarts(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.runtime.state = runtime.ContainerState{Restarts: 3, ExitedAt: time.Now(), ExitKnown: true, ExitCode: 143}
+	f.runtime.exitBeforeInspect = true
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.Restarts != 0 || status.LastExit != "" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+// Stopping the reconciler stops a pass begun through the API too, after the
+// tenant step under way.
+func TestStoppingEndsAPassBegunElsewhere(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.create(t, "beta")
+	f.reconcile(t)
+	before := map[string]string{}
+	for _, container := range f.runtime.containers {
+		before[container.Labels[runtime.LabelTenant]] = container.ID
+	}
+	for _, name := range []string{"acme", "beta"} {
+		f.updateApp(t, name, func(app *spec.Tenant) { app.Env["NEW"] = "1" })
+	}
+	f.runtime.onStop = f.reconciler.stop // the agent stops meanwhile
+	if err := f.reconciler.Reconcile(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Reconcile = %v, want context.Canceled", err)
+	}
+	for _, container := range f.runtime.containers {
+		switch tenant := container.Labels[runtime.LabelTenant]; {
+		case tenant == "acme" && (container.ID == before["acme"] || !container.Running):
+			t.Errorf("acme = %+v, want its replacement running", container)
+		case tenant == "beta" && container.ID != before["beta"]:
+			t.Errorf("beta = %+v, want it untouched", container)
+		}
+	}
+}
+
+// Run returns only once a pass begun elsewhere has let go.
+func TestRunWaitsForAPassBegunElsewhere(t *testing.T) {
+	f := newFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.reconciler.pass.Lock()
+	returned := make(chan struct{})
+	go func() {
+		f.reconciler.Run(ctx, time.Hour)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		t.Fatal("Run returned while a pass was under way")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if f.reconciler.life.Err() == nil {
+		t.Fatal("the pass under way was not told to stop")
+	}
+	f.reconciler.pass.Unlock()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the pass")
 	}
 }
 
