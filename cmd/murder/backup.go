@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -16,9 +18,16 @@ import (
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
-// backupPattern matches the backups "murder backup" writes; their names
-// sort by time.
-const backupPattern = "murder-*.db"
+// backupName matches the backups "murder backup" writes; their names sort
+// by time.
+var backupName = regexp.MustCompile(`^murder-\d{8}T\d{6}Z\.db$`)
+
+// partialPrefix starts the name of a backup being received; staleAfter is
+// when one is left from a run that died, not one still running.
+const (
+	partialPrefix = ".murder-backup-"
+	staleAfter    = time.Hour
+)
 
 // runBackup asks the agent for a copy of its database and keeps it in a
 // directory as murder-<UTC time>.db, removing all but the newest keep.
@@ -42,7 +51,8 @@ func runBackup(args []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	temp, err := os.CreateTemp(dir, ".murder-backup-*")
+	removeStalePartials(dir)
+	temp, err := os.CreateTemp(dir, partialPrefix+"*")
 	if err != nil {
 		return err
 	}
@@ -66,17 +76,44 @@ func runBackup(args []string) error {
 	if *keep == 0 {
 		return nil
 	}
-	backups, err := filepath.Glob(filepath.Join(dir, backupPattern))
+	return pruneBackups(dir, filepath.Base(path), *keep)
+}
+
+// pruneBackups removes all but the newest keep backups in dir, never the one
+// just written (a clock set back would make it sort first), nor files of
+// other names. Another run may have removed some already.
+func pruneBackups(dir, written string, keep int) error {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
+	var backups []string
+	for _, entry := range entries {
+		if backupName.MatchString(entry.Name()) && entry.Name() != written {
+			backups = append(backups, entry.Name())
+		}
+	}
 	slices.Sort(backups)
-	for _, old := range backups[:max(len(backups)-*keep, 0)] {
-		if err := os.Remove(old); err != nil {
+	for _, old := range backups[:max(len(backups)-(keep-1), 0)] {
+		if err := os.Remove(filepath.Join(dir, old)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove an old backup: %w", err)
 		}
 	}
 	return nil
+}
+
+// removeStalePartials removes backups a run that died left half received.
+func removeStalePartials(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err == nil && strings.HasPrefix(entry.Name(), partialPrefix) && time.Since(info.ModTime()) > staleAfter {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
 }
 
 // runRestore puts a backup in place of the node's database while the agent

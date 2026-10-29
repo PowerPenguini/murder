@@ -89,25 +89,27 @@ func TestRestoreReplacesTheDatabaseAndKeepsTheOldOne(t *testing.T) {
 	if _, err := Restore(backup, path); err == nil || !strings.Contains(err.Error(), "stop it first") {
 		t.Fatalf("Restore while the agent runs = %v", err)
 	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
+	// The node as a crash leaves it: beta is only in the log.
+	crashed := filepath.Join(t.TempDir(), "murder.db")
+	for _, suffix := range []string{"", "-wal"} {
+		data, err := os.ReadFile(path + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(crashed+suffix, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	// A log left by an agent that did not stop cleanly must not be applied
-	// to the restored copy.
-	if err := os.WriteFile(path+"-wal", []byte("the old database's log"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	kept, err := Restore(backup, path)
+	kept, err := Restore(backup, crashed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(path + "-wal"); !os.IsNotExist(err) {
-		t.Fatalf("the old log is still beside the restored database: %v", err)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(crashed + suffix); !os.IsNotExist(err) {
+			t.Fatalf("%s is beside the restored database: %v", suffix, err)
+		}
 	}
-	if data, err := os.ReadFile(kept + "-wal"); err != nil || string(data) != "the old database's log" {
-		t.Fatalf("the old log was not kept with the old database: %q, %v", data, err)
-	}
-	restored, err := Open(path, options())
+	restored, err := Open(crashed, options())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,8 +117,68 @@ func TestRestoreReplacesTheDatabaseAndKeepsTheOldOne(t *testing.T) {
 	if names := tenantNames(restored); !slices.Equal(names, []string{"acme"}) {
 		t.Fatalf("restored tenants = %v", names)
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(crashed); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("restored database = %v, %v; want owner-only", info, err)
+	}
+	// The database replaced is kept whole, with what was only in its log.
+	if info, err := CheckBackup(kept); err != nil || info.Tenants != 2 {
+		t.Fatalf("kept database = %+v, %v; want both tenants", info, err)
+	}
+}
+
+// A log whose database is gone is moved aside too, not applied to the
+// restored copy.
+func TestRestoreMovesALogWithoutItsDatabase(t *testing.T) {
+	st, path := withApp(t, options())
+	backup := backupTo(t, st)
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	lost := filepath.Join(t.TempDir(), "murder.db")
+	data, err := os.ReadFile(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lost+"-wal", data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := Restore(backup, lost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(kept + "-wal"); err != nil {
+		t.Fatalf("the log was not kept: %v", err)
+	}
+	restored, err := Open(lost, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if names := tenantNames(restored); len(names) != 0 {
+		t.Fatalf("restored tenants = %v", names)
+	}
+}
+
+// Copies a crash left beside the database go when it is next opened.
+func TestOpenRemovesStaleCopies(t *testing.T) {
+	st, path := openNew(t, options())
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{path + ".backup-123", path + ".restore-456", path + ".before-restore-20260101T000000Z"} {
+		if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reopened, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	for name, want := range map[string]bool{".backup-123": false, ".restore-456": false, ".before-restore-20260101T000000Z": true} {
+		if _, err := os.Stat(path + name); (err == nil) != want {
+			t.Errorf("%s exists = %v, want %v", name, err == nil, want)
+		}
 	}
 }
 

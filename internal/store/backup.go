@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -57,6 +58,32 @@ func check(db *sql.DB) error {
 		return fmt.Errorf("the database is damaged: %s", result)
 	}
 	return checkSchema(db)
+}
+
+// checkpoint writes a database's log into it and empties the log.
+func checkpoint(path string) error {
+	db, err := sql.Open("sqlite", uri(path, "_pragma=busy_timeout(5000)"))
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return errors.Join(err, db.Close())
+}
+
+// removeStale removes the temporary copies Backup and Restore make beside
+// the database at path, left by a crash. Only the holder of the
+// database's lock calls it: nothing else makes them.
+func removeStale(path string) {
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return
+	}
+	base := filepath.Base(path)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), base+".backup-") || strings.HasPrefix(entry.Name(), base+".restore-") {
+			removeDatabase(filepath.Join(filepath.Dir(path), entry.Name()))
+		}
+	}
 }
 
 // removeDatabase removes a database file and any journal SQLite left.
@@ -129,6 +156,7 @@ func Restore(from, path string) (kept string, err error) {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return "", fmt.Errorf("database %s is in use by the agent; stop it first", path)
 	}
+	removeStale(path)
 	// The copy is complete on disk before anything is moved.
 	temp, err := os.CreateTemp(dir, filepath.Base(path)+".restore-*")
 	if err != nil {
@@ -150,16 +178,22 @@ func Restore(from, path string) (kept string, err error) {
 		return "", fmt.Errorf("backup %s cannot be restored: %w", from, err)
 	}
 	if _, err := os.Stat(path); err == nil {
-		kept = path + ".before-restore-" + time.Now().UTC().Format("20060102T150405Z")
-		// The log and shared memory go first: a log left beside the
-		// restored copy would be applied to it.
-		for _, suffix := range []string{"-wal", "-shm", ""} {
-			if err := os.Rename(path+suffix, kept+suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return "", fmt.Errorf("keep the current database: %w", err)
-			}
+		// Fold the log into the database first, so the one kept is whole
+		// even if the moves below are interrupted. A database too damaged
+		// for that keeps its log beside it.
+		_ = checkpoint(path)
+	}
+	// Whatever is there goes aside, the log even without its database: a
+	// log left beside the restored copy would be applied to it.
+	name := path + ".before-restore-" + time.Now().UTC().Format("20060102T150405Z")
+	for _, suffix := range []string{"-wal", "-shm", "-journal", ""} {
+		err := os.Rename(path+suffix, name+suffix)
+		switch {
+		case err == nil:
+			kept = name
+		case !errors.Is(err, os.ErrNotExist):
+			return "", fmt.Errorf("keep the current database: %w", err)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
 	}
 	if err := os.Rename(temp.Name(), path); err != nil {
 		return kept, err

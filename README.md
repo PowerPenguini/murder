@@ -98,9 +98,15 @@ sudo systemctl start murder-agent
 
 `murder restore` refuses while the agent runs, refuses a damaged backup and
 one whose secrets the node's master key cannot open, and keeps the database
-it replaces beside it (`murder.db.before-restore-<time>`, with its log). The
-agent then makes the tenants match the restored state: a tenant created after
-the backup is removed with its containers, though its data stays on disk.
+it replaces beside it (`murder.db.before-restore-<time>`). The agent then
+makes the tenants match the backup; while the agent still runs, `murder
+events` shows what changed since the backup was taken:
+
+- a tenant created since loses its container; its data stays on disk, and
+  its name is free again only once purged;
+- a tenant archived since runs again, and one purged since comes back with
+  an empty data directory;
+- secrets rotated since go back to their old values.
 
 ## Run tenants
 

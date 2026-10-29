@@ -179,6 +179,7 @@ func Open(path string, options Options) (*SQLite, error) {
 		_ = lock.Close()
 		return nil, err
 	}
+	removeStale(path)
 	db, err := openDB(dsn(path))
 	if err != nil {
 		_ = lock.Close()

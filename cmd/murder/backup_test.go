@@ -59,7 +59,9 @@ func TestBackupAndRestore(t *testing.T) {
 	if err := os.MkdirAll(backups, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, old := range []string{"murder-20260101T000000Z.db", "murder-20260102T000000Z.db"} {
+	// murder-manual.db is no backup of the command's; the one from 2999
+	// says the clock was set back since.
+	for _, old := range []string{"murder-20260101T000000Z.db", "murder-20260102T000000Z.db", "murder-29990101T000000Z.db", "murder-manual.db"} {
 		if err := os.WriteFile(filepath.Join(backups, old), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -73,10 +75,10 @@ func TestBackupAndRestore(t *testing.T) {
 	for _, entry := range entries {
 		names = append(names, entry.Name())
 	}
-	if len(names) != 2 || names[0] != "murder-20260102T000000Z.db" || !strings.HasPrefix(names[1], "murder-2") || !strings.Contains(out.String(), "backed up node node-1 (1 tenants)") {
-		t.Fatalf("backups = %v, output %q; want the newest old one and the new one", names, out)
+	if len(names) != 3 || !strings.HasPrefix(names[0], "murder-202") || names[1] != "murder-29990101T000000Z.db" || names[2] != "murder-manual.db" || !strings.Contains(out.String(), "backed up node node-1 (1 tenants)") {
+		t.Fatalf("backups = %v, output %q; want the new one, the newest old one and the other file", names, out)
 	}
-	backup := filepath.Join(backups, names[1])
+	backup := filepath.Join(backups, names[0])
 
 	// A node whose key is not the one the secrets were sealed with refuses
 	// the backup.
