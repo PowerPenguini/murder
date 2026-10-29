@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -420,10 +422,20 @@ func (f *fixture) suspend(t *testing.T, name string, suspended bool) {
 	}
 }
 
+// reconcile runs passes until no pull they started is left to use, as Run
+// does when a pull ends.
 func (f *fixture) reconcile(t *testing.T) {
 	t.Helper()
-	if err := f.reconciler.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
+	for {
+		if err := f.reconciler.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.reconciler.pulls.wait()
+		select {
+		case <-f.reconciler.pulls.done:
+		default:
+			return
+		}
 	}
 }
 
@@ -654,10 +666,27 @@ func TestFailedPullKeepsTheOldContainer(t *testing.T) {
 	f.runtime.failPull = errors.New("manifest unknown")
 	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
 	f.runtime.takeEvents()
+	// The first pass starts the pull and reports the tenant pulling, still
+	// served by its container.
+	if err := f.reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := f.reconciler.Status("acme"); status.Phase != PhasePulling || status.ContainerID != old {
+		t.Fatalf("status while pulling = %+v", status)
+	}
+	f.reconciler.pulls.wait()
+	// Later passes report the failure without pulling again until the
+	// retry is due.
 	for range 3 {
 		if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "manifest unknown") {
 			t.Fatalf("Reconcile = %v", err)
 		}
+	}
+	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseFailed || !strings.Contains(status.Message, "attempt 1") || status.ContainerID != old {
+		t.Fatalf("status after a failed pull = %+v", status)
+	}
+	if len(f.runtime.pulled) != 1 {
+		t.Fatalf("pulled %d times before the retry was due", len(f.runtime.pulled))
 	}
 	if container := f.runtime.only(t); container.ID != old || !container.Running {
 		t.Fatalf("the old container did not keep serving: %+v", container)
@@ -667,6 +696,135 @@ func TestFailedPullKeepsTheOldContainer(t *testing.T) {
 	}
 	if len(f.volumes.snapshots) != 0 {
 		t.Fatalf("snapshots taken for a change that never happened: %v", f.volumes.snapshots)
+	}
+	// "murder reconcile" retries at once and reports how the pull went.
+	if err := f.reconciler.ReconcileNow(context.Background()); err == nil || !strings.Contains(err.Error(), "manifest unknown") || len(f.runtime.pulled) != 2 {
+		t.Fatalf("ReconcileNow with the registry still failing = %v, pulled %v", err, f.runtime.pulled)
+	}
+	f.runtime.mu.Lock()
+	f.runtime.failPull = nil // say, the credentials were fixed
+	f.runtime.mu.Unlock()
+	if err := f.reconciler.ReconcileNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if container := f.runtime.only(t); len(f.runtime.pulled) != 3 || container.spec.Image != imageB {
+		t.Fatalf("after a retry: pulled %v, container %+v", f.runtime.pulled, container)
+	}
+}
+
+// Once the old container is gone, a failed replacement names no container
+// that no longer exists.
+func TestFailedCreateNamesNoRemovedContainer(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.runtime.images[imageB] = true
+	f.runtime.failCreate = errors.New("bad mount")
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	if err := f.reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("a failed create reported success")
+	}
+	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseFailed || status.ContainerID != "" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+// An image whose pull runs while no tenant needs it any more stays tracked,
+// and is removed once it arrives.
+func TestImageStillPullingStaysTracked(t *testing.T) {
+	const wanted = "registry.test/app@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	release := make(chan struct{})
+	pull := f.reconciler.pulls.pull
+	f.reconciler.pulls.pull = func(ctx context.Context, image string) error {
+		<-release
+		return pull(ctx, image)
+	}
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = wanted })
+	if err := f.reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageA })
+	if err := f.reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.store.Images(), wanted) {
+		t.Fatal("forgot an image whose pull still runs")
+	}
+	close(release)
+	f.reconcile(t)
+	if f.runtime.images[wanted] || slices.Contains(f.store.Images(), wanted) {
+		t.Fatalf("the pulled image no tenant needs stayed: tracked %v", f.store.Images())
+	}
+}
+
+// A slow pull holds up neither other tenants nor work under the pass lock.
+func TestSlowPullHoldsUpNothingElse(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	release := make(chan struct{})
+	pull := f.reconciler.pulls.pull
+	f.reconciler.pulls.pull = func(ctx context.Context, image string) error {
+		<-release
+		return pull(ctx, image)
+	}
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.create(t, "beta")
+	if err := f.reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := f.reconciler.Status("beta"); status.Phase != PhaseRunning {
+		t.Fatalf("beta waited for acme's pull: %+v", status)
+	}
+	if status, _ := f.reconciler.Status("acme"); status.Phase != PhasePulling || status.ContainerID != old || !status.Healthy {
+		t.Fatalf("acme while pulling, served by its old container = %+v", status)
+	}
+	locked := make(chan error, 1)
+	go func() { locked <- f.reconciler.Exclusive(func() error { return nil }) }()
+	select {
+	case <-locked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pass lock was held during the pull")
+	}
+	close(release)
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseRunning || status.ContainerID == old {
+		t.Fatalf("acme after the pull = %+v", status)
+	}
+}
+
+// Health checks run side by side: each request here answers only once
+// every tenant's request has arrived, which one at a time would never do
+// within the timeout.
+func TestHealthChecksRunSideBySide(t *testing.T) {
+	f := newFixture(t)
+	names := []string{"acme", "beta", "gamma"}
+	var arrived atomic.Int32
+	all := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if arrived.Add(1) == int32(len(names)) {
+			close(all)
+		}
+		select {
+		case <-all:
+		case <-time.After(5 * time.Second):
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+	f.reconciler.backend = func(store.Record) (string, error) { return strings.TrimPrefix(server.URL, "http://"), nil }
+	for _, name := range names {
+		f.create(t, name)
+	}
+	f.reconcile(t)
+	for _, name := range names {
+		if status, _ := f.reconciler.Status(name); !status.Healthy {
+			t.Fatalf("%s = %+v", name, status)
+		}
 	}
 }
 
@@ -678,6 +836,7 @@ func TestFailedSnapshotBlocksTheChangeWithoutAnOutage(t *testing.T) {
 	f.reconcile(t)
 	old := f.runtime.only(t).ID
 	f.volumes.failSnapshot = errors.New("pool is full")
+	f.runtime.images[imageB] = true // already pulled
 	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
 	f.runtime.takeEvents()
 	for range 3 {

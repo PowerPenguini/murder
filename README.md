@@ -23,10 +23,15 @@ Stage 2 — a single server — is what this code does today.
   hour later, and local images stay (they could not be pulled again). Containers of archived or unknown tenants are
   removed. Tenants keep running
   while the agent is down; a restarted agent adopts them without restarting
-  them.
+  them. Images are pulled in the background: a tenant waiting for one shows
+  `pulling` while its old container keeps serving, and a failed pull is
+  retried after 10 s, doubling up to 10 minutes (`murder reconcile` retries
+  at once, say after fixing credentials, and waits for the pulls to report
+  how they went). Health checks run side by side.
 - **Edge proxy.** Routes `<tenant>.<baseDomain>` to the tenant's container. It
   streams responses (server-sent events) and replaces any client-sent
-  `X-Forwarded-*` headers. TLS is `off`, `internal` (a local CA, for testing) or
+  `X-Forwarded-*` headers. Over HTTPS it adds `Strict-Transport-Security` (one
+  year) unless the app sets its own. TLS is `off`, `internal` (a local CA, for testing) or
   `acme`, which gets a wildcard certificate through DNS-01 from Hetzner Cloud DNS
   or Namecheap.
 - **Local API.** A unix socket the `murder` CLI (and, later, the panel) talks to.
@@ -192,8 +197,10 @@ container of it that is still running.
     IPv6 (say from Docker's `default-network-opts`) is refused.
   - They cover `networkPool` and every tenant's subnet, read from the
     database, so tenants left on an earlier pool stay guarded.
-  - `firewall: off` turns it off, for development only. A test in the test
-    VM checks it from a real container.
+  - `firewall: off` turns it off, for development only. Two tests check it:
+    `go test -tags netns ./internal/firewall` loads it in network
+    namespaces of its own (no root needed) and probes from a tenant
+    network, and a test in the test VM probes from a real container.
 - **Tenant data is out of reach of host users.** Data directories sit below a
   root-only (`0700`) directory, and ZFS datasets are created with `setuid=off`
   and `devices=off`. A setuid file a tenant writes there is useless to host
@@ -224,8 +231,6 @@ through Murder's real components:
   containers keep running.
 - **Single node.** State is one local SQLite database; stage 3 replicates
   it to other nodes.
-- **Failing pulls.** A pull that keeps failing is retried on every pass,
-  without backoff.
 - **Registry access during apply.** Tags are pinned when an app is applied
   (or a tenant's image is set), which needs registry access for tags that are
   not yet local.
