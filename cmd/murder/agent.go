@@ -187,14 +187,15 @@ func runAgent(args []string) error {
 		log.Error("stopping the agent", "error", runErr)
 	}
 	// Tenant containers keep running while the agent is down or restarting;
-	// only the agent's own listeners stop.
+	// only the agent's own listeners stop. A pass, also one an API call
+	// began, stops after the tenant step under way, which then finishes:
+	// a tenant whose container is being replaced gets its new one first.
+	stop()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for _, server := range servers {
 		_ = server.Shutdown(shutdown)
 	}
-	// A tenant whose container is being replaced gets its new one first.
-	stop()
 	<-reconciled
 	log.Info("murder agent stopped")
 	return runErr

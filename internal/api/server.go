@@ -580,6 +580,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusConflict
 	case errors.As(err, new(*spec.ValidationError)):
 		status = http.StatusBadRequest
+	case errors.Is(err, reconcile.ErrStopping):
+		status = http.StatusServiceUnavailable
 	case errors.Is(err, context.Canceled):
 		status = 499
 	}

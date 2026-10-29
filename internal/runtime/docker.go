@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -609,8 +610,8 @@ func (d *Docker) exitFromEvents(ctx context.Context, id string, exitedAt time.Ti
 	}
 	filters, _ := json.Marshal(map[string][]string{"type": {"container"}, "container": {id}, "event": {"die", "oom"}})
 	query := url.Values{
-		"since":   {strconv.FormatInt(exitedAt.Add(-exitWindow).Unix(), 10)},
-		"until":   {strconv.FormatInt(until.Unix()+1, 10)},
+		"since":   {engineTime(exitedAt.Add(-exitWindow))},
+		"until":   {engineTime(until)},
 		"filters": {string(filters)},
 	}
 	var data []byte
@@ -618,8 +619,13 @@ func (d *Docker) exitFromEvents(ctx context.Context, id string, exitedAt time.Ti
 		return false, 0, false // unknown this time; asked again next time
 	}
 	// The die event nearest the exit is the one; an oom event belongs to
-	// it if it came shortly before.
-	var die, oomAt time.Time
+	// it if it came after the die before.
+	type logged struct {
+		die  bool
+		at   time.Time
+		code int
+	}
+	var events []logged
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	for {
 		var event struct {
@@ -635,15 +641,29 @@ func (d *Docker) exitFromEvents(ctx context.Context, id string, exitedAt time.Ti
 		at := time.Unix(0, event.TimeNano)
 		switch event.Action {
 		case "die":
-			exitCode, err := strconv.Atoi(event.Actor.Attributes["exitCode"])
-			if err == nil && (!known || at.Sub(exitedAt).Abs() < die.Sub(exitedAt).Abs()) {
-				known, code, die = true, exitCode, at
+			if exitCode, err := strconv.Atoi(event.Actor.Attributes["exitCode"]); err == nil {
+				events = append(events, logged{die: true, at: at, code: exitCode})
 			}
 		case "oom":
-			oomAt = at
+			events = append(events, logged{at: at})
 		}
 	}
-	oom = known && !oomAt.IsZero() && !oomAt.After(die) && die.Sub(oomAt) < exitWindow
+	slices.SortStableFunc(events, func(a, b logged) int { return a.at.Compare(b.at) })
+	var die time.Time
+	for _, e := range events {
+		if e.die && (!known || e.at.Sub(exitedAt).Abs() < die.Sub(exitedAt).Abs()) {
+			known, code, die = true, e.code, e.at
+		}
+	}
+	for _, e := range events {
+		switch {
+		case !known || e.at.After(die):
+		case e.die && e.at.Before(die):
+			oom = false // an earlier exit's
+		case !e.die:
+			oom = true
+		}
+	}
 	d.exitsMu.Lock()
 	if d.exits == nil {
 		d.exits = map[string]exit{}
@@ -652,6 +672,10 @@ func (d *Docker) exitFromEvents(ctx context.Context, id string, exitedAt time.Ti
 	d.exitsMu.Unlock()
 	return known, code, oom
 }
+
+// engineTime writes t as the engine's event filters take it: seconds and
+// nanoseconds.
+func engineTime(t time.Time) string { return fmt.Sprintf("%d.%09d", t.Unix(), t.Nanosecond()) }
 
 // exitWindow is how far from the exit time the event log is searched.
 const exitWindow = 5 * time.Second

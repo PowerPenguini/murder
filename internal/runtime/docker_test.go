@@ -446,9 +446,9 @@ func TestInspectFindsTheLastExitInTheEventLog(t *testing.T) {
 	lookups := 0
 	engine.handlers["GET /events"] = func(w http.ResponseWriter, r *http.Request) {
 		lookups++
-		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
-		until, _ := strconv.ParseInt(r.URL.Query().Get("until"), 10, 64)
-		if since > exited.Unix() || until <= exited.Unix() || !strings.Contains(r.URL.Query().Get("filters"), `"leaky"`) {
+		since, _ := strconv.ParseFloat(r.URL.Query().Get("since"), 64)
+		until, _ := strconv.ParseFloat(r.URL.Query().Get("until"), 64)
+		if since > float64(exited.Unix()) || until < float64(exited.Unix()) || until > float64(time.Now().Unix()+1) || !strings.Contains(r.URL.Query().Get("filters"), `"leaky"`) {
 			t.Errorf("events query = %v", r.URL.Query())
 		}
 		at := exited.UnixNano()
@@ -464,5 +464,24 @@ func TestInspectFindsTheLastExitInTheEventLog(t *testing.T) {
 	}
 	if lookups != 1 {
 		t.Fatalf("the event log was read %d times for one exit", lookups)
+	}
+}
+
+// An out-of-memory kill belongs to the exit right after it, not to a later
+// one.
+func TestInspectDoesNotBlameAnEarlierOOM(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	engine.handlers["GET /containers/flaky/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"RestartCount":2,"State":{"Pid":4242,"FinishedAt":"2026-10-29T15:02:00.3Z"}}`))
+	}
+	engine.handlers["GET /events"] = func(w http.ResponseWriter, _ *http.Request) {
+		killed := time.Date(2026, 10, 29, 15, 2, 0, 0, time.UTC).UnixNano()
+		fmt.Fprintf(w, `{"Action":"oom","timeNano":%d}`+"\n", killed)
+		fmt.Fprintf(w, `{"Action":"die","timeNano":%d,"Actor":{"Attributes":{"exitCode":"137"}}}`+"\n", killed+int64(time.Millisecond))
+		fmt.Fprintf(w, `{"Action":"die","timeNano":%d,"Actor":{"Attributes":{"exitCode":"1"}}}`+"\n", killed+int64(300*time.Millisecond))
+	}
+	state, err := docker.Inspect(context.Background(), "flaky")
+	if err != nil || !state.ExitKnown || state.ExitCode != 1 || state.OOMKilled {
+		t.Fatalf("Inspect = %+v, %v; want exit code 1, not killed", state, err)
 	}
 }

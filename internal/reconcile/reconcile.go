@@ -782,6 +782,9 @@ func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error
 func (r *Reconciler) Purge(ctx context.Context, name, actor string) error {
 	r.pass.Lock()
 	defer r.pass.Unlock()
+	if r.life.Err() != nil {
+		return ErrStopping
+	}
 	record, err := r.store.Get(name)
 	switch {
 	case err == nil && !record.Archived():
@@ -835,5 +838,12 @@ func (r *Reconciler) clearRuntime(ctx context.Context, name string) error {
 func (r *Reconciler) Exclusive(fn func() error) error {
 	r.pass.Lock()
 	defer r.pass.Unlock()
+	if r.life.Err() != nil {
+		return ErrStopping
+	}
 	return fn()
 }
+
+// ErrStopping refuses work queued behind a pass while the agent stops, so
+// the agent's stop does not wait for it.
+var ErrStopping = errors.New("the agent is stopping; try again once it is back")

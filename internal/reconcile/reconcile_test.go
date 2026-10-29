@@ -1322,6 +1322,13 @@ func TestRunWaitsForAPassBegunElsewhere(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after the pass")
 	}
+	// Work queued behind it is refused, not run while the agent stops.
+	if err := f.reconciler.Exclusive(func() error { return nil }); !errors.Is(err, ErrStopping) {
+		t.Fatalf("Exclusive after stop = %v", err)
+	}
+	if err := f.reconciler.Purge(context.Background(), "acme", "test"); !errors.Is(err, ErrStopping) {
+		t.Fatalf("Purge after stop = %v", err)
+	}
 }
 
 // An exit the container was not restarted after (Murder or the host
