@@ -131,16 +131,16 @@ edge: {http: %q, routes: %s, pidFile: %s, drain: 10s}
 	var served atomic.Int64
 	failures := make(chan error, 100)
 	for i := range 4 {
-		client := fresh
+		client, kind := fresh, "new connection"
 		if i%2 == 1 {
-			client = kept
+			client, kind = kept, "kept-alive connection"
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for ctx.Err() == nil {
 				if err := get(client, "/"); err != nil {
-					failures <- err
+					failures <- fmt.Errorf("%s at %s: %w", kind, time.Now().Format("15:04:05.000"), err)
 					return
 				}
 				served.Add(1)
@@ -151,6 +151,7 @@ edge: {http: %q, routes: %s, pidFile: %s, drain: 10s}
 	go func() { slow <- get(fresh, "/slow") }()
 	time.Sleep(300 * time.Millisecond)
 
+	t.Logf("SIGHUP at %s", time.Now().Format("15:04:05.000"))
 	if err := first.Process.Signal(syscall.SIGHUP); err != nil {
 		t.Fatal(err)
 	}

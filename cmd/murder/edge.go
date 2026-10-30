@@ -91,8 +91,10 @@ func runEdge(args []string) error {
 	}
 	failed := make(chan error, 3)
 	var servers []*http.Server
+	var listeners []net.Listener
 	serve := func(name string, server *http.Server, listener net.Listener) {
 		servers = append(servers, server)
+		listeners = append(listeners, listener)
 		go func() {
 			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				failed <- fmt.Errorf("%s listener: %w", name, err)
@@ -142,10 +144,23 @@ func runEdge(args []string) error {
 	case runErr = <-failed:
 		log.Error("stopping the edge", "error", runErr)
 	}
-	// The listeners are the new edge's now, or closed: finish what this
-	// one serves, then close what is left, such as event streams.
+	// The listeners are the new edge's now, or closed. This one stops
+	// accepting and keeping connections alive, but still answers requests
+	// on connections it accepted (a server shutting down drops a request
+	// that arrives after it began), then finishes what it serves, and
+	// closes what is left, such as event streams.
 	drain, stopDraining := context.WithTimeout(context.Background(), cfg.Edge.Drain.Duration)
 	defer stopDraining()
+	for _, server := range servers {
+		server.SetKeepAlivesEnabled(false)
+	}
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
+	select {
+	case <-time.After(min(handoverGrace, cfg.Edge.Drain.Duration)):
+	case <-drain.Done():
+	}
 	for _, server := range servers {
 		if err := server.Shutdown(drain); err != nil {
 			_ = server.Close()
@@ -197,6 +212,11 @@ func followRoutes(ctx context.Context, client *api.Client, table *edge.LiveTable
 		}
 	}
 }
+
+// handoverGrace is how long an edge that stopped accepting keeps answering
+// requests on connections it accepted before it shuts down: a client sends
+// its request right after connecting.
+const handoverGrace = 2 * time.Second
 
 // routesPoll is about how long the agent holds a request for new routes.
 const routesPoll = 25 * time.Second
