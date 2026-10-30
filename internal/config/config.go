@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,11 +55,37 @@ type Agent struct {
 	// private address. Tenants cannot reach it while the firewall is on.
 	Metrics string `yaml:"metrics"`
 
+	// Cluster, if set, makes the node part of a cluster: its state is
+	// replicated between the nodes with Raft.
+	Cluster *Cluster `yaml:"cluster"`
+
 	// Defaults fill in tenant limits left at zero. Disk use is unlimited
 	// unless diskGB is set (with the zfs driver).
 	Defaults          spec.Limits `yaml:"defaults"`
 	ReconcileInterval Duration    `yaml:"reconcileInterval"`
 }
+
+// Cluster sets up the node's part of a cluster.
+type Cluster struct {
+	// Address is where the node listens for other nodes and where they
+	// reach it: its IP address on the private network and a port.
+	Address string `yaml:"address"`
+	// Role is "worker", which runs tenants, or "witness", which only
+	// takes part in the cluster's decisions.
+	Role string `yaml:"role"`
+	// Dir holds the cluster's log and snapshots.
+	Dir string `yaml:"dir"`
+}
+
+// Cluster roles.
+const (
+	RoleWorker  = "worker"
+	RoleWitness = "witness"
+)
+
+// Witness reports whether the node only takes part in a cluster's
+// decisions and runs no tenants.
+func (a Agent) Witness() bool { return a.Cluster != nil && a.Cluster.Role == RoleWitness }
 
 // Volumes selects the data volume driver.
 type Volumes struct {
@@ -117,14 +144,26 @@ func Parse(data []byte) (Agent, error) {
 	if err := strictyaml.Decode(data, &agent); err != nil && !errors.Is(err, io.EOF) {
 		return Agent{}, fmt.Errorf("parse config: %w", err)
 	}
+	if agent.Cluster != nil {
+		if agent.Cluster.Role == "" {
+			agent.Cluster.Role = RoleWorker
+		}
+		if agent.Cluster.Dir == "" {
+			agent.Cluster.Dir = "/var/lib/murder/cluster"
+		}
+	}
 	return agent, agent.Validate()
 }
 
 // Validate reports settings that cannot work.
 func (a Agent) Validate() error {
 	var problems []string
-	if a.BaseDomain == "" || strings.HasPrefix(a.BaseDomain, ".") || strings.Contains(a.BaseDomain, "/") {
+	// A witness serves no tenants: it needs no domain.
+	if !a.Witness() && (a.BaseDomain == "" || strings.HasPrefix(a.BaseDomain, ".") || strings.Contains(a.BaseDomain, "/")) {
 		problems = append(problems, "baseDomain must be a domain name")
+	}
+	if a.Cluster != nil {
+		problems = append(problems, a.Cluster.problems()...)
 	}
 	switch a.Volumes.Driver {
 	case "dir":
@@ -219,4 +258,23 @@ func (a Agent) Scheme() string {
 		return "http"
 	}
 	return "https"
+}
+
+func (c Cluster) problems() []string {
+	var problems []string
+	host, port, err := net.SplitHostPort(c.Address)
+	address, parseErr := netip.ParseAddr(host)
+	number, portErr := strconv.Atoi(port)
+	if err != nil || parseErr != nil || address.IsUnspecified() || portErr != nil || number < 1 || number > 65535 {
+		problems = append(problems, "cluster.address must be the node's IP address on the private network and a port, such as 10.0.0.2:7400")
+	} else if !address.IsPrivate() && !address.IsLoopback() {
+		problems = append(problems, "cluster.address must be on a private network: other nodes reach the cluster's state there")
+	}
+	if c.Role != RoleWorker && c.Role != RoleWitness {
+		problems = append(problems, fmt.Sprintf("cluster.role must be %q or %q", RoleWorker, RoleWitness))
+	}
+	if !strings.HasPrefix(c.Dir, "/") {
+		problems = append(problems, "cluster.dir must be an absolute path")
+	}
+	return problems
 }

@@ -210,8 +210,11 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Version 4 is today's schema without the state version.
+	// Version 4 is today's schema without the state version and nodes.
 	if _, err := db.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE nodes`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO meta (key, value) VALUES ('node', 'old')`); err != nil {

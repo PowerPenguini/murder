@@ -1,6 +1,7 @@
-// Package store keeps the desired state of a node: its apps, its tenants
-// (each an app plus a few overrides) and an audit log of every change. It is
-// kept in SQLite; stage 3 replicates the same changes between nodes.
+// Package store keeps the desired state: apps, tenants (each an app plus a
+// few overrides), the nodes of a cluster and an audit log of every change.
+// It is kept in SQLite on every node; in a cluster, every change is a batch
+// the cluster's log applies on every node.
 package store
 
 import (
@@ -124,6 +125,23 @@ type EventQuery struct {
 	Limit int
 }
 
+// Node roles: a worker runs tenants, a witness only takes part in the
+// cluster's decisions.
+const (
+	RoleWorker  = "worker"
+	RoleWitness = "witness"
+)
+
+// Node is one node of a cluster.
+type Node struct {
+	Name string `json:"name"`
+	// Address is where other nodes reach it: host:port on the private
+	// network.
+	Address   string    `json:"address"`
+	Role      string    `json:"role"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 // Sealer makes a new value for one secret of a tenant and seals it.
 type Sealer func(tenant, name string, secret spec.Secret) (string, error)
 
@@ -179,6 +197,13 @@ type Store interface {
 	Archive(name, actor string) error
 	Restore(name, actor string) (Record, error)
 	Forget(name, actor string) error
+
+	// Nodes lists the nodes of the cluster by name; a node outside a
+	// cluster has none. PutNode adds a node or changes its address or
+	// role; RemoveNode removes one.
+	Nodes() []Node
+	PutNode(node Node, actor string) error
+	RemoveNode(name, actor string) error
 
 	Events(query EventQuery) ([]Event, error)
 	// Backup writes a copy of the whole database, as it is at one moment.

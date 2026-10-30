@@ -16,8 +16,9 @@ const schemaVersion = 5
 const oldestSchema = 4
 
 const schema = `
--- The node's name, which only this node keeps, and the version of the
--- replicated state: the number of batches applied to it.
+-- The node's name, which only this node keeps; the version of the
+-- replicated state, the number of batches applied to it; and, in a
+-- cluster, the index of the last log entry applied.
 CREATE TABLE meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -55,6 +56,14 @@ CREATE INDEX tenants_app ON tenants (app);
 -- state.
 CREATE TABLE images (
 	ref TEXT PRIMARY KEY
+) STRICT;
+
+-- The nodes of a cluster: workers run tenants, witnesses only vote.
+CREATE TABLE nodes (
+	name       TEXT PRIMARY KEY,
+	address    TEXT NOT NULL UNIQUE,
+	role       TEXT NOT NULL CHECK (role IN ('worker', 'witness')),
+	created_at TEXT NOT NULL
 ) STRICT;
 
 -- Sealed secret values, kept until a purge deletes the tenant.
@@ -107,7 +116,8 @@ func checkSchema(q querier) error {
 }
 
 // upgrade brings a database of an older schema version to this one, in one
-// transaction. Version 5 counts the batches applied to the state.
+// transaction. Version 5 counts the batches and log entries applied to the
+// state and knows the nodes of a cluster.
 func upgrade(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -122,7 +132,15 @@ func upgrade(db *sql.DB) error {
 		return nil
 	}
 	if version == 4 {
-		if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('version', '0')`); err != nil {
+		if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('version', '0'), ('applied', '0')`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`CREATE TABLE nodes (
+			name       TEXT PRIMARY KEY,
+			address    TEXT NOT NULL UNIQUE,
+			role       TEXT NOT NULL CHECK (role IN ('worker', 'witness')),
+			created_at TEXT NOT NULL
+		) STRICT`); err != nil {
 			return err
 		}
 	}

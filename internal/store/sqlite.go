@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"net/netip"
 	"net/url"
 	"os"
@@ -43,9 +44,14 @@ type SQLite struct {
 	applying sync.Mutex
 	// commit makes a batch part of the state: applies it here, or, in a
 	// cluster, has the cluster's log apply it on every node.
-	commit  func(Batch) (*snapshot, error)
+	commit func(Batch) (*snapshot, error)
+	// catchUp, in a cluster, applies here what the cluster has applied.
+	catchUp func() error
 	state   atomic.Pointer[snapshot]
 	changed chan struct{}
+	// applied is the index of the last cluster log entry applied, or
+	// refused: an entry refused on one node is refused on every node.
+	applied appliedIndex
 }
 
 type snapshot struct {
@@ -54,6 +60,7 @@ type snapshot struct {
 	version int64
 	apps    map[string]App
 	tenants map[string]Record
+	nodes   map[string]Node
 	images  map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
@@ -141,7 +148,7 @@ func initDB(db *sql.DB, path, node string) error {
 	if _, err := tx.Exec(schema); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('node', ?), ('version', '0')`, node); err != nil {
+	if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('node', ?), ('version', '0'), ('applied', '0')`, node); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
@@ -209,6 +216,17 @@ func Open(path string, options Options) (*SQLite, error) {
 		return nil, fmt.Errorf("database %s: %w", path, err)
 	}
 	s.state.Store(state)
+	var applied string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key = 'applied'`).Scan(&applied); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("database %s: read the applied log index: %w", path, err)
+	}
+	index, err := strconv.ParseUint(applied, 10, 64)
+	if err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("database %s: applied log index %q: %w", path, applied, err)
+	}
+	s.applied.set(index)
 	return s, nil
 }
 
@@ -292,7 +310,7 @@ type querier interface {
 
 // load reads the whole state. It is small: one row per app and tenant.
 func load(q querier) (state *snapshot, err error) {
-	state = &snapshot{apps: map[string]App{}, tenants: map[string]Record{}, images: map[string]bool{}}
+	state = &snapshot{apps: map[string]App{}, tenants: map[string]Record{}, nodes: map[string]Node{}, images: map[string]bool{}}
 	if err := q.QueryRow(`SELECT value FROM meta WHERE key = 'node'`).Scan(&state.node); err != nil {
 		return nil, fmt.Errorf("read the node name: %w", err)
 	}
@@ -375,6 +393,23 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
+	rows, err = q.Query(`SELECT name, address, role, created_at FROM nodes`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var node Node
+		var created string
+		if err := rows.Scan(&node.Name, &node.Address, &node.Role, &created); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		node.CreatedAt = parseTime(created)
+		state.nodes[node.Name] = node
+	}
+	if err := closeRows(rows); err != nil {
+		return nil, err
+	}
 	rows, err = q.Query(`SELECT ref FROM images`)
 	if err != nil {
 		return nil, err
@@ -429,22 +464,28 @@ func (s *SQLite) write(signal bool, change func(tx *recorder, current *snapshot,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for attempt := 1; ; attempt++ {
+		if s.catchUp != nil {
+			if err := s.catchUp(); err != nil {
+				return nil, err
+			}
+		}
 		current := s.state.Load()
 		tx := &recorder{}
 		if err := change(tx, current, s.now().UTC()); err != nil {
 			return nil, err
 		}
 		next, err := s.commit(Batch{Schema: schemaVersion, Version: current.version, Signal: signal, Statements: tx.statements})
-		if errors.Is(err, ErrStale) && attempt < staleAttempts {
-			continue
+		if !errors.Is(err, ErrStale) || attempt == staleAttempts {
+			return next, err
 		}
-		return next, err
+		// Writers racing on other nodes back off by different times.
+		time.Sleep(time.Duration(rand.Int64N(int64(attempt) * int64(20*time.Millisecond))))
 	}
 }
 
 // staleAttempts is how often a write is computed before a stale batch is
 // reported: often enough for writes racing on other nodes to pass.
-const staleAttempts = 5
+const staleAttempts = 10
 
 // Apply applies a batch committed elsewhere, such as by the cluster's log,
 // in one transaction. It refuses, with ErrStale and without a change, a
@@ -456,25 +497,29 @@ func (s *SQLite) Apply(batch Batch) error {
 }
 
 func (s *SQLite) apply(batch Batch) (*snapshot, error) {
-	if batch.Schema != schemaVersion {
-		return nil, fmt.Errorf("%w: a batch for schema version %d, this node runs %d", ErrSchema, batch.Schema, schemaVersion)
-	}
 	return s.transact(batch.Signal, func(tx *sql.Tx, current *snapshot) error {
-		if batch.Version != current.version {
-			return fmt.Errorf("%w: computed against version %d, the state is at %d", ErrStale, batch.Version, current.version)
-		}
-		for _, statement := range batch.Statements {
-			args, err := statement.values()
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(statement.SQL, args...); err != nil {
-				return err
-			}
-		}
-		_, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = 'version'`, strconv.FormatInt(current.version+1, 10))
-		return err
+		return applyBatch(tx, current, batch)
 	})
+}
+
+func applyBatch(tx *sql.Tx, current *snapshot, batch Batch) error {
+	if batch.Schema != schemaVersion {
+		return fmt.Errorf("%w: a batch for schema version %d, this node runs %d", ErrSchema, batch.Schema, schemaVersion)
+	}
+	if batch.Version != current.version {
+		return fmt.Errorf("%w: computed against version %d, the state is at %d", ErrStale, batch.Version, current.version)
+	}
+	for _, statement := range batch.Statements {
+		args, err := statement.values()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(statement.SQL, args...); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = 'version'`, strconv.FormatInt(current.version+1, 10))
+	return err
 }
 
 // local changes what only this node keeps, such as the images it pulled,
@@ -489,6 +534,10 @@ func (s *SQLite) local(change func(tx *sql.Tx) error) error {
 func (s *SQLite) transact(signal bool, change func(tx *sql.Tx, current *snapshot) error) (*snapshot, error) {
 	s.applying.Lock()
 	defer s.applying.Unlock()
+	return s.transactLocked(signal, change)
+}
+
+func (s *SQLite) transactLocked(signal bool, change func(tx *sql.Tx, current *snapshot) error) (*snapshot, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err

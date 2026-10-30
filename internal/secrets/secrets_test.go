@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"os"
@@ -97,5 +98,27 @@ func TestGenerate(t *testing.T) {
 	}
 	if _, err := Generate(spec.Secret{Kind: "rot13", Bytes: 24}); err == nil {
 		t.Fatal("unknown kind accepted")
+	}
+}
+
+func TestDeriveDependsOnKeyAndPurpose(t *testing.T) {
+	key, err := NewKey(bytes.Repeat([]byte{7}, keySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := NewKey(bytes.Repeat([]byte{7}, keySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := NewKey(bytes.Repeat([]byte{8}, keySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := key.Derive("cluster ca")
+	if len(ca) != keySize || !bytes.Equal(ca, same.Derive("cluster ca")) {
+		t.Fatal("the same key derives different bytes")
+	}
+	if bytes.Equal(ca, key.Derive("other")) || bytes.Equal(ca, other.Derive("cluster ca")) || bytes.Equal(ca, bytes.Repeat([]byte{7}, keySize)) {
+		t.Fatal("derived bytes do not depend on both key and purpose")
 	}
 }

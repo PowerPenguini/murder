@@ -138,6 +138,17 @@ func runRestore(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The cluster's log would apply its entries over the backup, or the
+	// backup's state would replace the cluster's when the node rejoins.
+	if cfg.Cluster != nil {
+		if _, err := os.Stat(cfg.Cluster.Dir); err == nil {
+			return fmt.Errorf("this node is part of a cluster (its log is in %s): its database comes from the other nodes. "+
+				"To rebuild a cluster from a backup, move the cluster directory aside on every node, restore on one node, "+
+				"\"murder cluster bootstrap\" there and join the others with new databases", cfg.Cluster.Dir)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	info, err := store.CheckBackup(from)
 	if err != nil {
 		return err

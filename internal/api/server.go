@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
@@ -96,6 +97,8 @@ type Server struct {
 	runtime    runtime.Runtime
 	key        *secrets.Key
 	log        *slog.Logger
+	// cluster is this node's part of a cluster; nil outside one.
+	cluster Cluster
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }
@@ -108,6 +111,7 @@ func NewServer(st store.Store, reconciler *reconcile.Reconciler, rt runtime.Runt
 // Handler routes API requests.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.clusterRoutes(mux)
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
 	mux.HandleFunc("PUT /v1/apps/{name}", s.putApp)
@@ -622,8 +626,10 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusConflict
 	case errors.As(err, new(*spec.ValidationError)):
 		status = http.StatusBadRequest
-	case errors.Is(err, reconcile.ErrStopping):
+	case errors.Is(err, reconcile.ErrStopping), errors.Is(err, cluster.ErrNoLeader), errors.Is(err, cluster.ErrNotLeader):
 		status = http.StatusServiceUnavailable
+	case errors.Is(err, store.ErrStale), errors.Is(err, cluster.ErrNotJoined):
+		status = http.StatusConflict
 	case errors.Is(err, context.Canceled):
 		status = 499
 	}

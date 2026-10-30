@@ -90,3 +90,35 @@ func TestExampleConfigParses(t *testing.T) {
 		t.Fatalf("example config = %+v", agent)
 	}
 }
+
+func TestParseCluster(t *testing.T) {
+	agent, err := Parse([]byte("baseDomain: example.com\ncluster: {address: 10.0.0.2:7400}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *agent.Cluster != (Cluster{Address: "10.0.0.2:7400", Role: RoleWorker, Dir: "/var/lib/murder/cluster"}) || agent.Witness() {
+		t.Fatalf("cluster = %+v", agent.Cluster)
+	}
+	// A witness serves no tenants and needs no domain.
+	agent, err = Parse([]byte("cluster: {address: 10.0.0.3:7400, role: witness, dir: /srv/cluster}\n"))
+	if err != nil || !agent.Witness() {
+		t.Fatalf("witness: %+v, %v", agent.Cluster, err)
+	}
+	for _, bad := range []string{
+		"cluster: {address: ':7400'}",
+		"cluster: {address: 0.0.0.0:7400}",
+		"cluster: {address: node-1.internal:7400}",
+		"cluster: {address: 203.0.113.7:7400}",
+		"cluster: {address: 10.0.0.2}",
+		"cluster: {address: 10.0.0.2:0}",
+		"cluster: {address: 10.0.0.2:7400, role: boss}",
+		"cluster: {address: 10.0.0.2:7400, dir: relative}",
+	} {
+		if _, err := Parse([]byte("baseDomain: example.com\n" + bad + "\n")); err == nil || !strings.Contains(err.Error(), "cluster.") {
+			t.Errorf("%s: %v", bad, err)
+		}
+	}
+	if _, err := Parse([]byte("cluster: {address: 10.0.0.2:7400}\n")); err == nil || !strings.Contains(err.Error(), "baseDomain") {
+		t.Errorf("a worker without a domain: %v", err)
+	}
+}

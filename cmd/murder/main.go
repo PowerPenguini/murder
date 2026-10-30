@@ -15,6 +15,7 @@ Node commands:
   agent      run the agent (reconciler, edge proxy and local API)
   firewall   load the tenant firewall (murder-firewall.service runs it at boot)
   restore    put a backup in place of the node's database (agent stopped)
+  cluster    show, start, join or leave a cluster of nodes
 
 Client commands (talk to the local agent):
   app        apply, list, show and delete apps (specs shared by tenants)
@@ -59,6 +60,8 @@ func run(args []string) error {
 		return runBackup(args[1:])
 	case "restore":
 		return runRestore(args[1:])
+	case "cluster":
+		return runCluster(args[1:])
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 		return nil
