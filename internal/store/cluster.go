@@ -379,12 +379,9 @@ func (s *SQLite) PutNode(node Node, actor string) error {
 	if !nodePattern.MatchString(node.Name) {
 		return fmt.Errorf("node name %q must be 1-63 letters, digits, dots or hyphens", node.Name)
 	}
-	if node.Role != RoleWorker && node.Role != RoleWitness {
-		return fmt.Errorf("node role %q must be %s or %s", node.Role, RoleWorker, RoleWitness)
-	}
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		existing, found := current.nodes[node.Name]
-		if found && existing.Address == node.Address && existing.Role == node.Role {
+		if found && existing.Address == node.Address {
 			return errUnchanged
 		}
 		for _, name := range slices.Sorted(maps.Keys(current.nodes)) {
@@ -393,23 +390,19 @@ func (s *SQLite) PutNode(node Node, actor string) error {
 				continue
 			}
 			if other.Address == node.Address {
-				return fmt.Errorf("node %s already has address %s", other.Name, node.Address)
-			}
-			// One node runs every tenant until tenants are placed on nodes.
-			if node.Role == RoleWorker && other.Role == RoleWorker {
-				return fmt.Errorf("%w: the cluster already has worker %s; for now a cluster runs one worker and witnesses", ErrConflict, other.Name)
+				return fmt.Errorf("%w: node %s already has address %s", ErrConflict, other.Name, node.Address)
 			}
 		}
-		if err := tx.Exec(`INSERT INTO nodes (name, address, role, created_at) VALUES (?, ?, ?, ?)
-			ON CONFLICT (name) DO UPDATE SET address = excluded.address, role = excluded.role`,
-			node.Name, node.Address, node.Role, formatTime(now)); err != nil {
+		if err := tx.Exec(`INSERT INTO nodes (name, address, created_at) VALUES (?, ?, ?)
+			ON CONFLICT (name) DO UPDATE SET address = excluded.address`,
+			node.Name, node.Address, formatTime(now)); err != nil {
 			return err
 		}
 		action := "node.joined"
 		if found {
 			action = "node.changed"
 		}
-		return event(tx, now, actor, action, "", "", node.Name+": "+node.Role+" at "+node.Address)
+		return event(tx, now, actor, action, "", "", node.Name+" at "+node.Address)
 	})
 	if errors.Is(err, errUnchanged) {
 		return nil
@@ -423,10 +416,19 @@ func (s *SQLite) RemoveNode(name, actor string) error {
 		if !found {
 			return fmt.Errorf("node %s: %w", name, ErrNotFound)
 		}
+		var tenants []string
+		for _, tenant := range slices.Sorted(maps.Keys(current.tenants)) {
+			if current.tenants[tenant].Node == name {
+				tenants = append(tenants, tenant)
+			}
+		}
+		if len(tenants) > 0 {
+			return fmt.Errorf("%w: node %s runs tenants %s; purge them first (archived ones count)", ErrInUse, name, strings.Join(tenants, ", "))
+		}
 		if err := tx.Exec(`DELETE FROM nodes WHERE name = ?`, name); err != nil {
 			return err
 		}
-		return event(tx, now, actor, "node.removed", "", "", node.Name+": "+node.Role+" at "+node.Address)
+		return event(tx, now, actor, "node.removed", "", "", node.Name+" at "+node.Address)
 	})
 	return err
 }

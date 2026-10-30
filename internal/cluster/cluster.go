@@ -68,7 +68,6 @@ type Config struct {
 	// Address is where the node listens and where other nodes reach it:
 	// an IP address and port on the private network.
 	Address string
-	Role    string
 	// Dir holds the Raft log and snapshots.
 	Dir string
 	// Seed is derived from the master key; every node of a cluster has the
@@ -358,7 +357,7 @@ func (c *Cluster) Bootstrap(ctx context.Context, actor string) error {
 			return err
 		}
 	}
-	return c.config.Store.PutNode(store.Node{Name: c.config.Node, Address: c.address, Role: c.config.Role}, actor)
+	return c.config.Store.PutNode(store.Node{Name: c.config.Node, Address: c.address}, actor)
 }
 
 // alone reports whether this node is the only voter of its cluster.
@@ -404,7 +403,7 @@ func (c *Cluster) Join(ctx context.Context, peer, actor string) error {
 	}
 	// The leader checks the node first, so a node it refuses keeps its
 	// state as it was.
-	request := joinRequest{Address: c.address, Role: c.config.Role, Actor: actor, Check: true}
+	request := joinRequest{Address: c.address, Actor: actor, Check: true}
 	var answer joinAnswer
 	if err := c.join(ctx, peer, request, &answer); err != nil {
 		return err
@@ -488,7 +487,6 @@ func (c *Cluster) Remove(ctx context.Context, node, actor string) error {
 type Status struct {
 	Node    string `json:"node"`
 	Address string `json:"address"`
-	Role    string `json:"role"`
 	// State is the node's Raft state: Leader, Follower, Candidate or
 	// Shutdown.
 	State  string `json:"state"`
@@ -500,16 +498,15 @@ type Status struct {
 	Members     []Member  `json:"members"`
 }
 
-// Member is one voter of the cluster, with its role from the state.
+// Member is one voter of the cluster.
 type Member struct {
 	Name     string `json:"name"`
 	Address  string `json:"address"`
-	Role     string `json:"role,omitempty"`
 	Suffrage string `json:"suffrage"`
 }
 
 func (c *Cluster) Status() (Status, error) {
-	status := Status{Node: c.config.Node, Address: c.address, Role: c.config.Role, State: c.raft.State().String(), Applied: c.config.Store.Applied()}
+	status := Status{Node: c.config.Node, Address: c.address, State: c.raft.State().String(), Applied: c.config.Store.Applied()}
 	if _, leader := c.raft.LeaderWithID(); leader != "" {
 		status.Leader = string(leader)
 	}
@@ -520,12 +517,8 @@ func (c *Cluster) Status() (Status, error) {
 	if err := future.Error(); err != nil {
 		return Status{}, err
 	}
-	roles := map[string]string{}
-	for _, node := range c.config.Store.Nodes() {
-		roles[node.Name] = node.Role
-	}
 	for _, server := range future.Configuration().Servers {
-		status.Members = append(status.Members, Member{Name: string(server.ID), Address: string(server.Address), Role: roles[string(server.ID)], Suffrage: server.Suffrage.String()})
+		status.Members = append(status.Members, Member{Name: string(server.ID), Address: string(server.Address), Suffrage: server.Suffrage.String()})
 	}
 	slices.SortFunc(status.Members, func(a, b Member) int { return strings.Compare(a.Name, b.Name) })
 	return status, nil
@@ -533,17 +526,6 @@ func (c *Cluster) Status() (Status, error) {
 
 // Leader reports whether this node leads the cluster.
 func (c *Cluster) Leader() bool { return c.raft.State() == raft.Leader }
-
-// workers lists the nodes running tenants, but name.
-func workers(nodes []store.Node, name string) []string {
-	var names []string
-	for _, node := range nodes {
-		if node.Role == store.RoleWorker && node.Name != name {
-			names = append(names, node.Name)
-		}
-	}
-	return names
-}
 
 func marshal(value any) []byte {
 	data, err := json.Marshal(value)

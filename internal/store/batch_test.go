@@ -142,8 +142,8 @@ func TestAWriteBeatenByAnotherNodeIsComputedAgain(t *testing.T) {
 	// Another node creates acme first; a write computed before it saw that
 	// must not be applied as computed.
 	other := &recorder{}
-	if err := other.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at)
-		VALUES ('acme', 'web', '{}', 0, '10.240.0.0/28', '', '', 1, '2026-10-30T00:00:00Z', '2026-10-30T00:00:00Z')`); err != nil {
+	if err := other.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, node)
+		VALUES ('acme', 'web', '{}', 0, '10.240.0.0/28', '', '', 1, '2026-10-30T00:00:00Z', '2026-10-30T00:00:00Z', 'node-1')`); err != nil {
 		t.Fatal(err)
 	}
 	commits := 0
@@ -214,8 +214,10 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DROP TABLE nodes`); err != nil {
-		t.Fatal(err)
+	for _, statement := range []string{`DROP TABLE nodes`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := db.Exec(`INSERT INTO meta (key, value) VALUES ('node', 'old')`); err != nil {
 		t.Fatal(err)

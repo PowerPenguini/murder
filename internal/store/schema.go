@@ -52,10 +52,13 @@ CREATE TABLE tenants (
 	generation  INTEGER NOT NULL,
 	created_at  TEXT NOT NULL,
 	updated_at  TEXT NOT NULL,
-	archived_at TEXT
+	archived_at TEXT,
+	-- The node that runs the tenant and keeps its data.
+	node        TEXT NOT NULL
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
+CREATE INDEX tenants_node ON tenants (node);
 
 -- Every image a tenant was given or ran: the candidates for removal once
 -- no tenant needs them. Each node keeps its own, outside the replicated
@@ -64,11 +67,10 @@ CREATE TABLE images (
 	ref TEXT PRIMARY KEY
 ) STRICT;
 
--- The nodes of a cluster: workers run tenants, witnesses only vote.
+-- The nodes of a cluster, which all run tenants.
 CREATE TABLE nodes (
 	name       TEXT PRIMARY KEY,
 	address    TEXT NOT NULL UNIQUE,
-	role       TEXT NOT NULL CHECK (role IN ('worker', 'witness')),
 	created_at TEXT NOT NULL
 ) STRICT;
 
@@ -141,11 +143,20 @@ func upgrade(db *sql.DB) error {
 		if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('version', '0'), ('applied', '0')`); err != nil {
 			return err
 		}
+		// Every tenant so far runs on the node upgraded.
+		if _, err := tx.Exec(`ALTER TABLE tenants ADD COLUMN node TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE tenants SET node = (SELECT value FROM meta WHERE key = 'node')`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`CREATE INDEX tenants_node ON tenants (node)`); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`CREATE TABLE nodes (
 			name       TEXT PRIMARY KEY,
 			address    TEXT NOT NULL UNIQUE,
-			role       TEXT NOT NULL CHECK (role IN ('worker', 'witness')),
-			created_at TEXT NOT NULL
+					created_at TEXT NOT NULL
 		) STRICT`); err != nil {
 			return err
 		}

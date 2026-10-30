@@ -29,8 +29,12 @@ type Tenant struct {
 	Spec      spec.Tenant    `json:"spec"`
 	App       string         `json:"app"`
 	Overrides spec.Overrides `json:"overrides"`
-	Host      string         `json:"host"`
-	URL       string         `json:"url"`
+	// Node runs the tenant; Status and Address are known there only.
+	Node string `json:"node"`
+	// Elsewhere is set when another node than this one runs the tenant.
+	Elsewhere bool   `json:"elsewhere,omitempty"`
+	Host      string `json:"host"`
+	URL       string `json:"url"`
 	// Address is where the tenant listens, reachable from this node only.
 	Address    string    `json:"address,omitempty"`
 	Generation int64     `json:"generation"`
@@ -136,11 +140,12 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) view(record store.Record) Tenant {
 	view := Tenant{
-		Spec: record.Spec, App: record.App, Overrides: record.Overrides,
+		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
 	}
-	if record.Archived() {
+	view.Elsewhere = record.Node != s.store.Node()
+	if record.Archived() || view.Elsewhere {
 		return view
 	}
 	if address, err := reconcile.Backend(record); err == nil {
@@ -473,8 +478,13 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if _, err := s.store.Live(name); err != nil {
+	record, err := s.store.Live(name)
+	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if record.Node != s.store.Node() {
+		writeError(w, fmt.Errorf("%w: tenant %s runs on node %s: read its logs there", reconcile.ErrElsewhere, name, record.Node))
 		return
 	}
 	tail := 200
@@ -585,7 +595,7 @@ type Routes struct {
 
 func (r Routes) Route(tenant string) (edge.Route, bool) {
 	record, err := r.Store.Live(tenant)
-	if err != nil {
+	if err != nil || record.Node != r.Store.Node() {
 		return edge.Route{}, false
 	}
 	backend, err := reconcile.Backend(record)
@@ -629,6 +639,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusConflict
 	case errors.As(err, new(*spec.ValidationError)):
 		status = http.StatusBadRequest
+	case errors.Is(err, reconcile.ErrElsewhere):
+		status = http.StatusConflict
 	case errors.Is(err, reconcile.ErrStopping), errors.Is(err, cluster.ErrNoLeader), errors.Is(err, cluster.ErrNotLeader):
 		status = http.StatusServiceUnavailable
 	case errors.Is(err, store.ErrStale), errors.Is(err, cluster.ErrNotJoined), errors.Is(err, cluster.ErrMember):

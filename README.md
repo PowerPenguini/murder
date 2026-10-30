@@ -126,9 +126,12 @@ catches up when it returns. With three nodes the cluster takes changes while
 any one of them is down; a node cut off from the other two takes none.
 Tenants and the edge keep running either way.
 
-For now a cluster runs one **worker**, which runs the tenants, and
-**witnesses**, small servers in other locations that only vote; placing
-tenants on several workers, and moving them when one fails, come next.
+Every node runs tenants: each tenant runs on one node, which keeps its
+data, and `tenant list` shows which. A tenant runs on the node it was
+created on (run `murder tenant create` there). For now each node's edge
+serves its own tenants only; passing requests to the node that runs a
+tenant, replicating tenant data and moving tenants when a node fails come
+next.
 
 Nodes talk over one TLS port on the private network. A node proves it
 belongs to the cluster with a certificate of an authority derived from the
@@ -138,7 +141,6 @@ shared. Give each node a `cluster:` section:
 ```yaml
 cluster:
   address: 10.0.0.2:7400   # this node on the private network; the others reach it there
-  role: worker             # or: witness (needs no baseDomain, runs no tenants)
   dir: /var/lib/murder/cluster
 ```
 
@@ -162,8 +164,8 @@ another cluster, or of this one before it was rebuilt, is refused; so is a
 node with the name of a member at another address. An agent whose config
 lost its `cluster:` section refuses to start on a database of a cluster.
 `murder cluster remove <node>` takes a node out; to bring it back, give it a
-new database and an empty cluster directory. Writes on a witness are refused:
-manage apps and tenants on the worker. A backup is restored into a cluster
+new database and an empty cluster directory. A node is removed only once it
+runs no tenant, archived ones included. A backup is restored into a cluster
 by rebuilding it: move the cluster directory aside on every node, restore on
 one node, bootstrap there and join the others with new databases.
 
@@ -322,9 +324,9 @@ through Murder's real components:
 - **Edge inside the agent.** The edge proxy runs in the agent process, so
   public traffic pauses for the few seconds an agent restart takes. Tenant
   containers keep running.
-- **One worker.** A cluster replicates the state between nodes, but runs
-  every tenant on its one worker; placement on several workers, replicated
-  tenant data and failover come next.
+- **Tenants stay on their node.** A tenant's data lives on the node that
+  runs it, and only that node's edge serves it; replicated tenant data,
+  routing between nodes and failover come next.
 - **Upgrades.** A node applies changes made by its own release and older
   ones, but stops on a change made by a newer release (and restarts into
   the same stop) until it is upgraded too. Upgrade every node of a cluster

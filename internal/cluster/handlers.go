@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/hashicorp/raft"
 
@@ -121,7 +120,6 @@ func (c *Cluster) handleSnapshot(w http.ResponseWriter, _ *http.Request) {
 // certificate.
 type joinRequest struct {
 	Address string `json:"address"`
-	Role    string `json:"role"`
 	Actor   string `json:"actor"`
 	// Check only checks that the node may join.
 	Check bool `json:"check,omitempty"`
@@ -164,19 +162,9 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	// One node runs every tenant until tenants are placed on nodes; the
-	// state checks it again when it adds the node.
-	if others := workers(c.config.Store.Nodes(), name); request.Role == store.RoleWorker && len(others) > 0 {
-		writeError(w, http.StatusConflict, fmt.Errorf("the cluster already has worker %s; for now a cluster runs one worker and witnesses", strings.Join(others, ", ")))
-		return
-	}
 	// A node of the same name elsewhere would take the member's place.
 	if address, member := c.memberAddress(name); member && address != request.Address {
 		writeError(w, http.StatusConflict, fmt.Errorf("node %s is already a member at %s; remove it first, or give the new node another name", name, address))
-		return
-	}
-	if request.Role != store.RoleWorker && request.Role != store.RoleWitness {
-		writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("node role %q must be %s or %s", request.Role, store.RoleWorker, store.RoleWitness))
 		return
 	}
 	if request.Check {
@@ -187,7 +175,7 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = "node " + name
 	}
-	if err := c.config.Store.PutNode(store.Node{Name: name, Address: request.Address, Role: request.Role}, actor); err != nil {
+	if err := c.config.Store.PutNode(store.Node{Name: name, Address: request.Address}, actor); err != nil {
 		switch {
 		case errors.Is(err, ErrNotLeader) || errors.Is(err, ErrNoLeader):
 			c.moved(w)
@@ -233,7 +221,11 @@ func (c *Cluster) handleRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	if known {
 		if err := c.config.Store.RemoveNode(name, r.URL.Query().Get("actor")); err != nil {
-			writeError(w, http.StatusServiceUnavailable, err)
+			status := http.StatusServiceUnavailable
+			if errors.Is(err, store.ErrInUse) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err)
 			return
 		}
 	}

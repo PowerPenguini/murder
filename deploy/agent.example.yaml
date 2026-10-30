@@ -27,7 +27,6 @@ edge:
 
 # cluster:                         # replicate the state to other nodes (see README)
 #   address: 10.0.0.2:7400         # this node on the private network
-#   role: worker                   # worker | witness
 #   dir: /var/lib/murder/cluster
 
 defaults: {memoryMB: 512, cpus: 1, pids: 512, diskGB: 20}   # diskGB needs the zfs driver

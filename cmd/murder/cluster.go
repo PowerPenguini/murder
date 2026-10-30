@@ -21,8 +21,7 @@ const clusterUsage = `Usage: murder cluster <command> [arguments]
   remove <node>       take a node out of the cluster
 
 A node joins with the cluster's master key: copy /etc/murder/master.key
-from a node of the cluster before "murder init". For now a cluster runs one
-worker; the other nodes are witnesses, which only vote.
+from a node of the cluster before "murder init". Every node runs tenants.
 `
 
 func runCluster(args []string) error {
@@ -72,18 +71,14 @@ func printCluster(status cluster.Status) error {
 	if leader == "" {
 		leader = "none"
 	}
-	fmt.Fprintf(stdout, "node %s (%s at %s): %s, leader %s, applied log entry %d\n", status.Node, status.Role, status.Address, status.State, leader, status.Applied)
+	fmt.Fprintf(stdout, "node %s at %s: %s, leader %s, applied log entry %d\n", status.Node, status.Address, status.State, leader, status.Applied)
 	if !status.LastContact.IsZero() {
 		fmt.Fprintf(stdout, "last heard from the leader %s ago\n", time.Since(status.LastContact).Round(time.Millisecond))
 	}
 	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "NODE\tROLE\tADDRESS\tVOTE")
+	fmt.Fprintln(table, "NODE\tADDRESS\tVOTE")
 	for _, member := range status.Members {
-		role := member.Role
-		if role == "" {
-			role = "-"
-		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", member.Name, role, member.Address, member.Suffrage)
+		fmt.Fprintf(table, "%s\t%s\t%s\n", member.Name, member.Address, member.Suffrage)
 	}
 	return table.Flush()
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,7 +109,7 @@ func TestWaitAppliedReturnsOnceTheEntryIsApplied(t *testing.T) {
 func TestSnapshotsCarryTheReplicatedStateOnly(t *testing.T) {
 	leader := openNamed(t, "node-1")
 	logged(t, leader)
-	if err := leader.PutNode(Node{Name: "node-1", Address: "10.0.0.1:7400", Role: RoleWorker}, "alice"); err != nil {
+	if err := leader.PutNode(Node{Name: "node-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := leader.PutApp(App{Name: "web", Spec: appSpec()}, "alice"); err != nil {
@@ -195,20 +196,19 @@ func TestStartLogForgetsTheOldLog(t *testing.T) {
 
 func TestNodesAreReplicatedState(t *testing.T) {
 	st, _ := openNew(t, options())
-	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400", Role: RoleWorker}, "alice"); err != nil {
+	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.PutNode(Node{Name: "hel-1", Address: "10.0.0.3:7400", Role: RoleWitness}, "alice"); err != nil {
+	if err := st.PutNode(Node{Name: "hel-1", Address: "10.0.0.3:7400"}, "alice"); err != nil {
 		t.Fatal(err)
 	}
 	version := st.state.Load().version
-	if err := st.PutNode(Node{Name: "hel-1", Address: "10.0.0.3:7400", Role: RoleWitness}, "alice"); err != nil || st.state.Load().version != version {
+	if err := st.PutNode(Node{Name: "hel-1", Address: "10.0.0.3:7400"}, "alice"); err != nil || st.state.Load().version != version {
 		t.Fatalf("an unchanged node was written again: %v", err)
 	}
 	for _, bad := range []Node{
-		{Name: "x y", Address: "10.0.0.9:7400", Role: RoleWorker},
-		{Name: "nbg-1", Address: "10.0.0.9:7400", Role: "boss"},
-		{Name: "nbg-1", Address: "10.0.0.1:7400", Role: RoleWorker},
+		{Name: "x y", Address: "10.0.0.9:7400"},
+		{Name: "nbg-1", Address: "10.0.0.1:7400"},
 	} {
 		if err := st.PutNode(bad, "alice"); err == nil {
 			t.Errorf("node %+v was accepted", bad)
@@ -221,11 +221,11 @@ func TestNodesAreReplicatedState(t *testing.T) {
 		t.Fatalf("remove a node twice: %v", err)
 	}
 	nodes := st.Nodes()
-	if len(nodes) != 1 || nodes[0].Name != "hel-1" || nodes[0].Role != RoleWitness || nodes[0].CreatedAt.IsZero() {
+	if len(nodes) != 1 || nodes[0].Name != "hel-1" || nodes[0].CreatedAt.IsZero() {
 		t.Fatalf("nodes = %+v", nodes)
 	}
 	events, _ := st.Events(EventQuery{})
-	if len(events) != 3 || events[0].Action != "node.removed" || events[0].Detail != "fsn-1: worker at 10.0.0.1:7400" {
+	if len(events) != 3 || events[0].Action != "node.removed" || events[0].Detail != "fsn-1 at 10.0.0.1:7400" {
 		t.Fatalf("events = %+v", events)
 	}
 }
@@ -335,16 +335,43 @@ func TestAWriteReturnsTheStateItMade(t *testing.T) {
 	}
 }
 
-func TestOneWorkerUntilPlacement(t *testing.T) {
-	st, _ := openNew(t, options())
-	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400", Role: RoleWorker}, "alice"); err != nil {
+func TestTenantsRunOnANodeOfTheCluster(t *testing.T) {
+	st, _ := withApp(t, options())
+	local, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.PutNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400", Role: RoleWorker}, "alice"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("a second worker: %v", err)
+	if local.Node != "node-1" {
+		t.Fatalf("a tenant created here runs on %q", local.Node)
 	}
-	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.9:7400", Role: RoleWorker}, "alice"); err != nil {
-		t.Fatalf("the worker moves: %v", err)
+	if _, err := st.Create(NewTenant{Name: "beta", App: "web", Node: "nbg-1"}, "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a tenant on an unknown node: %v", err)
+	}
+	if err := st.PutNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	remote, err := st.Create(NewTenant{Name: "beta", App: "web", Node: "nbg-1"}, "alice")
+	if err != nil || remote.Node != "nbg-1" {
+		t.Fatalf("beta: %+v, %v", remote, err)
+	}
+	if err := st.RemoveNode("nbg-1", "alice"); !errors.Is(err, ErrInUse) || !strings.Contains(err.Error(), "beta") {
+		t.Fatalf("remove a node that runs a tenant: %v", err)
+	}
+	if err := st.Archive("beta", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RemoveNode("nbg-1", "alice"); !errors.Is(err, ErrInUse) {
+		t.Fatalf("remove a node that keeps an archived tenant: %v", err)
+	}
+	if err := st.Forget("beta", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RemoveNode("nbg-1", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := st.Events(EventQuery{Tenant: "beta", Limit: 3})
+	if events[2].Detail != "on node nbg-1" {
+		t.Fatalf("created: %+v", events[0])
 	}
 }
 

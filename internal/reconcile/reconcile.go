@@ -221,9 +221,11 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		tenant := container.Labels[runtime.LabelTenant]
 		byTenant[tenant] = append(byTenant[tenant], container)
 	}
+	// This node runs its own live tenants; another node's tenants run
+	// there.
 	var records []store.Record
 	wanted := map[string]bool{}
-	for _, record := range r.store.List() {
+	for _, record := range r.own() {
 		if !record.Archived() {
 			records = append(records, record)
 			wanted[record.Spec.Name] = true
@@ -589,7 +591,7 @@ const imageRetry = time.Hour
 // another name stays.
 func (r *Reconciler) sweepImages(ctx context.Context) {
 	needed := map[string]bool{}
-	for _, record := range r.store.List() {
+	for _, record := range r.own() {
 		for _, image := range []string{record.Spec.Image, record.DataImage, record.PreviousImage} {
 			if image != "" {
 				needed[image] = true
@@ -652,7 +654,7 @@ func (r *Reconciler) sweepImages(ctx context.Context) {
 // needed reports whether a tenant needs image now, read from the store
 // right before it is removed: API writes do not wait for the pass.
 func (r *Reconciler) needed(image string) bool {
-	for _, record := range r.store.List() {
+	for _, record := range r.own() {
 		if record.Spec.Image == image || record.DataImage == image || record.PreviousImage == image {
 			return true
 		}
@@ -784,6 +786,20 @@ func (r *Reconciler) LastPass() (time.Time, int) {
 	return r.passAt, r.passErrors
 }
 
+// own lists the tenants this node runs, archived ones too.
+func (r *Reconciler) own() []store.Record {
+	var records []store.Record
+	for _, record := range r.store.List() {
+		if record.Node == r.store.Node() {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+// ErrElsewhere refuses work on a tenant another node runs.
+var ErrElsewhere = errors.New("the tenant runs on another node")
+
 // DataExists reports whether a tenant name still has data on this node.
 func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error) {
 	return r.volumes.Exists(ctx, tenant)
@@ -800,6 +816,8 @@ func (r *Reconciler) Purge(ctx context.Context, name, actor string) error {
 	}
 	record, err := r.store.Get(name)
 	switch {
+	case err == nil && record.Node != r.store.Node():
+		return fmt.Errorf("%w: tenant %s runs on node %s: purge it there", ErrElsewhere, name, record.Node)
 	case err == nil && !record.Archived():
 		return fmt.Errorf("%w: archive %s before purging it", store.ErrNotArchived, name)
 	case errors.Is(err, store.ErrNotFound):

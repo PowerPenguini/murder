@@ -3,12 +3,9 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/PowerPenguini/murder/internal/cluster"
-	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // Cluster is this node's part of a cluster.
@@ -28,20 +25,6 @@ type JoinRequest struct {
 func (s *Server) WithCluster(c Cluster) *Server {
 	s.cluster = c
 	return s
-}
-
-// NewWitnessServer serves a witness: it runs no tenants, so it serves the
-// cluster's commands, the audit log and backups only.
-func NewWitnessServer(st store.Store, c Cluster, log *slog.Logger) http.Handler {
-	s := &Server{store: st, cluster: c, log: log}
-	mux := http.NewServeMux()
-	s.clusterRoutes(mux)
-	mux.HandleFunc("GET /v1/events", s.events)
-	mux.HandleFunc("GET /v1/backup", s.backup)
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, statusError{http.StatusConflict, fmt.Errorf("node %s is a witness and runs no tenants: manage apps and tenants on a worker", st.Node())})
-	})
-	return mux
 }
 
 func (s *Server) clusterRoutes(mux *http.ServeMux) {

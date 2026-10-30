@@ -531,6 +531,23 @@ func TestSuspendLogsAndRoutes(t *testing.T) {
 	if _, ok := (Routes{Store: f.store}).Route("nobody"); ok {
 		t.Fatal("route for a missing tenant")
 	}
+
+	// A tenant another node runs is shown, but neither routed nor read here.
+	if err := f.store.PutNode(store.Node{Name: "other-node", Address: "10.0.0.2:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Create(store.NewTenant{Name: "away", App: "web", Node: "other-node"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := (Routes{Store: f.store}).Route("away"); ok {
+		t.Fatal("this node routes a tenant another node runs")
+	}
+	if away, err := f.client.Get(ctx, "away"); err != nil || away.Node != "other-node" || !away.Elsewhere || away.Status != nil || away.Address != "" {
+		t.Fatalf("away = %+v, %v", away, err)
+	}
+	if _, err := f.client.Logs(ctx, "away", 10); err == nil || !strings.Contains(err.Error(), "runs on node other-node") {
+		t.Fatalf("logs of a tenant elsewhere: %v", err)
+	}
 }
 
 // Over the unix socket the audit log names the user at the other end, and

@@ -38,7 +38,6 @@ func masterKey(t *testing.T, fill byte) *secrets.Key {
 type node struct {
 	t       *testing.T
 	name    string
-	role    string
 	dir     string
 	key     *secrets.Key
 	address string
@@ -47,9 +46,9 @@ type node struct {
 	fatal   chan error
 }
 
-func newNode(t *testing.T, name, role string) *node {
+func newNode(t *testing.T, name string) *node {
 	t.Helper()
-	n := &node{t: t, name: name, role: role, dir: t.TempDir(), key: masterKey(t, 7), address: "127.0.0.1:0", fatal: make(chan error, 1)}
+	n := &node{t: t, name: name, dir: t.TempDir(), key: masterKey(t, 7), address: "127.0.0.1:0", fatal: make(chan error, 1)}
 	if err := store.Init(filepath.Join(n.dir, "murder.db"), name); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +64,7 @@ func (n *node) start() {
 		n.t.Fatal(err)
 	}
 	c, err := Start(Config{
-		Node: n.name, Address: n.address, Role: n.role, Dir: filepath.Join(n.dir, "raft"),
+		Node: n.name, Address: n.address, Dir: filepath.Join(n.dir, "raft"),
 		Seed: n.key.Derive("cluster ca"), Store: st,
 		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Fatal: func(err error) { n.fatal <- err },
@@ -116,16 +115,16 @@ func eventually(t *testing.T, what string, check func() bool) {
 	}
 }
 
-// threeNodes starts a cluster of a worker and two witnesses.
+// threeNodes starts a cluster of three nodes.
 func threeNodes(t *testing.T) []*node {
 	t.Helper()
-	worker := newNode(t, "fsn-1", store.RoleWorker)
+	worker := newNode(t, "fsn-1")
 	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	nodes := []*node{worker}
 	for _, name := range []string{"nbg-1", "hel-1"} {
-		witness := newNode(t, name, store.RoleWitness)
+		witness := newNode(t, name)
 		if err := witness.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
 			t.Fatalf("join %s: %v", name, err)
 		}
@@ -186,8 +185,8 @@ func TestWritesOnAnyNodeReachEveryNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Leader != "fsn-1" || status.State != "Follower" || status.Role != store.RoleWitness || len(status.Members) != 3 ||
-		status.Members[0] != (Member{Name: "fsn-1", Address: worker.address, Role: store.RoleWorker, Suffrage: "Voter"}) {
+	if status.Leader != "fsn-1" || status.State != "Follower" || len(status.Members) != 3 ||
+		status.Members[0] != (Member{Name: "fsn-1", Address: worker.address, Suffrage: "Voter"}) {
 		t.Fatalf("status = %+v", status)
 	}
 }
@@ -269,30 +268,20 @@ func TestOneNodeLeftWritesNothing(t *testing.T) {
 }
 
 func TestJoinRules(t *testing.T) {
-	worker := newNode(t, "fsn-1", store.RoleWorker)
+	worker := newNode(t, "fsn-1")
 	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err == nil || !strings.Contains(err.Error(), "already part of a cluster") {
 		t.Fatalf("bootstrap twice: %v", err)
 	}
-	second := newNode(t, "nbg-1", store.RoleWorker)
-	if err := second.cluster.Join(ctx(t), worker.address, "alice"); err == nil || !strings.Contains(err.Error(), "already has worker fsn-1") {
-		t.Fatalf("a second worker joined: %v", err)
-	}
-	// The refused node took nothing, and joins in another role.
-	if !second.store.Fresh() {
-		t.Fatal("a refused node took the cluster's state")
-	}
-	second.stop()
-	second.role = store.RoleWitness
-	second.start()
+	second := newNode(t, "nbg-1")
 	if err := second.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
 		t.Fatal(err)
 	}
 
 	// A node outside a cluster says so at once.
-	lone := newNode(t, "hel-1", store.RoleWitness)
+	lone := newNode(t, "hel-1")
 	start := time.Now()
 	if _, err := lone.store.PutApp(store.App{Name: "web", Spec: appSpec()}, "alice"); err == nil || !strings.Contains(err.Error(), "not part of a cluster") || time.Since(start) > 5*time.Second {
 		t.Fatalf("a write outside a cluster after %v: %v", time.Since(start), err)
@@ -300,11 +289,11 @@ func TestJoinRules(t *testing.T) {
 }
 
 func TestANodeWithStateCannotJoin(t *testing.T) {
-	worker := newNode(t, "fsn-1", store.RoleWorker)
+	worker := newNode(t, "fsn-1")
 	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	other := newNode(t, "hel-1", store.RoleWitness)
+	other := newNode(t, "hel-1")
 	if err := other.cluster.Bootstrap(ctx(t), "bob"); err != nil {
 		t.Fatal(err)
 	}
@@ -314,11 +303,11 @@ func TestANodeWithStateCannotJoin(t *testing.T) {
 }
 
 func TestAnotherMasterKeyIsNotTheCluster(t *testing.T) {
-	worker := newNode(t, "fsn-1", store.RoleWorker)
+	worker := newNode(t, "fsn-1")
 	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	stranger := &node{t: t, name: "evil", role: store.RoleWitness, dir: t.TempDir(), key: masterKey(t, 8), address: "127.0.0.1:0", fatal: make(chan error, 1)}
+	stranger := &node{t: t, name: "evil", dir: t.TempDir(), key: masterKey(t, 8), address: "127.0.0.1:0", fatal: make(chan error, 1)}
 	if err := store.Init(filepath.Join(stranger.dir, "murder.db"), "evil"); err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +340,7 @@ func TestRemoveTakesANodeOut(t *testing.T) {
 }
 
 func TestAFailureOfTheNodesOwnStopsIt(t *testing.T) {
-	n := newNode(t, "fsn-1", store.RoleWorker)
+	n := newNode(t, "fsn-1")
 	if err := n.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -397,11 +386,11 @@ func TestRaftLogsAtItsLevels(t *testing.T) {
 func TestANodeOfAnotherClusterCannotJoin(t *testing.T) {
 	// A witness of a cluster since rebuilt keeps its old database: it must
 	// not join the new cluster with it.
-	old := newNode(t, "fsn-1", store.RoleWorker)
+	old := newNode(t, "fsn-1")
 	if err := old.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	witness := newNode(t, "hel-1", store.RoleWitness)
+	witness := newNode(t, "hel-1")
 	if err := witness.cluster.Join(ctx(t), old.address, "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +402,7 @@ func TestANodeOfAnotherClusterCannotJoin(t *testing.T) {
 	}
 	witness.start()
 
-	rebuilt := newNode(t, "nbg-1", store.RoleWorker)
+	rebuilt := newNode(t, "nbg-1")
 	if err := rebuilt.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -427,15 +416,15 @@ func TestANodeOfAnotherClusterCannotJoin(t *testing.T) {
 }
 
 func TestANameIsNotTakenOver(t *testing.T) {
-	worker := newNode(t, "fsn-1", store.RoleWorker)
+	worker := newNode(t, "fsn-1")
 	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	witness := newNode(t, "hel-1", store.RoleWitness)
+	witness := newNode(t, "hel-1")
 	if err := witness.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
 		t.Fatal(err)
 	}
-	impostor := newNode(t, "hel-1", store.RoleWitness)
+	impostor := newNode(t, "hel-1")
 	if err := impostor.cluster.Join(ctx(t), worker.address, "mallory"); err == nil || !strings.Contains(err.Error(), "already a member at "+witness.address) {
 		t.Fatalf("a second node named hel-1: %v", err)
 	}
@@ -449,7 +438,7 @@ func TestANameIsNotTakenOver(t *testing.T) {
 }
 
 func TestBootstrapFinishesWhatItStarted(t *testing.T) {
-	n := newNode(t, "fsn-1", store.RoleWorker)
+	n := newNode(t, "fsn-1")
 	if err := n.store.StartLog(); err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +488,7 @@ func mustEncode(t *testing.T, batch store.Batch) []byte {
 }
 
 func TestABrokenNodeTakesNoSnapshot(t *testing.T) {
-	n := newNode(t, "fsn-1", store.RoleWorker)
+	n := newNode(t, "fsn-1")
 	f := &fsm{store: n.store, fatal: func(error) {}}
 	f.broken.Store(true)
 	if _, err := f.Snapshot(); !errors.Is(err, errBroken) {
@@ -508,7 +497,7 @@ func TestABrokenNodeTakesNoSnapshot(t *testing.T) {
 }
 
 func TestHandshakesAreBounded(t *testing.T) {
-	n := newNode(t, "fsn-1", store.RoleWorker)
+	n := newNode(t, "fsn-1")
 	// Connections that never handshake hold every slot; the next one is
 	// closed at once.
 	var idle []net.Conn

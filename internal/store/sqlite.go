@@ -370,7 +370,7 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at FROM tenants`)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node FROM tenants`)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +379,7 @@ func load(q querier) (state *snapshot, err error) {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -399,14 +399,14 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, address, role, created_at FROM nodes`)
+	rows, err = q.Query(`SELECT name, address, created_at FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var node Node
 		var created string
-		if err := rows.Scan(&node.Name, &node.Address, &node.Role, &created); err != nil {
+		if err := rows.Scan(&node.Name, &node.Address, &created); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -848,19 +848,31 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 		if err != nil {
 			return err
 		}
+		node := tenant.Node
+		if node == "" {
+			node = current.node
+		}
+		if _, member := current.nodes[node]; node != current.node && !member {
+			return fmt.Errorf("node %s: %w", node, ErrNotFound)
+		}
 		subnet, err := s.assign(current)
 		if err != nil {
 			return err
 		}
 		stamp := formatTime(now)
-		if err := tx.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at)
-			VALUES (?, ?, ?, 0, ?, '', '', 1, ?, ?)`, tenant.Name, tenant.App, marshal(overrides), subnet, stamp, stamp); err != nil {
+		if err := tx.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, node)
+			VALUES (?, ?, ?, 0, ?, '', '', 1, ?, ?, ?)`, tenant.Name, tenant.App, marshal(overrides), subnet, stamp, stamp, node); err != nil {
 			return err
 		}
 		if err := s.sealMissing(tx, now, composed, nil); err != nil {
 			return err
 		}
-		return event(tx, now, actor, "tenant.created", tenant.Name, tenant.App, overridesDetail(overrides))
+		// In a cluster, where it runs is worth recording.
+		detail := overridesDetail(overrides)
+		if len(current.nodes) > 0 {
+			detail = strings.TrimSuffix("on node "+node+"; "+detail, "; ")
+		}
+		return event(tx, now, actor, "tenant.created", tenant.Name, tenant.App, detail)
 	})
 	if err != nil {
 		return Record{}, err

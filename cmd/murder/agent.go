@@ -107,7 +107,7 @@ func runAgent(args []string) error {
 	var member *cluster.Cluster
 	if cfg.Cluster != nil {
 		member, err = cluster.Start(cluster.Config{
-			Node: node, Address: cfg.Cluster.Address, Role: cfg.Cluster.Role, Dir: cfg.Cluster.Dir,
+			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
 			Seed: key.Derive(clusterSeed), Store: st, Log: log,
 			Fatal: func(err error) {
 				select {
@@ -121,9 +121,6 @@ func runAgent(args []string) error {
 		}
 		// Closed before the store, which the log applies to.
 		defer member.Close()
-	}
-	if cfg.Witness() {
-		return runWitness(cfg, st, member, log, fatal)
 	}
 	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: node, RegistryAuthFile: cfg.RegistryAuthFile})
 	volumes, err := newVolumes(cfg.Volumes)
@@ -259,42 +256,6 @@ func runAgent(args []string) error {
 // clusterSeed is what the cluster's certificate authority is derived from
 // the master key for.
 const clusterSeed = "cluster ca"
-
-// runWitness serves a witness: it takes part in the cluster's decisions and
-// serves its local API, but runs no tenants, edge or firewall.
-func runWitness(cfg config.Agent, st *store.SQLite, member *cluster.Cluster, log *slog.Logger, fatal <-chan error) error {
-	listener, err := listenSocket(cfg.Socket, cfg.SocketGroup)
-	if err != nil {
-		return err
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	server := &http.Server{Handler: api.NewWitnessServer(st, member, log), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
-	failed := make(chan error, 1)
-	go func() {
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			failed <- fmt.Errorf("api listener: %w", err)
-		}
-	}()
-	if cfg.Metrics != "" {
-		log.Warn("a witness serves no metrics: it runs no tenants", "metrics", cfg.Metrics)
-	}
-	log.Info("murder witness started", "node", st.Node(), "address", cfg.Cluster.Address)
-	var runErr error
-	select {
-	case <-ctx.Done():
-	case runErr = <-failed:
-	case runErr = <-fatal:
-	}
-	if runErr != nil {
-		log.Error("stopping the witness", "error", runErr)
-	}
-	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = server.Shutdown(shutdown)
-	log.Info("murder witness stopped")
-	return runErr
-}
 
 func newVolumes(cfg config.Volumes) (volume.Volumes, error) {
 	switch cfg.Driver {

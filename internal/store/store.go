@@ -29,8 +29,8 @@ var ErrNotArchived = errors.New("tenant is not archived")
 // ErrConflict reports a change based on an outdated read.
 var ErrConflict = errors.New("conflicting change")
 
-// ErrInUse reports an app that tenants still run.
-var ErrInUse = errors.New("app is in use")
+// ErrInUse reports an app or a node that tenants still run.
+var ErrInUse = errors.New("in use")
 
 // App is a spec shared by tenants: everything but the tenant's name. Its
 // image is pinned.
@@ -52,6 +52,8 @@ type Record struct {
 	// including secrets no longer in the spec: values are only replaced by a
 	// rotation and only deleted by a purge.
 	Sealed map[string]string `json:"-"`
+	// Node runs the tenant and keeps its data.
+	Node string `json:"node"`
 	// Subnet is the tenant network's IPv4 range; the tenant's address in it
 	// is fixed (see runtime.Addresses). A tenant keeps it until it is
 	// purged, archived or not, so no other tenant can be routed to a
@@ -92,6 +94,8 @@ type NewTenant struct {
 	Name      string
 	App       string
 	Overrides spec.Overrides
+	// Node runs the tenant; this node if empty.
+	Node string
 }
 
 // AppChange is the outcome of storing an app.
@@ -125,20 +129,12 @@ type EventQuery struct {
 	Limit int
 }
 
-// Node roles: a worker runs tenants, a witness only takes part in the
-// cluster's decisions.
-const (
-	RoleWorker  = "worker"
-	RoleWitness = "witness"
-)
-
-// Node is one node of a cluster.
+// Node is one node of a cluster. Every node runs tenants.
 type Node struct {
 	Name string `json:"name"`
 	// Address is where other nodes reach it: host:port on the private
 	// network.
 	Address   string    `json:"address"`
-	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -199,8 +195,8 @@ type Store interface {
 	Forget(name, actor string) error
 
 	// Nodes lists the nodes of the cluster by name; a node outside a
-	// cluster has none. PutNode adds a node or changes its address or
-	// role; RemoveNode removes one.
+	// cluster has none. PutNode adds a node or changes its address;
+	// RemoveNode removes one that runs no tenant, archived or not.
 	Nodes() []Node
 	PutNode(node Node, actor string) error
 	RemoveNode(name, actor string) error
