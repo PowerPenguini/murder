@@ -225,13 +225,17 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO apps (name, spec, created_at, updated_at) VALUES ('web', ?, '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')`, marshal(normalizeApp(appSpec()))); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at)
+		VALUES ('old', 'web', '{}', 0, '10.240.0.0/28', '', '', 1, '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(`PRAGMA user_version = 4`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if subnets, err := Subnets(path); err != nil || len(subnets) != 0 {
+	if subnets, err := Subnets(path); err != nil || len(subnets) != 1 {
 		t.Fatalf("the firewall cannot read a version 4 database: %v %v", subnets, err)
 	}
 	st, err := Open(path, options())
@@ -239,7 +243,7 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if st.Node() != "old" || st.state.Load().version != 0 || len(st.Apps()) != 1 {
+	if st.Node() != "old" || st.state.Load().version != 0 || len(st.Apps()) != 1 || st.List()[0].Node != "old" {
 		t.Fatalf("upgraded state: node %s, version %d, apps %v", st.Node(), st.state.Load().version, st.Apps())
 	}
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice"); err != nil {
@@ -251,5 +255,48 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 	}
 	if st.state.Load().version != 1 {
 		t.Fatalf("version after one write = %d", st.state.Load().version)
+	}
+}
+
+func TestOpenUpgradesSchemaVersion5(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "murder.db")
+	db, err := sql.Open("sqlite", initDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Version 5 is today's schema without rollouts.
+	for _, statement := range []string{
+		schema,
+		`ALTER TABLE tenants DROP COLUMN rollout`,
+		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '2'), ('applied', '7')`,
+		`INSERT INTO apps (name, spec, created_at, updated_at) VALUES ('web', '` + marshal(normalizeApp(appSpec())) + `', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')`,
+		`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, node)
+			VALUES ('acme', 'web', '{}', 0, '10.240.0.0/28', '', '', 1, '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 'n1')`,
+		`PRAGMA user_version = 5`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if st.Applied() != 7 || st.state.Load().version != 2 {
+		t.Fatalf("applied %d, version %d", st.Applied(), st.state.Load().version)
+	}
+	rolled, err := st.Roll("acme", "alice")
+	if err != nil || rolled.Rollout != 1 {
+		t.Fatalf("roll after the upgrade: %+v, %v", rolled, err)
+	}
+	// A batch of a version 5 node still applies here.
+	recorded := &recorder{}
+	_ = recorded.Exec(`UPDATE tenants SET suspended = 1 WHERE name = 'acme'`)
+	if err := st.Apply(Batch{Schema: 5, Version: st.state.Load().version, Statements: recorded.statements}); err != nil {
+		t.Fatal(err)
 	}
 }

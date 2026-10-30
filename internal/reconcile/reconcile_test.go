@@ -1404,7 +1404,7 @@ func TestInputsHashDoesNotChangeBetweenReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const pinned = "0e081e17c449062252c66de6c4a6e0b4"
+	const pinned = "599132ac130c62cf5da9bfc10b0cf130"
 	if hash != pinned {
 		t.Fatalf("the inputs hash changed to %s: every running container would be replaced; add new inputs omitted when empty instead", hash)
 	}
@@ -1435,5 +1435,40 @@ func TestRollReplacesTheContainerOnce(t *testing.T) {
 	b, _ := f.reconciler.inputsHash(suspended, "/srv/acme")
 	if a != b {
 		t.Fatal("suspension is part of the inputs")
+	}
+}
+
+// A container a release before inputs hashing made is adopted, not
+// replaced, by the first pass of this one.
+func TestContainersOfTheReleaseBeforeAreAdopted(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	container := f.runtime.only(t)
+	legacy, err := legacyHash(container.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container.Labels[runtime.LabelHash] = legacy
+	container.spec.Labels[runtime.LabelHash] = legacy
+	id := container.ID
+	f.reconcile(t)
+	if f.runtime.count() != 1 || f.runtime.only(t).ID != id {
+		t.Fatal("the container of the release before was replaced")
+	}
+}
+
+func TestWhatTheContainerDoesNotUseReplacesNothing(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	before, _ := f.reconciler.inputsHash(record, "/srv/acme")
+	record.Spec.HealthPath, record.Spec.Port, record.Spec.Limits.DiskGB = "/ready", 9090, 50
+	after, _ := f.reconciler.inputsHash(record, "/srv/acme")
+	if before != after {
+		t.Fatal("a health path, port or disk limit replaces the container")
+	}
+	record.Spec.Limits.MemoryMB = 999
+	if changed, _ := f.reconciler.inputsHash(record, "/srv/acme"); changed == before {
+		t.Fatal("a memory limit does not replace the container")
 	}
 }

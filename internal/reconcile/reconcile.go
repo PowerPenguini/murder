@@ -404,10 +404,17 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err != nil {
 		return Status{}, err
 	}
+	// A container made by a release before inputs were hashed carries the
+	// hash of the container as made: it is current as well.
+	legacy, err := legacyHash(desired)
+	if err != nil {
+		return Status{}, err
+	}
 	var current *runtime.Container
 	var outdated []runtime.Container
 	for i := range existing {
-		if current == nil && existing[i].Labels[runtime.LabelHash] == desired.Labels[runtime.LabelHash] {
+		hash := existing[i].Labels[runtime.LabelHash]
+		if current == nil && (hash == desired.Labels[runtime.LabelHash] || hash == legacy) {
 			current = &existing[i]
 			continue
 		}
@@ -759,6 +766,11 @@ type inputs struct {
 func (r *Reconciler) inputsHash(record store.Record, dataPath string) (string, error) {
 	tenant := record.Spec
 	tenant.Suspended = false // a resumed tenant gets a new container anyway
+	// Health checks, routing and the disk limit (set on the volume as it
+	// runs) use these; the container does not.
+	tenant.HealthPath, tenant.Port, tenant.Limits.DiskGB = "", 0, 0
+	limits := tenant.Limits.Or(r.config.DefaultLimits)
+	limits.DiskGB = 0
 	// No mounts, variables or secrets are none, however written.
 	if len(tenant.Tmpfs) == 0 {
 		tenant.Tmpfs = nil
@@ -774,9 +786,23 @@ func (r *Reconciler) inputsHash(record store.Record, dataPath string) (string, e
 		sealed[name] = record.Sealed[name]
 	}
 	encoded, err := json.Marshal(inputs{
-		Spec: tenant, Limits: tenant.Limits.Or(r.config.DefaultLimits), Subnet: record.Subnet,
+		Spec: tenant, Limits: limits, Subnet: record.Subnet,
 		Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Sealed: sealed, DataPath: dataPath, Rollout: record.Rollout,
 	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:16]), nil
+}
+
+// legacyHash is the label releases before inputs hashing gave a container:
+// the fingerprint of the container as made, before its hash label. Such a
+// container keeps it until it is replaced.
+func legacyHash(desired runtime.ContainerSpec) (string, error) {
+	desired.Labels = maps.Clone(desired.Labels)
+	delete(desired.Labels, runtime.LabelHash)
+	encoded, err := json.Marshal(desired)
 	if err != nil {
 		return "", err
 	}
