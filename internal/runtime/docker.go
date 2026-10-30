@@ -14,8 +14,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/spec"
@@ -50,6 +52,11 @@ type Docker struct {
 	base     string
 	node     string
 	authFile string
+
+	// exits holds what the event log said about each container's last
+	// exit.
+	exitsMu sync.Mutex
+	exits   map[string]exit
 }
 
 // NewDocker returns a client for the engine described by options.
@@ -503,6 +510,12 @@ func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error)
 		"NetworkMode":    spec.Network,
 		"LogConfig":      map[string]any{"Type": "json-file", "Config": map[string]string{"max-size": "10m", "max-file": "3"}},
 	}
+	// No swap on top of the memory limit (the engine would allow as much
+	// again): an app over its limit is killed and says so, rather than
+	// slowing the whole host down.
+	if spec.MemoryBytes > 0 {
+		host["MemorySwap"] = spec.MemoryBytes
+	}
 	body := map[string]any{
 		"Image":            spec.Image,
 		"Env":              spec.Env,
@@ -538,24 +551,141 @@ func (d *Docker) Stop(ctx context.Context, id string, timeout time.Duration) err
 func (d *Docker) Remove(ctx context.Context, id string) error {
 	err := d.do(ctx, request{method: http.MethodDelete, path: "/containers/" + url.PathEscape(id), query: url.Values{"force": {"true"}, "v": {"true"}}}, nil)
 	if errors.Is(err, ErrNotFound) {
-		return nil
+		err = nil
+	}
+	if err == nil {
+		d.exitsMu.Lock()
+		delete(d.exits, id)
+		d.exitsMu.Unlock()
 	}
 	return err
 }
 
-func (d *Docker) Pid(ctx context.Context, id string) (int, error) {
+func (d *Docker) Inspect(ctx context.Context, id string) (ContainerState, error) {
 	var inspected struct {
-		State struct {
-			Pid int `json:"Pid"`
+		RestartCount int `json:"RestartCount"`
+		State        struct {
+			Pid        int       `json:"Pid"`
+			Restarting bool      `json:"Restarting"`
+			OOMKilled  bool      `json:"OOMKilled"`
+			ExitCode   int       `json:"ExitCode"`
+			FinishedAt time.Time `json:"FinishedAt"`
 		} `json:"State"`
 	}
 	if err := d.do(ctx, request{method: http.MethodGet, path: "/containers/" + url.PathEscape(id) + "/json"}, &inspected); err != nil {
-		return 0, err
+		return ContainerState{}, err
 	}
-	if inspected.State.Pid <= 0 {
-		return 0, fmt.Errorf("container %s: %w", id, ErrNotRunning)
+	state := ContainerState{
+		Pid:        max(inspected.State.Pid, 0),
+		Restarting: inspected.State.Restarting,
+		Restarts:   inspected.RestartCount,
 	}
-	return inspected.State.Pid, nil
+	// The engine reports "never" as the zero time, 0001-01-01T00:00:00Z.
+	if inspected.State.FinishedAt.Year() <= 1 {
+		return state, nil
+	}
+	state.ExitedAt = inspected.State.FinishedAt.UTC()
+	if state.Pid == 0 {
+		state.ExitKnown, state.ExitCode, state.OOMKilled = true, inspected.State.ExitCode, inspected.State.OOMKilled
+		return state, nil
+	}
+	state.ExitKnown, state.ExitCode, state.OOMKilled = d.exitFromEvents(ctx, id, state.ExitedAt)
+	return state, nil
+}
+
+// exitFromEvents finds how a container's process that runs again last
+// exited, at exitedAt: the engine's "die" event carries the exit code, an
+// "oom" event comes just before it. The answer is kept per container, so
+// the log is read once per exit.
+func (d *Docker) exitFromEvents(ctx context.Context, id string, exitedAt time.Time) (known bool, code int, oom bool) {
+	d.exitsMu.Lock()
+	cached, ok := d.exits[id]
+	d.exitsMu.Unlock()
+	if ok && cached.at.Equal(exitedAt) {
+		return cached.known, cached.code, cached.oom
+	}
+	until := exitedAt.Add(exitWindow)
+	if now := time.Now(); until.After(now) {
+		until = now // a time to come would make the engine wait for events until then
+	}
+	filters, _ := json.Marshal(map[string][]string{"type": {"container"}, "container": {id}, "event": {"die", "oom"}})
+	query := url.Values{
+		"since":   {engineTime(exitedAt.Add(-exitWindow))},
+		"until":   {engineTime(until)},
+		"filters": {string(filters)},
+	}
+	var data []byte
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/events", query: query}, &data); err != nil {
+		return false, 0, false // unknown this time; asked again next time
+	}
+	// The die event nearest the exit is the one; an oom event belongs to
+	// it if it came after the die before.
+	type logged struct {
+		die  bool
+		at   time.Time
+		code int
+	}
+	var events []logged
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	for {
+		var event struct {
+			Action   string `json:"Action"`
+			TimeNano int64  `json:"timeNano"`
+			Actor    struct {
+				Attributes map[string]string `json:"Attributes"`
+			} `json:"Actor"`
+		}
+		if decoder.Decode(&event) != nil {
+			break
+		}
+		at := time.Unix(0, event.TimeNano)
+		switch event.Action {
+		case "die":
+			if exitCode, err := strconv.Atoi(event.Actor.Attributes["exitCode"]); err == nil {
+				events = append(events, logged{die: true, at: at, code: exitCode})
+			}
+		case "oom":
+			events = append(events, logged{at: at})
+		}
+	}
+	slices.SortStableFunc(events, func(a, b logged) int { return a.at.Compare(b.at) })
+	var die time.Time
+	for _, e := range events {
+		if e.die && (!known || e.at.Sub(exitedAt).Abs() < die.Sub(exitedAt).Abs()) {
+			known, code, die = true, e.code, e.at
+		}
+	}
+	for _, e := range events {
+		switch {
+		case !known || e.at.After(die):
+		case e.die && e.at.Before(die):
+			oom = false // an earlier exit's
+		case !e.die:
+			oom = true
+		}
+	}
+	d.exitsMu.Lock()
+	if d.exits == nil {
+		d.exits = map[string]exit{}
+	}
+	d.exits[id] = exit{at: exitedAt, known: known, code: code, oom: oom}
+	d.exitsMu.Unlock()
+	return known, code, oom
+}
+
+// engineTime writes t as the engine's event filters take it: seconds and
+// nanoseconds.
+func engineTime(t time.Time) string { return fmt.Sprintf("%d.%09d", t.Unix(), t.Nanosecond()) }
+
+// exitWindow is how far from the exit time the event log is searched.
+const exitWindow = 5 * time.Second
+
+// exit is what exitFromEvents found for one exit.
+type exit struct {
+	at    time.Time
+	known bool
+	code  int
+	oom   bool
 }
 
 func (d *Docker) Logs(ctx context.Context, id string, tail int) ([]byte, error) {

@@ -13,6 +13,9 @@ RestartSec=2
 # Tenant containers belong to Docker, not to this unit: stopping or restarting
 # the agent must not stop them.
 KillMode=process
+# A stopping agent first finishes a container replacement under way (at most
+# the stop timeout plus 30 s).
+TimeoutStopSec=90
 RuntimeDirectory=murder
 RuntimeDirectoryMode=0755
 StateDirectory=murder

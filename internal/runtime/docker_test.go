@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,9 @@ func TestCreateSendsHardenedContainer(t *testing.T) {
 	endpoint := engine.created["NetworkingConfig"].(map[string]any)["EndpointsConfig"].(map[string]any)["murder-acme"].(map[string]any)
 	if endpoint["IPAMConfig"].(map[string]any)["IPv4Address"] != "10.240.0.18" {
 		t.Errorf("endpoint = %v, want the fixed address", endpoint)
+	}
+	if host["Memory"] != float64(512<<20) || host["MemorySwap"] != float64(512<<20) {
+		t.Errorf("memory = %v, swap = %v; want 512 MB and no swap beyond it", host["Memory"], host["MemorySwap"])
 	}
 	if host["ReadonlyRootfs"] != true || host["NetworkMode"] != "murder-acme" || host["PidsLimit"] != float64(256) {
 		t.Errorf("host config = %v", host)
@@ -406,5 +411,77 @@ func TestImageIDAndRemoveImage(t *testing.T) {
 		if strings.HasPrefix(request, "DELETE") && strings.Contains(request, "force") {
 			t.Fatalf("forced a removal: %s", request)
 		}
+	}
+}
+
+func TestInspectReportsRestartsAndTheLastExit(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	engine.handlers["GET /containers/crashing/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"RestartCount":3,"State":{"Pid":0,"Restarting":true,"OOMKilled":true,"ExitCode":137,"FinishedAt":"2026-10-29T15:02:00.123Z"}}`))
+	}
+	engine.handlers["GET /containers/fresh/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"RestartCount":0,"State":{"Pid":4242,"FinishedAt":"0001-01-01T00:00:00Z"}}`))
+	}
+	state, err := docker.Inspect(context.Background(), "crashing")
+	want := ContainerState{Restarting: true, Restarts: 3, ExitKnown: true, OOMKilled: true, ExitCode: 137, ExitedAt: time.Date(2026, 10, 29, 15, 2, 0, 123e6, time.UTC)}
+	if err != nil || state != want {
+		t.Fatalf("Inspect = %+v, %v; want %+v", state, err, want)
+	}
+	if state, err := docker.Inspect(context.Background(), "fresh"); err != nil || state != (ContainerState{Pid: 4242}) {
+		t.Fatalf("Inspect = %+v, %v; want only the PID", state, err)
+	}
+	if _, err := docker.Inspect(context.Background(), "gone"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Inspect of a missing container = %v", err)
+	}
+}
+
+// A process that runs again has its last exit looked up in the engine's
+// event log, once per exit.
+func TestInspectFindsTheLastExitInTheEventLog(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	exited := time.Date(2026, 10, 29, 15, 2, 0, 0, time.UTC)
+	engine.handlers["GET /containers/leaky/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"RestartCount":1,"State":{"Pid":4242,"OOMKilled":false,"ExitCode":0,"FinishedAt":"2026-10-29T15:02:00Z"}}`))
+	}
+	lookups := 0
+	engine.handlers["GET /events"] = func(w http.ResponseWriter, r *http.Request) {
+		lookups++
+		since, _ := strconv.ParseFloat(r.URL.Query().Get("since"), 64)
+		until, _ := strconv.ParseFloat(r.URL.Query().Get("until"), 64)
+		if since > float64(exited.Unix()) || until < float64(exited.Unix()) || until > float64(time.Now().Unix()+1) || !strings.Contains(r.URL.Query().Get("filters"), `"leaky"`) {
+			t.Errorf("events query = %v", r.URL.Query())
+		}
+		at := exited.UnixNano()
+		fmt.Fprintf(w, `{"Action":"die","timeNano":%d,"Actor":{"Attributes":{"exitCode":"1"}}}`+"\n", at-int64(3*time.Second))
+		fmt.Fprintf(w, `{"Action":"oom","timeNano":%d,"Actor":{"Attributes":{}}}`+"\n", at-int64(time.Millisecond))
+		fmt.Fprintf(w, `{"Action":"die","timeNano":%d,"Actor":{"Attributes":{"exitCode":"137"}}}`+"\n", at)
+	}
+	for range 2 {
+		state, err := docker.Inspect(context.Background(), "leaky")
+		if err != nil || !state.ExitKnown || state.ExitCode != 137 || !state.OOMKilled || state.Pid != 4242 || state.Restarts != 1 {
+			t.Fatalf("Inspect = %+v, %v", state, err)
+		}
+	}
+	if lookups != 1 {
+		t.Fatalf("the event log was read %d times for one exit", lookups)
+	}
+}
+
+// An out-of-memory kill belongs to the exit right after it, not to a later
+// one.
+func TestInspectDoesNotBlameAnEarlierOOM(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	engine.handlers["GET /containers/flaky/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"RestartCount":2,"State":{"Pid":4242,"FinishedAt":"2026-10-29T15:02:00.3Z"}}`))
+	}
+	engine.handlers["GET /events"] = func(w http.ResponseWriter, _ *http.Request) {
+		killed := time.Date(2026, 10, 29, 15, 2, 0, 0, time.UTC).UnixNano()
+		fmt.Fprintf(w, `{"Action":"oom","timeNano":%d}`+"\n", killed)
+		fmt.Fprintf(w, `{"Action":"die","timeNano":%d,"Actor":{"Attributes":{"exitCode":"137"}}}`+"\n", killed+int64(time.Millisecond))
+		fmt.Fprintf(w, `{"Action":"die","timeNano":%d,"Actor":{"Attributes":{"exitCode":"1"}}}`+"\n", killed+int64(300*time.Millisecond))
+	}
+	state, err := docker.Inspect(context.Background(), "flaky")
+	if err != nil || !state.ExitKnown || state.ExitCode != 1 || state.OOMKilled {
+		t.Fatalf("Inspect = %+v, %v; want exit code 1, not killed", state, err)
 	}
 }

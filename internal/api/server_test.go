@@ -79,7 +79,9 @@ func (m *memoryRuntime) Remove(_ context.Context, id string) error {
 	}
 	return nil
 }
-func (m *memoryRuntime) Pid(context.Context, string) (int, error) { return 1, nil }
+func (m *memoryRuntime) Inspect(context.Context, string) (runtime.ContainerState, error) {
+	return runtime.ContainerState{Pid: 1}, nil
+}
 
 // Resolve pins tags to a digest derived from the tag; "missing" tags fail.
 func (m *memoryRuntime) Resolve(_ context.Context, ref string) (string, string, error) {
