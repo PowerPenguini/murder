@@ -146,6 +146,11 @@ func (r *recentStates) outcome(id string, index uint64, err error) {
 	if r.outcomes == nil {
 		r.outcomes = map[string]Outcome{}
 	}
+	// A batch sent again after its first copy reached the log is refused
+	// as stale: how the first went is its outcome.
+	if _, known := r.outcomes[id]; known {
+		return
+	}
 	r.outcomes[id] = Outcome{Index: index, Err: err}
 	r.ids = append(r.ids, id)
 	if len(r.ids) > recentKept {
@@ -572,7 +577,7 @@ func (s *SQLite) FinishMove(name, actor string) (Record, error) {
 		if !ok || record.MoveTo == "" {
 			return fmt.Errorf("tenant %s is not moving: %w", name, ErrConflict)
 		}
-		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', move_held = 0, generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
+		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "tenant.moved", name, record.App, record.Node+" → "+record.MoveTo)
@@ -583,8 +588,8 @@ func (s *SQLite) FinishMove(name, actor string) (Record, error) {
 	return next.tenants[name].clone(), nil
 }
 
-func (s *SQLite) CancelMove(name, actor string) error {
-	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
+func (s *SQLite) CancelMove(name, actor string) (bool, error) {
+	_, err := s.writeIf(false, true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
 		if !ok || record.MoveTo == "" {
 			return errUnchanged
@@ -593,6 +598,19 @@ func (s *SQLite) CancelMove(name, actor string) error {
 			return err
 		}
 		return event(tx, now, actor, "tenant.move-cancelled", name, record.App, "stays on "+record.Node)
+	})
+	if errors.Is(err, errUnchanged) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *SQLite) ReleaseHold(name string) error {
+	_, err := s.writeIf(false, true, func(tx *recorder, current *snapshot, _ time.Time) error {
+		if record, ok := current.tenants[name]; !ok || !record.MoveHeld {
+			return errUnchanged
+		}
+		return tx.Exec(`UPDATE tenants SET move_held = 0 WHERE name = ?`, name)
 	})
 	if errors.Is(err, errUnchanged) {
 		return nil

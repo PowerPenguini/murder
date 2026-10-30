@@ -38,6 +38,9 @@ func NewTable(routes map[string]Route) Table {
 // LiveTable is the table the edge serves from, replaced whole.
 type LiveTable struct {
 	table   atomic.Pointer[Table]
+	// ready is set once the table holds routes the agent gave, now or
+	// before a restart.
+	ready   atomic.Bool
 	updated atomic.Int64
 	// changed is closed, and replaced, whenever the table is replaced.
 	mu      sync.Mutex
@@ -84,6 +87,7 @@ func (l *LiveTable) Load() Table {
 // Set serves table from now on.
 func (l *LiveTable) Set(table Table) {
 	l.table.Store(&table)
+	l.ready.Store(true)
 	l.updated.Store(time.Now().UnixNano())
 	l.replaced()
 }
@@ -92,8 +96,13 @@ func (l *LiveTable) Set(table Table) {
 // count as confirmed.
 func (l *LiveTable) Restore(table Table) {
 	l.table.Store(&table)
+	l.ready.Store(true)
 	l.replaced()
 }
+
+// Ready reports whether the table holds routes the agent gave: until then,
+// a tenant it does not know may simply not have reached it yet.
+func (l *LiveTable) Ready() bool { return l.ready.Load() }
 
 // Updated is when the agent last confirmed the table; zero before.
 func (l *LiveTable) Updated() time.Time {

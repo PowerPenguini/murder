@@ -130,6 +130,7 @@ func runAgent(args []string) error {
 	fatal := make(chan error, 1)
 	moves := &agentMoves{store: st, reconciler: reconciler, volumes: volumes}
 	var member *cluster.Cluster
+	var mover *move.Mover
 	if cfg.Cluster != nil {
 		member, err = cluster.Start(cluster.Config{
 			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
@@ -146,7 +147,8 @@ func runAgent(args []string) error {
 		}
 		// Closed before the store, which the log applies to.
 		defer member.Close()
-		moves.setCluster(member, &move.Mover{Store: st, Reconciler: reconciler, Volumes: volumes, Peer: clusterPeer{member}, Log: log})
+		mover = &move.Mover{Store: st, Reconciler: reconciler, Volumes: volumes, Peer: clusterPeer{member}, Log: log, CatchUp: member.CatchUp}
+		moves.setCluster(member, mover)
 	}
 	// murder-firewall.service loads the rules before Docker starts the
 	// tenants at boot; loading them here covers a node without that unit
@@ -195,6 +197,10 @@ func runAgent(args []string) error {
 	}
 	apiServer := &http.Server{Handler: apiHandler.Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
 	go serve("api", apiServer, apiListener)
+	// Moves an agent restart cut short leave the tenant here.
+	if mover != nil {
+		go recoverMoves(ctx, mover, log)
+	}
 	reconciled := make(chan struct{})
 	go func() {
 		defer close(reconciled)
@@ -234,6 +240,21 @@ func runAgent(args []string) error {
 	<-reconciled
 	log.Info("murder agent stopped")
 	return runErr
+}
+
+// recoverMoves undoes moves away from this node cut short, now and every
+// minute, until the agent stops.
+func recoverMoves(ctx context.Context, mover *move.Mover, log *slog.Logger) {
+	for {
+		if err := mover.Recover(ctx); err != nil {
+			log.Warn("undo moves cut short", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+		}
+	}
 }
 
 // clusterSeed is what the cluster's certificate authority is derived from

@@ -37,13 +37,8 @@ func (a *agentMoves) Receive(ctx context.Context, tenant string, incremental boo
 	record, err := a.store.Get(tenant)
 	if err != nil || record.MoveTo != a.store.Node() {
 		// The node moving it may have marked the move a moment ago.
-		a.mu.Lock()
-		member := a.cluster
-		a.mu.Unlock()
-		if member != nil {
-			if err := member.CatchUp(); err != nil {
-				return err
-			}
+		if err := a.catchUp(); err != nil {
+			return err
 		}
 		record, err = a.store.Get(tenant)
 	}
@@ -63,15 +58,36 @@ func (a *agentMoves) Receive(ctx context.Context, tenant string, incremental boo
 			}
 		}
 	}
-	return a.volumes.Receive(ctx, tenant, incremental, data)
+	if err := a.volumes.Receive(ctx, tenant, incremental, data); err != nil {
+		return err
+	}
+	// The snapshot of the last changes is all this node needs.
+	if incremental {
+		_ = a.volumes.Prune(ctx, tenant, "move", 1)
+	}
+	return nil
 }
 
-// Discard drops a copy of a tenant this node does not run.
+// Discard drops a copy of a tenant this node neither runs nor is about to:
+// as the cluster has it now, not as this node last heard.
 func (a *agentMoves) Discard(ctx context.Context, tenant string) error {
-	if record, err := a.store.Get(tenant); err == nil && record.Node == a.store.Node() {
-		return fmt.Errorf("tenant %s runs on this node: its data stays", tenant)
+	if err := a.catchUp(); err != nil {
+		return err
+	}
+	if record, err := a.store.Get(tenant); err == nil && (record.Node == a.store.Node() || record.MoveTo == a.store.Node()) {
+		return fmt.Errorf("tenant %s runs on node %s, or is moving here: its data stays", tenant, a.store.Node())
 	}
 	return a.volumes.Remove(ctx, tenant)
+}
+
+func (a *agentMoves) catchUp() error {
+	a.mu.Lock()
+	member := a.cluster
+	a.mu.Unlock()
+	if member == nil {
+		return nil
+	}
+	return member.CatchUp()
 }
 
 func (a *agentMoves) Status(tenant string) (any, bool) { return a.reconciler.Status(tenant) }

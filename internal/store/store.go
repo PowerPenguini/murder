@@ -195,11 +195,15 @@ type Store interface {
 	Roll(name, actor string) (Record, error)
 	// StartMove marks a tenant of this node, live or archived, as moving to
 	// another node; HoldMove has requests wait while it runs nowhere;
-	// FinishMove gives it to the target, and CancelMove leaves it here.
+	// FinishMove gives it to the target, requests still held until it
+	// serves there (ReleaseHold); CancelMove leaves it here, and reports
+	// whether there was a move to cancel. Cancelling and releasing work
+	// while changes are frozen: a frozen state must not strand a tenant.
 	StartMove(name, target, actor string) (Record, error)
 	HoldMove(name string) error
 	FinishMove(name, actor string) (Record, error)
-	CancelMove(name, actor string) error
+	ReleaseHold(name string) error
+	CancelMove(name, actor string) (bool, error)
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error
@@ -219,6 +223,8 @@ type Store interface {
 	// cluster has none. PutNode adds a node or changes its address;
 	// RemoveNode removes one that runs no tenant, archived or not.
 	Nodes() []Node
+	// Cluster names the cluster the state belongs to; empty outside one.
+	Cluster() string
 	PutNode(node Node, actor string) error
 	RemoveNode(name, actor string) error
 

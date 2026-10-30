@@ -60,10 +60,12 @@ func runCluster(args []string) error {
 		if err := drain(client, rest[0], rest[1]); err != nil {
 			return err
 		}
-		if err := client.RemoveNode(context.Background(), rest[0]); err != nil {
+		removal, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := client.RemoveNode(removal, rest[0]); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "node %s runs no tenant and left the cluster: point its DNS records at %s (its edge serves every tenant meanwhile), then switch it off\n", rest[0], rest[1])
+		fmt.Fprintf(stdout, "node %s runs no tenant and left the cluster: point its DNS records at %s and switch it off (its edge serves the tenants it knew until then, not ones created or moved since)\n", rest[0], rest[1])
 		return nil
 	case command == "remove" && len(rest) == 1:
 		if err := client.RemoveNode(ctx, rest[0]); err != nil {

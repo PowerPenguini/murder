@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -28,6 +29,12 @@ func (r Routes) Table() edge.Table {
 // version the edge has, the next one once the routes change, or the same
 // one after routesWait.
 func (s *Server) routes(w http.ResponseWriter, r *http.Request) {
+	// A node set up for a cluster has the cluster's tenants only once it
+	// is part of it.
+	if s.cluster != nil && s.store.Cluster() == "" {
+		writeError(w, statusError{http.StatusServiceUnavailable, errors.New("this node is not part of a cluster yet: it has no routes")})
+		return
+	}
 	routes := Routes{Store: s.store, RelayPort: s.relayPort}
 	after := r.URL.Query().Get("after")
 	timeout := time.NewTimer(routesWait)

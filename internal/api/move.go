@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 )
 
 // Moves moves tenants between the nodes of a cluster.
@@ -42,7 +43,13 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// Moved by another node, the move reaches this one's state a moment
+	// later.
 	record, err := s.store.Get(name)
+	for deadline := time.Now().Add(15 * time.Second); err == nil && record.Node != request.To && time.Now().Before(deadline); {
+		time.Sleep(100 * time.Millisecond)
+		record, err = s.store.Get(name)
+	}
 	if err != nil {
 		writeError(w, err)
 		return

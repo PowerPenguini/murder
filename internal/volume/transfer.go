@@ -21,10 +21,14 @@ import (
 // tenant runs, then, stopped, what changed since.
 
 // Send writes the dir tenant's data as a tar stream. A directory has no
-// snapshots: every send is whole, and since is ignored.
+// snapshots: every send is whole, and since is ignored. A tenant without
+// data sends an empty tree.
 func (d Dir) Send(ctx context.Context, tenant, _ string, w io.Writer) (string, error) {
 	if err := checkTenant(tenant); err != nil {
 		return "", err
+	}
+	if _, err := os.Stat(d.path(tenant)); errors.Is(err, os.ErrNotExist) {
+		return "", tar.NewWriter(w).Close()
 	}
 	return "", writeTar(ctx, d.path(tenant), w)
 }
@@ -58,31 +62,38 @@ func (d Dir) Receive(ctx context.Context, tenant string, _ bool, r io.Reader) er
 	return os.RemoveAll(old)
 }
 
-func writeTar(ctx context.Context, root string, w io.Writer) error {
+// writeTar writes the tree below root, never leaving it: the tenant runs
+// meanwhile and may swap a directory for a symlink, which is then sent as
+// a symlink, not followed.
+func writeTar(ctx context.Context, path string, w io.Writer) error {
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	archive := tar.NewWriter(w)
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err = fs.WalkDir(root.FS(), ".", func(name string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		info, err := entry.Info()
+		info, err := root.Lstat(name)
 		if err != nil {
 			return err
 		}
 		link := ""
 		if info.Mode()&fs.ModeSymlink != 0 {
-			if link, err = os.Readlink(path); err != nil {
+			if link, err = root.Readlink(name); err != nil {
 				return err
 			}
 		}
 		header, err := tar.FileInfoHeader(info, link)
 		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+			return fmt.Errorf("%s: %w", name, err)
 		}
-		relative, _ := filepath.Rel(root, path)
-		header.Name = filepath.ToSlash(relative)
+		header.Name = name
 		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 			header.Uid, header.Gid = int(stat.Uid), int(stat.Gid)
 		}
@@ -93,12 +104,14 @@ func writeTar(ctx context.Context, root string, w io.Writer) error {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		file, err := os.Open(path)
+		// Opened within root: a path swapped for a symlink meanwhile does
+		// not lead out of it.
+		file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
-		_, err = io.Copy(archive, file)
+		_, err = io.CopyN(archive, file, header.Size)
 		return err
 	})
 	if err != nil {
@@ -107,10 +120,15 @@ func writeTar(ctx context.Context, root string, w io.Writer) error {
 	return archive.Close()
 }
 
-// readTar unpacks a stream writeTar wrote below root, refusing any entry
-// that would land outside it. Ownership is kept where the process may set
-// it (as root on a node).
-func readTar(ctx context.Context, root string, r io.Reader) error {
+// readTar unpacks a stream writeTar wrote below path, never leaving it,
+// also through a symlink an earlier entry made. Ownership is kept where the
+// process may set it (as root on a node); setuid and setgid bits are not.
+func readTar(ctx context.Context, path string, r io.Reader) error {
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	archive := tar.NewReader(r)
 	asRoot := os.Geteuid() == 0
 	var directories []*tar.Header
@@ -129,48 +147,49 @@ func readTar(ctx context.Context, root string, r io.Reader) error {
 		if !filepath.IsLocal(name) && name != "." {
 			return fmt.Errorf("entry %q leaves the tenant's data", header.Name)
 		}
-		path := filepath.Join(root, name)
-		mode := fs.FileMode(header.Mode).Perm() | fs.FileMode(header.Mode)&(fs.ModeSetgid|fs.ModeSticky)
+		mode := fs.FileMode(header.Mode).Perm()
+		if header.Mode&0o1000 != 0 {
+			mode |= fs.ModeSticky
+		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(path, 0o700); err != nil {
-				return err
+			if err := root.MkdirAll(name, 0o700); err != nil {
+				return fmt.Errorf("%s: %w", header.Name, err)
 			}
 			directories = append(directories, header)
 		case tar.TypeReg:
-			file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 			if err != nil {
-				return err
+				return fmt.Errorf("%s: %w", header.Name, err)
 			}
 			_, err = io.Copy(file, archive)
 			if err = errors.Join(err, file.Close()); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
-			if err := os.Symlink(header.Linkname, path); err != nil {
-				return err
+			if err := root.Symlink(header.Linkname, name); err != nil {
+				return fmt.Errorf("%s: %w", header.Name, err)
 			}
 		default:
-			continue // devices and the like have no place in tenant data
+			continue // devices, hard links and the like have no place here
 		}
 		if asRoot {
-			if err := os.Lchown(path, header.Uid, header.Gid); err != nil {
+			if err := root.Lchown(name, header.Uid, header.Gid); err != nil {
 				return err
 			}
 		}
 		if header.Typeflag != tar.TypeSymlink {
-			if err := os.Chmod(path, mode); err != nil {
+			if err := root.Chmod(name, mode); err != nil {
 				return err
 			}
-			if err := os.Chtimes(path, header.ModTime, header.ModTime); err != nil {
+			if err := root.Chtimes(name, header.ModTime, header.ModTime); err != nil {
 				return err
 			}
 		}
 	}
 	// Directory times last: their files changed them.
 	for _, header := range directories {
-		path := filepath.Join(root, filepath.FromSlash(header.Name))
-		_ = os.Chtimes(path, header.ModTime, header.ModTime)
+		_ = root.Chtimes(filepath.FromSlash(header.Name), header.ModTime, header.ModTime)
 	}
 	return nil
 }

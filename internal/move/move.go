@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/reconcile"
@@ -41,8 +42,14 @@ type Mover struct {
 	Volumes    volume.Volumes
 	Peer       Peer
 	Log        *slog.Logger
+	// CatchUp applies here what the cluster has applied, before a failed
+	// move decides what to undo.
+	CatchUp func() error
 	// Healthy bounds the wait for the tenant on its new node.
 	Healthy time.Duration
+
+	mu     sync.Mutex
+	active map[string]bool
 }
 
 // ErrUnhealthy reports a tenant that moved but is not healthy on its new
@@ -50,30 +57,37 @@ type Mover struct {
 var ErrUnhealthy = errors.New("the tenant moved but is not healthy on its new node")
 
 // Move moves tenant from this node to target. Until the tenant is the
-// target's, a failure leaves it here, running as before.
+// target's, a failure leaves it here, running as before; what the state
+// says decides that, not what a failed call returned.
 func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err error) {
+	if !m.begin(tenant) {
+		return fmt.Errorf("%w: tenant %s is moving already", store.ErrConflict, tenant)
+	}
+	defer m.end(tenant)
 	record, err := m.Store.StartMove(tenant, target, actor)
 	if err != nil {
 		return err
 	}
-	moved := false
+	handedOver := false
 	defer func() {
-		if moved || err == nil {
-			return
+		if err != nil && !handedOver {
+			err = errors.Join(err, m.undo(context.WithoutCancel(ctx), tenant, record.Node, target, actor))
 		}
-		// Here it stays: the reconciler starts it again.
-		cancelled := m.Store.CancelMove(tenant, actor)
-		discarded := m.Peer.Discard(context.WithoutCancel(ctx), target, tenant)
-		err = errors.Join(err, cancelled, discarded)
 	}()
 	log := m.Log.With("tenant", tenant, "to", target)
-	// Everything, while the tenant runs.
-	start := time.Now()
-	since, err := m.send(ctx, tenant, target, "")
+	// A tenant that never ran here has no data to send.
+	hasData, err := m.Volumes.Exists(ctx, tenant)
 	if err != nil {
-		return fmt.Errorf("copy the data: %w", err)
+		return err
 	}
-	log.Info("copied the tenant's data to its new node", "took", time.Since(start).Round(time.Millisecond))
+	since := ""
+	if hasData {
+		start := time.Now()
+		if since, err = m.send(ctx, tenant, target, ""); err != nil {
+			return fmt.Errorf("copy the data: %w", err)
+		}
+		log.Info("copied the tenant's data to its new node", "took", time.Since(start).Round(time.Millisecond))
+	}
 	// From here on the tenant runs nowhere, and requests wait for it.
 	if !record.Archived() {
 		if err := m.Store.HoldMove(tenant); err != nil {
@@ -84,17 +98,24 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 		}
 	}
 	away := time.Now()
-	if _, err := m.send(ctx, tenant, target, since); err != nil {
-		return fmt.Errorf("copy the last changes: %w", err)
+	if hasData {
+		if _, err := m.send(ctx, tenant, target, since); err != nil {
+			return fmt.Errorf("copy the last changes: %w", err)
+		}
 	}
 	if _, err := m.Store.FinishMove(tenant, actor); err != nil {
-		return err
+		// The handover may have been made all the same.
+		if m.settled(tenant) != target {
+			return err
+		}
+		log.Warn("the handover reported a failure but was made", "error", err)
 	}
-	moved = true
+	handedOver = true
 	log.Info("the tenant is its new node's", "away", time.Since(away).Round(time.Millisecond))
 	if !record.Archived() {
 		if err := m.waitHealthy(ctx, tenant, target); err != nil {
-			return err
+			// Waiting longer helps no one: requests get answers again.
+			return errors.Join(err, m.Store.ReleaseHold(tenant))
 		}
 	}
 	// Its data here is a copy no one needs now.
@@ -102,6 +123,86 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 		log.Warn("remove the moved tenant's data from this node", "error", err)
 	}
 	return nil
+}
+
+func (m *Mover) begin(tenant string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active == nil {
+		m.active = map[string]bool{}
+	}
+	if m.active[tenant] {
+		return false
+	}
+	m.active[tenant] = true
+	return true
+}
+
+func (m *Mover) end(tenant string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.active, tenant)
+}
+
+// settled is the node the state gives the tenant once this node has
+// applied what the cluster has; "" if that is not known.
+func (m *Mover) settled(tenant string) string {
+	if m.CatchUp != nil && m.CatchUp() != nil {
+		return ""
+	}
+	record, err := m.Store.Get(tenant)
+	if err != nil {
+		return ""
+	}
+	return record.Node
+}
+
+// undo leaves a tenant whose move failed on this node, and only once the
+// state says it stays here is the target's partial copy dropped: a copy
+// the target may yet run is never dropped.
+func (m *Mover) undo(ctx context.Context, tenant, source, target, actor string) error {
+	if m.CatchUp != nil {
+		if err := m.CatchUp(); err != nil {
+			return fmt.Errorf("the move's outcome is unknown, so nothing was undone (it is undone later): %w", err)
+		}
+	}
+	record, err := m.Store.Get(tenant)
+	if err != nil {
+		return err
+	}
+	switch {
+	case record.Node == target:
+		return nil // it moved after all; the target keeps its copy
+	case record.Node != source:
+		return fmt.Errorf("tenant %s runs on node %s: nothing undone", tenant, record.Node)
+	case record.MoveTo != "":
+		if _, err := m.Store.CancelMove(tenant, actor); err != nil {
+			return fmt.Errorf("cancel the move (it is undone later): %w", err)
+		}
+	}
+	if err := m.Peer.Discard(ctx, target, tenant); err != nil {
+		return fmt.Errorf("drop the target's partial copy: %w", err)
+	}
+	// Snapshots taken for the move are of no use now.
+	if err := m.Volumes.Prune(ctx, tenant, "move", 1); err != nil {
+		m.Log.Warn("prune the move's snapshots", "tenant", tenant, "error", err)
+	}
+	return nil
+}
+
+// Recover undoes the moves away from this node that no Move here is
+// making, such as one an agent restart cut short: the tenant stays here.
+func (m *Mover) Recover(ctx context.Context) error {
+	var errs []error
+	for _, record := range m.Store.List() {
+		if record.Node != m.Store.Node() || record.MoveTo == "" || !m.begin(record.Spec.Name) {
+			continue
+		}
+		m.Log.Warn("undoing a move cut short", "tenant", record.Spec.Name, "to", record.MoveTo)
+		errs = append(errs, m.undo(ctx, record.Spec.Name, record.Node, record.MoveTo, "murder (recovery)"))
+		m.end(record.Spec.Name)
+	}
+	return errors.Join(errs...)
 }
 
 // send streams the tenant's data to target, all of it or what changed

@@ -160,6 +160,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 	route, ok := p.route(r, tenant)
 	if !ok {
 		p.stats.Unrouted()
+		// An edge that has no routes from its agent yet, such as on a node
+		// that just joined, does not know which tenants exist.
+		if ready, ok := p.routes.(interface{ Ready() bool }); ok && !ready.Ready() {
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "this server is starting; try again shortly", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "unknown tenant", http.StatusNotFound)
 		return
 	}

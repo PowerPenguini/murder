@@ -142,3 +142,51 @@ func TestZFSSendsSnapshotsAndReceivesUnmounted(t *testing.T) {
 		t.Fatalf("received dataset: %+v", other.datasets["tank/murder/acme"])
 	}
 }
+
+func TestReceiveNeverWritesThroughASymlink(t *testing.T) {
+	outside := t.TempDir()
+	var stream bytes.Buffer
+	archive := tar.NewWriter(&stream)
+	_ = archive.WriteHeader(&tar.Header{Name: "a", Typeflag: tar.TypeSymlink, Linkname: outside})
+	_ = archive.WriteHeader(&tar.Header{Name: "a/x", Typeflag: tar.TypeReg, Mode: 0o4755, Size: 1})
+	_, _ = archive.Write([]byte("x"))
+	_ = archive.Close()
+	to := Dir{Root: filepath.Join(t.TempDir(), "to")}
+	if err := to.Receive(context.Background(), "acme", false, &stream); err == nil {
+		t.Fatal("an entry was written through a symlink")
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("written outside: %v", entries)
+	}
+}
+
+func TestReceiveDropsSetuidBits(t *testing.T) {
+	var stream bytes.Buffer
+	archive := tar.NewWriter(&stream)
+	_ = archive.WriteHeader(&tar.Header{Name: "tool", Typeflag: tar.TypeReg, Mode: 0o6755, Size: 1})
+	_, _ = archive.Write([]byte("x"))
+	_ = archive.Close()
+	to := Dir{Root: filepath.Join(t.TempDir(), "to")}
+	if err := to.Receive(context.Background(), "acme", false, &stream); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(to.Root, "acme", "tool"))
+	if err != nil || info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 || info.Mode().Perm() != 0o755 {
+		t.Fatalf("mode %v, %v", info.Mode(), err)
+	}
+}
+
+func TestATenantWithoutDataSendsAnEmptyTree(t *testing.T) {
+	from := Dir{Root: filepath.Join(t.TempDir(), "from")}
+	to := Dir{Root: filepath.Join(t.TempDir(), "to")}
+	var stream bytes.Buffer
+	if _, err := from.Send(context.Background(), "acme", "", &stream); err != nil {
+		t.Fatal(err)
+	}
+	if err := to.Receive(context.Background(), "acme", false, &stream); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(to.Root, "acme")); err != nil || !info.IsDir() {
+		t.Fatalf("received %v, %v", info, err)
+	}
+}

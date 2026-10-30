@@ -490,8 +490,21 @@ func TestAMoveGivesTheTenantToItsTarget(t *testing.T) {
 		t.Fatal("not held")
 	}
 	moved, err := st.FinishMove("acme", "alice")
-	if err != nil || moved.Node != "nbg-1" || moved.MoveTo != "" || moved.MoveHeld || moved.Generation != moving.Generation+1 {
+	if err != nil || moved.Node != "nbg-1" || moved.MoveTo != "" || !moved.MoveHeld || moved.Generation != moving.Generation+1 {
 		t.Fatalf("moved: %+v, %v", moved, err)
+	}
+	// Requests wait until the new node serves it.
+	if err := st.Freeze("upgrade", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReleaseHold("acme"); err != nil {
+		t.Fatalf("release while frozen: %v", err)
+	}
+	if record, _ := st.Get("acme"); record.MoveHeld {
+		t.Fatal("still held")
+	}
+	if err := st.Thaw("alice"); err != nil {
+		t.Fatal(err)
 	}
 	// From here on, nbg-1 moves it.
 	if _, err := st.StartMove("acme", "node-1", "alice"); !errors.Is(err, ErrConflict) {
@@ -503,7 +516,16 @@ func TestAMoveGivesTheTenantToItsTarget(t *testing.T) {
 	if _, err := st.StartMove("beta", "nbg-1", "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CancelMove("beta", "alice"); err != nil {
+	if err := st.Freeze("upgrade", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled, err := st.CancelMove("beta", "alice"); err != nil || !cancelled {
+		t.Fatalf("cancel while frozen: %v %v", cancelled, err)
+	}
+	if cancelled, err := st.CancelMove("beta", "alice"); err != nil || cancelled {
+		t.Fatalf("cancel nothing: %v %v", cancelled, err)
+	}
+	if err := st.Thaw("alice"); err != nil {
 		t.Fatal(err)
 	}
 	if record, _ := st.Get("beta"); record.MoveTo != "" || record.Node != "node-1" {

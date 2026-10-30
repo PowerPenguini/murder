@@ -198,6 +198,13 @@ func (c *Cluster) commit(batch store.Batch) (uint64, error) {
 		}
 		index, err = c.propose(ctx, data)
 	}
+	// A batch sent again is refused once its first copy reached the log;
+	// that first copy is what happened.
+	if err != nil && batch.ID != "" {
+		if outcome, ok := c.config.Store.Outcome(batch.ID); ok && outcome.Err == nil {
+			index, err = outcome.Index, nil
+		}
+	}
 	if index == 0 {
 		return 0, err
 	}

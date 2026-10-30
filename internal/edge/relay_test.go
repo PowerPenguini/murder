@@ -155,3 +155,26 @@ func TestRequestsWaitWhileTheirTenantMoves(t *testing.T) {
 		t.Fatalf("a move that did not end: %s", response.Status)
 	}
 }
+
+func TestAnEdgeWithoutRoutesYetAsksToComeBack(t *testing.T) {
+	table := &LiveTable{}
+	server := httptest.NewServer(NewProxy("example.com", table, quietLog()))
+	defer server.Close()
+	get := func() *http.Response {
+		request, _ := http.NewRequest("GET", server.URL, nil)
+		request.Host = "acme.example.com"
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return response
+	}
+	if response := get(); response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") == "" {
+		t.Fatalf("before any routes: %s", response.Status)
+	}
+	table.Set(NewTable(nil))
+	if response := get(); response.StatusCode != http.StatusNotFound {
+		t.Fatalf("with routes: %s", response.Status)
+	}
+}

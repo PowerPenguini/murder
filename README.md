@@ -200,8 +200,10 @@ on every node), so DNS may point at any node.
 is copied while it runs (a ZFS stream, or a tar of a directory), then it
 stops, what changed meanwhile follows, and the other node starts it. It is
 away for seconds; requests for it wait meanwhile, on every edge, instead of
-failing. Its data is removed from the old node once it is healthy on the new
-one; a move that fails before that leaves it where it was.
+failing, until it is healthy on the new node (a minute at most). Its data is
+removed from the old node once it is healthy on the new one. A move that
+fails before the handover leaves it where it was, running; one cut short,
+say by an agent restart, is undone by that node's agent within a minute.
 
 To swap a server for a bigger or smaller one, join the new server, then:
 
@@ -209,8 +211,9 @@ To swap a server for a bigger or smaller one, join the new server, then:
 sudo murder cluster replace old-node new-node   # moves every tenant, one after the other, then old-node leaves
 ```
 
-Point the DNS records at the new server (the old one's edge serves every
-tenant until then), and switch the old one off. `murder cluster drain NODE
+Point the DNS records at the new server once it has joined (until then its
+edge answers 503, "starting"; the old one's serves every tenant it knows),
+and switch the old one off. `murder cluster drain NODE
 -to TARGET` moves the tenants without taking the node out.
 
 Nodes talk over one TLS port on the private network. A node proves it

@@ -347,6 +347,15 @@ func TestResolvePinsTags(t *testing.T) {
 	if err != nil || pinned != "sha256:3333333333333333333333333333333333333333333333333333333333333333" || !strings.Contains(note, "local image") {
 		t.Fatalf("Resolve(local) = %q, %q, %v", pinned, note, err)
 	}
+	// A registry that only failed to answer keeps the digest other nodes
+	// can pull.
+	engine.handlers["POST /images/create"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"error":"received unexpected HTTP status: 503 Service Unavailable"}`))
+	}
+	engine.handlers["GET /images/postgres:17/json"] = hub
+	if pinned, note, err := docker.Resolve(ctx, "postgres:17"); err != nil || pinned != "postgres@"+digest || !strings.Contains(note, "local image") {
+		t.Fatalf("Resolve while the registry fails = %q, %q, %v", pinned, note, err)
+	}
 	// Neither pullable nor present: the pull error comes back.
 	engine.handlers["POST /images/create"] = func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"manifest unknown"}`))

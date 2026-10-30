@@ -111,8 +111,9 @@ func TestAMoveTakesTheDataAndTheTenant(t *testing.T) {
 	if err := f.mover.Move(context.Background(), "acme", "n2", "alice"); err != nil {
 		t.Fatal(err)
 	}
+	// Requests wait until the new node serves it; its reconciler says so.
 	record, _ := f.st.Get("acme")
-	if record.Node != "n2" || record.MoveTo != "" || record.MoveHeld {
+	if record.Node != "n2" || record.MoveTo != "" || !record.MoveHeld {
 		t.Fatalf("after the move: %+v", record)
 	}
 	data, err := os.ReadFile(filepath.Join(f.target.volumes.Root, "acme", "app.db"))
@@ -181,8 +182,8 @@ func TestAnUnhealthyTenantKeepsItsOldData(t *testing.T) {
 	if !errors.Is(err, ErrUnhealthy) || !strings.Contains(err.Error(), "image missing") {
 		t.Fatalf("move: %v", err)
 	}
-	if record, _ := f.st.Get("acme"); record.Node != "n2" {
-		t.Fatal("the tenant did not move")
+	if record, _ := f.st.Get("acme"); record.Node != "n2" || record.MoveHeld {
+		t.Fatalf("the tenant did not move, or requests still wait for it: %+v", record)
 	}
 	if exists, _ := f.source.Exists(context.Background(), "acme"); !exists {
 		t.Fatal("the old node's copy went though the tenant is not healthy")
@@ -199,5 +200,60 @@ func TestAnArchivedTenantMovesWithoutStopping(t *testing.T) {
 	}
 	if record, _ := f.st.Get("acme"); record.Node != "n2" || len(f.releaser.released) != 0 {
 		t.Fatalf("after the move: %+v, released %v", record, f.releaser.released)
+	}
+}
+
+// finishFails makes FinishMove report a failure after it was made, as a
+// leader that lost its leadership in flight may.
+type finishFails struct{ *store.SQLite }
+
+func (s finishFails) FinishMove(name, actor string) (store.Record, error) {
+	record, _ := s.SQLite.FinishMove(name, actor)
+	return record, errors.New("leadership lost while committing log")
+}
+
+func TestAHandoverThatReportsAFailureButWasMadeIsKept(t *testing.T) {
+	f := newFixture(t)
+	f.mover.Store = finishFails{f.st}
+	if err := f.mover.Move(context.Background(), "acme", "n2", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if f.target.discarded {
+		t.Fatal("the copy the new node runs was dropped")
+	}
+	if record, _ := f.st.Get("acme"); record.Node != "n2" {
+		t.Fatalf("after the move: %+v", record)
+	}
+}
+
+func TestAMoveCutShortIsUndone(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.st.StartMove("acme", "n2", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.HoldMove("acme"); err != nil {
+		t.Fatal(err)
+	}
+	// As after an agent restart: no Move here is making it.
+	if err := f.mover.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := f.st.Get("acme"); record.Node != "n1" || record.MoveTo != "" || record.MoveHeld {
+		t.Fatalf("after recovery: %+v", record)
+	}
+	if !f.target.discarded {
+		t.Fatal("the target kept its partial copy")
+	}
+	// One under way is left alone.
+	f.target.discarded = false
+	if _, err := f.st.StartMove("acme", "n2", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.mover.begin("acme")
+	if err := f.mover.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := f.st.Get("acme"); record.MoveTo != "n2" || f.target.discarded {
+		t.Fatal("recovery undid a move under way")
 	}
 }
