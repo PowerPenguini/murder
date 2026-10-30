@@ -22,6 +22,8 @@ func (c *Cluster) handler() http.Handler {
 	mux.HandleFunc("GET /cluster/v1/snapshot", c.handleSnapshot)
 	mux.HandleFunc("POST /cluster/v1/nodes", c.handleJoin)
 	mux.HandleFunc("DELETE /cluster/v1/nodes/{name}", c.handleRemove)
+	mux.HandleFunc("GET /cluster/v1/node", c.handleNodeInfo)
+	mux.HandleFunc("PUT /cluster/v1/node/binary", c.handleInstall)
 	return mux
 }
 
@@ -234,6 +236,31 @@ func (c *Cluster) handleRemove(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("remove %s from the voters: %w", name, err))
 			return
 		}
+	}
+	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+// maxBinary bounds a binary sent for an upgrade.
+const maxBinary = 512 << 20
+
+func (c *Cluster) handleNodeInfo(w http.ResponseWriter, _ *http.Request) {
+	if c.config.Upgrade == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this node does not take upgrades"))
+		return
+	}
+	writeJSON(w, http.StatusOK, c.config.Upgrade.Info())
+}
+
+// handleInstall installs the binary another node sends; the agent then
+// restarts into it.
+func (c *Cluster) handleInstall(w http.ResponseWriter, r *http.Request) {
+	if c.config.Upgrade == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this node does not take upgrades"))
+		return
+	}
+	if err := c.config.Upgrade.Install(r.Context(), http.MaxBytesReader(w, r.Body, maxBinary), r.Header.Get(shaHeader)); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
 }

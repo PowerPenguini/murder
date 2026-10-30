@@ -175,3 +175,6 @@ func upgrade(db *sql.DB) error {
 	}
 	return tx.Commit()
 }
+
+// SchemaVersion is the schema version of this release's databases.
+const SchemaVersion = schemaVersion

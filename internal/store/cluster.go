@@ -307,7 +307,10 @@ func (s *SQLite) InstallSnapshot(from io.Reader) (bool, error) {
 		if _, err := tx.Exec(`DELETE FROM main.meta WHERE key = 'cluster'`); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`INSERT INTO main.meta (key, value) SELECT key, value FROM snapshot.meta WHERE key IN ('version', 'applied', 'cluster')
+		if _, err := tx.Exec(`DELETE FROM main.meta WHERE key = 'frozen'`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO main.meta (key, value) SELECT key, value FROM snapshot.meta WHERE key IN ('version', 'applied', 'cluster', 'frozen')
 			ON CONFLICT (key) DO UPDATE SET value = excluded.value`)
 		return err
 	})
@@ -430,5 +433,38 @@ func (s *SQLite) RemoveNode(name, actor string) error {
 		}
 		return event(tx, now, actor, "node.removed", "", "", node.Name+" at "+node.Address)
 	})
+	return err
+}
+
+func (s *SQLite) Frozen() string { return s.state.Load().frozen }
+
+// Freeze refuses changes from now on, on every node, and says why.
+func (s *SQLite) Freeze(reason, actor string) error {
+	if reason == "" {
+		return errors.New("a freeze needs a reason")
+	}
+	_, err := s.write(false, func(tx *recorder, _ *snapshot, now time.Time) error {
+		if err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('frozen', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, reason); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "changes.frozen", "", "", reason)
+	})
+	return err
+}
+
+// Thaw takes changes again.
+func (s *SQLite) Thaw(actor string) error {
+	_, err := s.writeIf(false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+		if current.frozen == "" {
+			return errUnchanged
+		}
+		if err := tx.Exec(`DELETE FROM meta WHERE key = 'frozen'`); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "changes.thawed", "", "", "")
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
 	return err
 }

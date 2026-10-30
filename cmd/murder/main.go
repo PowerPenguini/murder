@@ -17,6 +17,8 @@ Node commands:
   firewall   load the tenant firewall (murder-firewall.service runs it at boot)
   restore    put a backup in place of the node's database (agent stopped)
   cluster    show, start, join or leave a cluster of nodes
+  upgrade    install a new murder binary on every node, one after the other
+  version    print this binary's hash and schema version
 
 Client commands (talk to the local agent):
   app        apply, list, show and delete apps (specs shared by tenants)
@@ -65,6 +67,10 @@ func run(args []string) error {
 		return runRestore(args[1:])
 	case "cluster":
 		return runCluster(args[1:])
+	case "upgrade":
+		return runUpgrade(args[1:])
+	case "version":
+		return runVersion(args[1:])
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 		return nil

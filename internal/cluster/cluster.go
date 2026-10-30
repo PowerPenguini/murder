@@ -31,6 +31,7 @@ import (
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
 	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/upgrade"
 )
 
 // ErrNoLeader reports a cluster that has no leader to take a change: it is
@@ -78,6 +79,9 @@ type Config struct {
 	// Fatal is called when the node cannot apply an entry every other node
 	// applied; the agent must stop, and its restart applies the entry again.
 	Fatal func(error)
+	// Upgrade reports on and installs this node's binary for an upgrade
+	// run from another node.
+	Upgrade Upgrader
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
@@ -481,6 +485,56 @@ func (c *Cluster) join(ctx context.Context, peer string, request joinRequest, ou
 // Remove takes a node out of the cluster.
 func (c *Cluster) Remove(ctx context.Context, node, actor string) error {
 	return c.toLeader(ctx, http.MethodDelete, "/cluster/v1/nodes/"+node+"?actor="+url.QueryEscape(actor), nil, nil)
+}
+
+// Upgrader is the node's part in an upgrade.
+type Upgrader interface {
+	Info() upgrade.Info
+	Install(ctx context.Context, binary io.Reader, sha string) error
+}
+
+// NodeInfo asks a node of the cluster how it is, for an upgrade.
+func (c *Cluster) NodeInfo(ctx context.Context, node string) (upgrade.Info, error) {
+	address, err := c.addressOf(node)
+	if err != nil {
+		return upgrade.Info{}, err
+	}
+	var info upgrade.Info
+	err = c.call(ctx, address, http.MethodGet, "/cluster/v1/node", nil, &info)
+	return info, err
+}
+
+// Install sends a node of the cluster a binary to install.
+func (c *Cluster) Install(ctx context.Context, node string, binary io.Reader, sha string) error {
+	address, err := c.addressOf(node)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, "https://"+address+"/cluster/v1/node/binary", binary)
+	if err != nil {
+		return err
+	}
+	request.Header.Set(shaHeader, sha)
+	response, err := c.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("node %s: %w", node, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return responseError(response)
+	}
+	return nil
+}
+
+// shaHeader carries the SHA-256 a binary must have.
+const shaHeader = "X-Murder-Sha256"
+
+// addressOf is where the cluster reaches node.
+func (c *Cluster) addressOf(node string) (string, error) {
+	if address, member := c.memberAddress(node); member {
+		return address, nil
+	}
+	return "", fmt.Errorf("node %s: %w", node, store.ErrNotFound)
 }
 
 // Status is this node's view of the cluster.

@@ -402,3 +402,51 @@ func TestSnapshotsCarryTheClusterName(t *testing.T) {
 		t.Fatalf("the follower's cluster is %q", follower.Cluster())
 	}
 }
+
+func TestAFrozenStateTakesNoChanges(t *testing.T) {
+	st, _ := withApp(t, options())
+	if err := st.Freeze("upgrade to abc", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if st.Frozen() != "upgrade to abc" {
+		t.Fatalf("frozen = %q", st.Frozen())
+	}
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "bob"); !errors.Is(err, ErrFrozen) || !strings.Contains(err.Error(), "upgrade to abc") {
+		t.Fatalf("a change while frozen: %v", err)
+	}
+	if err := st.Freeze("again", "alice"); !errors.Is(err, ErrFrozen) {
+		t.Fatalf("a second freeze: %v", err)
+	}
+	if err := st.Thaw("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Thaw("alice"); err != nil {
+		t.Fatalf("thaw twice: %v", err)
+	}
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := st.Events(EventQuery{Limit: 3})
+	if events[1].Action != "changes.thawed" || events[2].Action != "changes.frozen" || events[2].Detail != "upgrade to abc" {
+		t.Fatalf("events = %+v", events)
+	}
+	// A snapshot carries the freeze.
+	logged(t, st)
+	if err := st.Freeze("upgrade to def", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := st.SnapshotFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeDatabase(snapshot)
+	follower := openNamed(t, "node-2")
+	file, _ := os.Open(snapshot)
+	defer file.Close()
+	if _, err := follower.InstallSnapshot(file); err != nil {
+		t.Fatal(err)
+	}
+	if follower.Frozen() != "upgrade to def" {
+		t.Fatalf("the follower's freeze is %q", follower.Frozen())
+	}
+}

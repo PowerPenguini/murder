@@ -64,6 +64,8 @@ type snapshot struct {
 	version int64
 	// cluster names the cluster the state belongs to; empty outside one.
 	cluster string
+	// frozen, while an upgrade runs, says why changes are refused.
+	frozen  string
 	apps    map[string]App
 	tenants map[string]Record
 	nodes   map[string]Node
@@ -347,7 +349,7 @@ func load(q querier) (state *snapshot, err error) {
 	if state.version, err = strconv.ParseInt(version, 10, 64); err != nil {
 		return nil, fmt.Errorf("state version %q: %w", version, err)
 	}
-	if err := q.QueryRow(`SELECT COALESCE((SELECT value FROM meta WHERE key = 'cluster'), '')`).Scan(&state.cluster); err != nil {
+	if err := q.QueryRow(`SELECT COALESCE((SELECT value FROM meta WHERE key = 'cluster'), ''), COALESCE((SELECT value FROM meta WHERE key = 'frozen'), '')`).Scan(&state.cluster, &state.frozen); err != nil {
 		return nil, fmt.Errorf("read the cluster: %w", err)
 	}
 	if err := q.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&state.lastEvent); err != nil {
@@ -490,6 +492,12 @@ func parseTime(text string) time.Time {
 // changed since is stale and computed again; writers on one node are
 // serialized, so only writes from other nodes can make it stale.
 func (s *SQLite) write(signal bool, change func(tx *recorder, current *snapshot, now time.Time) error) (*snapshot, error) {
+	return s.writeIf(true, signal, change)
+}
+
+// writeIf is write, refusing changes while the state is frozen unless
+// unlessFrozen is false.
+func (s *SQLite) writeIf(unlessFrozen, signal bool, change func(tx *recorder, current *snapshot, now time.Time) error) (*snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for attempt := 1; ; attempt++ {
@@ -499,6 +507,9 @@ func (s *SQLite) write(signal bool, change func(tx *recorder, current *snapshot,
 			}
 		}
 		current := s.state.Load()
+		if unlessFrozen && current.frozen != "" {
+			return nil, fmt.Errorf("%w: %s", ErrFrozen, current.frozen)
+		}
 		tx := &recorder{}
 		if err := change(tx, current, s.now().UTC()); err != nil {
 			return nil, err
