@@ -37,7 +37,7 @@ func NewTable(routes map[string]Route) Table {
 
 // LiveTable is the table the edge serves from, replaced whole.
 type LiveTable struct {
-	table   atomic.Pointer[Table]
+	table atomic.Pointer[Table]
 	// ready is set once the table holds routes the agent gave, now or
 	// before a restart.
 	ready   atomic.Bool
