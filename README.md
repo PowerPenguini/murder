@@ -63,8 +63,9 @@ sudo install -m 0755 murder /usr/local/bin/murder
 sudo install -d -m 0755 /etc/murder
 sudo install -m 0644 deploy/agent.example.yaml /etc/murder/agent.yaml   # then edit it
 sudo murder init                       # creates the master key (store a copy offline) and an empty database
-sudo install -m 0644 deploy/murder-firewall.service deploy/murder-agent.service /etc/systemd/system/
-sudo systemctl enable --now murder-firewall murder-agent
+sudo install -m 0644 deploy/murder-firewall.service deploy/murder-agent.service \
+  deploy/murder-backup.service deploy/murder-backup.timer /etc/systemd/system/
+sudo systemctl enable --now murder-firewall murder-agent murder-backup.timer
 ```
 
 With the `zfs` driver, create the parent dataset first, for example
@@ -77,8 +78,35 @@ directory underneath and replaces it.
 The agent refuses to start without its database. A new node gets one from
 `murder init`; on an existing node a missing file means a broken mount or a
 lost disk, and starting from an empty database would remove every tenant.
-Back it up with `sqlite3 /var/lib/murder/murder.db ".backup /path/murder.db"`
-(a plain copy of a live database can be torn), together with the master key.
+
+### Back up and restore
+
+`murder backup <directory>` asks the agent for a copy of the database as it
+is at one moment (a plain copy of a live database can be torn), checks it and
+keeps it as `murder-<UTC time>.db`, removing all but the newest 48 (`-keep`).
+`murder-backup.timer` runs it every hour into `/var/backups/murder`; copy that
+directory off the server as well. The database holds secrets only sealed: keep
+the master key apart from it, offline.
+
+To restore, stop the agent and put a backup in place:
+
+```bash
+sudo systemctl stop murder-agent
+sudo murder restore /var/backups/murder/murder-20261029T150000Z.db
+sudo systemctl start murder-agent
+```
+
+`murder restore` refuses while the agent runs, refuses a damaged backup and
+one whose secrets the node's master key cannot open, and keeps the database
+it replaces beside it (`murder.db.before-restore-<time>`). The agent then
+makes the tenants match the backup; while the agent still runs, `murder
+events` shows what changed since the backup was taken:
+
+- a tenant created since loses its container; its data stays on disk, and
+  its name is free again only once purged;
+- a tenant archived since runs again, and one purged since comes back with
+  an empty data directory;
+- secrets rotated since go back to their old values.
 
 ## Run tenants
 

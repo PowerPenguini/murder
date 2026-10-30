@@ -5,6 +5,7 @@ package store
 
 import (
 	"errors"
+	"io"
 	"maps"
 	"net/netip"
 	"time"
@@ -180,6 +181,8 @@ type Store interface {
 	Forget(name, actor string) error
 
 	Events(query EventQuery) ([]Event, error)
+	// Backup writes a copy of the whole database, as it is at one moment.
+	Backup(w io.Writer) error
 	// Changed is signalled after every successful change of desired state.
 	Changed() <-chan struct{}
 	Close() error

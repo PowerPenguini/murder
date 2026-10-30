@@ -123,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tenants/{name}/logs", s.logs)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
+	mux.HandleFunc("GET /v1/backup", s.backup)
 	return mux
 }
 
@@ -530,6 +531,34 @@ func (s *Server) reconcileNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// backup streams a copy of the database. A failure before the first byte is
+// an error response; one after it cuts the connection, so the client never
+// takes a partial copy for a whole one.
+func (s *Server) backup(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/vnd.sqlite3")
+	out := &countingWriter{w: w}
+	if err := s.store.Backup(out); err != nil {
+		if out.n == 0 {
+			w.Header().Del("Content-Type")
+			writeError(w, err)
+			return
+		}
+		s.log.Error("back up the database", "error", err)
+		panic(http.ErrAbortHandler)
+	}
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // Routes adapts the store for the edge proxy.
