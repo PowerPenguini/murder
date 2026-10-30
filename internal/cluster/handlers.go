@@ -23,6 +23,10 @@ func (c *Cluster) handler() http.Handler {
 	mux.HandleFunc("POST /cluster/v1/nodes", c.handleJoin)
 	mux.HandleFunc("DELETE /cluster/v1/nodes/{name}", c.handleRemove)
 	mux.HandleFunc("GET /cluster/v1/node", c.handleNodeInfo)
+	mux.HandleFunc("PUT /cluster/v1/tenants/{name}/data", c.handleReceive)
+	mux.HandleFunc("DELETE /cluster/v1/tenants/{name}/data", c.handleDiscard)
+	mux.HandleFunc("GET /cluster/v1/tenants/{name}/status", c.handleTenantStatus)
+	mux.HandleFunc("POST /cluster/v1/tenants/{name}/move", c.handleMove)
 	mux.HandleFunc("PUT /cluster/v1/node/binary", c.handleInstall)
 	return mux
 }
@@ -223,16 +227,24 @@ func (c *Cluster) handleRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	if known {
 		if err := c.config.Store.RemoveNode(name, r.URL.Query().Get("actor")); err != nil {
-			status := http.StatusServiceUnavailable
-			if errors.Is(err, store.ErrInUse) {
-				status = http.StatusConflict
+			switch {
+			case errors.Is(err, ErrNotLeader) || errors.Is(err, ErrNoLeader):
+				c.moved(w)
+			case errors.Is(err, store.ErrInUse):
+				writeError(w, http.StatusConflict, err)
+			default:
+				writeError(w, http.StatusServiceUnavailable, err)
 			}
-			writeError(w, status, err)
 			return
 		}
 	}
 	if voter {
 		if err := c.raft.RemoveServer(raft.ServerID(name), 0, commitTimeout).Error(); err != nil {
+			if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
+				// Asking the next leader again is safe.
+				c.moved(w)
+				return
+			}
 			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("remove %s from the voters: %w", name, err))
 			return
 		}
@@ -259,6 +271,67 @@ func (c *Cluster) handleInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := c.config.Upgrade.Install(r.Context(), http.MaxBytesReader(w, r.Body, maxBinary), r.Header.Get(shaHeader)); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+func (c *Cluster) moves(w http.ResponseWriter) bool {
+	if c.config.Moves == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this node takes part in no moves"))
+		return false
+	}
+	return true
+}
+
+// handleReceive takes the data of a tenant moving here.
+func (c *Cluster) handleReceive(w http.ResponseWriter, r *http.Request) {
+	if !c.moves(w) {
+		return
+	}
+	if err := c.config.Moves.Receive(r.Context(), r.PathValue("name"), r.URL.Query().Get("incremental") == "1", r.Body); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+func (c *Cluster) handleDiscard(w http.ResponseWriter, r *http.Request) {
+	if !c.moves(w) {
+		return
+	}
+	if err := c.config.Moves.Discard(r.Context(), r.PathValue("name")); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+func (c *Cluster) handleTenantStatus(w http.ResponseWriter, r *http.Request) {
+	if !c.moves(w) {
+		return
+	}
+	status, ok := c.config.Moves.Status(r.PathValue("name"))
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("node %s has no status of tenant %s", c.config.Node, r.PathValue("name")))
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+// handleMove moves one of this node's tenants, for a node replacement run
+// from another node.
+func (c *Cluster) handleMove(w http.ResponseWriter, r *http.Request) {
+	if !c.moves(w) {
+		return
+	}
+	var request moveRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := c.config.Moves.Move(r.Context(), r.PathValue("name"), request.To, request.Actor); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}

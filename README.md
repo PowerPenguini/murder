@@ -189,10 +189,29 @@ Tenants and the edge keep running either way.
 
 Every node runs tenants: each tenant runs on one node, which keeps its
 data, and `tenant list` shows which. A tenant runs on the node it was
-created on (run `murder tenant create` there). For now each node's edge
-serves its own tenants only; passing requests to the node that runs a
-tenant, replicating tenant data and moving tenants when a node fails come
-next.
+created on (run `murder tenant create` there). Every node's edge serves
+every tenant: a request for a tenant of another node goes on, over TLS on
+the private network, to that node's edge (`edge.relayPort`, 7402, the same
+on every node), so DNS may point at any node.
+
+### Move tenants, replace a server
+
+`murder tenant move NAME -to NODE` moves a tenant with its data: everything
+is copied while it runs (a ZFS stream, or a tar of a directory), then it
+stops, what changed meanwhile follows, and the other node starts it. It is
+away for seconds; requests for it wait meanwhile, on every edge, instead of
+failing. Its data is removed from the old node once it is healthy on the new
+one; a move that fails before that leaves it where it was.
+
+To swap a server for a bigger or smaller one, join the new server, then:
+
+```bash
+sudo murder cluster replace old-node new-node   # moves every tenant, one after the other, then old-node leaves
+```
+
+Point the DNS records at the new server (the old one's edge serves every
+tenant until then), and switch the old one off. `murder cluster drain NODE
+-to TARGET` moves the tenants without taking the node out.
 
 Nodes talk over one TLS port on the private network. A node proves it
 belongs to the cluster with a certificate of an authority derived from the
@@ -382,9 +401,11 @@ through Murder's real components:
 
 ## Known limits
 
-- **Tenants stay on their node.** A tenant's data lives on the node that
-  runs it, and only that node's edge serves it; replicated tenant data,
-  routing between nodes and failover come next.
+- **Tenants stay on their node until moved.** A tenant's data lives on the
+  node that runs it; replicating it to another node, and moving tenants
+  when a node fails, come next. Moving a tenant with the `dir` driver
+  copies all its data twice, the second time while it is stopped; ZFS
+  sends only what changed.
 - **Upgrades.** A node applies changes made by its own release and older
   ones, but stops on a change made by a newer release (and restarts into
   the same stop) until it is upgraded too. `murder upgrade` freezes changes

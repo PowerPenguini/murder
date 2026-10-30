@@ -113,6 +113,8 @@ type Server struct {
 	upgrader Upgrader
 	// relayPort is where the edges of a cluster pass requests on.
 	relayPort int
+	// moves moves tenants between nodes; nil if this node moves none.
+	moves Moves
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }
@@ -154,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tenants/{name}/secrets/{key}", s.secret)
 	mux.HandleFunc("POST /v1/tenants/{name}/secrets/{key}/rotate", s.rotate)
 	mux.HandleFunc("POST /v1/tenants/{name}/roll", s.roll)
+	mux.HandleFunc("POST /v1/tenants/{name}/move", s.move)
 	mux.HandleFunc("GET /v1/tenants/{name}/logs", s.logs)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
@@ -634,6 +637,10 @@ func (r Routes) Route(tenant string) (edge.Route, bool) {
 	record, err := r.Store.Live(tenant)
 	if err != nil {
 		return edge.Route{}, false
+	}
+	// Moving, it runs nowhere for a moment: requests wait for it.
+	if record.MoveHeld {
+		return edge.Route{Moving: true, Suspended: record.Spec.Suspended}, true
 	}
 	if record.Node != r.Store.Node() {
 		return r.relay(record)

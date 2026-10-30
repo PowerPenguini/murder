@@ -40,6 +40,9 @@ const (
 	// PhaseRestarting is a container whose process exited and that the
 	// engine is about to start again; LastExit says why it exited.
 	PhaseRestarting = "restarting"
+	// PhaseMoving is a tenant moving to another node: the move, not the
+	// reconciler, handles it meanwhile.
+	PhaseMoving = "moving"
 )
 
 // healthChecks is how many health checks run at once.
@@ -223,12 +226,18 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	}
 	// This node runs its own live tenants; another node's tenants run
 	// there.
-	var records []store.Record
+	var records, moving []store.Record
 	wanted := map[string]bool{}
 	for _, record := range r.own() {
-		if !record.Archived() {
+		if record.Archived() {
+			continue
+		}
+		wanted[record.Spec.Name] = true
+		// A move handles the tenant's container and data meanwhile.
+		if record.MoveTo == "" {
 			records = append(records, record)
-			wanted[record.Spec.Name] = true
+		} else {
+			moving = append(moving, record)
 		}
 	}
 	var errs []error
@@ -285,11 +294,14 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	if err := r.interrupted(ctx); err != nil {
 		return errors.Join(append(errs, err)...)
 	}
-	byName := make(map[string]Status, len(records))
+	byName := make(map[string]Status, len(records)+len(moving))
 	for i, record := range records {
 		statuses[i].Generation = record.Generation
 		statuses[i].CheckedAt = time.Now().UTC()
 		byName[record.Spec.Name] = statuses[i]
+	}
+	for _, record := range moving {
+		byName[record.Spec.Name] = Status{Phase: PhaseMoving, Message: "moving to node " + record.MoveTo, Generation: record.Generation, CheckedAt: time.Now().UTC()}
 	}
 	r.mu.Lock()
 	r.statuses = byName
@@ -905,6 +917,13 @@ func (r *Reconciler) Purge(ctx context.Context, name, actor string) error {
 		return err
 	}
 	return r.store.Forget(name, actor)
+}
+
+// Release stops a tenant's container and removes its network, between
+// passes, for a move: the tenant then runs nowhere until its new node
+// starts it.
+func (r *Reconciler) Release(ctx context.Context, name string) error {
+	return r.Exclusive(func() error { return r.clearRuntime(ctx, name) })
 }
 
 // clearRuntime makes sure no container or network of the tenant remains.

@@ -19,6 +19,12 @@ const clusterUsage = `Usage: murder cluster <command> [arguments]
   join <address>      add this node, with a new database, to the cluster of
                       the node at address (host:port on the private network)
   remove <node>       take a node out of the cluster
+  drain <node> -to <target>
+                      move every tenant of node, with its data, to target,
+                      one after the other
+  replace <old> <new> move every tenant of old to new, then take old out of
+                      the cluster: a server swapped for a bigger or smaller
+                      one, which joined first; switch it off afterwards
 
 A node joins with the cluster's master key: copy /etc/murder/master.key
 from a node of the cluster before "murder init". Every node runs tenants.
@@ -32,6 +38,7 @@ func runCluster(args []string) error {
 	flags := flag.NewFlagSet("cluster "+args[0], flag.ContinueOnError)
 	socket := socketPath(flags)
 	asJSON := flags.Bool("json", false, "print JSON")
+	to := flags.String("to", "", "with drain: the node to move the tenants to")
 	rest, err := parseInterspersed(flags, args[1:])
 	if err != nil {
 		return err
@@ -47,6 +54,17 @@ func runCluster(args []string) error {
 		status, err = client.Bootstrap(ctx)
 	case command == "join" && len(rest) == 1:
 		status, err = client.Join(ctx, rest[0])
+	case command == "drain" && len(rest) == 1 && *to != "":
+		return drain(client, rest[0], *to)
+	case command == "replace" && len(rest) == 2:
+		if err := drain(client, rest[0], rest[1]); err != nil {
+			return err
+		}
+		if err := client.RemoveNode(context.Background(), rest[0]); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "node %s runs no tenant and left the cluster: point its DNS records at %s (its edge serves every tenant meanwhile), then switch it off\n", rest[0], rest[1])
+		return nil
 	case command == "remove" && len(rest) == 1:
 		if err := client.RemoveNode(ctx, rest[0]); err != nil {
 			return err
@@ -81,4 +99,28 @@ func printCluster(status cluster.Status) error {
 		fmt.Fprintf(table, "%s\t%s\t%s\n", member.Name, member.Address, member.Suffrage)
 	}
 	return table.Flush()
+}
+
+// drain moves every tenant of node, live or archived, to target, one after
+// the other, and stops at the first that does not move.
+func drain(client *api.Client, node, target string) error {
+	ctx := context.Background()
+	tenants, err := client.List(ctx)
+	if err != nil {
+		return err
+	}
+	moved := 0
+	for _, tenant := range tenants {
+		if tenant.Node != node {
+			continue
+		}
+		start := time.Now()
+		if _, err := client.Move(ctx, tenant.Spec.Name, target); err != nil {
+			return fmt.Errorf("move %s: %w (moved %d before it)", tenant.Spec.Name, err, moved)
+		}
+		moved++
+		fmt.Fprintf(stdout, "%s moved to %s in %v\n", tenant.Spec.Name, target, time.Since(start).Round(time.Second))
+	}
+	fmt.Fprintf(stdout, "node %s runs no tenant now (%d moved)\n", node, moved)
+	return nil
 }

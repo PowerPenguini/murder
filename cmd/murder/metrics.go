@@ -13,7 +13,7 @@ import (
 
 // phases are the values murder_tenant_phase takes; "pending" is a tenant
 // no pass has seen yet.
-var phases = []string{"pending", reconcile.PhaseRunning, reconcile.PhasePulling, reconcile.PhaseRestarting, reconcile.PhaseFailed, reconcile.PhaseSuspended}
+var phases = []string{"pending", reconcile.PhaseRunning, reconcile.PhasePulling, reconcile.PhaseRestarting, reconcile.PhaseFailed, reconcile.PhaseSuspended, reconcile.PhaseMoving}
 
 // agentMetrics serves /metrics: each live tenant's state as of the last
 // pass, and when the agent last reconciled, loaded the firewall and sent a

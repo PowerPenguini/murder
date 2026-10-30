@@ -30,6 +30,8 @@ const tenantUsage = `Usage: murder tenant <command> [options]
   purge NAME -yes        delete an archived tenant and its data for good
   secret NAME KEY        print one generated secret
   rotate NAME KEY        give a secret a new value (the container restarts)
+  move NAME -to NODE     move a tenant with its data to another node of the
+                         cluster; it is away for seconds, and requests wait
   roll NAME | -all       replace the container as it is, applying what a new
                          release of Murder changed in containers; -all rolls
                          this node's tenants one at a time, each healthy
@@ -98,6 +100,7 @@ func runTenant(args []string) error {
 	tail := flags.Int("tail", 200, "with logs: number of lines")
 	asJSON := flags.Bool("json", false, "with list: print JSON")
 	all := flags.Bool("all", false, "with roll: every tenant this node runs")
+	to := flags.String("to", "", "with move: the node to move to")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
 		return err
@@ -196,6 +199,19 @@ func runTenant(args []string) error {
 		}
 		fmt.Fprintf(stdout, "%s %s rotated; the container restarts with the new value\n", positional[0], positional[1])
 		return waitHealthy(ctx, client, result, *wait)
+	case "move":
+		if err := need(1); err != nil {
+			return err
+		}
+		if *to == "" {
+			return errors.New("tenant move needs -to NODE")
+		}
+		moved, err := client.Move(ctx, positional[0], *to)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s runs on node %s now\n", moved.Spec.Name, moved.Node)
+		return nil
 	case "roll":
 		if !*all {
 			if err := need(1); err != nil {

@@ -22,6 +22,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/firewall"
+	"github.com/PowerPenguini/murder/internal/move"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
@@ -127,11 +128,12 @@ func runAgent(args []string) error {
 	// A node that cannot apply what the cluster applied stops; its restart
 	// applies the entry again.
 	fatal := make(chan error, 1)
+	moves := &agentMoves{store: st, reconciler: reconciler, volumes: volumes}
 	var member *cluster.Cluster
 	if cfg.Cluster != nil {
 		member, err = cluster.Start(cluster.Config{
 			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
-			Seed: key.Derive(clusterSeed), Store: st, Log: log, Upgrade: upgrader,
+			Seed: key.Derive(clusterSeed), Store: st, Log: log, Upgrade: upgrader, Moves: moves,
 			Fatal: func(err error) {
 				select {
 				case fatal <- err:
@@ -144,6 +146,7 @@ func runAgent(args []string) error {
 		}
 		// Closed before the store, which the log applies to.
 		defer member.Close()
+		moves.setCluster(member, &move.Mover{Store: st, Reconciler: reconciler, Volumes: volumes, Peer: clusterPeer{member}, Log: log})
 	}
 	// murder-firewall.service loads the rules before Docker starts the
 	// tenants at boot; loading them here covers a node without that unit
@@ -185,7 +188,7 @@ func runAgent(args []string) error {
 		}
 	}
 
-	apiHandler := api.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader)
+	apiHandler := api.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves)
 	if member != nil {
 		apiHandler.WithRelayPort(cfg.Edge.RelayPort)
 		apiHandler.WithCluster(member)

@@ -269,10 +269,13 @@ func (d *Docker) Resolve(ctx context.Context, ref string) (string, string, error
 		}
 		return "", "", fmt.Errorf("inspect %s: %w", ref, err)
 	}
-	note := ""
+	// An image the registry did not give is local only: its ID pins it, as
+	// one that cannot be pulled again. With containerd's image store a local
+	// build has a repository digest too, which names no registry's image.
 	if pullErr != nil {
-		note = fmt.Sprintf("using the local image %s:%s (%v)", repository, tag, pullErr)
+		return image.ID, fmt.Sprintf("using the local image %s:%s (%v)", repository, tag, pullErr), nil
 	}
+	note := ""
 	for _, repoDigest := range image.RepoDigests {
 		if name, digest, ok := strings.Cut(repoDigest, "@"); ok && familiar(name) == familiar(repository) {
 			return familiar(repository) + "@" + digest, note, nil

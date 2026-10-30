@@ -338,8 +338,10 @@ func TestResolvePinsTags(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"done"}`))
 	}
 	// A local image that cannot be pulled is pinned to its ID, with a note.
+	// With containerd's image store a local build has a repository digest
+	// too; it names no registry's image.
 	engine.handlers["GET /images/local/app:latest/json"] = func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"Id":"sha256:3333333333333333333333333333333333333333333333333333333333333333","RepoDigests":[]}`))
+		_, _ = w.Write([]byte(`{"Id":"sha256:3333333333333333333333333333333333333333333333333333333333333333","RepoDigests":["local/app@sha256:3333333333333333333333333333333333333333333333333333333333333333"]}`))
 	}
 	pinned, note, err = docker.Resolve(ctx, "local/app")
 	if err != nil || pinned != "sha256:3333333333333333333333333333333333333333333333333333333333333333" || !strings.Contains(note, "local image") {

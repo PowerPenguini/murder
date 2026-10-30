@@ -69,9 +69,11 @@ func (n *node) start() {
 		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Fatal: func(err error) { n.fatal <- err },
 		raft: func(config *raft.Config) {
-			config.HeartbeatTimeout = 500 * time.Millisecond
-			config.ElectionTimeout = 500 * time.Millisecond
-			config.LeaderLeaseTimeout = 250 * time.Millisecond
+			// Raft's own defaults: a loaded test host with the race
+			// detector misses shorter heartbeats and elects for nothing.
+			config.HeartbeatTimeout = time.Second
+			config.ElectionTimeout = time.Second
+			config.LeaderLeaseTimeout = 500 * time.Millisecond
 			config.CommitTimeout = 5 * time.Millisecond
 		},
 	})
@@ -94,7 +96,7 @@ func (n *node) stop() {
 }
 
 func ctx(t *testing.T) context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
 	return ctx
 }

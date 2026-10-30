@@ -20,6 +20,7 @@ edge:                              # served by "murder edge"
   https: ":443"
   # metrics: 127.0.0.1:9465         # the edge's own /metrics
   # drain: 30s                      # how long a replaced edge finishes its requests
+  # relayPort: 7402                 # in a cluster: where other nodes pass requests on; the same on every node
   tls:
     mode: acme                     # off | internal | acme
     storage: /var/lib/murder/certs

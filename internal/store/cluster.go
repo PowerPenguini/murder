@@ -125,6 +125,42 @@ type recentStates struct {
 	mu     sync.Mutex
 	states map[uint64]*snapshot
 	order  []uint64
+	// outcomes are how the last batches went, by ID.
+	outcomes map[string]Outcome
+	ids      []string
+}
+
+// Outcome is how a batch went: the entry it was applied as, or why every
+// node refused it.
+type Outcome struct {
+	Index uint64
+	Err   error
+}
+
+func (r *recentStates) outcome(id string, index uint64, err error) {
+	if id == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.outcomes == nil {
+		r.outcomes = map[string]Outcome{}
+	}
+	r.outcomes[id] = Outcome{Index: index, Err: err}
+	r.ids = append(r.ids, id)
+	if len(r.ids) > recentKept {
+		delete(r.outcomes, r.ids[0])
+		r.ids = r.ids[1:]
+	}
+}
+
+// Applied says how the batch with id went, if this node applied it
+// lately.
+func (s *SQLite) Outcome(id string) (Outcome, bool) {
+	s.recent.mu.Lock()
+	defer s.recent.mu.Unlock()
+	outcome, ok := s.recent.outcomes[id]
+	return outcome, ok
 }
 
 const recentKept = 64
@@ -177,6 +213,7 @@ func (s *SQLite) ApplyEntry(index uint64, batch Batch) error {
 		s.recent.put(index, next)
 	}
 	if err == nil || Refused(err) {
+		s.recent.outcome(batch.ID, index, err)
 		s.applied.set(index)
 	}
 	return err
@@ -489,5 +526,76 @@ func (s *SQLite) Note(action, detail, actor string) error {
 	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, _ *snapshot, now time.Time) error {
 		return event(tx, now, actor, action, "", "", detail)
 	})
+	return err
+}
+
+func (s *SQLite) StartMove(name, target, actor string) (Record, error) {
+	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[name]
+		switch {
+		case !ok:
+			return fmt.Errorf("tenant %s: %w", name, ErrNotFound)
+		case record.Node != current.node:
+			return fmt.Errorf("%w: tenant %s runs on node %s: move it from there", ErrConflict, name, record.Node)
+		case record.MoveTo != "":
+			return fmt.Errorf("%w: tenant %s is already moving to node %s", ErrConflict, name, record.MoveTo)
+		case target == record.Node:
+			return fmt.Errorf("%w: tenant %s runs on node %s already", ErrConflict, name, target)
+		}
+		if _, member := current.nodes[target]; !member {
+			return fmt.Errorf("node %s: %w", target, ErrNotFound)
+		}
+		if err := tx.Exec(`UPDATE tenants SET move_to = ?, updated_at = ? WHERE name = ?`, target, formatTime(now), name); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "tenant.moving", name, record.App, record.Node+" → "+target)
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	return next.tenants[name].clone(), nil
+}
+
+func (s *SQLite) HoldMove(name string) error {
+	_, err := s.write(true, func(tx *recorder, current *snapshot, _ time.Time) error {
+		if record, ok := current.tenants[name]; !ok || record.MoveTo == "" {
+			return fmt.Errorf("tenant %s is not moving: %w", name, ErrConflict)
+		}
+		return tx.Exec(`UPDATE tenants SET move_held = 1 WHERE name = ?`, name)
+	})
+	return err
+}
+
+func (s *SQLite) FinishMove(name, actor string) (Record, error) {
+	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[name]
+		if !ok || record.MoveTo == "" {
+			return fmt.Errorf("tenant %s is not moving: %w", name, ErrConflict)
+		}
+		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', move_held = 0, generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "tenant.moved", name, record.App, record.Node+" → "+record.MoveTo)
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	return next.tenants[name].clone(), nil
+}
+
+func (s *SQLite) CancelMove(name, actor string) error {
+	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[name]
+		if !ok || record.MoveTo == "" {
+			return errUnchanged
+		}
+		if err := tx.Exec(`UPDATE tenants SET move_to = '', move_held = 0, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "tenant.move-cancelled", name, record.App, "stays on "+record.Node)
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
 	return err
 }
