@@ -3,6 +3,7 @@
 package edge
 
 import (
+	"bufio"
 	"errors"
 	"log/slog"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/PowerPenguini/murder/internal/metrics"
 )
 
 // spoofable are client-settable headers that proxies and frameworks use to
@@ -45,6 +48,7 @@ type Proxy struct {
 	routes     Routes
 	log        *slog.Logger
 	transport  http.RoundTripper
+	stats      *metrics.Edge
 }
 
 // NewProxy returns a proxy for tenants below baseDomain.
@@ -56,8 +60,11 @@ func NewProxy(baseDomain string, routes Routes, log *slog.Logger) *Proxy {
 		ResponseHeaderTimeout: 2 * time.Minute,
 		ExpectContinueTimeout: time.Second,
 	}
-	return &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, transport: transport}
+	return &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, transport: transport, stats: metrics.NewEdge()}
 }
+
+// Stats returns the proxy's request counters.
+func (p *Proxy) Stats() *metrics.Edge { return p.stats }
 
 // Tenant returns the tenant a host name belongs to: exactly one label in
 // front of the base domain.
@@ -76,14 +83,24 @@ func (p *Proxy) Tenant(host string) (string, bool) {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tenant, ok := p.Tenant(r.Host)
 	if !ok {
+		p.stats.Unrouted()
 		http.Error(w, "unknown host", http.StatusNotFound)
 		return
 	}
 	route, ok := p.routes.Route(tenant)
 	if !ok {
+		p.stats.Unrouted()
 		http.Error(w, "unknown tenant", http.StatusNotFound)
 		return
 	}
+	recorder := &recorder{ResponseWriter: w, start: time.Now()}
+	w = recorder
+	// A request the client gave up before any response is not counted.
+	defer func() {
+		if recorder.status != 0 {
+			p.stats.Request(tenant, recorder.status, recorder.wait)
+		}
+	}()
 	if route.Suspended {
 		w.Header().Set("Retry-After", "3600")
 		http.Error(w, "this workspace is suspended", http.StatusServiceUnavailable)
@@ -121,9 +138,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Stream responses as they come, for server-sent events.
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			if errors.Is(err, http.ErrAbortHandler) || r.Context().Err() != nil {
+			// Once the connection is taken over, a failure is the client's,
+			// and nothing can be written back.
+			if errors.Is(err, http.ErrAbortHandler) || r.Context().Err() != nil || recorder.hijacked {
 				return
 			}
+			p.stats.BackendError(tenant)
 			p.log.Warn("proxy to tenant", "tenant", tenant, "error", err)
 			w.Header().Set("Retry-After", "10")
 			http.Error(w, "this workspace is not available right now", http.StatusBadGateway)
@@ -152,4 +172,46 @@ func (p *Proxy) RedirectToHTTPS(ready func() bool) http.Handler {
 		}
 		http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusPermanentRedirect)
 	})
+}
+
+// recorder notes a response's status and when its headers were written.
+// Unwrap lets the proxy flush streamed responses and take over upgraded
+// connections through it.
+type recorder struct {
+	http.ResponseWriter
+	start    time.Time
+	status   int
+	wait     time.Duration
+	hijacked bool
+}
+
+func (r *recorder) WriteHeader(status int) {
+	// Informational responses come before the final one, except a
+	// protocol switch, which is final.
+	if r.status == 0 && (status >= 200 || status == http.StatusSwitchingProtocols) {
+		r.status, r.wait = status, time.Since(r.start)
+	}
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *recorder) Write(data []byte) (int, error) {
+	if r.status == 0 {
+		r.status, r.wait = http.StatusOK, time.Since(r.start)
+	}
+	return r.ResponseWriter.Write(data)
+}
+
+func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// Hijack takes over the connection for a protocol switch, whose response
+// the proxy then writes to it directly.
+func (r *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, buffered, err := http.NewResponseController(r.ResponseWriter).Hijack()
+	if err == nil {
+		r.hijacked = true
+		if r.status == 0 {
+			r.status, r.wait = http.StatusSwitchingProtocols, time.Since(r.start)
+		}
+	}
+	return conn, buffered, err
 }

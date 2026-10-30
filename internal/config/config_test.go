@@ -71,6 +71,7 @@ func TestParseRejectsBadConfig(t *testing.T) {
 		"node":          "baseDomain: example.com\nnode: \"a b\"\n",
 		"dns provider":  "baseDomain: example.com\nedge: {tls: {mode: acme, email: a@b.c, dnsTokenFile: /t, dnsProvider: cloudflare}}\n",
 		"tls storage":   "baseDomain: example.com\nedge: {tls: {mode: internal, storage: \"\"}}\n",
+		"metrics":       "baseDomain: example.com\nmetrics: \":9464\"\n",
 	} {
 		if _, err := Parse([]byte(document)); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -85,7 +86,7 @@ func TestExampleConfigParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploy/agent.example.yaml: %v", err)
 	}
-	if agent.Volumes.Driver != "zfs" || agent.Edge.TLS.Mode != "acme" {
+	if agent.Volumes.Driver != "zfs" || agent.Edge.TLS.Mode != "acme" || agent.Metrics != "127.0.0.1:9464" {
 		t.Fatalf("example config = %+v", agent)
 	}
 }
