@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,17 +23,33 @@ import (
 // name, images) belong to one node.
 var replicatedTables = []string{"apps", "tenants", "secrets", "nodes", "events"}
 
-// sqliteConstraint is SQLite's result code for a violated constraint; the
-// extended codes keep it in their low byte.
-const sqliteConstraint = 19
-
 // Refused reports whether a batch failed the same way on every node that
-// applies it: stale, or against a constraint of the state. Any other
-// failure, such as a full disk, is the node's own, and a node that cannot
+// applies it: stale, malformed, or against the state (a constraint, a
+// statement the schema cannot run). Any other failure, such as a full disk
+// or a batch of a newer release, is the node's own, and a node that cannot
 // apply what every other node applied must stop rather than diverge.
 func Refused(err error) bool {
+	return errors.Is(err, ErrStale) || errors.As(err, new(refusal))
+}
+
+// refusal is a batch every node refuses alike.
+type refusal struct{ err error }
+
+func (r refusal) Error() string { return "refused: " + r.err.Error() }
+func (r refusal) Unwrap() error { return r.err }
+
+// nodeFailure reports a SQLite failure of this node's own database rather
+// than of the statement: it may not happen on another node.
+func nodeFailure(err error) bool {
 	var sqliteErr *sqlite.Error
-	return errors.Is(err, ErrStale) || errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqliteConstraint
+	if !errors.As(err, &sqliteErr) {
+		return true // not SQLite's verdict on the statement
+	}
+	switch sqliteErr.Code() & 0xff {
+	case 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 26: // PERM ABORT BUSY LOCKED NOMEM READONLY INTERRUPT IOERR CORRUPT FULL CANTOPEN PROTOCOL NOTADB
+		return true
+	}
+	return false
 }
 
 // appliedIndex is the index of the last log entry applied, with a way to
@@ -81,19 +98,56 @@ func (a *appliedIndex) wait(ctx context.Context, index uint64) error {
 }
 
 // Replicate hands every batch to commit, which must have the cluster's log
-// apply it here (through ApplyEntry) before it returns, instead of applying
-// it at once. Before a write is computed, catchUp must apply here every
-// change the cluster has made, so the write is checked against them.
-func (s *SQLite) Replicate(commit func(Batch) error, catchUp func() error) {
+// apply it here (through ApplyEntry) before it returns its index, instead
+// of applying it at once. Before a write is computed, catchUp must apply
+// here every change the cluster has made, so the write is checked against
+// them.
+func (s *SQLite) Replicate(commit func(Batch) (uint64, error), catchUp func() error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.catchUp = catchUp
 	s.commit = func(batch Batch) (*snapshot, error) {
-		if err := commit(batch); err != nil {
+		index, err := commit(batch)
+		if err != nil {
 			return nil, err
+		}
+		// What the write made, not what later entries made of it.
+		if state, ok := s.recent.get(index); ok {
+			return state, nil
 		}
 		return s.state.Load(), nil
 	}
+}
+
+// recentStates keeps the states the last log entries made, for the writes
+// waiting for them.
+type recentStates struct {
+	mu     sync.Mutex
+	states map[uint64]*snapshot
+	order  []uint64
+}
+
+const recentKept = 64
+
+func (r *recentStates) put(index uint64, state *snapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.states == nil {
+		r.states = map[uint64]*snapshot{}
+	}
+	r.states[index] = state
+	r.order = append(r.order, index)
+	if len(r.order) > recentKept {
+		delete(r.states, r.order[0])
+		r.order = r.order[1:]
+	}
+}
+
+func (r *recentStates) get(index uint64) (*snapshot, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, ok := r.states[index]
+	return state, ok
 }
 
 // Applied is the index of the last log entry applied here.
@@ -112,13 +166,16 @@ func (s *SQLite) ApplyEntry(index uint64, batch Batch) error {
 	if index <= s.applied.get() {
 		return nil
 	}
-	_, err := s.transact(batch.Signal, func(tx *sql.Tx, current *snapshot) error {
+	next, err := s.transact(batch.Signal, func(tx *sql.Tx, current *snapshot) error {
 		if err := applyBatch(tx, current, batch); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = 'applied'`, strconv.FormatUint(index, 10))
 		return err
 	})
+	if err == nil {
+		s.recent.put(index, next)
+	}
 	if err == nil || Refused(err) {
 		s.applied.set(index)
 	}
@@ -138,11 +195,32 @@ func (s *SQLite) StartLog() error {
 	return err
 }
 
+// Cluster names the cluster the state belongs to: empty for a node of no
+// cluster, which a bootstrap names.
+func (s *SQLite) Cluster() string { return s.state.Load().cluster }
+
+// NameCluster names the cluster a bootstrap started, in its first entry.
+func (s *SQLite) NameCluster(name, actor string) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		if current.cluster == name {
+			return errUnchanged
+		}
+		if err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('cluster', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, name); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "cluster.started", "", "", name)
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
+}
+
 // Fresh reports whether the state holds nothing yet: a node may only join a
 // cluster, and take the cluster's state, with nothing of its own to lose.
 func (s *SQLite) Fresh() bool {
 	state := s.state.Load()
-	return state.version == 0 && len(state.apps) == 0 && len(state.tenants) == 0 && len(state.nodes) == 0
+	return state.version == 0 && len(state.apps) == 0 && len(state.tenants) == 0 && len(state.nodes) == 0 && state.cluster == ""
 }
 
 // SnapshotFile writes a copy of the whole database, as it is at one
@@ -181,7 +259,8 @@ func (s *SQLite) InstallSnapshot(from io.Reader) (bool, error) {
 	if err = errors.Join(err, temp.Close()); err != nil {
 		return false, err
 	}
-	if err := checkSnapshot(name); err != nil {
+	version, err := checkSnapshot(name)
+	if err != nil {
 		return false, fmt.Errorf("snapshot: %w", err)
 	}
 
@@ -205,19 +284,31 @@ func (s *SQLite) InstallSnapshot(from io.Reader) (bool, error) {
 		if index <= s.applied.get() {
 			return nil
 		}
+		// A snapshot of an older release, such as this node's own from
+		// before an upgrade, lacks what migrations added since.
+		if version > schemaVersion {
+			return fmt.Errorf("%w: a snapshot of schema version %d, this node runs %d", ErrSchema, version, schemaVersion)
+		}
 		for _, table := range slices.Backward(replicatedTables) {
 			if _, err := tx.Exec(`DELETE FROM main.` + table); err != nil {
 				return err
 			}
 		}
 		for _, table := range replicatedTables {
-			if _, err := tx.Exec(`INSERT INTO main.` + table + ` SELECT * FROM snapshot.` + table); err != nil {
+			columns, err := columnsOf(tx, "snapshot", table)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT INTO main.` + table + ` (` + columns + `) SELECT ` + columns + ` FROM snapshot.` + table); err != nil {
 				return err
 			}
 		}
 		installed = true
-		_, err := tx.Exec(`UPDATE main.meta SET value = (SELECT copy.value FROM snapshot.meta AS copy WHERE copy.key = meta.key)
-			WHERE key IN ('version', 'applied')`)
+		if _, err := tx.Exec(`DELETE FROM main.meta WHERE key = 'cluster'`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO main.meta (key, value) SELECT key, value FROM snapshot.meta WHERE key IN ('version', 'applied', 'cluster')
+			ON CONFLICT (key) DO UPDATE SET value = excluded.value`)
 		return err
 	})
 	if err != nil {
@@ -229,25 +320,50 @@ func (s *SQLite) InstallSnapshot(from io.Reader) (bool, error) {
 	return installed, nil
 }
 
-// checkSnapshot checks that a snapshot is whole and of this schema version
-// exactly, so its tables match this database's.
-func checkSnapshot(path string) error {
+// checkSnapshot checks that a snapshot is whole and made by a release that
+// replicates, and returns its schema version.
+func checkSnapshot(path string) (int, error) {
 	db, err := sql.Open("sqlite", uri(path, "mode=ro"))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer db.Close()
-	if err := check(db); err != nil {
-		return err
-	}
 	var version int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		return err
+		return 0, err
 	}
-	if version != schemaVersion {
-		return fmt.Errorf("%w: schema version %d, this node runs %d", ErrSchema, version, schemaVersion)
+	if version < firstBatchSchema {
+		return 0, fmt.Errorf("%w: schema version %d comes from no cluster", ErrSchema, version)
 	}
-	return nil
+	if version > schemaVersion {
+		return version, nil // refused unless the node holds it already
+	}
+	return version, check(db)
+}
+
+// columnsOf lists a table's columns, quoted, for copying between schema
+// versions.
+func columnsOf(tx *sql.Tx, schema, table string) (string, error) {
+	rows, err := tx.Query(`SELECT name FROM pragma_table_info(?, ?)`, table, schema)
+	if err != nil {
+		return "", err
+	}
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			rows.Close()
+			return "", err
+		}
+		columns = append(columns, `"`+column+`"`)
+	}
+	if err := closeRows(rows); err != nil {
+		return "", err
+	}
+	if len(columns) == 0 {
+		return "", fmt.Errorf("the snapshot has no table %s", table)
+	}
+	return strings.Join(columns, ", "), nil
 }
 
 func (s *SQLite) Nodes() []Node {
@@ -271,9 +387,17 @@ func (s *SQLite) PutNode(node Node, actor string) error {
 		if found && existing.Address == node.Address && existing.Role == node.Role {
 			return errUnchanged
 		}
-		for _, other := range current.nodes {
-			if other.Name != node.Name && other.Address == node.Address {
+		for _, name := range slices.Sorted(maps.Keys(current.nodes)) {
+			other := current.nodes[name]
+			if other.Name == node.Name {
+				continue
+			}
+			if other.Address == node.Address {
 				return fmt.Errorf("node %s already has address %s", other.Name, node.Address)
+			}
+			// One node runs every tenant until tenants are placed on nodes.
+			if node.Role == RoleWorker && other.Role == RoleWorker {
+				return fmt.Errorf("%w: the cluster already has worker %s; for now a cluster runs one worker and witnesses", ErrConflict, other.Name)
 			}
 		}
 		if err := tx.Exec(`INSERT INTO nodes (name, address, role, created_at) VALUES (?, ?, ?, ?)

@@ -30,11 +30,13 @@ func (f *fsm) Apply(entry *raft.Log) any {
 		return errBroken
 	}
 	batch, err := store.DecodeBatch(entry.Data)
-	if err == nil {
-		err = f.store.ApplyEntry(entry.Index, batch)
-		if err == nil || store.Refused(err) {
-			return err
-		}
+	if err != nil {
+		// Every node refuses it alike; the leader checks what it appends.
+		return err
+	}
+	err = f.store.ApplyEntry(entry.Index, batch)
+	if err == nil || store.Refused(err) {
+		return err
 	}
 	f.broken.Store(true)
 	err = fmt.Errorf("apply log entry %d: %w", entry.Index, err)
@@ -47,6 +49,11 @@ var errBroken = errors.New("this node stopped applying the log; restart it")
 // Snapshot copies the database while Raft applies nothing; Persist then
 // streams the copy.
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
+	// Raft counts the entries a stopped node did not apply as applied: a
+	// snapshot would claim them.
+	if f.broken.Load() {
+		return nil, errBroken
+	}
 	name, err := f.store.SnapshotFile()
 	if err != nil {
 		return nil, err

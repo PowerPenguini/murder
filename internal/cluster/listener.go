@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -12,25 +13,31 @@ import (
 )
 
 // handshakeTimeout bounds a TLS handshake, so a peer that never finishes
-// one holds nothing for long.
-const handshakeTimeout = 10 * time.Second
+// one holds nothing for long; handshakes bounds how many run at once, so
+// connections that never prove anything cannot use up the agent's files.
+const (
+	handshakeTimeout = 10 * time.Second
+	handshakes       = 64
+)
 
 // listener accepts nodes of the cluster on one port and hands each
 // connection, by the protocol it negotiated, to Raft or to the HTTP server.
 type listener struct {
 	inner       net.Listener
 	credentials *Credentials
+	log         *slog.Logger
+	pending     chan struct{}
 	raft, http  chan net.Conn
 	done        chan struct{}
 	once        sync.Once
 }
 
-func listen(address string, credentials *Credentials) (*listener, error) {
+func listen(address string, credentials *Credentials, log *slog.Logger) (*listener, error) {
 	inner, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
 	}
-	l := &listener{inner: inner, credentials: credentials, raft: make(chan net.Conn), http: make(chan net.Conn), done: make(chan struct{})}
+	l := &listener{inner: inner, credentials: credentials, log: log, pending: make(chan struct{}, handshakes), raft: make(chan net.Conn), http: make(chan net.Conn), done: make(chan struct{})}
 	go l.accept()
 	return l, nil
 }
@@ -50,16 +57,24 @@ func (l *listener) accept() {
 				time.Sleep(50 * time.Millisecond)
 				continue
 			}
+			l.log.Error("the cluster port stopped accepting connections", "error", err)
 			l.close()
 			return
 		}
-		go l.route(tls.Server(conn, config))
+		select {
+		case l.pending <- struct{}{}:
+			go l.route(tls.Server(conn, config))
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
 func (l *listener) route(conn *tls.Conn) {
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	if err := conn.Handshake(); err != nil {
+	err := conn.Handshake()
+	<-l.pending
+	if err != nil {
 		_ = conn.Close()
 		return
 	}

@@ -52,12 +52,15 @@ type SQLite struct {
 	// applied is the index of the last cluster log entry applied, or
 	// refused: an entry refused on one node is refused on every node.
 	applied appliedIndex
+	recent  recentStates
 }
 
 type snapshot struct {
 	node string
 	// version counts the batches applied to the replicated state.
 	version int64
+	// cluster names the cluster the state belongs to; empty outside one.
+	cluster string
 	apps    map[string]App
 	tenants map[string]Record
 	nodes   map[string]Node
@@ -321,6 +324,9 @@ func load(q querier) (state *snapshot, err error) {
 	if state.version, err = strconv.ParseInt(version, 10, 64); err != nil {
 		return nil, fmt.Errorf("state version %q: %w", version, err)
 	}
+	if err := q.QueryRow(`SELECT COALESCE((SELECT value FROM meta WHERE key = 'cluster'), '')`).Scan(&state.cluster); err != nil {
+		return nil, fmt.Errorf("read the cluster: %w", err)
+	}
 	if err := q.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&state.lastEvent); err != nil {
 		return nil, err
 	}
@@ -502,8 +508,11 @@ func (s *SQLite) apply(batch Batch) (*snapshot, error) {
 	})
 }
 
+// applyBatch applies a batch of this schema version or an older one: a
+// migration keeps the statements of earlier releases valid, so a node
+// upgraded first still applies what the others write.
 func applyBatch(tx *sql.Tx, current *snapshot, batch Batch) error {
-	if batch.Schema != schemaVersion {
+	if batch.Schema < firstBatchSchema || batch.Schema > schemaVersion {
 		return fmt.Errorf("%w: a batch for schema version %d, this node runs %d", ErrSchema, batch.Schema, schemaVersion)
 	}
 	if batch.Version != current.version {
@@ -512,10 +521,13 @@ func applyBatch(tx *sql.Tx, current *snapshot, batch Batch) error {
 	for _, statement := range batch.Statements {
 		args, err := statement.values()
 		if err != nil {
-			return err
+			return refusal{err}
 		}
 		if _, err := tx.Exec(statement.SQL, args...); err != nil {
-			return err
+			if nodeFailure(err) {
+				return err
+			}
+			return refusal{err}
 		}
 	}
 	_, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = 'version'`, strconv.FormatInt(current.version+1, 10))
@@ -669,7 +681,8 @@ func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
 	var unchanged App
 	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		existing, found := current.apps[app.Name]
-		result.Created = !found
+		// A stale attempt's result is discarded with its batch.
+		result = AppChange{Created: !found}
 		if found && existing.Spec.Equal(app.Spec) {
 			unchanged = cloneApp(existing)
 			return errUnchanged

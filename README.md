@@ -156,9 +156,13 @@ sudo murder cluster join 10.0.0.2:7400   # any node of the cluster
 sudo murder cluster status
 ```
 
-Only a node with a new database joins: it takes the cluster's state. `murder
-cluster remove <node>` takes a node out; to bring it back, give it a new
-database and an empty cluster directory. Writes on a witness are refused:
+Only a node with a new database joins: it takes the cluster's state. Each
+cluster has a name, given at bootstrap, so a node holding the state of
+another cluster, or of this one before it was rebuilt, is refused; so is a
+node with the name of a member at another address. An agent whose config
+lost its `cluster:` section refuses to start on a database of a cluster.
+`murder cluster remove <node>` takes a node out; to bring it back, give it a
+new database and an empty cluster directory. Writes on a witness are refused:
 manage apps and tenants on the worker. A backup is restored into a cluster
 by rebuilding it: move the cluster directory aside on every node, restore on
 one node, bootstrap there and join the others with new databases.
@@ -321,9 +325,10 @@ through Murder's real components:
 - **One worker.** A cluster replicates the state between nodes, but runs
   every tenant on its one worker; placement on several workers, replicated
   tenant data and failover come next.
-- **Upgrades.** Every node of a cluster must run the same release: a node
-  given a change made by another schema version stops instead of applying
-  it. Upgrade all nodes together.
+- **Upgrades.** A node applies changes made by its own release and older
+  ones, but stops on a change made by a newer release (and restarts into
+  the same stop) until it is upgraded too. Upgrade every node of a cluster
+  one after the other, without making changes in between.
 - **Registry access during apply.** Tags are pinned when an app is applied
   (or a tenant's image is set), which needs registry access for tags that are
   not yet local.

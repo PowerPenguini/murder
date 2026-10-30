@@ -116,3 +116,18 @@ func (r *recorder) Exec(query string, args ...any) error {
 	r.statements = append(r.statements, statement)
 	return nil
 }
+
+// Check refuses a batch no node of this release can apply: of another
+// schema version than a release that writes batches, or with malformed
+// arguments. The leader checks every batch before it enters the log.
+func (b Batch) Check() error {
+	if b.Schema < firstBatchSchema || b.Schema > schemaVersion {
+		return fmt.Errorf("%w: a batch for schema version %d, the leader runs %d: upgrade it", ErrSchema, b.Schema, schemaVersion)
+	}
+	for _, statement := range b.Statements {
+		if _, err := statement.values(); err != nil {
+			return err
+		}
+	}
+	return nil
+}

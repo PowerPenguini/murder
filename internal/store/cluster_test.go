@@ -17,9 +17,10 @@ import (
 func logged(t *testing.T, st *SQLite) *[]Batch {
 	t.Helper()
 	var entries []Batch
-	st.Replicate(func(batch Batch) error {
+	st.Replicate(func(batch Batch) (uint64, error) {
 		entries = append(entries, batch)
-		return st.ApplyEntry(uint64(len(entries)), batch)
+		index := uint64(len(entries))
+		return index, st.ApplyEntry(index, batch)
 	}, func() error { return nil })
 	return &entries
 }
@@ -242,5 +243,135 @@ func TestRefusedTellsTheStateFromTheNode(t *testing.T) {
 	err = st.ApplyEntry(2, Batch{Schema: schemaVersion + 1})
 	if !errors.Is(err, ErrSchema) || Refused(err) || st.Applied() != 1 {
 		t.Fatalf("a batch of another schema: %v, applied %d", err, st.Applied())
+	}
+}
+
+func TestBatchesTheStateRefusesCountAsRefused(t *testing.T) {
+	st, _ := withApp(t, options())
+	version := st.state.Load().version
+	broken := &recorder{}
+	if err := broken.Exec(`UPDATE no_such_table SET x = 1`); err != nil {
+		t.Fatal(err)
+	}
+	err := st.ApplyEntry(1, Batch{Schema: schemaVersion, Version: version, Statements: broken.statements})
+	if err == nil || !Refused(err) || st.Applied() != 1 {
+		t.Fatalf("a statement the schema cannot run: %v (refused %v)", err, Refused(err))
+	}
+	malformed := Batch{Schema: schemaVersion, Version: version, Statements: []Statement{{SQL: `SELECT ?`, Args: []Arg{{Text: new("a"), Bool: new(true)}}}}}
+	if err := st.ApplyEntry(2, malformed); !Refused(err) {
+		t.Fatalf("a malformed argument: %v", err)
+	}
+	if err := malformed.Check(); err == nil {
+		t.Fatal("the leader would append a malformed batch")
+	}
+	if err := (Batch{Schema: schemaVersion + 1}).Check(); !errors.Is(err, ErrSchema) {
+		t.Fatalf("the leader would append a newer release's batch: %v", err)
+	}
+	if err := (Batch{Schema: schemaVersion}).Check(); err != nil {
+		t.Fatal(err)
+	}
+	if nodeFailure(errors.New("connection reset")) == false {
+		t.Fatal("a failure that is not SQLite's verdict is the node's own")
+	}
+}
+
+func TestAStaleRetryReportsOnlyItsOwnRollout(t *testing.T) {
+	st, _ := withApp(t, options())
+	for _, name := range []string{"acme", "beta"} {
+		if _, err := st.Create(NewTenant{Name: name, App: "web"}, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := &recorder{}
+	if err := other.Exec(`INSERT INTO events (at, actor, action, tenant, app, detail) VALUES ('2026-10-30T00:00:00Z', 'x', 'x', '', '', '')`); err != nil {
+		t.Fatal(err)
+	}
+	commits := 0
+	st.commit = func(batch Batch) (*snapshot, error) {
+		commits++
+		if commits == 1 {
+			if _, err := st.apply(Batch{Schema: schemaVersion, Version: batch.Version, Statements: other.statements}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return st.apply(batch)
+	}
+	next := appSpec()
+	next.Image = otherImage
+	change, err := st.PutApp(App{Name: "web", Spec: next}, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commits != 2 || !reflect.DeepEqual(change.Tenants, []string{"acme", "beta"}) || change.Created {
+		t.Fatalf("after %d commits: %+v", commits, change)
+	}
+}
+
+func TestAWriteReturnsTheStateItMade(t *testing.T) {
+	st, _ := withApp(t, options())
+	var entries []Batch
+	st.Replicate(func(batch Batch) (uint64, error) {
+		entries = append(entries, batch)
+		index := uint64(len(entries))
+		if err := st.ApplyEntry(index, batch); err != nil {
+			return 0, err
+		}
+		// Another node's write lands before this one returns.
+		later := &recorder{}
+		_ = later.Exec(`DELETE FROM secrets`)
+		_ = later.Exec(`DELETE FROM tenants`)
+		entries = append(entries, Batch{Schema: schemaVersion, Version: st.state.Load().version, Statements: later.statements})
+		if err := st.ApplyEntry(uint64(len(entries)), entries[len(entries)-1]); err != nil {
+			t.Fatal(err)
+		}
+		return index, nil
+	}, func() error { return nil })
+	created, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Spec.Name != "acme" || created.Subnet == "" {
+		t.Fatalf("the write returned a later state: %+v", created)
+	}
+}
+
+func TestOneWorkerUntilPlacement(t *testing.T) {
+	st, _ := openNew(t, options())
+	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400", Role: RoleWorker}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400", Role: RoleWorker}, "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a second worker: %v", err)
+	}
+	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.9:7400", Role: RoleWorker}, "alice"); err != nil {
+		t.Fatalf("the worker moves: %v", err)
+	}
+}
+
+func TestSnapshotsCarryTheClusterName(t *testing.T) {
+	leader := openNamed(t, "node-1")
+	logged(t, leader)
+	if err := leader.NameCluster("blue", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if leader.Cluster() != "blue" || leader.Fresh() {
+		t.Fatalf("cluster %q, fresh %v", leader.Cluster(), leader.Fresh())
+	}
+	snapshot, err := leader.SnapshotFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeDatabase(snapshot)
+	follower := openNamed(t, "node-2")
+	file, err := os.Open(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if installed, err := follower.InstallSnapshot(file); err != nil || !installed {
+		t.Fatalf("install: %v %v", installed, err)
+	}
+	if follower.Cluster() != "blue" {
+		t.Fatalf("the follower's cluster is %q", follower.Cluster())
 	}
 }

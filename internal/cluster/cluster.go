@@ -11,6 +11,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,18 @@ var ErrNoLeader = errors.New("the cluster has no leader")
 
 // ErrNotLeader reports a request made to a node that is not the leader.
 var ErrNotLeader = errors.New("not the leader")
+
+// ErrMember reports a node that is, or was, part of a cluster, where only a
+// new one will do.
+var ErrMember = errors.New("already part of a cluster")
+
+// PeerError is another node's answer to a request it refused.
+type PeerError struct {
+	Status  int
+	Message string
+}
+
+func (e *PeerError) Error() string { return e.Message }
 
 const (
 	// commitTimeout bounds one change, from proposal until this node has
@@ -107,7 +120,7 @@ func Start(config Config) (*Cluster, error) {
 		_ = logs.Close()
 		return nil, err
 	}
-	l, err := listen(config.Address, credentials)
+	l, err := listen(config.Address, credentials, config.Log)
 	if err != nil {
 		_ = logs.Close()
 		return nil, fmt.Errorf("cluster address: %w", err)
@@ -136,7 +149,11 @@ func Start(config Config) (*Cluster, error) {
 		},
 	}
 	c.server = &http.Server{Handler: c.handler(), ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = c.server.Serve(l.httpListener()) }()
+	go func() {
+		if err := c.server.Serve(l.httpListener()); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			config.Log.Error("the cluster port stopped serving", "error", err)
+		}
+	}()
 	config.Store.Replicate(c.commit, c.catchUp)
 	return c, nil
 }
@@ -148,23 +165,24 @@ func (c *Cluster) Close() error {
 	return errors.Join(err, c.logs.Close())
 }
 
-// commit has the leader append batch to the log, and returns once this node
-// has applied it: what a write here returns, a read here then shows.
-func (c *Cluster) commit(batch store.Batch) error {
+// commit has the leader append batch to the log, and returns its index
+// once this node has applied it: what a write here returns, a read here
+// then shows.
+func (c *Cluster) commit(batch store.Batch) (uint64, error) {
 	data, err := store.EncodeBatch(batch)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
 	index, err := c.propose(ctx, data)
 	if index == 0 {
-		return err
+		return 0, err
 	}
 	if waitErr := c.config.Store.WaitApplied(ctx, index); waitErr != nil {
-		return errors.Join(err, waitErr)
+		return 0, errors.Join(err, fmt.Errorf("the change was made (log entry %d) but this node has not applied it yet: %w", index, waitErr))
 	}
-	return err
+	return index, err
 }
 
 // catchUp returns once this node has applied every change the cluster
@@ -245,8 +263,14 @@ func (c *Cluster) propose(ctx context.Context, data []byte) (uint64, error) {
 		} else {
 			var result commitResult
 			err = c.toLeader(ctx, http.MethodPost, "/cluster/v1/commit", data, &result)
-			if err == nil {
+			var peer *PeerError
+			switch {
+			case err == nil:
 				index, err = result.Index, result.err()
+			case !errors.Is(err, ErrNotLeader) && !errors.Is(err, ErrNoLeader) && !errors.As(err, &peer):
+				// The request may have reached the leader before the
+				// answer was lost.
+				err = fmt.Errorf("the leader did not answer, and the change may yet be made: %w", err)
 			}
 		}
 		if !errors.Is(err, ErrNotLeader) && !errors.Is(err, ErrNoLeader) {
@@ -266,6 +290,14 @@ func (c *Cluster) propose(ctx context.Context, data []byte) (uint64, error) {
 
 // apply appends data to the log on the leader.
 func (c *Cluster) apply(data []byte) (uint64, error) {
+	// Nothing enters the log that a node of this release cannot apply.
+	batch, err := store.DecodeBatch(data)
+	if err == nil {
+		err = batch.Check()
+	}
+	if err != nil {
+		return 0, &PeerError{Status: http.StatusBadRequest, Message: err.Error()}
+	}
 	future := c.raft.Apply(data, commitTimeout)
 	if err := future.Error(); err != nil {
 		if errors.Is(err, raft.ErrNotLeader) {
@@ -298,17 +330,21 @@ func (r commitResult) err() error {
 }
 
 // Bootstrap starts a new cluster of this node alone, with the state its
-// database holds.
+// database holds, and names it. A bootstrap stopped half way finishes.
 func (c *Cluster) Bootstrap(ctx context.Context, actor string) error {
-	if err := c.unconfigured(); err != nil {
+	if err := c.unconfigured(); err == nil {
+		if c.config.Store.Cluster() != "" {
+			return fmt.Errorf("%w: this node's database belongs to cluster %s; give it a new database, or rebuild the cluster from a backup", ErrMember, c.config.Store.Cluster())
+		}
+		if err := c.config.Store.StartLog(); err != nil {
+			return err
+		}
+		configuration := raft.Configuration{Servers: []raft.Server{{Suffrage: raft.Voter, ID: raft.ServerID(c.config.Node), Address: raft.ServerAddress(c.address)}}}
+		if err := c.raft.BootstrapCluster(configuration).Error(); err != nil {
+			return fmt.Errorf("bootstrap: %w", err)
+		}
+	} else if !c.alone() || c.config.Store.Cluster() != "" && c.joined() {
 		return err
-	}
-	if err := c.config.Store.StartLog(); err != nil {
-		return err
-	}
-	configuration := raft.Configuration{Servers: []raft.Server{{Suffrage: raft.Voter, ID: raft.ServerID(c.config.Node), Address: raft.ServerAddress(c.address)}}}
-	if err := c.raft.BootstrapCluster(configuration).Error(); err != nil {
-		return fmt.Errorf("bootstrap: %w", err)
 	}
 	for c.raft.State() != raft.Leader {
 		select {
@@ -317,7 +353,34 @@ func (c *Cluster) Bootstrap(ctx context.Context, actor string) error {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+	if c.config.Store.Cluster() == "" {
+		if err := c.config.Store.NameCluster(newClusterName(), actor); err != nil {
+			return err
+		}
+	}
 	return c.config.Store.PutNode(store.Node{Name: c.config.Node, Address: c.address, Role: c.config.Role}, actor)
+}
+
+// alone reports whether this node is the only voter of its cluster.
+func (c *Cluster) alone() bool {
+	future := c.raft.GetConfiguration()
+	if future.Error() != nil {
+		return false
+	}
+	servers := future.Configuration().Servers
+	return len(servers) == 1 && servers[0].ID == raft.ServerID(c.config.Node)
+}
+
+// joined reports whether the state knows this node.
+func (c *Cluster) joined() bool {
+	_, known := nodeNamed(c.config.Store.Nodes(), c.config.Node)
+	return known
+}
+
+// newClusterName names a new cluster, so a node of another one, or of this
+// one before it was rebuilt, cannot join it with its old state.
+func newClusterName() string {
+	return rand.Text()
 }
 
 // unconfigured refuses a node that is, or was, part of a cluster.
@@ -327,42 +390,46 @@ func (c *Cluster) unconfigured() error {
 		return err
 	}
 	if existing {
-		return fmt.Errorf("node %s is already part of a cluster (its log is in %s)", c.config.Node, c.config.Dir)
+		return fmt.Errorf("%w: node %s has a cluster log in %s", ErrMember, c.config.Node, c.config.Dir)
 	}
 	return nil
 }
 
-// Join adds this node to the cluster of the node at peer. Only an empty
-// node joins: it takes the cluster's state, and anything of its own would
-// be lost. A node whose join failed half way holds the cluster's state, and
-// may try again.
+// Join adds this node to the cluster of the node at peer. Only a node
+// with a new database joins, since it takes the cluster's state; a node
+// whose join stopped half way, holding this cluster's state, tries again.
 func (c *Cluster) Join(ctx context.Context, peer, actor string) error {
 	if err := c.unconfigured(); err != nil {
 		return err
 	}
-	if !c.config.Store.Fresh() && c.config.Store.Applied() == 0 {
-		return errors.New("this node already holds apps, tenants or nodes; only a node with a new database (murder init) can join a cluster")
-	}
 	// The leader checks the node first, so a node it refuses keeps its
 	// state as it was.
 	request := joinRequest{Address: c.address, Role: c.config.Role, Actor: actor, Check: true}
-	if err := c.join(ctx, peer, request); err != nil {
+	var answer joinAnswer
+	if err := c.join(ctx, peer, request, &answer); err != nil {
 		return err
+	}
+	if ours := c.config.Store.Cluster(); !c.config.Store.Fresh() && ours != answer.Cluster {
+		if ours == "" {
+			return fmt.Errorf("%w: this node already holds apps, tenants or nodes; only a node with a new database (murder init) can join a cluster", ErrMember)
+		}
+		return fmt.Errorf("%w: this node's database belongs to cluster %s, not %s; give it a new database", ErrMember, ours, answer.Cluster)
 	}
 	if err := c.fetchState(ctx, peer); err != nil {
 		return err
 	}
+	if c.config.Store.Cluster() != answer.Cluster {
+		return fmt.Errorf("the state from %s belongs to cluster %q, not %q", peer, c.config.Store.Cluster(), answer.Cluster)
+	}
 	request.Check = false
-	if err := c.join(ctx, peer, request); err != nil {
+	if err := c.join(ctx, peer, request, nil); err != nil {
 		return err
 	}
 	// The leader has added the node; it is part of the cluster once the
 	// leader has reached it.
 	for {
-		if leader, _ := c.raft.LeaderWithID(); leader != "" {
-			if _, joined := nodeNamed(c.config.Store.Nodes(), c.config.Node); joined {
-				return nil
-			}
+		if leader, _ := c.raft.LeaderWithID(); leader != "" && c.joined() {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -394,9 +461,9 @@ func (c *Cluster) fetchState(ctx context.Context, peer string) error {
 
 // join sends request to peer, or to the leader peer names, while
 // leadership moves.
-func (c *Cluster) join(ctx context.Context, peer string, request joinRequest) error {
+func (c *Cluster) join(ctx context.Context, peer string, request joinRequest, out any) error {
 	for {
-		err := c.call(ctx, peer, http.MethodPost, "/cluster/v1/nodes", marshal(request), nil)
+		err := c.call(ctx, peer, http.MethodPost, "/cluster/v1/nodes", marshal(request), out)
 		var moved *movedError
 		if !errors.As(err, &moved) {
 			return err
@@ -542,5 +609,5 @@ func responseError(response *http.Response) error {
 	if response.StatusCode == http.StatusMisdirectedRequest {
 		return &movedError{leader: answer.Leader}
 	}
-	return errors.New(answer.Error)
+	return &PeerError{Status: response.StatusCode, Message: answer.Error}
 }

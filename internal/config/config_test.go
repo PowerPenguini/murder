@@ -99,6 +99,9 @@ func TestParseCluster(t *testing.T) {
 	if *agent.Cluster != (Cluster{Address: "10.0.0.2:7400", Role: RoleWorker, Dir: "/var/lib/murder/cluster"}) || agent.Witness() {
 		t.Fatalf("cluster = %+v", agent.Cluster)
 	}
+	if _, err := Parse([]byte("baseDomain: example.com\ncluster: {address: 100.101.102.103:7400}\n")); err != nil {
+		t.Fatalf("a Tailscale address: %v", err)
+	}
 	// A witness serves no tenants and needs no domain.
 	agent, err = Parse([]byte("cluster: {address: 10.0.0.3:7400, role: witness, dir: /srv/cluster}\n"))
 	if err != nil || !agent.Witness() {

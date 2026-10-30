@@ -33,15 +33,15 @@ func runCluster(args []string) error {
 	flags := flag.NewFlagSet("cluster "+args[0], flag.ContinueOnError)
 	socket := socketPath(flags)
 	asJSON := flags.Bool("json", false, "print JSON")
-	if err := flags.Parse(args[1:]); err != nil {
+	rest, err := parseInterspersed(flags, args[1:])
+	if err != nil {
 		return err
 	}
 	client := api.NewClient(*socket)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	var status cluster.Status
-	var err error
-	switch command, rest := args[0], flags.Args(); {
+	switch command := args[0]; {
 	case command == "status" && len(rest) == 0:
 		status, err = client.ClusterStatus(ctx)
 	case command == "bootstrap" && len(rest) == 0:

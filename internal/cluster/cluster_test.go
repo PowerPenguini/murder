@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -354,8 +356,19 @@ func TestAFailureOfTheNodesOwnStopsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := &fsm{store: n.store, fatal: func(err error) { n.fatal <- err }}
-	if response := f.Apply(&raft.Log{Type: raft.LogCommand, Index: 1000, Data: []byte("not a batch")}); response == nil {
+	// Every node refuses garbage alike; that stops nobody.
+	if response := f.Apply(&raft.Log{Type: raft.LogCommand, Index: 999, Data: []byte("not a batch")}); response == nil {
 		t.Fatal("garbage was applied")
+	}
+	select {
+	case err := <-n.fatal:
+		t.Fatalf("garbage stopped the node: %v", err)
+	default:
+	}
+	// A batch of a newer release this node cannot apply stops it.
+	newer, _ := store.EncodeBatch(store.Batch{Schema: 99})
+	if response := f.Apply(&raft.Log{Type: raft.LogCommand, Index: 1000, Data: newer}); response == nil {
+		t.Fatal("a newer release's batch was applied")
 	}
 	select {
 	case <-n.fatal:
@@ -379,4 +392,151 @@ func TestRaftLogsAtItsLevels(t *testing.T) {
 	if len(lines) != 2 || !strings.Contains(lines[0], `"level":"ERROR","msg":"failed to accept connection","component":"raft","error":"closed"`) || !strings.Contains(lines[1], `"level":"INFO"`) {
 		t.Fatalf("logged:\n%s", out.String())
 	}
+}
+
+func TestANodeOfAnotherClusterCannotJoin(t *testing.T) {
+	// A witness of a cluster since rebuilt keeps its old database: it must
+	// not join the new cluster with it.
+	old := newNode(t, "fsn-1", store.RoleWorker)
+	if err := old.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	witness := newNode(t, "hel-1", store.RoleWitness)
+	if err := witness.cluster.Join(ctx(t), old.address, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// The old cluster is gone; the witness's log is moved aside.
+	old.stop()
+	witness.stop()
+	if err := os.RemoveAll(filepath.Join(witness.dir, "raft")); err != nil {
+		t.Fatal(err)
+	}
+	witness.start()
+
+	rebuilt := newNode(t, "nbg-1", store.RoleWorker)
+	if err := rebuilt.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	err := witness.cluster.Join(ctx(t), rebuilt.address, "alice")
+	if !errors.Is(err, ErrMember) || !strings.Contains(err.Error(), "belongs to cluster") {
+		t.Fatalf("a node of another cluster joined: %v", err)
+	}
+	if !reflect.DeepEqual(rebuilt.store.Nodes()[0].Name, "nbg-1") || len(rebuilt.store.Nodes()) != 1 {
+		t.Fatalf("the rebuilt cluster took the node: %+v", rebuilt.store.Nodes())
+	}
+}
+
+func TestANameIsNotTakenOver(t *testing.T) {
+	worker := newNode(t, "fsn-1", store.RoleWorker)
+	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	witness := newNode(t, "hel-1", store.RoleWitness)
+	if err := witness.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	impostor := newNode(t, "hel-1", store.RoleWitness)
+	if err := impostor.cluster.Join(ctx(t), worker.address, "mallory"); err == nil || !strings.Contains(err.Error(), "already a member at "+witness.address) {
+		t.Fatalf("a second node named hel-1: %v", err)
+	}
+	status, err := worker.cluster.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Members) != 2 || status.Members[1].Address != witness.address {
+		t.Fatalf("members = %+v", status.Members)
+	}
+}
+
+func TestBootstrapFinishesWhatItStarted(t *testing.T) {
+	n := newNode(t, "fsn-1", store.RoleWorker)
+	if err := n.store.StartLog(); err != nil {
+		t.Fatal(err)
+	}
+	// Stopped after Raft took the configuration, before the state did.
+	configuration := raft.Configuration{Servers: []raft.Server{{Suffrage: raft.Voter, ID: "fsn-1", Address: raft.ServerAddress(n.address)}}}
+	if err := n.cluster.raft.BootstrapCluster(configuration).Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if n.store.Cluster() == "" || len(n.store.Nodes()) != 1 {
+		t.Fatalf("cluster %q, nodes %+v", n.store.Cluster(), n.store.Nodes())
+	}
+	if err := n.cluster.Bootstrap(ctx(t), "alice"); !errors.Is(err, ErrMember) {
+		t.Fatalf("bootstrap a finished cluster: %v", err)
+	}
+}
+
+func TestTheLeaderAppendsOnlyWhatEveryNodeCanApply(t *testing.T) {
+	nodes := threeNodes(t)
+	before := nodes[0].cluster.raft.LastIndex()
+	for _, body := range [][]byte{[]byte("garbage"), mustEncode(t, store.Batch{Schema: 99})} {
+		err := nodes[1].cluster.toLeader(ctx(t), "POST", "/cluster/v1/commit", body, nil)
+		var peer *PeerError
+		if !errors.As(err, &peer) || peer.Status != 400 {
+			t.Fatalf("the leader took %q: %v", body, err)
+		}
+	}
+	if after := nodes[0].cluster.raft.LastIndex(); after != before {
+		t.Fatalf("the log grew from %d to %d", before, after)
+	}
+	select {
+	case err := <-nodes[2].fatal:
+		t.Fatalf("a node stopped: %v", err)
+	default:
+	}
+}
+
+func mustEncode(t *testing.T, batch store.Batch) []byte {
+	t.Helper()
+	data, err := store.EncodeBatch(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestABrokenNodeTakesNoSnapshot(t *testing.T) {
+	n := newNode(t, "fsn-1", store.RoleWorker)
+	f := &fsm{store: n.store, fatal: func(error) {}}
+	f.broken.Store(true)
+	if _, err := f.Snapshot(); !errors.Is(err, errBroken) {
+		t.Fatalf("snapshot of a broken node: %v", err)
+	}
+}
+
+func TestHandshakesAreBounded(t *testing.T) {
+	n := newNode(t, "fsn-1", store.RoleWorker)
+	// Connections that never handshake hold every slot; the next one is
+	// closed at once.
+	var idle []net.Conn
+	for range handshakes {
+		conn, err := net.Dial("tcp", n.address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idle = append(idle, conn)
+	}
+	defer func() {
+		for _, conn := range idle {
+			conn.Close()
+		}
+	}()
+	eventually(t, "every slot is taken", func() bool { return len(n.cluster.listener.pending) == handshakes })
+	extra, err := net.Dial("tcp", n.address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	_ = extra.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := extra.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a connection beyond the bound was kept: %v", err)
+	}
+	// Once they give up, the port takes nodes again.
+	for _, conn := range idle {
+		conn.Close()
+	}
+	eventually(t, "the slots are free", func() bool { return len(n.cluster.listener.pending) == 0 })
 }

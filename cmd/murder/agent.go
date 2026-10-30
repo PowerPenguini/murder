@@ -96,6 +96,11 @@ func runAgent(args []string) error {
 	if cfg.Node != "" && cfg.Node != node {
 		return fmt.Errorf("config names node %q but the database belongs to node %q", cfg.Node, node)
 	}
+	// Run alone, a node of a cluster would change its state apart from the
+	// others', which then refuse everything they send it.
+	if cfg.Cluster == nil && (st.Cluster() != "" || len(st.Nodes()) > 0) {
+		return fmt.Errorf("the database belongs to cluster %s: give the node its cluster section back in %s", st.Cluster(), *configPath)
+	}
 	// A node that cannot apply what the cluster applied stops; its restart
 	// applies the entry again.
 	fatal := make(chan error, 1)
@@ -271,6 +276,9 @@ func runWitness(cfg config.Agent, st *store.SQLite, member *cluster.Cluster, log
 			failed <- fmt.Errorf("api listener: %w", err)
 		}
 	}()
+	if cfg.Metrics != "" {
+		log.Warn("a witness serves no metrics: it runs no tenants", "metrics", cfg.Metrics)
+	}
 	log.Info("murder witness started", "node", st.Node(), "address", cfg.Cluster.Address)
 	var runErr error
 	select {

@@ -15,10 +15,16 @@ const schemaVersion = 5
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
 
+// firstBatchSchema is the first schema version of releases that write
+// batches. A migration must keep the statements of batches of every
+// version since valid: a node upgraded first applies the batches the
+// others still write.
+const firstBatchSchema = 5
+
 const schema = `
 -- The node's name, which only this node keeps; the version of the
 -- replicated state, the number of batches applied to it; and, in a
--- cluster, the index of the last log entry applied.
+-- cluster, the cluster's name and the index of the last log entry applied.
 CREATE TABLE meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL

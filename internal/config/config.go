@@ -260,6 +260,10 @@ func (a Agent) Scheme() string {
 	return "https"
 }
 
+// sharedAddressSpace (RFC 6598) is private too: Tailscale and some
+// WireGuard setups use it.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
 func (c Cluster) problems() []string {
 	var problems []string
 	host, port, err := net.SplitHostPort(c.Address)
@@ -267,7 +271,7 @@ func (c Cluster) problems() []string {
 	number, portErr := strconv.Atoi(port)
 	if err != nil || parseErr != nil || address.IsUnspecified() || portErr != nil || number < 1 || number > 65535 {
 		problems = append(problems, "cluster.address must be the node's IP address on the private network and a port, such as 10.0.0.2:7400")
-	} else if !address.IsPrivate() && !address.IsLoopback() {
+	} else if !address.IsPrivate() && !address.IsLoopback() && !sharedAddressSpace.Contains(address) {
 		problems = append(problems, "cluster.address must be on a private network: other nodes reach the cluster's state there")
 	}
 	if c.Role != RoleWorker && c.Role != RoleWitness {

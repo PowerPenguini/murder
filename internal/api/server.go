@@ -617,9 +617,12 @@ type errorBody struct {
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	var typed statusError
+	var peer *cluster.PeerError
 	switch {
 	case errors.As(err, &typed):
 		status = typed.status
+	case errors.As(err, &peer) && peer.Status >= 400 && peer.Status < 500:
+		status = peer.Status
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrNotArchived), errors.Is(err, store.ErrInUse), errors.Is(err, store.ErrConflict):
@@ -628,7 +631,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusBadRequest
 	case errors.Is(err, reconcile.ErrStopping), errors.Is(err, cluster.ErrNoLeader), errors.Is(err, cluster.ErrNotLeader):
 		status = http.StatusServiceUnavailable
-	case errors.Is(err, store.ErrStale), errors.Is(err, cluster.ErrNotJoined):
+	case errors.Is(err, store.ErrStale), errors.Is(err, cluster.ErrNotJoined), errors.Is(err, cluster.ErrMember):
 		status = http.StatusConflict
 	case errors.Is(err, context.Canceled):
 		status = 499

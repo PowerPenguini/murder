@@ -65,9 +65,12 @@ func (c *Cluster) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	index, err := c.apply(data)
+	var refused *PeerError
 	switch {
 	case errors.Is(err, ErrNotLeader):
 		c.moved(w)
+	case errors.As(err, &refused):
+		writeError(w, refused.Status, err)
 	case index == 0:
 		writeError(w, http.StatusServiceUnavailable, err)
 	case err != nil:
@@ -124,6 +127,27 @@ type joinRequest struct {
 	Check bool `json:"check,omitempty"`
 }
 
+// joinAnswer names the cluster a node checked it may join.
+type joinAnswer struct {
+	Cluster string `json:"cluster"`
+}
+
+// memberAddress is where the state or the voters have node name.
+func (c *Cluster) memberAddress(name string) (string, bool) {
+	if node, known := nodeNamed(c.config.Store.Nodes(), name); known {
+		return node.Address, true
+	}
+	future := c.raft.GetConfiguration()
+	if future.Error() == nil {
+		for _, server := range future.Configuration().Servers {
+			if server.ID == raft.ServerID(name) {
+				return string(server.Address), true
+			}
+		}
+	}
+	return "", false
+}
+
 // handleJoin adds a node: first to the state, so its role is known before
 // it votes, then to the voters.
 func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
@@ -140,9 +164,15 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	// One node runs every tenant until tenants are placed on nodes.
+	// One node runs every tenant until tenants are placed on nodes; the
+	// state checks it again when it adds the node.
 	if others := workers(c.config.Store.Nodes(), name); request.Role == store.RoleWorker && len(others) > 0 {
 		writeError(w, http.StatusConflict, fmt.Errorf("the cluster already has worker %s; for now a cluster runs one worker and witnesses", strings.Join(others, ", ")))
+		return
+	}
+	// A node of the same name elsewhere would take the member's place.
+	if address, member := c.memberAddress(name); member && address != request.Address {
+		writeError(w, http.StatusConflict, fmt.Errorf("node %s is already a member at %s; remove it first, or give the new node another name", name, address))
 		return
 	}
 	if request.Role != store.RoleWorker && request.Role != store.RoleWitness {
@@ -150,7 +180,7 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if request.Check {
-		writeJSON(w, http.StatusOK, struct{}{})
+		writeJSON(w, http.StatusOK, joinAnswer{Cluster: c.config.Store.Cluster()})
 		return
 	}
 	actor := request.Actor
@@ -158,11 +188,14 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		actor = "node " + name
 	}
 	if err := c.config.Store.PutNode(store.Node{Name: name, Address: request.Address, Role: request.Role}, actor); err != nil {
-		if errors.Is(err, ErrNotLeader) || errors.Is(err, ErrNoLeader) {
+		switch {
+		case errors.Is(err, ErrNotLeader) || errors.Is(err, ErrNoLeader):
 			c.moved(w)
-			return
+		case errors.Is(err, store.ErrConflict):
+			writeError(w, http.StatusConflict, err)
+		default:
+			writeError(w, http.StatusUnprocessableEntity, err)
 		}
-		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
 	if err := c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), 0, commitTimeout).Error(); err != nil {
