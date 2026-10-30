@@ -47,6 +47,9 @@ func (s *Server) routes(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-r.Context().Done():
 			return
+		case <-s.stopping:
+			writeJSON(w, http.StatusOK, table)
+			return
 		}
 	}
 }

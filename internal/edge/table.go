@@ -64,7 +64,11 @@ func (l *LiveTable) Set(table Table) {
 	l.updated.Store(time.Now().UnixNano())
 }
 
-// Updated is when the table was last confirmed by the agent or loaded.
+// Restore serves a saved table until the agent confirms one; it does not
+// count as confirmed.
+func (l *LiveTable) Restore(table Table) { l.table.Store(&table) }
+
+// Updated is when the agent last confirmed the table; zero before.
 func (l *LiveTable) Updated() time.Time {
 	if at := l.updated.Load(); at != 0 {
 		return time.Unix(0, at)

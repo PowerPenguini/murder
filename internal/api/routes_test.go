@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"io"
+	"log/slog"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -73,5 +76,32 @@ func TestRoutesWaitForAChange(t *testing.T) {
 	gone, err := f.client.Routes(ctx, next.Version)
 	if err != nil || len(gone.Routes) != 0 {
 		t.Fatalf("after archiving: %+v, %v", gone, err)
+	}
+}
+
+func TestAStoppingAgentAnswersWaitingEdges(t *testing.T) {
+	f := newAPIFixture(t)
+	server := NewServer(f.store, f.reconciler, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	client := NewClientURL(httpServer.URL)
+	first, err := client.Routes(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := make(chan error, 1)
+	go func() {
+		_, err := client.Routes(context.Background(), first.Version)
+		answered <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	server.Stop()
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a waiting edge held the stopping agent")
 	}
 }

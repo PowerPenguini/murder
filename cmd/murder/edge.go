@@ -53,7 +53,7 @@ func runEdge(args []string) error {
 	if saved, ok, err := edge.LoadTable(cfg.Edge.Routes); err != nil {
 		log.Warn("the saved routes cannot be read; waiting for the agent's", "error", err)
 	} else if ok {
-		table.Set(saved)
+		table.Restore(saved)
 	}
 	proxy := edge.NewProxy(cfg.BaseDomain, table, log)
 
@@ -80,15 +80,6 @@ func runEdge(args []string) error {
 		cancel()
 	}()
 
-	// With TLS, the certificate comes first: a new edge taking over from an
-	// old one serves nothing the old one would serve better. It is read
-	// from storage, unless this is the first start.
-	var certificates *edge.Certificates
-	if cfg.Edge.TLS.Mode != edge.TLSOff {
-		if certificates = obtainTLS(ctx, cfg, log); certificates == nil {
-			return nil // stopped while waiting
-		}
-	}
 	failed := make(chan error, 3)
 	var servers []*http.Server
 	var listeners []net.Listener
@@ -108,19 +99,41 @@ func runEdge(args []string) error {
 		}
 		return listener, nil
 	}
-	httpListener, err := listen("edge http", cfg.Edge.HTTP)
-	if err != nil {
-		return err
+	// On a first start with TLS, plain HTTP answers while the certificate
+	// is obtained (503 for tenants until HTTPS serves). An edge taking over
+	// from an old one gets its certificate, from storage, before it serves
+	// anything: it serves nothing the old one would serve better.
+	tlsOn := cfg.Edge.TLS.Mode != edge.TLSOff
+	var ready atomic.Bool
+	plain := publicServer(proxy)
+	if tlsOn {
+		plain = publicServer(proxy.RedirectToHTTPS(ready.Load))
 	}
-	if certificates == nil {
-		serve("edge http", publicServer(proxy), httpListener)
-	} else {
+	if !tlsOn || !upgrader.HasParent() {
+		httpListener, err := listen("edge http", cfg.Edge.HTTP)
+		if err != nil {
+			return err
+		}
+		serve("edge http", plain, httpListener)
+	}
+	var certificates *edge.Certificates
+	if tlsOn {
+		if certificates = obtainTLS(ctx, cfg, log); certificates == nil {
+			return nil // stopped while waiting
+		}
+		if upgrader.HasParent() {
+			httpListener, err := listen("edge http", cfg.Edge.HTTP)
+			if err != nil {
+				return err
+			}
+			serve("edge http", plain, httpListener)
+		}
 		httpsListener, err := listen("edge https", cfg.Edge.HTTPS)
 		if err != nil {
 			return err
 		}
-		serve("edge http", publicServer(proxy.RedirectToHTTPS(func() bool { return true })), httpListener)
 		serve("edge https", publicServer(proxy), tls.NewListener(httpsListener, certificates.Config))
+		ready.Store(true)
 	}
 	if cfg.Edge.Metrics != "" {
 		metricsListener, err := listen("edge metrics", cfg.Edge.Metrics)

@@ -35,6 +35,10 @@ func TestSavedTablesLoad(t *testing.T) {
 	if _, ok := live.Route("acme"); ok || !live.Updated().IsZero() {
 		t.Fatal("an empty table routes")
 	}
+	live.Restore(loaded)
+	if _, ok := live.Route("acme"); !ok || !live.Updated().IsZero() {
+		t.Fatal("a saved table does not route, or counts as confirmed by the agent")
+	}
 	live.Set(loaded)
 	if route, ok := live.Route("acme"); !ok || route.Backend != "10.240.0.2:8080" || live.Updated().IsZero() {
 		t.Fatalf("route %+v %v", route, ok)

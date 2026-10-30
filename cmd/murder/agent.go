@@ -202,6 +202,7 @@ func runAgent(args []string) error {
 	// began, stops after the tenant step under way, which then finishes:
 	// a tenant whose container is being replaced gets its new one first.
 	stop()
+	apiHandler.Stop()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for _, server := range servers {

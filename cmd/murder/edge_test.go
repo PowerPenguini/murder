@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -52,6 +53,12 @@ func TestEdgeUpgradeDropsNothing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the binary")
 	}
+	t.Run("plain", func(t *testing.T) { testEdgeUpgrade(t, false) })
+	// The new edge loads the certificate before it serves.
+	t.Run("tls", func(t *testing.T) { testEdgeUpgrade(t, true) })
+}
+
+func testEdgeUpgrade(t *testing.T, secure bool) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "murder")
 	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
@@ -68,15 +75,21 @@ func TestEdgeUpgradeDropsNothing(t *testing.T) {
 	if err := edge.SaveTable(routes, edge.NewTable(map[string]edge.Route{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}})); err != nil {
 		t.Fatal(err)
 	}
-	address := freePort(t)
+	address, plainAddress := freePort(t), freePort(t)
 	pidFile := filepath.Join(dir, "edge.pid")
 	configPath := filepath.Join(dir, "agent.yaml")
 	// No agent runs: the edge serves the saved routes.
+	edgeConfig := fmt.Sprintf(`{http: %q, routes: %s, pidFile: %s, drain: 10s}`, address, routes, pidFile)
+	scheme := "http"
+	if secure {
+		scheme = "https"
+		edgeConfig = fmt.Sprintf(`{http: %q, https: %q, tls: {mode: internal, storage: %s}, routes: %s, pidFile: %s, drain: 10s}`, plainAddress, address, filepath.Join(dir, "certs"), routes, pidFile)
+	}
 	config := fmt.Sprintf(`baseDomain: example.test
 socket: %s
 firewall: "off"
-edge: {http: %q, routes: %s, pidFile: %s, drain: 10s}
-`, filepath.Join(dir, "agent.sock"), address, routes, pidFile)
+edge: %s
+`, filepath.Join(dir, "agent.sock"), edgeConfig)
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +123,7 @@ edge: {http: %q, routes: %s, pidFile: %s, drain: 10s}
 	}
 
 	get := func(client *http.Client, path string) error {
-		request, _ := http.NewRequest("GET", "http://"+address+path, nil)
+		request, _ := http.NewRequest("GET", scheme+"://"+address+path, nil)
 		request.Host = "acme.example.test"
 		response, err := client.Do(request)
 		if err != nil {
@@ -124,8 +137,9 @@ edge: {http: %q, routes: %s, pidFile: %s, drain: 10s}
 		return nil
 	}
 	// New connections every time, and kept-alive ones.
-	fresh := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 10 * time.Second}
-	kept := &http.Client{Timeout: 10 * time.Second}
+	insecure := &tls.Config{InsecureSkipVerify: true, ServerName: "acme.example.test"}
+	fresh := &http.Client{Transport: &http.Transport{DisableKeepAlives: true, TLSClientConfig: insecure}, Timeout: 10 * time.Second}
+	kept := &http.Client{Transport: &http.Transport{TLSClientConfig: insecure}, Timeout: 10 * time.Second}
 	ctx, stop := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	var served atomic.Int64

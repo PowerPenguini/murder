@@ -93,6 +93,12 @@ sudo systemctl reload murder-edge     # the new edge takes the listeners over; t
 sudo systemctl restart murder-agent   # tenants keep running, the edge keeps serving
 ```
 
+From a release in which the agent served the edge itself, the first
+upgrade has a short gap, once: install `murder-edge.service`, install the
+binary, `systemctl restart murder-agent` (which frees ports 80 and 443) and
+`systemctl enable --now murder-edge`. The edge's metrics (requests per
+tenant, certificate expiry) are served from then on at `edge.metrics`.
+
 The reload starts the new binary beside the old one and hands it the open
 listeners; only once it serves does the old one stop taking connections,
 finish the requests it has (up to `edge.drain`, 30 s; event streams are then
