@@ -540,7 +540,10 @@ func TestSuspendLogsAndRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok := (Routes{Store: f.store}).Route("away"); ok {
-		t.Fatal("this node routes a tenant another node runs")
+		t.Fatal("outside a cluster's relay, this node routes a tenant another node runs")
+	}
+	if route, ok := (Routes{Store: f.store, RelayPort: 7402}).Route("away"); !ok || route.Relay != "10.0.0.2:7402" || route.Backend != "" {
+		t.Fatalf("route to a tenant of another node = %+v, %v", route, ok)
 	}
 	if away, err := f.client.Get(ctx, "away"); err != nil || away.Node != "other-node" || !away.Elsewhere || away.Status != nil || away.Address != "" {
 		t.Fatalf("away = %+v, %v", away, err)

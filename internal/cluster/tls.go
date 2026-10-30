@@ -107,6 +107,17 @@ func (c *Credentials) client(protocol string) *tls.Config {
 	}
 }
 
+// RelayServer accepts other nodes' edges passing requests on to this
+// node's tenants.
+func (c *Credentials) RelayServer() *tls.Config {
+	config := c.server()
+	config.NextProtos = []string{protocolHTTP}
+	return config
+}
+
+// RelayClient passes requests on to another node's edge.
+func (c *Credentials) RelayClient() *tls.Config { return c.client(protocolHTTP) }
+
 // peerName is the node name in the certificate a peer presented.
 func peerName(state *tls.ConnectionState) (string, error) {
 	if state == nil || len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) == 0 {

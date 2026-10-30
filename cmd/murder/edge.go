@@ -19,9 +19,11 @@ import (
 	"github.com/cloudflare/tableflip"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/metrics"
+	"github.com/PowerPenguini/murder/internal/secrets"
 )
 
 // runEdge serves the public listeners. It holds no state: it routes with the
@@ -56,6 +58,20 @@ func runEdge(args []string) error {
 		table.Restore(saved)
 	}
 	proxy := edge.NewProxy(cfg.BaseDomain, table, log)
+	// In a cluster, requests for tenants of other nodes go on to their
+	// edges, proven part of the cluster by a certificate derived from the
+	// master key; this edge takes theirs on its relay port.
+	var credentials *cluster.Credentials
+	if cfg.Cluster != nil {
+		key, err := secrets.LoadKey(cfg.MasterKeyFile)
+		if err != nil {
+			return err
+		}
+		if credentials, err = cluster.NewCredentials(key.Derive(clusterSeed), "edge", time.Now()); err != nil {
+			return err
+		}
+		proxy.WithRelay(credentials.RelayClient())
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -134,6 +150,13 @@ func runEdge(args []string) error {
 		}
 		serve("edge https", publicServer(proxy), tls.NewListener(httpsListener, certificates.Config))
 		ready.Store(true)
+	}
+	if credentials != nil {
+		relayListener, err := listen("edge relay", cfg.RelayAddress())
+		if err != nil {
+			return err
+		}
+		serve("edge relay", publicServer(proxy.Relay()), tls.NewListener(relayListener, credentials.RelayServer()))
 	}
 	if cfg.Edge.Metrics != "" {
 		metricsListener, err := listen("edge metrics", cfg.Edge.Metrics)

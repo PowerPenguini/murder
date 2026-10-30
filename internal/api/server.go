@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -110,6 +111,8 @@ type Server struct {
 	stopOnce sync.Once
 	// upgrader installs new binaries on this node; nil if it takes none.
 	upgrader Upgrader
+	// relayPort is where the edges of a cluster pass requests on.
+	relayPort int
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }
@@ -117,6 +120,13 @@ type Server struct {
 // NewServer returns the API server.
 func NewServer(st store.Store, reconciler *reconcile.Reconciler, rt runtime.Runtime, key *secrets.Key, log *slog.Logger) *Server {
 	return &Server{store: st, reconciler: reconciler, runtime: rt, key: key, log: log, stopping: make(chan struct{})}
+}
+
+// WithRelayPort routes to tenants of other nodes through their edges'
+// relay port.
+func (s *Server) WithRelayPort(port int) *Server {
+	s.relayPort = port
+	return s
 }
 
 // Stop ends the requests that wait, before the server shuts down.
@@ -615,18 +625,43 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // Routes adapts the store for the edge proxy.
 type Routes struct {
 	Store store.Store
+	// RelayPort is where every node's edge takes requests other nodes pass
+	// on; 0 outside a cluster.
+	RelayPort int
 }
 
 func (r Routes) Route(tenant string) (edge.Route, bool) {
 	record, err := r.Store.Live(tenant)
-	if err != nil || record.Node != r.Store.Node() {
+	if err != nil {
 		return edge.Route{}, false
+	}
+	if record.Node != r.Store.Node() {
+		return r.relay(record)
 	}
 	backend, err := reconcile.Backend(record)
 	if err != nil {
 		return edge.Route{}, false
 	}
 	return edge.Route{Backend: backend, Suspended: record.Spec.Suspended}, true
+}
+
+// relay routes to the edge of the node that runs the tenant, on the private
+// network, at the host of its cluster address.
+func (r Routes) relay(record store.Record) (edge.Route, bool) {
+	if r.RelayPort == 0 {
+		return edge.Route{}, false
+	}
+	for _, node := range r.Store.Nodes() {
+		if node.Name != record.Node {
+			continue
+		}
+		host, _, err := net.SplitHostPort(node.Address)
+		if err != nil {
+			return edge.Route{}, false
+		}
+		return edge.Route{Relay: net.JoinHostPort(host, strconv.Itoa(r.RelayPort)), Suspended: record.Spec.Suspended}, true
+	}
+	return edge.Route{}, false
 }
 
 type statusError struct {

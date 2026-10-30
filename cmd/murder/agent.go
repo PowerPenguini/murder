@@ -187,6 +187,7 @@ func runAgent(args []string) error {
 
 	apiHandler := api.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader)
 	if member != nil {
+		apiHandler.WithRelayPort(cfg.Edge.RelayPort)
 		apiHandler.WithCluster(member)
 	}
 	apiServer := &http.Server{Handler: apiHandler.Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}

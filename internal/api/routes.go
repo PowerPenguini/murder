@@ -28,7 +28,7 @@ func (r Routes) Table() edge.Table {
 // version the edge has, the next one once the routes change, or the same
 // one after routesWait.
 func (s *Server) routes(w http.ResponseWriter, r *http.Request) {
-	routes := Routes{Store: s.store}
+	routes := Routes{Store: s.store, RelayPort: s.relayPort}
 	after := r.URL.Query().Get("after")
 	timeout := time.NewTimer(routesWait)
 	defer timeout.Stop()

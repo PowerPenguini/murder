@@ -102,6 +102,20 @@ type Edge struct {
 	// Drain is how long an edge that was replaced or stopped finishes the
 	// requests it has, such as event streams, before it closes them.
 	Drain Duration `yaml:"drain"`
+	// RelayPort is where, in a cluster, the edge takes requests other
+	// nodes' edges pass on to the tenants this node runs: on the node's
+	// cluster address. The same on every node.
+	RelayPort int `yaml:"relayPort"`
+}
+
+// RelayAddress is where the edge takes requests other nodes pass on; empty
+// outside a cluster.
+func (a Agent) RelayAddress() string {
+	if a.Cluster == nil {
+		return ""
+	}
+	host, _, _ := net.SplitHostPort(a.Cluster.Address)
+	return net.JoinHostPort(host, strconv.Itoa(a.Edge.RelayPort))
 }
 
 // Duration reads Go duration strings such as "10s".
@@ -137,7 +151,7 @@ func Parse(data []byte) (Agent, error) {
 		Firewall:      FirewallNftables,
 		Edge: Edge{
 			HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/murder/certs"},
-			Routes: "/var/lib/murder/edge-routes.json", PIDFile: "/run/murder-edge/edge.pid", Drain: Duration{30 * time.Second},
+			Routes: "/var/lib/murder/edge-routes.json", PIDFile: "/run/murder-edge/edge.pid", Drain: Duration{30 * time.Second}, RelayPort: 7402,
 		},
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
@@ -218,6 +232,11 @@ func (a Agent) Validate() error {
 	}
 	if !strings.HasPrefix(a.Edge.Routes, "/") || !strings.HasPrefix(a.Edge.PIDFile, "/") {
 		problems = append(problems, "edge.routes and edge.pidFile must be absolute paths")
+	}
+	if a.Edge.RelayPort < 1 || a.Edge.RelayPort > 65535 {
+		problems = append(problems, "edge.relayPort must be a port")
+	} else if a.Cluster != nil && a.RelayAddress() == a.Cluster.Address {
+		problems = append(problems, "edge.relayPort must differ from the cluster address's port")
 	}
 	if a.Edge.Drain.Duration < 0 {
 		problems = append(problems, "edge.drain must not be negative")
