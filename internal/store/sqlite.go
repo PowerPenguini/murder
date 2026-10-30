@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,12 +39,19 @@ type SQLite struct {
 	now     func() time.Time
 	lock    *os.File
 	mu      sync.Mutex // serializes writers
+	// applying serializes transactions and the publication of their state.
+	applying sync.Mutex
+	// commit makes a batch part of the state: applies it here, or, in a
+	// cluster, has the cluster's log apply it on every node.
+	commit  func(Batch) (*snapshot, error)
 	state   atomic.Pointer[snapshot]
 	changed chan struct{}
 }
 
 type snapshot struct {
-	node    string
+	node string
+	// version counts the batches applied to the replicated state.
+	version int64
 	apps    map[string]App
 	tenants map[string]Record
 	images  map[string]bool
@@ -133,7 +141,7 @@ func initDB(db *sql.DB, path, node string) error {
 	if _, err := tx.Exec(schema); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('node', ?)`, node); err != nil {
+	if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('node', ?), ('version', '0')`, node); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
@@ -186,9 +194,14 @@ func Open(path string, options Options) (*SQLite, error) {
 		return nil, err
 	}
 	s := &SQLite{path: path, db: db, options: options, now: time.Now, lock: lock, changed: make(chan struct{}, 1)}
+	s.commit = s.apply
 	if err := checkSchema(db); err != nil {
 		_ = s.Close()
 		return nil, fmt.Errorf("database %s: %w", path, err)
+	}
+	if err := upgrade(db); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("database %s: upgrade the schema: %w", path, err)
 	}
 	state, err := load(db)
 	if err != nil {
@@ -278,10 +291,17 @@ type querier interface {
 }
 
 // load reads the whole state. It is small: one row per app and tenant.
-func load(q querier) (*snapshot, error) {
-	state := &snapshot{apps: map[string]App{}, tenants: map[string]Record{}, images: map[string]bool{}}
+func load(q querier) (state *snapshot, err error) {
+	state = &snapshot{apps: map[string]App{}, tenants: map[string]Record{}, images: map[string]bool{}}
 	if err := q.QueryRow(`SELECT value FROM meta WHERE key = 'node'`).Scan(&state.node); err != nil {
 		return nil, fmt.Errorf("read the node name: %w", err)
+	}
+	var version string
+	if err := q.QueryRow(`SELECT value FROM meta WHERE key = 'version'`).Scan(&version); err != nil {
+		return nil, fmt.Errorf("read the state version: %w", err)
+	}
+	if state.version, err = strconv.ParseInt(version, 10, 64); err != nil {
+		return nil, fmt.Errorf("state version %q: %w", version, err)
 	}
 	if err := q.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&state.lastEvent); err != nil {
 		return nil, err
@@ -401,17 +421,80 @@ func parseTime(text string) time.Time {
 	return t
 }
 
-// write runs change in one transaction, rebuilds the snapshot inside it and
-// makes the snapshot current only once the transaction has committed.
-func (s *SQLite) write(signal bool, change func(tx *sql.Tx, current *snapshot, now time.Time) error) (*snapshot, error) {
+// write computes a change against the current state as a batch of
+// statements and commits it. A batch computed against a state that has
+// changed since is stale and computed again; writers on one node are
+// serialized, so only writes from other nodes can make it stale.
+func (s *SQLite) write(signal bool, change func(tx *recorder, current *snapshot, now time.Time) error) (*snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for attempt := 1; ; attempt++ {
+		current := s.state.Load()
+		tx := &recorder{}
+		if err := change(tx, current, s.now().UTC()); err != nil {
+			return nil, err
+		}
+		next, err := s.commit(Batch{Schema: schemaVersion, Version: current.version, Signal: signal, Statements: tx.statements})
+		if errors.Is(err, ErrStale) && attempt < staleAttempts {
+			continue
+		}
+		return next, err
+	}
+}
+
+// staleAttempts is how often a write is computed before a stale batch is
+// reported: often enough for writes racing on other nodes to pass.
+const staleAttempts = 5
+
+// Apply applies a batch committed elsewhere, such as by the cluster's log,
+// in one transaction. It refuses, with ErrStale and without a change, a
+// batch computed against another version of the state. The new state is
+// published only once the transaction has committed.
+func (s *SQLite) Apply(batch Batch) error {
+	_, err := s.apply(batch)
+	return err
+}
+
+func (s *SQLite) apply(batch Batch) (*snapshot, error) {
+	if batch.Schema != schemaVersion {
+		return nil, fmt.Errorf("%w: a batch for schema version %d, this node runs %d", ErrSchema, batch.Schema, schemaVersion)
+	}
+	return s.transact(batch.Signal, func(tx *sql.Tx, current *snapshot) error {
+		if batch.Version != current.version {
+			return fmt.Errorf("%w: computed against version %d, the state is at %d", ErrStale, batch.Version, current.version)
+		}
+		for _, statement := range batch.Statements {
+			args, err := statement.values()
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(statement.SQL, args...); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = 'version'`, strconv.FormatInt(current.version+1, 10))
+		return err
+	})
+}
+
+// local changes what only this node keeps, such as the images it pulled,
+// outside the replicated state.
+func (s *SQLite) local(change func(tx *sql.Tx) error) error {
+	_, err := s.transact(false, func(tx *sql.Tx, _ *snapshot) error { return change(tx) })
+	return err
+}
+
+// transact runs change in one transaction, rebuilds the snapshot inside it
+// and makes the snapshot current only once the transaction has committed.
+func (s *SQLite) transact(signal bool, change func(tx *sql.Tx, current *snapshot) error) (*snapshot, error) {
+	s.applying.Lock()
+	defer s.applying.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	if err := change(tx, s.state.Load(), s.now().UTC()); err != nil {
+	if err := change(tx, s.state.Load()); err != nil {
 		return nil, err
 	}
 	next, err := load(tx)
@@ -434,17 +517,16 @@ func (s *SQLite) write(signal bool, change func(tx *sql.Tx, current *snapshot, n
 	return next, nil
 }
 
-func event(tx *sql.Tx, now time.Time, actor, action, tenant, app, detail string) error {
+func event(tx *recorder, now time.Time, actor, action, tenant, app, detail string) error {
 	if actor == "" {
 		actor = "unknown"
 	}
-	_, err := tx.Exec(`INSERT INTO events (at, actor, action, tenant, app, detail) VALUES (?, ?, ?, ?, ?, ?)`,
+	return tx.Exec(`INSERT INTO events (at, actor, action, tenant, app, detail) VALUES (?, ?, ?, ?, ?, ?)`,
 		formatTime(now), actor, action, tenant, app, detail)
-	return err
 }
 
 // sealMissing generates a value for every secret of tenant that has none.
-func (s *SQLite) sealMissing(tx *sql.Tx, now time.Time, tenant spec.Tenant, sealed map[string]string) error {
+func (s *SQLite) sealMissing(tx *recorder, now time.Time, tenant spec.Tenant, sealed map[string]string) error {
 	for _, name := range slices.Sorted(maps.Keys(tenant.Secrets)) {
 		if _, ok := sealed[name]; ok {
 			continue
@@ -453,7 +535,7 @@ func (s *SQLite) sealMissing(tx *sql.Tx, now time.Time, tenant spec.Tenant, seal
 		if err != nil {
 			return fmt.Errorf("secret %s: %w", name, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO secrets (tenant, name, sealed, created_at) VALUES (?, ?, ?, ?)`, tenant.Name, name, value, formatTime(now)); err != nil {
+		if err := tx.Exec(`INSERT INTO secrets (tenant, name, sealed, created_at) VALUES (?, ?, ?, ?)`, tenant.Name, name, value, formatTime(now)); err != nil {
 			return err
 		}
 	}
@@ -536,7 +618,7 @@ func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
 	app.Spec = normalizeApp(app.Spec)
 	var result AppChange
 	var unchanged App
-	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
+	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		existing, found := current.apps[app.Name]
 		result.Created = !found
 		if found && existing.Spec.Equal(app.Spec) {
@@ -547,7 +629,7 @@ func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
 			return err
 		}
 		stamp := formatTime(now)
-		if _, err := tx.Exec(`INSERT INTO apps (name, spec, created_at, updated_at) VALUES (?, ?, ?, ?)
+		if err := tx.Exec(`INSERT INTO apps (name, spec, created_at, updated_at) VALUES (?, ?, ?, ?)
 			ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at`,
 			app.Name, marshal(app.Spec), stamp, stamp); err != nil {
 			return err
@@ -567,7 +649,7 @@ func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
 			if composed.Equal(record.Spec) {
 				continue
 			}
-			if _, err := tx.Exec(`UPDATE tenants SET generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+			if err := tx.Exec(`UPDATE tenants SET generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 				return err
 			}
 			if err := s.sealMissing(tx, now, composed, record.Sealed); err != nil {
@@ -621,7 +703,7 @@ func changedFields(before, after spec.Tenant) []string {
 var errUnchanged = errors.New("unchanged")
 
 func (s *SQLite) DeleteApp(name, actor string) error {
-	_, err := s.write(false, func(tx *sql.Tx, current *snapshot, now time.Time) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		if _, ok := current.apps[name]; !ok {
 			return fmt.Errorf("app %s: %w", name, ErrNotFound)
 		}
@@ -634,7 +716,7 @@ func (s *SQLite) DeleteApp(name, actor string) error {
 		if len(names) > 0 {
 			return fmt.Errorf("%w: tenants %v run app %s (archived ones count until purged)", ErrInUse, names, name)
 		}
-		if _, err := tx.Exec(`DELETE FROM apps WHERE name = ?`, name); err != nil {
+		if err := tx.Exec(`DELETE FROM apps WHERE name = ?`, name); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "app.deleted", "", name, "")
@@ -694,7 +776,7 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 		return Record{}, &spec.ValidationError{Problems: []string{err.Error()}}
 	}
 	overrides := tenant.Overrides.Normalized()
-	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
+	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		if existing, ok := current.tenants[tenant.Name]; ok && existing.Archived() {
 			return ErrArchived
 		} else if ok {
@@ -709,7 +791,7 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 			return err
 		}
 		stamp := formatTime(now)
-		if _, err := tx.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at)
+		if err := tx.Exec(`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at)
 			VALUES (?, ?, ?, 0, ?, '', '', 1, ?, ?)`, tenant.Name, tenant.App, marshal(overrides), subnet, stamp, stamp); err != nil {
 			return err
 		}
@@ -749,7 +831,7 @@ func overridesDetail(overrides spec.Overrides) string {
 func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generation int64, actor string) (Record, bool, error) {
 	overrides = overrides.Normalized()
 	var unchanged Record
-	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
+	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
 		if !ok {
 			return fmt.Errorf("tenant %s: %w", name, ErrNotFound)
@@ -765,7 +847,7 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE tenants SET app = ?, overrides = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
+		if err := tx.Exec(`UPDATE tenants SET app = ?, overrides = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
 			app, marshal(overrides), formatTime(now), name); err != nil {
 			return err
 		}
@@ -794,12 +876,12 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 }
 
 func (s *SQLite) SetSuspended(name string, suspended bool, actor string) (Record, error) {
-	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
+	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE tenants SET suspended = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
+		if err := tx.Exec(`UPDATE tenants SET suspended = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
 			suspended, formatTime(now), name); err != nil {
 			return err
 		}
@@ -816,7 +898,7 @@ func (s *SQLite) SetSuspended(name string, suspended bool, actor string) (Record
 }
 
 func (s *SQLite) Rotate(name, secret, actor string) (Record, error) {
-	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
+	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)
 		if err != nil {
 			return err
@@ -830,11 +912,11 @@ func (s *SQLite) Rotate(name, secret, actor string) (Record, error) {
 			return err
 		}
 		stamp := formatTime(now)
-		if _, err := tx.Exec(`INSERT INTO secrets (tenant, name, sealed, created_at) VALUES (?, ?, ?, ?)
+		if err := tx.Exec(`INSERT INTO secrets (tenant, name, sealed, created_at) VALUES (?, ?, ?, ?)
 			ON CONFLICT (tenant, name) DO UPDATE SET sealed = excluded.sealed, created_at = excluded.created_at`, name, secret, value, stamp); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE tenants SET generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+		if err := tx.Exec(`UPDATE tenants SET generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "secret.rotated", name, record.App, secret)
@@ -849,12 +931,11 @@ func (s *SQLite) Observe(name, dataImage string) error {
 	if record, ok := s.state.Load().tenants[name]; ok && record.DataImage == dataImage {
 		return nil
 	}
-	_, err := s.write(false, func(tx *sql.Tx, current *snapshot, _ time.Time) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, _ time.Time) error {
 		if _, err := liveTenant(current, name); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`UPDATE tenants SET previous_image = CASE WHEN data_image = '' THEN previous_image ELSE data_image END, data_image = ? WHERE name = ?`, dataImage, name)
-		return err
+		return tx.Exec(`UPDATE tenants SET previous_image = CASE WHEN data_image = '' THEN previous_image ELSE data_image END, data_image = ? WHERE name = ?`, dataImage, name)
 	})
 	return err
 }
@@ -862,12 +943,12 @@ func (s *SQLite) Observe(name, dataImage string) error {
 // Archive takes a live tenant out of service in one write; the edge stops
 // routing to it at once. Its suspension is kept for the restore.
 func (s *SQLite) Archive(name, actor string) error {
-	_, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
+	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE tenants SET archived_at = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
+		if err := tx.Exec(`UPDATE tenants SET archived_at = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
 			formatTime(now), formatTime(now), name); err != nil {
 			return err
 		}
@@ -877,7 +958,7 @@ func (s *SQLite) Archive(name, actor string) error {
 }
 
 func (s *SQLite) Restore(name, actor string) (Record, error) {
-	next, err := s.write(true, func(tx *sql.Tx, current *snapshot, now time.Time) error {
+	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
 		switch {
 		case !ok:
@@ -889,7 +970,7 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 		if err != nil {
 			return fmt.Errorf("tenant %s cannot run app %s as it is now; change it with \"murder tenant set\" first: %w", name, record.App, err)
 		}
-		if _, err := tx.Exec(`UPDATE tenants SET archived_at = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
+		if err := tx.Exec(`UPDATE tenants SET archived_at = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
 			formatTime(now), name); err != nil {
 			return err
 		}
@@ -907,7 +988,7 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 // Forget deletes an archived tenant and its secrets. It also records the
 // purge of data no archive entry accounted for.
 func (s *SQLite) Forget(name, actor string) error {
-	_, err := s.write(false, func(tx *sql.Tx, current *snapshot, now time.Time) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
 		if ok && !record.Archived() {
 			return fmt.Errorf("tenant %s: %w", name, ErrNotArchived)
@@ -915,7 +996,7 @@ func (s *SQLite) Forget(name, actor string) error {
 		app, detail := "", "leftover data"
 		if ok {
 			app, detail = record.App, ""
-			if _, err := tx.Exec(`DELETE FROM tenants WHERE name = ?`, name); err != nil {
+			if err := tx.Exec(`DELETE FROM tenants WHERE name = ?`, name); err != nil {
 				return err
 			}
 		}
@@ -969,11 +1050,10 @@ func (s *SQLite) ForgetImage(ref string) error {
 	if !s.state.Load().images[ref] {
 		return nil
 	}
-	_, err := s.write(false, func(tx *sql.Tx, _ *snapshot, _ time.Time) error {
+	return s.local(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`DELETE FROM images WHERE ref = ?`, ref)
 		return err
 	})
-	return err
 }
 
 // assign returns a subnet no tenant holds, live or archived.

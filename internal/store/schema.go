@@ -1,17 +1,23 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 )
 
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
-// production; their databases are refused, not upgraded. A later change of
-// the schema adds a migration from this version.
-const schemaVersion = 4
+// production; their databases are refused, not upgraded. Open upgrades
+// version 4 in place.
+const schemaVersion = 5
+
+// oldestSchema is the oldest schema version Open upgrades.
+const oldestSchema = 4
 
 const schema = `
+-- The node's name, which only this node keeps, and the version of the
+-- replicated state: the number of batches applied to it.
 CREATE TABLE meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -45,7 +51,8 @@ CREATE TABLE tenants (
 CREATE INDEX tenants_app ON tenants (app);
 
 -- Every image a tenant was given or ran: the candidates for removal once
--- no tenant needs them.
+-- no tenant needs them. Each node keeps its own, outside the replicated
+-- state.
 CREATE TABLE images (
 	ref TEXT PRIMARY KEY
 ) STRICT;
@@ -81,7 +88,7 @@ func checkSchema(q querier) error {
 		return err
 	}
 	switch {
-	case version == schemaVersion:
+	case version >= oldestSchema && version <= schemaVersion:
 		return nil
 	case version == 0:
 		var objects int
@@ -97,4 +104,30 @@ func checkSchema(q querier) error {
 	default:
 		return fmt.Errorf("it has schema version %d of a development release, which cannot be upgraded; create a new one with \"murder init\"", version)
 	}
+}
+
+// upgrade brings a database of an older schema version to this one, in one
+// transaction. Version 5 counts the batches applied to the state.
+func upgrade(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version == schemaVersion {
+		return nil
+	}
+	if version == 4 {
+		if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('version', '0')`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
