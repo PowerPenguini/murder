@@ -1,0 +1,26 @@
+[Unit]
+Description=Murder edge (public listeners)
+Documentation=https://github.com/PowerPenguini/murder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/murder edge -config /etc/murder/agent.yaml
+# Upgrade without a gap: install the new binary, then reload. The new
+# process takes the listeners over; the old one finishes its requests (at
+# most edge.drain) and exits. systemd follows the new one through PIDFile.
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/run/murder-edge/edge.pid
+Restart=always
+RestartSec=1
+# A stopping edge finishes its requests first (edge.drain, 30 s by default).
+TimeoutStopSec=45
+RuntimeDirectory=murder-edge
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=murder
+StateDirectoryMode=0700
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

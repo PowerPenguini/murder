@@ -84,11 +84,24 @@ type Volumes struct {
 	MountRoot string `yaml:"mountRoot"`
 }
 
-// Edge configures the public listeners.
+// Edge configures the public listeners, which "murder edge" serves.
 type Edge struct {
 	HTTP  string         `yaml:"http"`
 	HTTPS string         `yaml:"https"`
 	TLS   edge.TLSConfig `yaml:"tls"`
+	// Metrics, if set, is where the edge serves /metrics: its requests by
+	// tenant, its certificate and its routes. A loopback or private
+	// address, as for the agent's.
+	Metrics string `yaml:"metrics"`
+	// Routes keeps the last routes the edge got from the agent, so an edge
+	// started while the agent is down serves all the same.
+	Routes string `yaml:"routes"`
+	// PIDFile names the edge's process; an upgrade replaces the process,
+	// and systemd follows it there.
+	PIDFile string `yaml:"pidFile"`
+	// Drain is how long an edge that was replaced or stopped finishes the
+	// requests it has, such as event streams, before it closes them.
+	Drain Duration `yaml:"drain"`
 }
 
 // Duration reads Go duration strings such as "10s".
@@ -115,14 +128,17 @@ func Load(path string) (Agent, error) {
 // Parse reads a configuration and fills in defaults.
 func Parse(data []byte) (Agent, error) {
 	agent := Agent{
-		Database:          "/var/lib/murder/murder.db",
-		MasterKeyFile:     "/etc/murder/master.key",
-		Socket:            "/run/murder/agent.sock",
-		DockerSocket:      "/var/run/docker.sock",
-		Volumes:           Volumes{Driver: "dir", Root: "/srv/murder/tenants", MountRoot: "/srv/murder/tenants"},
-		NetworkPool:       "10.240.0.0/16",
-		Firewall:          FirewallNftables,
-		Edge:              Edge{HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/murder/certs"}},
+		Database:      "/var/lib/murder/murder.db",
+		MasterKeyFile: "/etc/murder/master.key",
+		Socket:        "/run/murder/agent.sock",
+		DockerSocket:  "/var/run/docker.sock",
+		Volumes:       Volumes{Driver: "dir", Root: "/srv/murder/tenants", MountRoot: "/srv/murder/tenants"},
+		NetworkPool:   "10.240.0.0/16",
+		Firewall:      FirewallNftables,
+		Edge: Edge{
+			HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/murder/certs"},
+			Routes: "/var/lib/murder/edge-routes.json", PIDFile: "/run/murder-edge/edge.pid", Drain: Duration{30 * time.Second},
+		},
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
 	}
@@ -194,6 +210,17 @@ func (a Agent) Validate() error {
 		if host, _, err := net.SplitHostPort(a.Metrics); err != nil || host == "" {
 			problems = append(problems, "metrics must be a host and port, such as 127.0.0.1:9464")
 		}
+	}
+	if a.Edge.Metrics != "" {
+		if host, _, err := net.SplitHostPort(a.Edge.Metrics); err != nil || host == "" {
+			problems = append(problems, "edge.metrics must be a host and port, such as 127.0.0.1:9465")
+		}
+	}
+	if !strings.HasPrefix(a.Edge.Routes, "/") || !strings.HasPrefix(a.Edge.PIDFile, "/") {
+		problems = append(problems, "edge.routes and edge.pidFile must be absolute paths")
+	}
+	if a.Edge.Drain.Duration < 0 {
+		problems = append(problems, "edge.drain must not be negative")
 	}
 	for _, problem := range a.Defaults.Problems() {
 		problems = append(problems, "defaults: "+problem)

@@ -35,12 +35,16 @@ the state replicated between nodes.
   ones created before this release from their next replacement). Stopping
   the agent lets a container replacement under way finish first, also in a
   pass `murder reconcile` started, so no tenant is left without one.
-- **Edge proxy.** Routes `<tenant>.<baseDomain>` to the tenant's container. It
+- **Edge proxy.** `murder edge`, a process of its own, routes
+  `<tenant>.<baseDomain>` to the tenant's container. It
   streams responses (server-sent events) and replaces any client-sent
   `X-Forwarded-*` headers. Over HTTPS it adds `Strict-Transport-Security` (one
   year) unless the app sets its own. TLS is `off`, `internal` (a local CA, for testing) or
   `acme`, which gets a wildcard certificate through DNS-01 from Hetzner Cloud DNS
-  or Namecheap.
+  or Namecheap. It holds no state: the agent hands it the routes as soon as
+  they change, and it keeps the last ones (also on disk, `edge.routes`), so
+  it serves while the agent restarts or is down. `murder_edge_routes_timestamp_seconds`
+  in its metrics (`edge.metrics`) says when the agent last answered.
 - **Local API.** A unix socket the `murder` CLI (and, later, the panel) talks to.
 - **Database.** One SQLite file holds the node's apps, tenants, sealed secrets
   and an audit log of every change: who (the socket user, plus the person a
@@ -52,14 +56,16 @@ the state replicated between nodes.
   plain directories, cannot limit disk use and is for development.
 - **Firewall.** An nftables table (`inet murder`) keeps tenants away from
   the host and private networks; see the security model.
-- **Metrics.** With `metrics:` set (say `127.0.0.1:9464`), `/metrics` serves,
-  in the Prometheus text format: per tenant, the edge's responses by status
-  class, how long their headers took and requests it could not pass on; each
-  live tenant's phase, health, restarts and warning; when the last whole
-  reconcile pass ended and its error count; when the firewall was last
-  loaded, a backup last sent (since the agent started) and the certificate
-  expires. Enough to alert on a tenant down or crashing, a stuck agent, a
-  missing backup or a certificate not renewed.
+- **Metrics.** With `metrics:` set (say `127.0.0.1:9464`), the agent's
+  `/metrics` serves, in the Prometheus text format: each live tenant of the
+  node's phase, health, restarts and warning; when the last whole reconcile
+  pass ended and its error count; when the firewall was last loaded and a
+  backup last sent (since the agent started). With `edge.metrics` set (say
+  `127.0.0.1:9465`), the edge's serves per tenant its responses by status
+  class, how long their headers took and requests it could not pass on, and
+  when the certificate expires and the agent last confirmed the routes.
+  Enough to alert on a tenant down or crashing, a stuck agent, a missing
+  backup or a certificate not renewed.
 - **Secrets.** Generated per tenant and sealed with the node's master key
   (AES-256-GCM, bound to tenant and name). The database never holds them in
   the clear.
@@ -72,10 +78,26 @@ sudo install -m 0755 murder /usr/local/bin/murder
 sudo install -d -m 0755 /etc/murder
 sudo install -m 0644 deploy/agent.example.yaml /etc/murder/agent.yaml   # then edit it
 sudo murder init                       # creates the master key (store a copy offline) and an empty database
-sudo install -m 0644 deploy/murder-firewall.service deploy/murder-agent.service \
+sudo install -m 0644 deploy/murder-firewall.service deploy/murder-agent.service deploy/murder-edge.service \
   deploy/murder-backup.service deploy/murder-backup.timer /etc/systemd/system/
-sudo systemctl enable --now murder-firewall murder-agent murder-backup.timer
+sudo systemctl enable --now murder-firewall murder-agent murder-edge murder-backup.timer
 ```
+
+### Upgrade Murder
+
+An upgrade stops no tenant and drops no request:
+
+```bash
+sudo install -m 0755 murder /usr/local/bin/murder
+sudo systemctl reload murder-edge     # the new edge takes the listeners over; the old one finishes its requests
+sudo systemctl restart murder-agent   # tenants keep running, the edge keeps serving
+```
+
+The reload starts the new binary beside the old one and hands it the open
+listeners; only once it serves does the old one stop taking connections,
+finish the requests it has (up to `edge.drain`, 30 s; event streams are then
+closed and reconnect) and exit. A new edge that does not start leaves the old
+one serving. Restarting the agent leaves containers alone and the edge routing.
 
 With the `zfs` driver, create the parent dataset first, for example
 `zfs create -p tank/murder/tenants`, and make Docker start after ZFS has mounted
@@ -321,9 +343,6 @@ through Murder's real components:
 
 ## Known limits
 
-- **Edge inside the agent.** The edge proxy runs in the agent process, so
-  public traffic pauses for the few seconds an agent restart takes. Tenant
-  containers keep running.
 - **Tenants stay on their node.** A tenant's data lives on the node that
   runs it, and only that node's edge serves it; replicated tenant data,
   routing between nodes and failover come next.

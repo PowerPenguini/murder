@@ -12,7 +12,8 @@ const usage = `Usage: murder <command> [arguments]
 
 Node commands:
   init       create the master key and the database for a node
-  agent      run the agent (reconciler, edge proxy and local API)
+  agent      run the agent (reconciler, local API and cluster)
+  edge       serve the public listeners; SIGHUP replaces it without a gap
   firewall   load the tenant firewall (murder-firewall.service runs it at boot)
   restore    put a backup in place of the node's database (agent stopped)
   cluster    show, start, join or leave a cluster of nodes
@@ -46,6 +47,8 @@ func run(args []string) error {
 		return runInit(args[1:])
 	case "agent":
 		return runAgent(args[1:])
+	case "edge":
+		return runEdge(args[1:])
 	case "firewall":
 		return runFirewall(args[1:])
 	case "app":

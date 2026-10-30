@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,7 +21,6 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
-	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
@@ -143,23 +141,11 @@ func runAgent(args []string) error {
 	}
 
 	// Bind every listener before serving, so a taken port stops the agent at
-	// once instead of leaving it up without an edge.
+	// once. The edge is a process of its own ("murder edge"): restarting
+	// the agent leaves public traffic alone.
 	apiListener, err := listenSocket(cfg.Socket, cfg.SocketGroup)
 	if err != nil {
 		return err
-	}
-	httpListener, err := net.Listen("tcp", cfg.Edge.HTTP)
-	if err != nil {
-		return fmt.Errorf("edge http: %w", err)
-	}
-	if cfg.Edge.TLS.Mode != edge.TLSOff {
-		// Only check the port now: holding it without a certificate would
-		// leave clients hanging in the accept queue instead of refused.
-		probe, err := net.Listen("tcp", cfg.Edge.HTTPS)
-		if err != nil {
-			return fmt.Errorf("edge https: %w", err)
-		}
-		_ = probe.Close()
 	}
 	var metricsListener net.Listener
 	if cfg.Metrics != "" {
@@ -173,7 +159,7 @@ func runAgent(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	failed := make(chan error, 3)
+	failed := make(chan error, 2)
 	serve := func(name string, server *http.Server, listener net.Listener) {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			failed <- fmt.Errorf("%s listener: %w", name, err)
@@ -195,41 +181,14 @@ func runAgent(args []string) error {
 		go keepFirewall(ctx, cfg, st, log, firewallLoaded)
 	}
 
-	proxy := edge.NewProxy(cfg.BaseDomain, api.Routes{Store: st}, log)
 	servers := []*http.Server{apiServer}
-	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, edge: proxy.Stats(), firewall: firewallLoaded}
+	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded}
 	if metricsListener != nil {
 		metricsServer := &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, metricsServer)
 		go serve("metrics", metricsServer, metricsListener)
 	}
-	if cfg.Edge.TLS.Mode == edge.TLSOff {
-		plain := publicServer(proxy)
-		servers = append(servers, plain)
-		go serve("edge http", plain, httpListener)
-	} else {
-		var ready atomic.Bool
-		redirect := publicServer(proxy.RedirectToHTTPS(ready.Load))
-		secure := publicServer(proxy)
-		servers = append(servers, redirect, secure)
-		go serve("edge http", redirect, httpListener)
-		go func() {
-			certificates := obtainTLS(ctx, cfg, log)
-			if certificates == nil {
-				return
-			}
-			observed.certificates.Store(certificates)
-			listener, err := net.Listen("tcp", cfg.Edge.HTTPS)
-			if err != nil {
-				failed <- fmt.Errorf("edge https: %w", err)
-				return
-			}
-			ready.Store(true)
-			log.Info("edge https ready")
-			serve("edge https", secure, tls.NewListener(listener, certificates.Config))
-		}()
-	}
-	log.Info("murder agent started", "node", node, "baseDomain", cfg.BaseDomain, "volumes", cfg.Volumes.Driver, "tls", cfg.Edge.TLS.Mode)
+	log.Info("murder agent started", "node", node, "baseDomain", cfg.BaseDomain, "volumes", cfg.Volumes.Driver)
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -375,30 +334,6 @@ func runFirewall(args []string) error {
 		return err
 	}
 	return loadFirewall(context.Background(), cfg, subnets)
-}
-
-// publicServer has no write timeout: tenants stream server-sent events.
-func publicServer(handler http.Handler) *http.Server {
-	return &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
-}
-
-// obtainTLS retries until the certificate is available or ctx ends; the
-// reconciler and the plain listener keep working meanwhile.
-func obtainTLS(ctx context.Context, cfg config.Agent, log *slog.Logger) *edge.Certificates {
-	delay := 10 * time.Second
-	for {
-		certificates, err := edge.NewTLS(ctx, cfg.Edge.TLS, cfg.BaseDomain, log)
-		if err == nil {
-			return certificates
-		}
-		log.Error("obtain TLS certificate", "error", err, "retryIn", delay.String())
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(delay):
-		}
-		delay = min(2*delay, 10*time.Minute)
-	}
 }
 
 // privateHost reports whether host is a loopback or private address, or a

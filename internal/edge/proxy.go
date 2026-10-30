@@ -33,8 +33,8 @@ const hsts = "max-age=31536000"
 type Route struct {
 	// Backend is the tenant container's address and port, which only the
 	// host reaches.
-	Backend   string
-	Suspended bool
+	Backend   string `json:"backend"`
+	Suspended bool   `json:"suspended,omitempty"`
 }
 
 // Routes looks tenants up by name.

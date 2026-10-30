@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/caddyserver/certmagic v0.25.6
+	github.com/cloudflare/tableflip v1.2.3
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/raft v1.8.0
 	github.com/hashicorp/raft-boltdb/v2 v2.4.2

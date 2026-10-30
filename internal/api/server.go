@@ -116,6 +116,7 @@ func NewServer(st store.Store, reconciler *reconcile.Reconciler, rt runtime.Runt
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.clusterRoutes(mux)
+	mux.HandleFunc("GET /v1/routes", s.routes)
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
 	mux.HandleFunc("PUT /v1/apps/{name}", s.putApp)
