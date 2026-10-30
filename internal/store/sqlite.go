@@ -393,7 +393,7 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node FROM tenants`)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout FROM tenants`)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +402,7 @@ func load(q querier) (state *snapshot, err error) {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -1018,6 +1018,23 @@ func (s *SQLite) Rotate(name, secret, actor string) (Record, error) {
 			return err
 		}
 		return event(tx, now, actor, "secret.rotated", name, record.App, secret)
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	return next.tenants[name].clone(), nil
+}
+
+func (s *SQLite) Roll(name, actor string) (Record, error) {
+	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, err := liveTenant(current, name)
+		if err != nil {
+			return err
+		}
+		if err := tx.Exec(`UPDATE tenants SET rollout = rollout + 1, generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "tenant.rolled", name, record.App, "")
 	})
 	if err != nil {
 		return Record{}, err

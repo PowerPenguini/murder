@@ -30,6 +30,10 @@ const tenantUsage = `Usage: murder tenant <command> [options]
   purge NAME -yes        delete an archived tenant and its data for good
   secret NAME KEY        print one generated secret
   rotate NAME KEY        give a secret a new value (the container restarts)
+  roll NAME | -all       replace the container as it is, applying what a new
+                         release of Murder changed in containers; -all rolls
+                         this node's tenants one at a time, each healthy
+                         before the next (-wait, 5m by default)
   logs NAME [-tail N]    print the container's recent output
 
 Overrides (repeatable where it makes sense; set changes only what is given):
@@ -93,6 +97,7 @@ func runTenant(args []string) error {
 	yes := flags.Bool("yes", false, "confirm purge")
 	tail := flags.Int("tail", 200, "with logs: number of lines")
 	asJSON := flags.Bool("json", false, "with list: print JSON")
+	all := flags.Bool("all", false, "with roll: every tenant this node runs")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
 		return err
@@ -191,6 +196,25 @@ func runTenant(args []string) error {
 		}
 		fmt.Fprintf(stdout, "%s %s rotated; the container restarts with the new value\n", positional[0], positional[1])
 		return waitHealthy(ctx, client, result, *wait)
+	case "roll":
+		if !*all {
+			if err := need(1); err != nil {
+				return err
+			}
+			result, err := client.Roll(ctx, positional[0])
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "%s rolled; its container is replaced\n", positional[0])
+			return waitHealthy(ctx, client, result, *wait)
+		}
+		if err := need(0); err != nil {
+			return err
+		}
+		if *wait <= 0 {
+			*wait = 5 * time.Minute
+		}
+		return rollAll(ctx, client, *wait)
 	case "logs":
 		if err := need(1); err != nil {
 			return err
@@ -205,6 +229,33 @@ func runTenant(args []string) error {
 		fmt.Fprint(os.Stderr, tenantUsage)
 		return fmt.Errorf("unknown tenant command %q", command)
 	}
+}
+
+// rollAll rolls the running tenants this node runs one after the other,
+// each healthy before the next, and stops at the first that is not: one
+// tenant down at a time, and none after a release that breaks them.
+func rollAll(ctx context.Context, client *api.Client, wait time.Duration) error {
+	tenants, err := client.List(ctx)
+	if err != nil {
+		return err
+	}
+	rolled := 0
+	for _, tenant := range tenants {
+		if tenant.Archived() || tenant.Elsewhere || tenant.Spec.Suspended {
+			continue
+		}
+		result, err := client.Roll(ctx, tenant.Spec.Name)
+		if err != nil {
+			return fmt.Errorf("roll %s: %w", tenant.Spec.Name, err)
+		}
+		fmt.Fprintf(stdout, "%s rolled\n", tenant.Spec.Name)
+		if err := waitHealthy(ctx, client, result, wait); err != nil {
+			return fmt.Errorf("stopped after %d tenant(s): %w", rolled, err)
+		}
+		rolled++
+	}
+	fmt.Fprintf(stdout, "rolled %d tenant(s)\n", rolled)
+	return nil
 }
 
 // parseInterspersed parses flags that may appear before, between or after

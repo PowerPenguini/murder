@@ -793,3 +793,29 @@ func TestPreviousImageAndTrackedImages(t *testing.T) {
 		t.Fatalf("tracked after forgetting = %v", images)
 	}
 }
+
+func TestRollReplacesOnlyLiveTenants(t *testing.T) {
+	st, _ := withApp(t, options())
+	created, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain(st)
+	rolled, err := st.Roll("acme", "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rolled.Rollout != 1 || rolled.Generation != created.Generation+1 || !drain(st) {
+		t.Fatalf("rolled = %+v", rolled)
+	}
+	events, _ := st.Events(EventQuery{Tenant: "acme", Limit: 1})
+	if events[0].Action != "tenant.rolled" || events[0].Actor != "bob" {
+		t.Fatalf("events = %+v", events)
+	}
+	if err := st.Archive("acme", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Roll("acme", "bob"); !errors.Is(err, ErrArchived) {
+		t.Fatalf("roll an archived tenant: %v", err)
+	}
+}

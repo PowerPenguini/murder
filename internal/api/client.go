@@ -198,6 +198,12 @@ func (c *Client) Secret(ctx context.Context, name, key string) (string, error) {
 }
 
 // Rotate gives one of a tenant's secrets a new value.
+// Roll has a tenant's container replaced as it is.
+func (c *Client) Roll(ctx context.Context, name string) (Tenant, error) {
+	var tenant Tenant
+	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+"/roll", nil, &tenant)
+}
+
 func (c *Client) Rotate(ctx context.Context, name, key string) (Tenant, error) {
 	var tenant Tenant
 	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+"/secrets/"+url.PathEscape(key)+"/rotate", nil, &tenant)

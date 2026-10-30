@@ -728,7 +728,7 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 			runtime.LabelImage:  tenant.Image,
 		},
 	}
-	hash, err := specHash(desired)
+	hash, err := r.inputsHash(record, dataPath)
 	if err != nil {
 		return runtime.ContainerSpec{}, err
 	}
@@ -736,11 +736,47 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 	return desired, nil
 }
 
-// specHash fingerprints everything that shapes the container. A container
-// whose label differs from the desired hash is replaced. JSON encodes maps
-// in sorted key order, so equal specs always hash alike.
-func specHash(desired runtime.ContainerSpec) (string, error) {
-	encoded, err := json.Marshal(desired)
+// inputs are what a tenant's container is made from that the operator
+// decides: the tenant's spec, its limits, address, names, secrets and data.
+// How Murder turns them into a container is not among them, so a new
+// release of Murder replaces no container; "murder tenant roll" applies
+// what it changed. Fields only ever get added, omitted when empty, so a
+// tenant whose inputs are as they were keeps its container across releases.
+type inputs struct {
+	Spec     spec.Tenant       `json:"spec"`
+	Limits   spec.Limits       `json:"limits"`
+	Subnet   string            `json:"subnet"`
+	Host     string            `json:"host"`
+	URL      string            `json:"url"`
+	Sealed   map[string]string `json:"sealed,omitempty"`
+	DataPath string            `json:"dataPath"`
+	Rollout  int64             `json:"rollout,omitempty"`
+}
+
+// inputsHash fingerprints a tenant's inputs. A container whose label differs
+// is replaced. JSON encodes maps in sorted key order, so equal inputs hash
+// alike.
+func (r *Reconciler) inputsHash(record store.Record, dataPath string) (string, error) {
+	tenant := record.Spec
+	tenant.Suspended = false // a resumed tenant gets a new container anyway
+	// No mounts, variables or secrets are none, however written.
+	if len(tenant.Tmpfs) == 0 {
+		tenant.Tmpfs = nil
+	}
+	if len(tenant.Env) == 0 {
+		tenant.Env = nil
+	}
+	if len(tenant.Secrets) == 0 {
+		tenant.Secrets = nil
+	}
+	sealed := map[string]string{}
+	for name := range tenant.Secrets {
+		sealed[name] = record.Sealed[name]
+	}
+	encoded, err := json.Marshal(inputs{
+		Spec: tenant, Limits: tenant.Limits.Or(r.config.DefaultLimits), Subnet: record.Subnet,
+		Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Sealed: sealed, DataPath: dataPath, Rollout: record.Rollout,
+	})
 	if err != nil {
 		return "", err
 	}

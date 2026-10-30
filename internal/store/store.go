@@ -65,6 +65,9 @@ type Record struct {
 	// PreviousImage is the image the data had before DataImage, kept on
 	// the node so a rollback needs no registry.
 	PreviousImage string `json:"previousImage,omitempty"`
+	// Rollout counts the rollouts asked for the tenant; each gives it a new
+	// container made as this release of Murder makes them.
+	Rollout int64 `json:"rollout,omitempty"`
 	// Generation counts changes of the desired state.
 	Generation int64     `json:"generation"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -179,6 +182,9 @@ type Store interface {
 	SetSuspended(name string, suspended bool, actor string) (Record, error)
 	// Rotate gives one secret of the tenant's spec a new value.
 	Rotate(name, secret, actor string) (Record, error)
+	// Roll has a live tenant's container replaced as it is: what a new
+	// release of Murder changed in containers then applies to it.
+	Roll(name, actor string) (Record, error)
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error

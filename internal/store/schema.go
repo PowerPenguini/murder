@@ -54,7 +54,9 @@ CREATE TABLE tenants (
 	updated_at  TEXT NOT NULL,
 	archived_at TEXT,
 	-- The node that runs the tenant and keeps its data.
-	node        TEXT NOT NULL
+	node        TEXT NOT NULL,
+	-- Rollouts asked for: each replaces the container as it is.
+	rollout     INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -151,6 +153,9 @@ func upgrade(db *sql.DB) error {
 			return err
 		}
 		if _, err := tx.Exec(`CREATE INDEX tenants_node ON tenants (node)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`ALTER TABLE tenants ADD COLUMN rollout INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`CREATE TABLE nodes (

@@ -109,8 +109,16 @@ edge: %s
 	exited := make(chan error, 1)
 	go func() { exited <- first.Wait() }()
 	defer func() {
-		if pid := readPID(pidFile); pid != 0 {
+		// The new edge is not this test's child: wait for it to drain and
+		// go, before the backend closes.
+		if pid := readPID(pidFile); pid != 0 && pid != first.Process.Pid {
 			_ = syscall.Kill(pid, syscall.SIGTERM)
+			for range 300 {
+				if syscall.Kill(pid, 0) != nil {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
 		}
 		_ = first.Process.Kill()
 	}()

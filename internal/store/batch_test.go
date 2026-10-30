@@ -214,7 +214,7 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{`DROP TABLE nodes`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`} {
+	for _, statement := range []string{`DROP TABLE nodes`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`, `ALTER TABLE tenants DROP COLUMN rollout`} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
