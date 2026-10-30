@@ -1472,3 +1472,22 @@ func TestWhatTheContainerDoesNotUseReplacesNothing(t *testing.T) {
 		t.Fatal("a memory limit does not replace the container")
 	}
 }
+
+func TestNoPurgeWhileFrozen(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	if err := f.store.Archive("acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if err := f.store.Freeze("upgrade", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reconciler.Purge(context.Background(), "acme", "test"); !errors.Is(err, store.ErrFrozen) {
+		t.Fatalf("purge while frozen: %v", err)
+	}
+	if exists, _ := f.volumes.Exists(context.Background(), "acme"); !exists {
+		t.Fatal("a purge refused while frozen deleted the data")
+	}
+}

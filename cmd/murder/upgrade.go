@@ -73,9 +73,10 @@ hands its edge over to the new binary and restarts its agent into it; the
 next node follows once it is back and has caught up.
 
 If a node does not come back, the upgrade stops there and changes stay
-frozen: on that node, "murder upgrade rollback" puts the old binary (and,
-if the new release changed it, the old database) back; then "murder upgrade
--thaw", or the upgrade again.
+frozen: on that node, with its agent stopped, "murder upgrade rollback"
+puts the old binary (and, if the new release changed it, the old database)
+back. Running the same upgrade again resumes it; "murder upgrade -thaw"
+takes changes again, which is safe only once every node runs one release.
 `
 
 func runUpgrade(args []string) error {
@@ -144,9 +145,11 @@ func upgradeCluster(ctx context.Context, client *api.Client, binary string, wait
 			}
 			return fmt.Errorf("%w\nno node was upgraded; changes are taken again", err)
 		case errors.As(err, &refused):
-			return fmt.Errorf("%w\nit runs its old binary; %d node(s) run the new one, so changes stay frozen: fix the binary and upgrade again", err, upgraded)
+			return fmt.Errorf("%w\nit runs its old binary; %d node(s) run the new one, so changes stay frozen until every node runs one release: run this upgrade again (it resumes), or one with a fixed binary", err, upgraded)
+		case errors.As(err, new(*backError)):
+			return fmt.Errorf("%w\nchanges stay frozen: on node %s, \"murder upgrade rollback\" (agent stopped) puts its old binary back; then run this upgrade again, or, once no node runs the new binary, \"murder upgrade -thaw\"", err, node)
 		default:
-			return fmt.Errorf("%w\nchanges stay frozen: on node %s, \"murder upgrade rollback\" puts its old binary back; then \"murder upgrade -thaw\", or upgrade again", err, node)
+			return fmt.Errorf("%w\nchanges stay frozen: check node %s (\"murder version\" there), then run this upgrade again (it resumes where it stopped)", err, node)
 		}
 	}
 	// The local agent restarted last: wait until it takes requests.
@@ -209,6 +212,12 @@ func upgradeNode(ctx context.Context, client *api.Client, node string, self bool
 		return fmt.Errorf("%s: install: %w", name, err)
 	}
 	fmt.Fprintf(stdout, "%s: installed; its edge handed over, its agent restarts\n", name)
+	// Caught up means as far as the cluster applied once the node took
+	// the binary; changes are frozen, so that is where it stays.
+	target := before.Applied
+	if status, err := client.ClusterStatus(ctx); err == nil && status.Applied > target {
+		target = status.Applied
+	}
 	if self {
 		// This command's agent restarts: wait for its socket again.
 		time.Sleep(time.Second)
@@ -220,15 +229,15 @@ func upgradeNode(ctx context.Context, client *api.Client, node string, self bool
 			return err
 		case info.Version.Binary != version.Binary:
 			return fmt.Errorf("still runs %s", short(info.Version.Binary))
-		case info.Applied < before.Applied:
-			return fmt.Errorf("has applied log entry %d of %d", info.Applied, before.Applied)
+		case info.Applied < target:
+			return fmt.Errorf("has applied log entry %d of the cluster's %d", info.Applied, target)
 		case !info.LastPass.After(info.Started):
 			return errors.New("has not reconciled since it started")
 		}
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("%s did not come back with the new binary within %v: %w", name, wait, err)
+		return &backError{fmt.Errorf("%s did not come back with the new binary within %v: %w", name, wait, err)}
 	}
 	fmt.Fprintf(stdout, "%s runs the new binary\n", name)
 	return nil
@@ -267,8 +276,8 @@ func retry(ctx context.Context, wait time.Duration, try func() error) error {
 }
 
 // runRollback puts the binary an upgrade replaced back on this node, and
-// the database as it was before, if the new release changed its schema.
-// The agent must be stopped.
+// the database as it was before, if the new release changed its schema. It
+// undoes the last install only, and only while the agent is stopped.
 func runRollback(args []string) error {
 	flags := flag.NewFlagSet("upgrade rollback", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfig, "agent configuration file")
@@ -286,33 +295,37 @@ func runRollback(args []string) error {
 			return err
 		}
 	}
-	previous := executable + ".prev"
-	old, err := upgrade.Probe(context.Background(), previous)
-	if err != nil {
-		return fmt.Errorf("no binary to go back to: %w", err)
+	if running, err := store.InUse(cfg.Database); err != nil {
+		return err
+	} else if running {
+		return errors.New("the agent runs: stop it first (systemctl stop murder-agent)")
 	}
-	// The database first: the old binary may not open it as the new
-	// release left it.
+	record, err := upgrade.Rollback(executable)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "put murder %s back (the new binary is %s.failed)\n", short(record.From.Binary), executable)
+	// The old binary may not open the database as the new release left it.
 	schema, err := store.DatabaseSchema(cfg.Database)
 	if err != nil {
 		return err
 	}
-	if schema > old.Schema {
+	if schema > record.From.Schema {
 		kept, err := store.Restore(cfg.Database+".before-upgrade", cfg.Database)
 		if err != nil {
 			return fmt.Errorf("put the database back: %w", err)
 		}
 		fmt.Fprintf(stdout, "put the database from before the upgrade back; the one the new release changed is %s\n", kept)
 	}
-	if err := os.Rename(executable, executable+".failed"); err != nil {
-		return err
-	}
-	if err := os.Rename(previous, executable); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "put murder %s back (the new binary is %s.failed); now: systemctl start murder-agent; systemctl reload murder-edge\n", short(old.Binary), executable)
+	fmt.Fprintln(stdout, "now: systemctl start murder-agent; systemctl reload murder-edge")
 	return nil
 }
+
+// backError is a node that took the binary but did not come back with it.
+type backError struct{ err error }
+
+func (e *backError) Error() string { return e.err.Error() }
+func (e *backError) Unwrap() error { return e.err }
 
 // refusedError is a node that kept its old binary.
 type refusedError struct{ err error }

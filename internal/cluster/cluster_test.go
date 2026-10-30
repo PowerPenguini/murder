@@ -128,8 +128,9 @@ func threeNodes(t *testing.T) []*node {
 		if err := witness.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
 			t.Fatalf("join %s: %v", name, err)
 		}
-		// Join returns once the node follows the leader.
-		if status, err := witness.cluster.Status(); err != nil || status.Leader != "fsn-1" {
+		// Join returns once the node follows a leader (under load,
+		// leadership may have moved meanwhile).
+		if status, err := witness.cluster.Status(); err != nil || status.Leader == "" {
 			t.Fatalf("after joining, %s sees %+v, %v", name, status, err)
 		}
 		nodes = append(nodes, witness)

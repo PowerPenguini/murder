@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -118,6 +119,13 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 	if sha == n.Current.Binary {
 		return nil
 	}
+	// The binary in place must be the one running: its copy is what a
+	// rollback goes back to.
+	if inPlace, err := Hash(n.Executable); err != nil {
+		return err
+	} else if inPlace != n.Current.Binary {
+		return fmt.Errorf("%s holds %s, not the binary running (%s): restart the agent, or put its binary back, first", n.Executable, short(inPlace), short(n.Current.Binary))
+	}
 	version, err := Probe(ctx, temp.Name())
 	if err != nil {
 		return err
@@ -139,6 +147,11 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 	if err := copyFile(n.Executable, previous); err != nil {
 		return fmt.Errorf("keep the current binary: %w", err)
 	}
+	// What a rollback checks it undoes this install, and nothing older.
+	record := Record{From: n.Current, To: Version{Binary: sha, Schema: version.Schema}, At: time.Now().UTC()}
+	if err := writeRecord(n.Executable, record); err != nil {
+		return err
+	}
 	if err := os.Rename(temp.Name(), n.Executable); err != nil {
 		return err
 	}
@@ -146,6 +159,8 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 		// Put the old binary back; the old edge serves on.
 		if restoreErr := os.Rename(previous, n.Executable); restoreErr != nil {
 			err = errors.Join(err, fmt.Errorf("put the old binary back: %w", restoreErr))
+		} else {
+			_ = os.Remove(recordPath(n.Executable))
 		}
 		return err
 	}
@@ -155,21 +170,21 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 }
 
 // handOverEdge has the edge start the binary now in place and waits until
-// the new edge serves. The edge's PID file names the process serving.
+// the new edge serves. The edge's PID file names the process serving. An
+// edge still finishing an earlier handover refuses another, so the signal
+// is sent again until the edge takes it.
 func (n *Node) handOverEdge(ctx context.Context) error {
 	pid, err := readPID(n.EdgePIDFile)
-	if err != nil || syscall.Kill(pid, 0) != nil {
+	if err != nil || !isEdge(pid) {
 		n.Log.Warn("no edge runs to hand over", "pidFile", n.EdgePIDFile)
 		return nil
-	}
-	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
-		return fmt.Errorf("signal the edge: %w", err)
 	}
 	wait := n.edgeWait
 	if wait == 0 {
 		wait = 90 * time.Second
 	}
 	deadline := time.Now().Add(wait)
+	var signalled time.Time
 	for {
 		if next, err := readPID(n.EdgePIDFile); err == nil && next != pid {
 			return nil
@@ -177,12 +192,95 @@ func (n *Node) handOverEdge(ctx context.Context) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("the edge did not hand over to the new binary within %v; the old edge serves on", wait)
 		}
+		if time.Since(signalled) >= resignal {
+			if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+				return fmt.Errorf("signal the edge: %w", err)
+			}
+			signalled = time.Now()
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// resignal is how long a handover gets before the edge is asked again.
+const resignal = 10 * time.Second
+
+// isEdge reports whether pid is a murder edge, not a process that took
+// the PID of one that is gone.
+func isEdge(pid int) bool {
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return false
+	}
+	args := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+	return len(args) >= 2 && slices.Contains(args[1:], "edge")
+}
+
+// Record says what an install replaced, for its rollback.
+type Record struct {
+	From Version   `json:"from"`
+	To   Version   `json:"to"`
+	At   time.Time `json:"at"`
+}
+
+func recordPath(executable string) string { return executable + ".upgrade" }
+
+func writeRecord(executable string, record Record) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(recordPath(executable), data, 0o644)
+}
+
+// ErrNothingToRollBack reports a node with no install to undo.
+var ErrNothingToRollBack = errors.New("no upgrade of this node to roll back")
+
+// Rollback puts back the binary the last install replaced, if the binary
+// in place is the one it installed. It returns the record, whose From
+// schema says which database the old binary opens.
+func Rollback(executable string) (Record, error) {
+	data, err := os.ReadFile(recordPath(executable))
+	if errors.Is(err, os.ErrNotExist) {
+		return Record{}, ErrNothingToRollBack
+	}
+	if err != nil {
+		return Record{}, err
+	}
+	var record Record
+	if err := json.Unmarshal(data, &record); err != nil {
+		return Record{}, fmt.Errorf("%s: %w", recordPath(executable), err)
+	}
+	inPlace, err := Hash(executable)
+	if err != nil {
+		return Record{}, err
+	}
+	previous, err := Hash(executable + ".prev")
+	if err != nil {
+		return Record{}, fmt.Errorf("%w: %w", ErrNothingToRollBack, err)
+	}
+	if inPlace != record.To.Binary || previous != record.From.Binary {
+		return Record{}, fmt.Errorf("%w: %s holds %s and its .prev %s, not what the last install left (%s replacing %s)",
+			ErrNothingToRollBack, executable, short(inPlace), short(previous), short(record.To.Binary), short(record.From.Binary))
+	}
+	if err := os.Rename(executable, executable+".failed"); err != nil {
+		return Record{}, err
+	}
+	if err := os.Rename(executable+".prev", executable); err != nil {
+		return Record{}, err
+	}
+	return record, os.Remove(recordPath(executable))
+}
+
+func short(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 func readPID(path string) (int, error) {

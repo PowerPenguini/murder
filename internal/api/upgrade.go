@@ -29,11 +29,23 @@ const maxBinary = 512 << 20
 // ShaHeader carries the SHA-256 an uploaded binary must have.
 const ShaHeader = "X-Murder-Sha256"
 
+// Upgrades run code as root on every node: only root asks for them, not
+// members of the socket's group.
 func (s *Server) upgradeRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/upgrade/freeze", s.freeze)
-	mux.HandleFunc("POST /v1/upgrade/thaw", s.thaw)
+	mux.HandleFunc("POST /v1/upgrade/freeze", rootOnly(s.freeze))
+	mux.HandleFunc("POST /v1/upgrade/thaw", rootOnly(s.thaw))
 	mux.HandleFunc("GET /v1/upgrade/nodes/{node}", s.nodeInfo)
-	mux.HandleFunc("PUT /v1/upgrade/nodes/{node}", s.installOn)
+	mux.HandleFunc("PUT /v1/upgrade/nodes/{node}", rootOnly(s.installOn))
+}
+
+func rootOnly(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !root(r) {
+			writeError(w, statusError{http.StatusForbidden, errors.New("only root (the agent's user) upgrades murder")})
+			return
+		}
+		handler(w, r)
+	}
 }
 
 func (s *Server) freeze(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +113,13 @@ func (s *Server) installOn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if node == "-" {
+		node = s.store.Node()
+	}
 	s.log.Info("installed a new binary", "node", node, "binary", sha, "actor", actor(r))
+	if err := s.store.Note("node.upgraded", node+" to "+sha, actor(r)); err != nil {
+		s.log.Warn("record the upgrade", "node", node, "error", err)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

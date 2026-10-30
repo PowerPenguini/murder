@@ -216,6 +216,8 @@ type Store interface {
 	Frozen() string
 	Freeze(reason, actor string) error
 	Thaw(actor string) error
+	// Note records an event, frozen or not.
+	Note(action, detail, actor string) error
 
 	Events(query EventQuery) ([]Event, error)
 	// Backup writes a copy of the whole database, as it is at one moment.

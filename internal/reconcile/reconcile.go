@@ -876,6 +876,11 @@ func (r *Reconciler) Purge(ctx context.Context, name, actor string) error {
 	if r.life.Err() != nil {
 		return ErrStopping
 	}
+	// The data goes before the record: a frozen state would keep the
+	// record of a tenant whose data is gone.
+	if frozen := r.store.Frozen(); frozen != "" {
+		return fmt.Errorf("%w: %s", store.ErrFrozen, frozen)
+	}
 	record, err := r.store.Get(name)
 	switch {
 	case err == nil && record.Node != r.store.Node():

@@ -128,3 +128,18 @@ func TestChangesStayFrozenOnceNodesDiffer(t *testing.T) {
 		t.Fatalf("upgrade: %v, frozen %v", err, agent.frozen)
 	}
 }
+
+func TestAResumedUpgradeSkipsNodesThatRunTheBinary(t *testing.T) {
+	agent := &upgradeAgent{running: map[string]string{"n1": "old", "n2": "old", "n3": "old"}}
+	client, binary := startUpgradeAgent(t, agent)
+	sum, _ := upgrade.Hash(binary)
+	agent.running["n2"] = sum // upgraded before the upgrade stopped
+	agent.frozen = true
+	capture(t)
+	if err := upgradeCluster(context.Background(), client, binary, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(agent.installed, []string{"n3", "n1"}) || agent.frozen {
+		t.Fatalf("installed %v, frozen %v", agent.installed, agent.frozen)
+	}
+}

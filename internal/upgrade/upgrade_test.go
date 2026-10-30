@@ -45,7 +45,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	database := filepath.Join(dir, "murder.db")
 	f.node = &Node{
-		Executable: executable, Current: Version{Binary: "old", Schema: 5},
+		Executable: executable, Current: Version{Binary: sha(fakeBinary(5, "old")), Schema: 5},
 		EdgePIDFile: filepath.Join(dir, "edge.pid"), Database: database,
 		Snapshot: func() (string, error) {
 			path := filepath.Join(dir, "copy")
@@ -112,7 +112,7 @@ func TestInstallRefusesWhatItCannotRun(t *testing.T) {
 func TestAnEdgeThatDoesNotTakeOverLeavesTheOldBinary(t *testing.T) {
 	f := newFixture(t)
 	// An "edge" that dies on SIGHUP and never names a successor.
-	edge := exec.Command("sleep", "30")
+	edge := exec.Command("/bin/sh", "-c", "sleep 30; true", "edge")
 	if err := edge.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +130,43 @@ func TestAnEdgeThatDoesNotTakeOverLeavesTheOldBinary(t *testing.T) {
 	if !bytes.Equal(installed, fakeBinary(5, "old")) || f.restarted != 0 {
 		t.Fatal("the new binary stayed though the edge did not take it")
 	}
+	if _, err := Rollback(f.node.Executable); !errors.Is(err, ErrNothingToRollBack) {
+		t.Fatalf("a refused install left something to roll back: %v", err)
+	}
+}
+
+func TestRollbackUndoesTheLastInstallOnly(t *testing.T) {
+	f := newFixture(t)
+	f.node.Current.Binary = sha(fakeBinary(5, "old"))
+	if _, err := Rollback(f.node.Executable); !errors.Is(err, ErrNothingToRollBack) {
+		t.Fatalf("rollback before any install: %v", err)
+	}
+	binary := fakeBinary(6, "new")
+	if err := f.node.Install(context.Background(), bytes.NewReader(binary), sha(binary)); err != nil {
+		t.Fatal(err)
+	}
+	record, err := Rollback(f.node.Executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inPlace, _ := os.ReadFile(f.node.Executable)
+	failed, _ := os.ReadFile(f.node.Executable + ".failed")
+	if !bytes.Equal(inPlace, fakeBinary(5, "old")) || !bytes.Equal(failed, binary) || record.From.Schema != 5 || record.To.Schema != 6 {
+		t.Fatalf("after rollback: %q in place, %q failed, record %+v", inPlace, failed, record)
+	}
+	// Done once: a second rollback has nothing to undo.
+	if _, err := Rollback(f.node.Executable); !errors.Is(err, ErrNothingToRollBack) {
+		t.Fatalf("a second rollback: %v", err)
+	}
+}
+
+func TestInstallRefusesWhenTheBinaryInPlaceIsNotTheOneRunning(t *testing.T) {
+	f := newFixture(t)
+	f.node.Current.Binary = "something-else"
+	binary := fakeBinary(6, "new")
+	if err := f.node.Install(context.Background(), bytes.NewReader(binary), sha(binary)); err == nil || !strings.Contains(err.Error(), "not the binary running") {
+		t.Fatalf("install over a binary that is not running: %v", err)
+	}
 }
 
 func TestAnEdgeThatTakesOverLetsTheAgentRestart(t *testing.T) {
@@ -139,7 +176,7 @@ func TestAnEdgeThatTakesOverLetsTheAgentRestart(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\ntrap 'echo 1 > "+f.node.EdgePIDFile+"' HUP\necho $$ > "+f.node.EdgePIDFile+"\nwhile true; do sleep 0.05; done\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	edge := exec.Command(script)
+	edge := exec.Command(script, "edge")
 	if err := edge.Start(); err != nil {
 		t.Fatal(err)
 	}

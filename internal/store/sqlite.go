@@ -498,6 +498,13 @@ func (s *SQLite) write(signal bool, change func(tx *recorder, current *snapshot,
 // writeIf is write, refusing changes while the state is frozen unless
 // unlessFrozen is false.
 func (s *SQLite) writeIf(unlessFrozen, signal bool, change func(tx *recorder, current *snapshot, now time.Time) error) (*snapshot, error) {
+	return s.writeAs(schemaVersion, unlessFrozen, signal, change)
+}
+
+// writeAs is writeIf for a batch marked as of schema version schema: one
+// whose statements every release since runs alike, so nodes of older
+// releases apply it during an upgrade.
+func (s *SQLite) writeAs(schema int, unlessFrozen, signal bool, change func(tx *recorder, current *snapshot, now time.Time) error) (*snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for attempt := 1; ; attempt++ {
@@ -514,7 +521,7 @@ func (s *SQLite) writeIf(unlessFrozen, signal bool, change func(tx *recorder, cu
 		if err := change(tx, current, s.now().UTC()); err != nil {
 			return nil, err
 		}
-		next, err := s.commit(Batch{Schema: schemaVersion, Version: current.version, Signal: signal, Statements: tx.statements})
+		next, err := s.commit(Batch{Schema: schema, Version: current.version, Signal: signal, Statements: tx.statements})
 		if !errors.Is(err, ErrStale) || attempt == staleAttempts {
 			return next, err
 		}

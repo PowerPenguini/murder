@@ -31,5 +31,5 @@ func ConnContext(ctx context.Context, conn net.Conn) context.Context {
 	if found, err := user.LookupId(uid); err == nil {
 		name = found.Username
 	}
-	return context.WithValue(ctx, actorKey{}, name)
+	return context.WithValue(context.WithValue(ctx, actorKey{}, name), uidKey{}, cred.Uid)
 }

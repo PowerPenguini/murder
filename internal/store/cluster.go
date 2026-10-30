@@ -438,23 +438,37 @@ func (s *SQLite) RemoveNode(name, actor string) error {
 
 func (s *SQLite) Frozen() string { return s.state.Load().frozen }
 
-// Freeze refuses changes from now on, on every node, and says why.
+// Freeze refuses changes from now on, on every node, and says why. A freeze
+// for the same reason again is no change: an upgrade that stopped resumes
+// under its own freeze. Freezes, thaws and notes are written as of the
+// first schema version that writes batches, which every release since
+// applies: nodes of two releases take them during an upgrade.
 func (s *SQLite) Freeze(reason, actor string) error {
 	if reason == "" {
 		return errors.New("a freeze needs a reason")
 	}
-	_, err := s.write(false, func(tx *recorder, _ *snapshot, now time.Time) error {
+	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+		switch current.frozen {
+		case reason:
+			return errUnchanged
+		case "":
+		default:
+			return fmt.Errorf("%w: %s", ErrFrozen, current.frozen)
+		}
 		if err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('frozen', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, reason); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "changes.frozen", "", "", reason)
 	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
 	return err
 }
 
 // Thaw takes changes again.
 func (s *SQLite) Thaw(actor string) error {
-	_, err := s.writeIf(false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
 		if current.frozen == "" {
 			return errUnchanged
 		}
@@ -466,5 +480,14 @@ func (s *SQLite) Thaw(actor string) error {
 	if errors.Is(err, errUnchanged) {
 		return nil
 	}
+	return err
+}
+
+// Note records an event that changes nothing else, frozen or not, such as
+// a binary installed during an upgrade.
+func (s *SQLite) Note(action, detail, actor string) error {
+	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, _ *snapshot, now time.Time) error {
+		return event(tx, now, actor, action, "", "", detail)
+	})
 	return err
 }

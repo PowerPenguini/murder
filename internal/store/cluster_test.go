@@ -417,6 +417,13 @@ func TestAFrozenStateTakesNoChanges(t *testing.T) {
 	if err := st.Freeze("again", "alice"); !errors.Is(err, ErrFrozen) {
 		t.Fatalf("a second freeze: %v", err)
 	}
+	// The same upgrade resumes under its own freeze.
+	if err := st.Freeze("upgrade to abc", "alice"); err != nil {
+		t.Fatalf("a freeze for the same reason: %v", err)
+	}
+	if err := st.Note("node.upgrading", "n2 to abc", "alice"); err != nil {
+		t.Fatalf("a note while frozen: %v", err)
+	}
 	if err := st.Thaw("alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -426,14 +433,18 @@ func TestAFrozenStateTakesNoChanges(t *testing.T) {
 	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "bob"); err != nil {
 		t.Fatal(err)
 	}
-	events, _ := st.Events(EventQuery{Limit: 3})
-	if events[1].Action != "changes.thawed" || events[2].Action != "changes.frozen" || events[2].Detail != "upgrade to abc" {
+	events, _ := st.Events(EventQuery{Limit: 4})
+	if events[1].Action != "changes.thawed" || events[2].Action != "node.upgrading" || events[3].Action != "changes.frozen" || events[3].Detail != "upgrade to abc" {
 		t.Fatalf("events = %+v", events)
 	}
 	// A snapshot carries the freeze.
-	logged(t, st)
+	entries := logged(t, st)
 	if err := st.Freeze("upgrade to def", "alice"); err != nil {
 		t.Fatal(err)
+	}
+	// Nodes of the release before apply a freeze.
+	if (*entries)[0].Schema != firstBatchSchema {
+		t.Fatalf("a freeze is written as of schema version %d", (*entries)[0].Schema)
 	}
 	snapshot, err := st.SnapshotFile()
 	if err != nil {

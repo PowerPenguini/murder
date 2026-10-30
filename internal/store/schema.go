@@ -18,7 +18,8 @@ const oldestSchema = 4
 // firstBatchSchema is the first schema version of releases that write
 // batches. A migration must keep the statements of batches of every
 // version since valid: a node upgraded first applies the batches the
-// others still write.
+// others still write. Freezes, thaws and notes are written as of this
+// version, so the meta and events tables must keep its shape.
 const firstBatchSchema = 5
 
 const schema = `
