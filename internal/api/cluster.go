@@ -3,14 +3,18 @@ package api
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/PowerPenguini/murder/internal/cluster"
+	"github.com/PowerPenguini/murder/internal/upgrade"
 )
 
 // Cluster is this node's part of a cluster.
 type Cluster interface {
 	Status() (cluster.Status, error)
+	NodeInfo(ctx context.Context, node string) (upgrade.Info, error)
+	Install(ctx context.Context, node string, binary io.Reader, sha string) error
 	Bootstrap(ctx context.Context, actor string) error
 	Join(ctx context.Context, peer, actor string) error
 	Remove(ctx context.Context, node, actor string) error

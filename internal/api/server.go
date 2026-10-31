@@ -108,6 +108,8 @@ type Server struct {
 	// as the edge's for new routes, end at once.
 	stopping chan struct{}
 	stopOnce sync.Once
+	// upgrader installs new binaries on this node; nil if it takes none.
+	upgrader Upgrader
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }
@@ -124,6 +126,7 @@ func (s *Server) Stop() { s.stopOnce.Do(func() { close(s.stopping) }) }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.clusterRoutes(mux)
+	s.upgradeRoutes(mux)
 	mux.HandleFunc("GET /v1/routes", s.routes)
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
@@ -664,7 +667,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusConflict
 	case errors.Is(err, reconcile.ErrStopping), errors.Is(err, cluster.ErrNoLeader), errors.Is(err, cluster.ErrNotLeader):
 		status = http.StatusServiceUnavailable
-	case errors.Is(err, store.ErrStale), errors.Is(err, cluster.ErrNotJoined), errors.Is(err, cluster.ErrMember):
+	case errors.Is(err, store.ErrStale), errors.Is(err, store.ErrFrozen), errors.Is(err, cluster.ErrNotJoined), errors.Is(err, cluster.ErrMember):
 		status = http.StatusConflict
 	case errors.Is(err, context.Canceled):
 		status = 499

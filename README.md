@@ -85,7 +85,30 @@ sudo systemctl enable --now murder-firewall murder-agent murder-edge murder-back
 
 ### Upgrade Murder
 
-An upgrade stops no tenant and drops no request:
+An upgrade stops no tenant and drops no request. On any node, with the new
+binary:
+
+```bash
+sudo murder upgrade ./murder          # every node of the cluster, one after the other, this one last
+```
+
+It freezes changes (the panel and CLI only read meanwhile, so nodes of two
+releases exchange none), then, node by node: the node checks the binary
+(its hash, that it runs, no older schema), keeps the binary it runs as
+`murder.prev` and a copy of its database, hands its edge over to the new
+binary and restarts its agent into it (`murder-agent.service` restarts it:
+keep `Restart=always`); the next node follows once this one runs the new
+binary, has caught up with the cluster and reconciled. Then changes are
+taken again. A node that refuses the binary keeps its old one, edge
+included; if it was the first, changes are taken again at once. A node that
+does not come back stops the upgrade with changes still frozen: on that
+node, with its agent stopped, `murder upgrade rollback` puts the old binary
+back (and the database from before the upgrade, if the new release changed
+its schema); it undoes that node's last install, nothing older. Running the
+same upgrade again resumes it where it stopped; `murder upgrade -thaw`
+takes changes again, safe only once every node runs one release. Only root
+upgrades, and each install is in the audit log (`node.upgraded`). By hand,
+on one node, the same is:
 
 ```bash
 sudo install -m 0755 murder /usr/local/bin/murder
@@ -364,8 +387,9 @@ through Murder's real components:
   routing between nodes and failover come next.
 - **Upgrades.** A node applies changes made by its own release and older
   ones, but stops on a change made by a newer release (and restarts into
-  the same stop) until it is upgraded too. Upgrade every node of a cluster
-  one after the other, without making changes in between.
+  the same stop) until it is upgraded too. `murder upgrade` freezes changes
+  until every node runs the new release; upgrading by hand, make no changes
+  until every node is upgraded.
 - **Registry access during apply.** Tags are pinned when an app is applied
   (or a tenant's image is set), which needs registry access for tags that are
   not yet local.

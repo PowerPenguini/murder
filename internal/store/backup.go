@@ -202,3 +202,31 @@ func Restore(from, path string) (kept string, err error) {
 	}
 	return kept, syncDir(dir)
 }
+
+// DatabaseSchema returns the schema version of the database at path,
+// reading it only.
+func DatabaseSchema(path string) (int, error) {
+	db, err := sql.Open("sqlite", uri(path, "mode=ro"))
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("database %s: %w", path, err)
+	}
+	return version, nil
+}
+
+// InUse reports whether an agent holds the database at path.
+func InUse(path string) (bool, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true, nil
+	}
+	return false, syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+}

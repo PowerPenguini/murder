@@ -61,13 +61,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return fmt.Errorf("reach the murder agent: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode >= 300 {
-		var failure errorBody
-		data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<16))
-		if json.Unmarshal(data, &failure) != nil || failure.Error == "" {
-			failure.Error = string(bytes.TrimSpace(data))
-		}
-		return &Error{Status: response.StatusCode, Message: failure.Error}
+	if err := responseError(response); err != nil {
+		return err
 	}
 	switch out := out.(type) {
 	case nil:
@@ -221,4 +216,17 @@ func (c *Client) Reconcile(ctx context.Context) error {
 // Backup writes a copy of the agent's database to w.
 func (c *Client) Backup(ctx context.Context, w io.Writer) error {
 	return c.do(ctx, http.MethodGet, "/v1/backup", nil, w)
+}
+
+// responseError is the agent's refusal, if it refused.
+func responseError(response *http.Response) error {
+	if response.StatusCode < 300 {
+		return nil
+	}
+	var failure errorBody
+	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<16))
+	if json.Unmarshal(data, &failure) != nil || failure.Error == "" {
+		failure.Error = string(bytes.TrimSpace(data))
+	}
+	return &Error{Status: response.StatusCode, Message: failure.Error}
 }

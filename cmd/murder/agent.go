@@ -26,6 +26,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/upgrade"
 	"github.com/PowerPenguini/murder/internal/volume"
 )
 
@@ -99,6 +100,30 @@ func runAgent(args []string) error {
 	if cfg.Cluster == nil && (st.Cluster() != "" || len(st.Nodes()) > 0) {
 		return fmt.Errorf("the database belongs to cluster %s: give the node its cluster section back in %s", st.Cluster(), *configPath)
 	}
+	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: node, RegistryAuthFile: cfg.RegistryAuthFile})
+	volumes, err := newVolumes(cfg.Volumes)
+	if err != nil {
+		return err
+	}
+	reconciler := reconcile.New(st, docker, volumes, key, reconcile.Config{BaseDomain: cfg.BaseDomain, Scheme: cfg.Scheme(), DefaultLimits: cfg.Defaults}, log)
+	// The agent's part in an upgrade: the new binary replaces this one, and
+	// the agent stops for its service to start the new one.
+	version, err := ownVersion()
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	upgrader := &agentUpgrader{store: st, reconciler: reconciler, started: time.Now(), Node: &upgrade.Node{
+		Executable: executable, Current: version, EdgePIDFile: cfg.Edge.PIDFile,
+		Snapshot: st.SnapshotFile, Database: cfg.Database, Log: log,
+		Restart: func() {
+			// After the answer has gone out.
+			time.AfterFunc(500*time.Millisecond, func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) })
+		},
+	}}
 	// A node that cannot apply what the cluster applied stops; its restart
 	// applies the entry again.
 	fatal := make(chan error, 1)
@@ -106,7 +131,7 @@ func runAgent(args []string) error {
 	if cfg.Cluster != nil {
 		member, err = cluster.Start(cluster.Config{
 			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
-			Seed: key.Derive(clusterSeed), Store: st, Log: log,
+			Seed: key.Derive(clusterSeed), Store: st, Log: log, Upgrade: upgrader,
 			Fatal: func(err error) {
 				select {
 				case fatal <- err:
@@ -120,12 +145,6 @@ func runAgent(args []string) error {
 		// Closed before the store, which the log applies to.
 		defer member.Close()
 	}
-	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: node, RegistryAuthFile: cfg.RegistryAuthFile})
-	volumes, err := newVolumes(cfg.Volumes)
-	if err != nil {
-		return err
-	}
-	reconciler := reconcile.New(st, docker, volumes, key, reconcile.Config{BaseDomain: cfg.BaseDomain, Scheme: cfg.Scheme(), DefaultLimits: cfg.Defaults}, log)
 	// murder-firewall.service loads the rules before Docker starts the
 	// tenants at boot; loading them here covers a node without that unit
 	// and a ruleset flushed since.
@@ -166,7 +185,7 @@ func runAgent(args []string) error {
 		}
 	}
 
-	apiHandler := api.NewServer(st, reconciler, docker, key, log)
+	apiHandler := api.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader)
 	if member != nil {
 		apiHandler.WithCluster(member)
 	}

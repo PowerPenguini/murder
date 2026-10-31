@@ -29,6 +29,10 @@ var ErrNotArchived = errors.New("tenant is not archived")
 // ErrConflict reports a change based on an outdated read.
 var ErrConflict = errors.New("conflicting change")
 
+// ErrFrozen refuses a change while an upgrade runs: nodes of two releases
+// must not exchange changes.
+var ErrFrozen = errors.New("changes are frozen")
+
 // ErrInUse reports an app or a node that tenants still run.
 var ErrInUse = errors.New("in use")
 
@@ -206,6 +210,14 @@ type Store interface {
 	Nodes() []Node
 	PutNode(node Node, actor string) error
 	RemoveNode(name, actor string) error
+
+	// Frozen says why changes are refused, while an upgrade runs; empty
+	// otherwise. Freeze refuses every change but Thaw from then on.
+	Frozen() string
+	Freeze(reason, actor string) error
+	Thaw(actor string) error
+	// Note records an event, frozen or not.
+	Note(action, detail, actor string) error
 
 	Events(query EventQuery) ([]Event, error)
 	// Backup writes a copy of the whole database, as it is at one moment.
