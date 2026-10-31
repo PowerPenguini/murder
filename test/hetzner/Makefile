@@ -15,7 +15,10 @@ KEY        := $(STATE)/id_ed25519
 N          ?= n1
 
 export HCLOUD_TOKEN = $(shell cat $(TOKEN_FILE) 2>/dev/null)
-TF_VARS := -var ssh_public_key=$(KEY).pub
+# The spare node, once added, stays until "make down": every later plan
+# keeps it.
+SPARE   := $(if $(wildcard $(STATE)/spare),true,false)
+TF_VARS := -var ssh_public_key=$(KEY).pub -var spare=$(SPARE)
 
 .PHONY: up down plan deploy cluster smoke spare status ssh token-check
 
@@ -46,8 +49,9 @@ cluster: token-check
 smoke: token-check
 	./nodes.sh smoke
 
-spare: TF_EXTRA = -var spare=true
-spare: up
+spare:
+	@touch $(STATE)/spare
+	$(MAKE) up TOKEN_FILE=$(TOKEN_FILE)
 	./nodes.sh deploy n4
 	./nodes.sh join n4
 
@@ -58,5 +62,5 @@ ssh: token-check
 	./nodes.sh ssh $(N)
 
 down: token-check $(STATE)/.init
-	tofu destroy -auto-approve -input=false $(TF_VARS) -var spare=true
-	rm -f $(STATE)/master.key $(STATE)/known_hosts
+	tofu destroy -auto-approve -input=false $(TF_VARS)
+	rm -f $(STATE)/master.key $(STATE)/known_hosts $(STATE)/spare

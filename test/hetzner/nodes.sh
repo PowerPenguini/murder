@@ -200,7 +200,8 @@ EOF
 murder app apply /tmp/murder-test/testapp.yaml -wait 3m'
   for node in "${all[@]}"; do
     local tenant=t-$node
-    if ! on n1 "murder tenant list" | grep -qw "$tenant"; then
+    local listed; listed=$(on n1 "murder tenant list")
+    if ! grep -qw "$tenant" <<< "$listed"; then
       log "creating $tenant on $node"
       on "$node" "murder tenant create $tenant -app testapp -wait 3m"
     fi

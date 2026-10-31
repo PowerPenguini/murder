@@ -32,7 +32,8 @@ runcmd:
   - |
     # The volume is attached after the server starts.
     for i in $(seq 120); do [ -e "${device}" ] && break; sleep 2; done
-    zpool list tank >/dev/null 2>&1 || zpool create -f -o ashift=12 -O compression=lz4 -O atime=off tank "${device}"
+    # A volume that already holds the pool, such as on a rebuilt server, keeps it.
+    zpool list tank >/dev/null 2>&1 || zpool import -f tank 2>/dev/null || zpool create -o ashift=12 -O compression=lz4 -O atime=off tank "${device}"
     zfs create -p tank/murder/tenants
   - systemctl daemon-reload
   - systemctl enable --now docker
