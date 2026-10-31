@@ -266,3 +266,19 @@ func TestTheEdgeFollowsTheAgentsRoutes(t *testing.T) {
 		t.Fatal("the edge forgot its routes when the agent went away")
 	}
 }
+
+func TestSlowStartsAfterIdle(t *testing.T) {
+	dir := t.TempDir()
+	for value, want := range map[string]bool{"1\n": true, "0\n": false} {
+		path := filepath.Join(dir, strings.TrimSpace(value))
+		if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := slowStartsAfterIdle(path); got != want {
+			t.Errorf("setting %q: slow starts %v, want %v", value, got, want)
+		}
+	}
+	if slowStartsAfterIdle(filepath.Join(dir, "absent")) {
+		t.Error("a setting that cannot be read is reported")
+	}
+}

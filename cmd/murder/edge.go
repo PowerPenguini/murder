@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -26,6 +27,18 @@ import (
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/secrets"
 )
+
+// slowStartSetting is the kernel setting deploy/murder-sysctl.conf turns off.
+const slowStartSetting = "/proc/sys/net/ipv4/tcp_slow_start_after_idle"
+
+// slowStartsAfterIdle reports whether the host's TCP starts a connection's
+// sending rate over after a pause, which makes the first response after a
+// click take several round trips. A setting that cannot be read, as off
+// Linux, is not reported.
+func slowStartsAfterIdle(path string) bool {
+	value, err := os.ReadFile(path)
+	return err == nil && strings.TrimSpace(string(value)) != "0"
+}
 
 // runEdge serves the public listeners. It holds no state: it routes with the
 // last routes the agent gave it, kept on disk too, so it serves while the
@@ -47,6 +60,9 @@ func runEdge(args []string) error {
 	// often spends less CPU on it, for a little more memory.
 	if os.Getenv("GOGC") == "" {
 		debug.SetGCPercent(200)
+	}
+	if slowStartsAfterIdle(slowStartSetting) {
+		log.Warn("the host starts each connection's sending rate over after a pause; install deploy/murder-sysctl.conf", "setting", "net.ipv4.tcp_slow_start_after_idle")
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.Edge.PIDFile), 0o755); err != nil {
 		return err

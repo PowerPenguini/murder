@@ -49,7 +49,10 @@ the state replicated between nodes.
   stay open (one to each other edge is kept warm, and resumes its TLS
   session), it neither compresses nor decompresses bodies, flushes only
   streams as they come, speaks HTTP/2 to browsers over HTTPS, and counts
-  requests without a lock. `murder_edge_routes_timestamp_seconds`
+  requests without a lock. On the host, `deploy/murder-sysctl.conf` keeps a
+  connection's sending rate across a pause between requests instead of
+  starting it over (a 60 KB response after a click takes one round trip, not
+  three); the edge warns at start when it is not set. `murder_edge_routes_timestamp_seconds`
   in its metrics (`edge.metrics`) says when the agent last answered.
 - **Local API.** A unix socket the `murder` CLI (and, later, the panel) talks to.
 - **Database.** One SQLite file holds the node's apps, tenants, sealed secrets
@@ -81,6 +84,8 @@ the state replicated between nodes.
 ```bash
 sudo apt install nftables               # the agent loads the tenant firewall with nft
 sudo install -m 0755 murder /usr/local/bin/murder
+sudo install -m 0644 deploy/murder-sysctl.conf /etc/sysctl.d/90-murder.conf
+sudo sysctl -p /etc/sysctl.d/90-murder.conf
 sudo install -d -m 0755 /etc/murder
 sudo install -m 0644 deploy/agent.example.yaml /etc/murder/agent.yaml   # then edit it
 sudo murder init                       # creates the master key (store a copy offline) and an empty database
