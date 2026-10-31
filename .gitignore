@@ -3,3 +3,5 @@
 *.test
 *.out
 /.vm/
+/test/hetzner/.state/
+/test/hetzner/.terraform/
