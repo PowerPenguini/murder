@@ -229,6 +229,19 @@ type Record struct {
 
 func recordPath(executable string) string { return executable + ".upgrade" }
 
+// RollbackTarget is the binary a rollback run as executable puts the old
+// one back for: the old binary, kept as murder.prev, rolls back the one in
+// place, so a node whose new binary does not even run can still be rolled
+// back.
+func RollbackTarget(executable string) string {
+	if installed, ok := strings.CutSuffix(executable, ".prev"); ok {
+		if _, err := os.Stat(recordPath(installed)); err == nil {
+			return installed
+		}
+	}
+	return executable
+}
+
 func writeRecord(executable string, record Record) error {
 	data, err := json.Marshal(record)
 	if err != nil {

@@ -11,9 +11,11 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -160,6 +162,33 @@ func TestRollbackUndoesTheLastInstallOnly(t *testing.T) {
 	}
 }
 
+// A new binary may not run at all: the old one, kept as murder.prev, rolls
+// back the one in place.
+func TestTheOldBinaryRollsBackTheNewOne(t *testing.T) {
+	f := newFixture(t)
+	f.node.Current.Binary = sha(fakeBinary(5, "old"))
+	previous := f.node.Executable + ".prev"
+	if got := RollbackTarget(previous); got != previous {
+		t.Fatalf("before any install, murder.prev rolls back %s", got)
+	}
+	binary := fakeBinary(6, "new")
+	if err := f.node.Install(context.Background(), bytes.NewReader(binary), sha(binary)); err != nil {
+		t.Fatal(err)
+	}
+	if got := RollbackTarget(previous); got != f.node.Executable {
+		t.Fatalf("murder.prev rolls back %s, want %s", got, f.node.Executable)
+	}
+	if got := RollbackTarget(f.node.Executable); got != f.node.Executable {
+		t.Fatalf("murder rolls back %s", got)
+	}
+	if _, err := Rollback(RollbackTarget(previous)); err != nil {
+		t.Fatal(err)
+	}
+	if inPlace, _ := os.ReadFile(f.node.Executable); !bytes.Equal(inPlace, fakeBinary(5, "old")) {
+		t.Fatalf("after rollback from murder.prev: %q in place", inPlace)
+	}
+}
+
 func TestInstallRefusesWhenTheBinaryInPlaceIsNotTheOneRunning(t *testing.T) {
 	f := newFixture(t)
 	f.node.Current.Binary = "something-else"
@@ -176,6 +205,11 @@ func TestAnEdgeThatTakesOverLetsTheAgentRestart(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\ntrap 'echo 1 > "+f.node.EdgePIDFile+"' HUP\necho $$ > "+f.node.EdgePIDFile+"\nwhile true; do sleep 0.05; done\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A shell cannot trap a signal it was started with ignored, as under
+	// nohup; handling SIGHUP here makes the script start with the default.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 	edge := exec.Command(script, "edge")
 	if err := edge.Start(); err != nil {
 		t.Fatal(err)

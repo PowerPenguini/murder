@@ -75,7 +75,8 @@ next node follows once it is back and has caught up.
 If a node does not come back, the upgrade stops there and changes stay
 frozen: on that node, with its agent stopped, "murder upgrade rollback"
 puts the old binary (and, if the new release changed it, the old database)
-back. Running the same upgrade again resumes it; "murder upgrade -thaw"
+back; run it as /usr/local/bin/murder.prev, the old binary, if the new one
+does not run. Running the same upgrade again resumes it; "murder upgrade -thaw"
 takes changes again, which is safe only once every node runs one release.
 `
 
@@ -147,7 +148,7 @@ func upgradeCluster(ctx context.Context, client *api.Client, binary string, wait
 		case errors.As(err, &refused):
 			return fmt.Errorf("%w\nit runs its old binary; %d node(s) run the new one, so changes stay frozen until every node runs one release: run this upgrade again (it resumes), or one with a fixed binary", err, upgraded)
 		case errors.As(err, new(*backError)):
-			return fmt.Errorf("%w\nchanges stay frozen: on node %s, \"murder upgrade rollback\" (agent stopped) puts its old binary back; then run this upgrade again, or, once no node runs the new binary, \"murder upgrade -thaw\"", err, node)
+			return fmt.Errorf("%w\nchanges stay frozen: on node %s, \"murder.prev upgrade rollback\" (the old binary, beside murder; agent stopped) puts it back; then run this upgrade again, or, once no node runs the new binary, \"murder upgrade -thaw\"", err, node)
 		default:
 			return fmt.Errorf("%w\nchanges stay frozen: check node %s (\"murder version\" there), then run this upgrade again (it resumes where it stopped)", err, node)
 		}
@@ -294,6 +295,7 @@ func runRollback(args []string) error {
 		if executable, err = os.Executable(); err != nil {
 			return err
 		}
+		executable = upgrade.RollbackTarget(executable)
 	}
 	if running, err := store.InUse(cfg.Database); err != nil {
 		return err

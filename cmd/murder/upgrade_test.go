@@ -124,7 +124,7 @@ func TestChangesStayFrozenOnceNodesDiffer(t *testing.T) {
 	agent = &upgradeAgent{running: map[string]string{"n1": "old", "n2": "old", "n3": "old"}, stuck: map[string]bool{"n2": true}}
 	client, binary = startUpgradeAgent(t, agent)
 	err = upgradeCluster(context.Background(), client, binary, 2*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "did not come back") || !strings.Contains(err.Error(), "murder upgrade rollback") || !agent.frozen {
+	if err == nil || !strings.Contains(err.Error(), "did not come back") || !strings.Contains(err.Error(), "murder.prev upgrade rollback") || !agent.frozen {
 		t.Fatalf("upgrade: %v, frozen %v", err, agent.frozen)
 	}
 }

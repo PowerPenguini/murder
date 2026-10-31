@@ -113,9 +113,10 @@ binary, has caught up with the cluster and reconciled. Then changes are
 taken again. A node that refuses the binary keeps its old one, edge
 included; if it was the first, changes are taken again at once. A node that
 does not come back stops the upgrade with changes still frozen: on that
-node, with its agent stopped, `murder upgrade rollback` puts the old binary
-back (and the database from before the upgrade, if the new release changed
-its schema); it undoes that node's last install, nothing older. Running the
+node, with its agent stopped, `murder.prev upgrade rollback` (the old
+binary, beside the new one, so it works even if the new one does not run)
+puts the old binary back (and the database from before the upgrade, if the
+new release changed its schema); it undoes that node's last install, nothing older. Running the
 same upgrade again resumes it where it stopped; `murder upgrade -thaw`
 takes changes again, safe only once every node runs one release. Only root
 upgrades, and each install is in the audit log (`node.upgraded`). By hand,
