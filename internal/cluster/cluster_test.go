@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -44,11 +46,18 @@ type node struct {
 	store   *store.SQLite
 	cluster *Cluster
 	fatal   chan error
+	// tune changes Raft's settings after the tests' own.
+	tune func(*raft.Config)
 }
 
 func newNode(t *testing.T, name string) *node {
 	t.Helper()
-	n := &node{t: t, name: name, dir: t.TempDir(), key: masterKey(t, 7), address: "127.0.0.1:0", fatal: make(chan error, 1)}
+	return newTunedNode(t, name, nil)
+}
+
+func newTunedNode(t *testing.T, name string, tune func(*raft.Config)) *node {
+	t.Helper()
+	n := &node{t: t, name: name, dir: t.TempDir(), key: masterKey(t, 7), address: "127.0.0.1:0", fatal: make(chan error, 1), tune: tune}
 	if err := store.Init(filepath.Join(n.dir, "murder.db"), name); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +84,9 @@ func (n *node) start() {
 			config.ElectionTimeout = time.Second
 			config.LeaderLeaseTimeout = 500 * time.Millisecond
 			config.CommitTimeout = 5 * time.Millisecond
+			if n.tune != nil {
+				n.tune(config)
+			}
 		},
 	})
 	if err != nil {
@@ -120,13 +132,20 @@ func eventually(t *testing.T, what string, check func() bool) {
 // threeNodes starts a cluster of three nodes.
 func threeNodes(t *testing.T) []*node {
 	t.Helper()
-	worker := newNode(t, "fsn-1")
+	return threeTunedNodes(t, nil)
+}
+
+// threeTunedNodes starts a cluster of three nodes with Raft's settings
+// changed by tune.
+func threeTunedNodes(t *testing.T, tune func(*raft.Config)) []*node {
+	t.Helper()
+	worker := newTunedNode(t, "fsn-1", tune)
 	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	nodes := []*node{worker}
 	for _, name := range []string{"nbg-1", "hel-1"} {
-		witness := newNode(t, name)
+		witness := newTunedNode(t, name, tune)
 		if err := witness.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
 			t.Fatalf("join %s: %v", name, err)
 		}
@@ -254,6 +273,49 @@ func TestTheClusterOutlivesItsLeader(t *testing.T) {
 	if record, _ := nodes[1].store.Get("acme"); !record.Spec.Suspended || record.Generation != 2 {
 		t.Fatalf("acme = %+v", record)
 	}
+}
+
+// A node down for longer than the others keep their log catches up from a
+// snapshot, as Raft installs it from the leader, and goes on applying
+// entries after it.
+func TestANodeFarBehindCatchesUpFromASnapshot(t *testing.T) {
+	nodes := threeTunedNodes(t, func(config *raft.Config) {
+		config.SnapshotThreshold = 4
+		config.TrailingLogs = 2
+		config.SnapshotInterval = 100 * time.Millisecond
+	})
+	if _, err := nodes[0].store.PutApp(store.App{Name: "web", Spec: appSpec()}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	sameState(t, nodes)
+	behind := nodes[2]
+	appliedAtStop := behind.store.Applied()
+	behind.stop()
+	for i := range 20 {
+		if _, err := nodes[i%2].store.Create(store.NewTenant{Name: fmt.Sprintf("t%02d", i), App: "web"}, "bob"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The log no longer has what the node missed.
+	for _, n := range nodes[:2] {
+		eventually(t, n.name+" compacted its log", func() bool {
+			first, err := n.cluster.logs.FirstIndex()
+			return err == nil && first > appliedAtStop+1
+		})
+	}
+	behind.start()
+	sameState(t, nodes)
+	if installed, _ := strconv.ParseUint(behind.cluster.raft.Stats()["last_snapshot_index"], 10, 64); installed <= appliedAtStop {
+		t.Fatalf("%s caught up without a snapshot newer than what it had (%d <= %d)", behind.name, installed, appliedAtStop)
+	}
+	if len(behind.store.List()) != 20 {
+		t.Fatalf("%s has %d tenants", behind.name, len(behind.store.List()))
+	}
+	// And it applies what comes next, as the others do.
+	if _, err := behind.store.SetSuspended("t07", true, "carol"); err != nil {
+		t.Fatal(err)
+	}
+	sameState(t, nodes)
 }
 
 func TestOneNodeLeftWritesNothing(t *testing.T) {
