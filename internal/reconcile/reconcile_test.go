@@ -1491,3 +1491,70 @@ func TestNoPurgeWhileFrozen(t *testing.T) {
 		t.Fatal("a purge refused while frozen deleted the data")
 	}
 }
+
+// Requests for a tenant that moved here wait until it is healthy. Its app
+// takes a moment to listen once started: the pass that starts it checks it
+// again until it answers and serves it then, not a pass later.
+func TestMovedTenantIsServedOnceHealthyInTheSamePass(t *testing.T) {
+	f := newFixture(t)
+	var ready atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+	f.reconciler.backend = func(store.Record) (string, error) { return strings.TrimPrefix(server.URL, "http://"), nil }
+
+	// The move is made on the node it comes from; every change is an entry
+	// of the cluster's log, applied on both nodes.
+	sourcePath := filepath.Join(t.TempDir(), "source.db")
+	if err := store.Init(sourcePath, "other-node"); err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.Open(sourcePath, store.Options{NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: func(string, string, spec.Secret) (string, error) { return "sealed", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+	var index uint64
+	source.Replicate(func(batch store.Batch) (uint64, error) {
+		index++
+		return index, errors.Join(source.ApplyEntry(index, batch), f.store.ApplyEntry(index, batch))
+	}, func() error { return nil })
+	app := spec.Tenant{Image: imageA, HealthPath: "/health", User: fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
+	if _, err := source.PutApp(store.App{Name: "acme", Spec: app}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Create(store.NewTenant{Name: "acme", App: "acme"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.PutNode(store.Node{Name: "test-node", Address: "10.0.0.1:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.StartMove("acme", "test-node", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.HoldMove("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.FinishMove("acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.runtime.images[imageA] = true
+	if record, _ := f.store.Get("acme"); !record.MoveHeld || record.Node != "test-node" {
+		t.Fatalf("acme before the pass = %+v", record)
+	}
+
+	time.AfterFunc(600*time.Millisecond, func() { ready.Store(true) })
+	start := time.Now()
+	f.reconcile(t)
+	if record, _ := f.store.Get("acme"); record.MoveHeld {
+		t.Fatalf("requests for acme still wait after the pass that started it (%s)", time.Since(start))
+	}
+	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseRunning || !status.Healthy {
+		t.Fatalf("acme = %+v", status)
+	}
+}

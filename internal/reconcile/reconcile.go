@@ -48,6 +48,13 @@ const (
 // healthChecks is how many health checks run at once.
 const healthChecks = 16
 
+// A tenant that moved here, whose requests wait for it, is checked every
+// heldHealthEvery until it is healthy, for heldHealthWait at most in a pass.
+const (
+	heldHealthEvery = 200 * time.Millisecond
+	heldHealthWait  = 20 * time.Second
+)
+
 // Status is the observed state of one tenant.
 type Status struct {
 	Phase   string `json:"phase"`
@@ -284,6 +291,19 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 			limit <- struct{}{}
 			defer func() { <-limit }()
 			healthy, message := r.checkHealth(ctx, record)
+			// Requests for a tenant that just moved here wait until it is
+			// healthy; its app takes a moment to listen once started, so
+			// it is checked again at once, not at the next pass.
+			if record.MoveHeld {
+				deadline := time.Now().Add(heldHealthWait)
+				for !healthy && time.Now().Before(deadline) && ctx.Err() == nil {
+					select {
+					case <-ctx.Done():
+					case <-time.After(heldHealthEvery):
+					}
+					healthy, message = r.checkHealth(ctx, record)
+				}
+			}
 			statuses[i].Healthy = healthy
 			if message != "" {
 				statuses[i].Message = message
