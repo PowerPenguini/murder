@@ -567,7 +567,8 @@ func TestRelayedRequestsSurviveTheTargetsHandover(t *testing.T) {
 	}
 }
 
-// Only a small body of known length is kept to send again; others stream.
+// Only a small body of known length is kept to send again, within a
+// budget for all requests; others stream.
 func TestOnlySmallBodiesAreKeptToSendAgain(t *testing.T) {
 	for name, c := range map[string]struct {
 		length int64
@@ -578,14 +579,17 @@ func TestOnlySmallBodiesAreKeptToSendAgain(t *testing.T) {
 		"length unknown": {length: -1, kept: false},
 	} {
 		body := strings.Repeat("x", int(max(c.length, 10)))
-		request, _ := http.NewRequest(http.MethodPut, "https://edge/", io.NopCloser(strings.NewReader(body)))
-		request.ContentLength = c.length
-		if err := replayable(request); err != nil {
+		original, _ := http.NewRequest(http.MethodPut, "https://edge/", io.NopCloser(strings.NewReader(body)))
+		original.ContentLength = c.length
+		request, release, err := replayable(original)
+		if err != nil {
 			t.Fatal(err)
 		}
 		if (request.GetBody != nil) != c.kept {
 			t.Errorf("%s: kept %v", name, request.GetBody != nil)
-			continue
+		}
+		if original.GetBody != nil {
+			t.Errorf("%s: the caller's request was changed", name)
 		}
 		if c.kept {
 			for range 2 {
@@ -595,5 +599,19 @@ func TestOnlySmallBodiesAreKeptToSendAgain(t *testing.T) {
 				}
 			}
 		}
+		release()
+	}
+	if replayKept.Load() != 0 {
+		t.Fatalf("%d bytes still counted as kept", replayKept.Load())
+	}
+	// With the budget taken, bodies stream.
+	replayKept.Add(replayBudget)
+	defer replayKept.Add(-replayBudget)
+	original, _ := http.NewRequest(http.MethodPut, "https://edge/", strings.NewReader("small"))
+	original.GetBody = nil
+	if request, release, _ := replayable(original); request.GetBody != nil {
+		t.Fatal("a body was kept beyond the budget")
+	} else {
+		release()
 	}
 }

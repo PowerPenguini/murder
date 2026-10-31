@@ -241,33 +241,52 @@ func (t relayTransport) RoundTrip(request *http.Request) (*http.Response, error)
 	if request.Header.Get("Upgrade") != "" {
 		return t.upgrades.RoundTrip(request)
 	}
-	if err := replayable(request); err != nil {
+	request, release, err := replayable(request)
+	if err != nil {
 		return nil, err
 	}
+	defer release()
 	return t.multiplexed.RoundTrip(request)
 }
 
 // replayBody is the largest request body kept so that it can be sent
 // again: an edge handing over answers GOAWAY, and a request it did not take
 // is sent again on another connection, which needs its body anew. Larger
-// bodies stream through, as before.
-const replayBody = 1 << 20
+// bodies stream through, as before; so does every body while replayBudget
+// is taken, so clients that send bodies slowly cannot make the edge hold
+// more than that.
+const (
+	replayBody   = 1 << 20
+	replayBudget = 64 << 20
+)
 
-// replayable reads a small body of known length into memory, so the
-// transport can send the request again.
-func replayable(request *http.Request) error {
-	if request.Body == nil || request.Body == http.NoBody || request.GetBody != nil ||
-		request.ContentLength <= 0 || request.ContentLength > replayBody {
-		return nil
+// replayKept is how many bytes of bodies are kept now.
+var replayKept atomic.Int64
+
+// replayable returns request with a small body of known length read into
+// memory, so the transport can send it again, and a function that gives
+// the memory back once the request is done.
+func replayable(request *http.Request) (*http.Request, func(), error) {
+	none := func() {}
+	size := request.ContentLength
+	if request.Body == nil || request.Body == http.NoBody || request.GetBody != nil || size <= 0 || size > replayBody {
+		return request, none, nil
 	}
-	body, err := io.ReadAll(io.LimitReader(request.Body, request.ContentLength))
+	if replayKept.Add(size) > replayBudget {
+		replayKept.Add(-size)
+		return request, none, nil
+	}
+	release := func() { replayKept.Add(-size) }
+	body, err := io.ReadAll(io.LimitReader(request.Body, size))
 	_ = request.Body.Close()
 	if err != nil {
-		return err
+		release()
+		return nil, none, err
 	}
-	request.Body = io.NopCloser(bytes.NewReader(body))
-	request.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
-	return nil
+	kept := *request
+	kept.Body = io.NopCloser(bytes.NewReader(body))
+	kept.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	return &kept, release, nil
 }
 
 // Warm opens, or keeps open, a connection to each of relays, so the first
