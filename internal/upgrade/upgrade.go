@@ -251,12 +251,9 @@ func writeRecord(executable string, record Record) error {
 }
 
 // ErrNothingToRollBack reports a node with no install to undo.
-var ErrNothingToRollBack = errors.New("no upgrade of this node to roll back")
-
-// Rollback puts back the binary the last install replaced, if the binary
-// in place is the one it installed. It returns the record, whose From
-// schema says which database the old binary opens.
-func Rollback(executable string) (Record, error) {
+// LastInstall is the record of the last install over executable, or
+// ErrNothingToRollBack.
+func LastInstall(executable string) (Record, error) {
 	data, err := os.ReadFile(recordPath(executable))
 	if errors.Is(err, os.ErrNotExist) {
 		return Record{}, ErrNothingToRollBack
@@ -267,6 +264,19 @@ func Rollback(executable string) (Record, error) {
 	var record Record
 	if err := json.Unmarshal(data, &record); err != nil {
 		return Record{}, fmt.Errorf("%s: %w", recordPath(executable), err)
+	}
+	return record, nil
+}
+
+var ErrNothingToRollBack = errors.New("no upgrade of this node to roll back")
+
+// Rollback puts back the binary the last install replaced, if the binary
+// in place is the one it installed. It returns the record, whose From
+// schema says which database the old binary opens.
+func Rollback(executable string) (Record, error) {
+	record, err := LastInstall(executable)
+	if err != nil {
+		return Record{}, err
 	}
 	inPlace, err := Hash(executable)
 	if err != nil {

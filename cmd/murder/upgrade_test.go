@@ -28,6 +28,7 @@ type upgradeAgent struct {
 	running   map[string]string
 	refuse    map[string]bool
 	stuck     map[string]bool
+	down      map[string]bool
 	installed []string
 	frozen    bool
 	thawed    int
@@ -50,6 +51,9 @@ func (a *upgradeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.frozen = false
 		a.thawed++
 		w.WriteHeader(http.StatusNoContent)
+	case a.down[node]:
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"node does not answer"}`))
 	case r.Method == http.MethodGet:
 		now := time.Now()
 		_ = json.NewEncoder(w).Encode(upgrade.Info{Node: node, Version: upgrade.Version{Binary: a.running[node], Schema: 5}, Started: now.Add(-time.Second), LastPass: now})
@@ -141,5 +145,17 @@ func TestAResumedUpgradeSkipsNodesThatRunTheBinary(t *testing.T) {
 	}
 	if !slices.Equal(agent.installed, []string{"n3", "n1"}) || agent.frozen {
 		t.Fatalf("installed %v, frozen %v", agent.installed, agent.frozen)
+	}
+}
+
+// A node that does not answer stops the upgrade before anything changed,
+// changes not frozen.
+func TestANodeThatDoesNotAnswerFreezesNothing(t *testing.T) {
+	agent := &upgradeAgent{running: map[string]string{"n1": "old", "n2": "old", "n3": "old"}, down: map[string]bool{"n3": true}}
+	client, binary := startUpgradeAgent(t, agent)
+	capture(t)
+	err := upgradeCluster(context.Background(), client, binary, 5*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") || agent.frozen || len(agent.installed) != 0 {
+		t.Fatalf("upgrade: %v, frozen %v, installed %v", err, agent.frozen, agent.installed)
 	}
 }

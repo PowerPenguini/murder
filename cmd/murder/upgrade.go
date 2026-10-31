@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -126,8 +127,19 @@ func upgradeCluster(ctx context.Context, client *api.Client, binary string, wait
 	if err != nil {
 		return err
 	}
+	// A node that does not answer would stop the upgrade before it changed
+	// anything, with changes frozen: find out first.
+	for _, node := range nodes {
+		if _, err := client.NodeInfo(ctx, nodeOrSelf(node)); err != nil {
+			name := node
+			if name == "" {
+				name = "this node"
+			}
+			return fmt.Errorf("%s does not answer, so nothing was changed: %w", name, err)
+		}
+	}
 	fmt.Fprintf(stdout, "upgrading %v to %s (schema version %d)\n", nodes, short(version.Binary), version.Schema)
-	reason := "upgrade to " + short(version.Binary)
+	reason := store.UpgradeFreeze + short(version.Binary)
 	if err := client.Freeze(ctx, reason); err != nil {
 		return fmt.Errorf("freeze changes: %w", err)
 	}
@@ -283,6 +295,7 @@ func runRollback(args []string) error {
 	flags := flag.NewFlagSet("upgrade rollback", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfig, "agent configuration file")
 	binary := flags.String("binary", "", "the agent's binary (this one if unset)")
+	force := flags.Bool("force", false, "roll back even though no upgrade is under way")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -301,6 +314,16 @@ func runRollback(args []string) error {
 		return err
 	} else if running {
 		return errors.New("the agent runs: stop it first (systemctl stop murder-agent)")
+	}
+	// Once an upgrade is over, its rollback would put back a database as
+	// it was then, losing every change since.
+	if _, err := upgrade.LastInstall(executable); err != nil {
+		return err
+	}
+	if frozen, err := store.DatabaseFrozen(cfg.Database); err != nil {
+		return err
+	} else if !strings.HasPrefix(frozen, store.UpgradeFreeze) && !*force {
+		return errors.New("no upgrade is under way (changes were taken again since): rolling the last one back now would put back the binary, and the database if its schema changed, as they were before it, losing what changed since; -force does it anyway")
 	}
 	record, err := upgrade.Rollback(executable)
 	if err != nil {
