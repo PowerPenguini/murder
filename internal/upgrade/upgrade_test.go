@@ -285,10 +285,12 @@ func TestAFailedHandoverIsReportedAtOnce(t *testing.T) {
 }
 
 // A new edge that took over late, from a binary that is no longer in
-// place, is handed back; one running another binary is left alone.
+// place, is handed back, asked again while it refuses, as an edge whose
+// predecessor still drains does; one running another binary is left alone,
+// and so is any edge once a new install began.
 func TestALateEdgeIsHandedBack(t *testing.T) {
 	f := newFixture(t)
-	f.node.lateEdgeWait = 5 * time.Second
+	f.node.lateEdgeWait = 4 * time.Second
 	shell, err := os.ReadFile("/bin/sh")
 	if err != nil {
 		t.Skip("no /bin/sh")
@@ -301,29 +303,34 @@ func TestALateEdgeIsHandedBack(t *testing.T) {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
-	edge := exec.Command(late, "-c", "trap 'echo yes > "+marker+"; exit' HUP; while true; do sleep 0.05; done", "edge")
-	if err := edge.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = edge.Process.Kill(); _ = edge.Wait() }()
-	if err := os.WriteFile(f.node.EdgePIDFile, []byte(strconv.Itoa(edge.Process.Pid)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	f.node.revertLateEdge(1, sha(shell))
-	var data []byte
-	for range 100 {
-		if data, err = os.ReadFile(marker); err == nil {
-			break
+	start := func() *exec.Cmd {
+		// It refuses the first handover and takes the second.
+		edge := exec.Command(late, "-c", "n=0; trap 'n=$((n+1)); if [ $n -ge 2 ]; then echo $n > "+marker+"; exit; fi' HUP; while true; do sleep 0.05; done", "edge")
+		if err := edge.Start(); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(20 * time.Millisecond)
+		if err := os.WriteFile(f.node.EdgePIDFile, []byte(strconv.Itoa(edge.Process.Pid)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return edge
 	}
-	if string(data) != "yes\n" {
-		t.Fatalf("the late edge was not handed back: %q, %v", data, err)
+	edge := start()
+	f.node.revertLateEdge(context.Background(), 1, sha(shell))
+	_ = edge.Wait()
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "2\n" {
+		t.Fatalf("the late edge was not handed back after it refused once: %q, %v", data, err)
 	}
 	// An edge of another binary is not touched.
 	_ = os.Remove(marker)
-	f.node.revertLateEdge(1, sha([]byte("another binary")))
+	edge = start()
+	defer func() { _ = edge.Process.Kill(); _ = edge.Wait() }()
+	f.node.revertLateEdge(context.Background(), 1, sha([]byte("another binary")))
+	// Nor any edge once the watch is stopped, as a new install stops it.
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	f.node.revertLateEdge(stopped, 1, sha(shell))
+	time.Sleep(200 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatal("an edge of another binary was signalled")
+		t.Fatal("an edge was signalled that should not be")
 	}
 }
