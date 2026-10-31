@@ -46,8 +46,9 @@ the state replicated between nodes.
   it serves while the agent restarts or is down. A request costs it little:
   routes are one lookup in memory, its reverse proxies are shared and lend
   copy buffers from a pool, connections to tenants and to other nodes' edges
-  stay open (one to each other edge is kept warm, and resumes its TLS
-  session), it neither compresses nor decompresses bodies, flushes only
+  stay open (one HTTP/2 connection to each other edge is kept warm and
+  carries its requests side by side; WebSockets get HTTP/1.1 connections of
+  their own), it neither compresses nor decompresses bodies, flushes only
   streams as they come, speaks HTTP/2 to browsers over HTTPS, and counts
   requests without a lock. On the host, `deploy/murder-sysctl.conf` keeps a
   connection's sending rate across a pause between requests instead of
@@ -116,9 +117,12 @@ does not come back stops the upgrade with changes still frozen: on that
 node, with its agent stopped, `murder.prev upgrade rollback` (the old
 binary, beside the new one, so it works even if the new one does not run)
 puts the old binary back (and the database from before the upgrade, if the
-new release changed its schema); it undoes that node's last install, nothing older. Running the
-same upgrade again resumes it where it stopped; `murder upgrade -thaw`
-takes changes again, safe only once every node runs one release. Only root
+new release changed its schema); it undoes that node's last install, nothing older, and only
+while an upgrade is under way (`-force` otherwise: the database would go back
+to before it). Running the same upgrade again resumes it where it stopped,
+and an upgrade with a fixed binary takes over; `murder upgrade -thaw` takes
+changes again, safe only once every node runs one release. Before freezing
+anything, the upgrade checks that every node answers. Only root
 upgrades, and each install is in the audit log (`node.upgraded`). By hand,
 on one node, the same is:
 
@@ -136,8 +140,8 @@ tenant, certificate expiry) are served from then on at `edge.metrics`.
 
 The reload starts the new binary beside the old one and hands it the open
 listeners; only once it serves does the old one stop taking connections,
-finish the requests it has (up to `edge.drain`, 30 s; event streams are then
-closed and reconnect) and exit. A new edge that does not start leaves the old
+finish the requests it has, WebSockets included (up to `edge.drain`, 30 s;
+what still runs then is closed, and reconnects) and exit. A new edge that does not start leaves the old
 one serving. Restarting the agent leaves containers alone and the edge routing.
 
 A new release replaces no container either: a container is replaced only
@@ -204,7 +208,16 @@ data, and `tenant list` shows which. A tenant runs on the node it was
 created on (run `murder tenant create` there). Every node's edge serves
 every tenant: a request for a tenant of another node goes on, over TLS on
 the private network, to that node's edge (`edge.relayPort`, 7402, the same
-on every node), so DNS may point at any node.
+on every node), so DNS may point at any node. If the tenant moved while the
+request waited for it there, the request follows it, once. A node switched
+off is noticed within seconds (HTTP/2 pings), and its tenants' requests fail
+(502) instead of waiting.
+
+Only members reach a cluster: Raft connections and requests between nodes
+carry the cluster's name, so nodes of another cluster with the same master
+key, such as the one a backup was restored from, are refused, as is a node
+removed from it. A node brought back with a new database rejoins only once
+removed (`murder cluster remove`).
 
 ### Move tenants, replace a server
 
