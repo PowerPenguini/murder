@@ -105,3 +105,29 @@ func TestAStoppingAgentAnswersWaitingEdges(t *testing.T) {
 		t.Fatal("a waiting edge held the stopping agent")
 	}
 }
+
+// A tenant whose container is being replaced is routed as moving: the edge
+// holds its requests until the new container answers.
+func TestARouteWaitsWhileItsContainerIsReplaced(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
+		t.Fatal(err)
+	}
+	replacing := false
+	routes := Routes{Store: f.store, Replacing: func(tenant string) bool { return tenant == "acme" && replacing }}
+	if route, ok := routes.Route("acme"); !ok || route.Moving || route.Backend == "" {
+		t.Fatalf("route = %+v, %v", route, ok)
+	}
+	before := routes.Table().Version
+	replacing = true
+	if route, ok := routes.Route("acme"); !ok || !route.Moving || route.Backend != "" {
+		t.Fatalf("route while replaced = %+v, %v", route, ok)
+	}
+	if routes.Table().Version == before {
+		t.Fatal("the table's version did not change")
+	}
+}
