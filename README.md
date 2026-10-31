@@ -7,7 +7,8 @@ directory. An app is configuration (an image and a spec), not code in Murder.
 The name is the word for a flock of crows: a murder of crows.
 
 See [docs/design.md](docs/design.md) for the architecture and build stages.
-Stage 2 — a single server — is what this code does today.
+Stage 2 — a single server — is what this code does, and the start of stage 3:
+the state replicated between nodes.
 
 ## What one node does
 
@@ -43,7 +44,7 @@ Stage 2 — a single server — is what this code does today.
 - **Local API.** A unix socket the `murder` CLI (and, later, the panel) talks to.
 - **Database.** One SQLite file holds the node's apps, tenants, sealed secrets
   and an audit log of every change: who (the socket user, plus the person a
-  panel acts for), what and when.
+  panel acts for), what and when. In a cluster every node holds the same.
 - **Volumes.** The `zfs` driver gives each tenant a dataset, limited to its
   disk limit (`refquota`, so snapshots do not count). A limit below what a
   tenant already stores is not applied; `tenant list` shows the tenant with
@@ -115,6 +116,58 @@ events` shows what changed since the backup was taken:
 - a tenant archived since runs again, and one purged since comes back with
   an empty data directory;
 - secrets rotated since go back to their old values.
+
+### Join nodes into a cluster
+
+A cluster keeps the same state (apps, tenants, sealed secrets, the audit
+log and its nodes) on every node, replicated with Raft: a change made on any
+node is applied on every node, in the same order, and a node that was down
+catches up when it returns. With three nodes the cluster takes changes while
+any one of them is down; a node cut off from the other two takes none.
+Tenants and the edge keep running either way.
+
+Every node runs tenants: each tenant runs on one node, which keeps its
+data, and `tenant list` shows which. A tenant runs on the node it was
+created on (run `murder tenant create` there). For now each node's edge
+serves its own tenants only; passing requests to the node that runs a
+tenant, replicating tenant data and moving tenants when a node fails come
+next.
+
+Nodes talk over one TLS port on the private network. A node proves it
+belongs to the cluster with a certificate of an authority derived from the
+master key, so every node needs the same master key and nothing else is
+shared. Give each node a `cluster:` section:
+
+```yaml
+cluster:
+  address: 10.0.0.2:7400   # this node on the private network; the others reach it there
+  dir: /var/lib/murder/cluster
+```
+
+On the first node (with its state, if it already runs tenants):
+
+```bash
+sudo murder cluster bootstrap
+```
+
+On every other node, copy `/etc/murder/master.key` from the first node
+before `murder init` (which keeps a key that is there), start the agent and:
+
+```bash
+sudo murder cluster join 10.0.0.2:7400   # any node of the cluster
+sudo murder cluster status
+```
+
+Only a node with a new database joins: it takes the cluster's state. Each
+cluster has a name, given at bootstrap, so a node holding the state of
+another cluster, or of this one before it was rebuilt, is refused; so is a
+node with the name of a member at another address. An agent whose config
+lost its `cluster:` section refuses to start on a database of a cluster.
+`murder cluster remove <node>` takes a node out; to bring it back, give it a
+new database and an empty cluster directory. A node is removed only once it
+runs no tenant, archived ones included. A backup is restored into a cluster
+by rebuilding it: move the cluster directory aside on every node, restore on
+one node, bootstrap there and join the others with new databases.
 
 ## Run tenants
 
@@ -266,13 +319,18 @@ through Murder's real components:
 - suspend and resume;
 - archive, restore with the data, purge.
 
-## Known limits (stage 2)
+## Known limits
 
 - **Edge inside the agent.** The edge proxy runs in the agent process, so
   public traffic pauses for the few seconds an agent restart takes. Tenant
   containers keep running.
-- **Single node.** State is one local SQLite database; stage 3 replicates
-  it to other nodes.
+- **Tenants stay on their node.** A tenant's data lives on the node that
+  runs it, and only that node's edge serves it; replicated tenant data,
+  routing between nodes and failover come next.
+- **Upgrades.** A node applies changes made by its own release and older
+  ones, but stops on a change made by a newer release (and restarts into
+  the same stop) until it is upgraded too. Upgrade every node of a cluster
+  one after the other, without making changes in between.
 - **Registry access during apply.** Tags are pinned when an app is applied
   (or a tenant's image is set), which needs registry access for tags that are
   not yet local.

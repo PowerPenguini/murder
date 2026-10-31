@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
@@ -28,8 +29,12 @@ type Tenant struct {
 	Spec      spec.Tenant    `json:"spec"`
 	App       string         `json:"app"`
 	Overrides spec.Overrides `json:"overrides"`
-	Host      string         `json:"host"`
-	URL       string         `json:"url"`
+	// Node runs the tenant; Status and Address are known there only.
+	Node string `json:"node"`
+	// Elsewhere is set when another node than this one runs the tenant.
+	Elsewhere bool   `json:"elsewhere,omitempty"`
+	Host      string `json:"host"`
+	URL       string `json:"url"`
 	// Address is where the tenant listens, reachable from this node only.
 	Address    string    `json:"address,omitempty"`
 	Generation int64     `json:"generation"`
@@ -96,6 +101,8 @@ type Server struct {
 	runtime    runtime.Runtime
 	key        *secrets.Key
 	log        *slog.Logger
+	// cluster is this node's part of a cluster; nil outside one.
+	cluster Cluster
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }
@@ -108,6 +115,7 @@ func NewServer(st store.Store, reconciler *reconcile.Reconciler, rt runtime.Runt
 // Handler routes API requests.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.clusterRoutes(mux)
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
 	mux.HandleFunc("PUT /v1/apps/{name}", s.putApp)
@@ -132,11 +140,12 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) view(record store.Record) Tenant {
 	view := Tenant{
-		Spec: record.Spec, App: record.App, Overrides: record.Overrides,
+		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
 	}
-	if record.Archived() {
+	view.Elsewhere = record.Node != s.store.Node()
+	if record.Archived() || view.Elsewhere {
 		return view
 	}
 	if address, err := reconcile.Backend(record); err == nil {
@@ -469,8 +478,13 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if _, err := s.store.Live(name); err != nil {
+	record, err := s.store.Live(name)
+	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if record.Node != s.store.Node() {
+		writeError(w, fmt.Errorf("%w: tenant %s runs on node %s: read its logs there", reconcile.ErrElsewhere, name, record.Node))
 		return
 	}
 	tail := 200
@@ -581,7 +595,7 @@ type Routes struct {
 
 func (r Routes) Route(tenant string) (edge.Route, bool) {
 	record, err := r.Store.Live(tenant)
-	if err != nil {
+	if err != nil || record.Node != r.Store.Node() {
 		return edge.Route{}, false
 	}
 	backend, err := reconcile.Backend(record)
@@ -613,17 +627,24 @@ type errorBody struct {
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	var typed statusError
+	var peer *cluster.PeerError
 	switch {
 	case errors.As(err, &typed):
 		status = typed.status
+	case errors.As(err, &peer) && peer.Status >= 400 && peer.Status < 500:
+		status = peer.Status
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrNotArchived), errors.Is(err, store.ErrInUse), errors.Is(err, store.ErrConflict):
 		status = http.StatusConflict
 	case errors.As(err, new(*spec.ValidationError)):
 		status = http.StatusBadRequest
-	case errors.Is(err, reconcile.ErrStopping):
+	case errors.Is(err, reconcile.ErrElsewhere):
+		status = http.StatusConflict
+	case errors.Is(err, reconcile.ErrStopping), errors.Is(err, cluster.ErrNoLeader), errors.Is(err, cluster.ErrNotLeader):
 		status = http.StatusServiceUnavailable
+	case errors.Is(err, store.ErrStale), errors.Is(err, cluster.ErrNotJoined), errors.Is(err, cluster.ErrMember):
+		status = http.StatusConflict
 	case errors.Is(err, context.Canceled):
 		status = 499
 	}

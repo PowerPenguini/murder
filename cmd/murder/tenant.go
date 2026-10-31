@@ -311,9 +311,12 @@ func printJSON(value any) error {
 
 func printTable(tenants []api.Tenant) error {
 	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "NAME\tAPP\tSTATE\tHEALTHY\tIMAGE\tURL")
+	fmt.Fprintln(table, "NAME\tAPP\tNODE\tSTATE\tHEALTHY\tIMAGE\tURL")
 	for _, tenant := range tenants {
 		state, healthy, url := "pending", "-", tenant.URL
+		if tenant.Elsewhere {
+			state = "-" // the node that runs it knows
+		}
 		if tenant.Archived() {
 			// Not routed; when it was archived helps decide what to purge.
 			state, url = "archived "+tenant.ArchivedAt.Local().Format(time.DateOnly), "-"
@@ -334,7 +337,7 @@ func printTable(tenants []api.Tenant) error {
 				healthy = fmt.Sprint(tenant.Status.Healthy)
 			}
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", tenant.Spec.Name, tenant.App, state, healthy, shortImage(tenant.Spec.Image), url)
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", tenant.Spec.Name, tenant.App, tenant.Node, state, healthy, shortImage(tenant.Spec.Image), url)
 	}
 	return table.Flush()
 }

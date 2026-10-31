@@ -1,17 +1,30 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 )
 
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
-// production; their databases are refused, not upgraded. A later change of
-// the schema adds a migration from this version.
-const schemaVersion = 4
+// production; their databases are refused, not upgraded. Open upgrades
+// version 4 in place.
+const schemaVersion = 5
+
+// oldestSchema is the oldest schema version Open upgrades.
+const oldestSchema = 4
+
+// firstBatchSchema is the first schema version of releases that write
+// batches. A migration must keep the statements of batches of every
+// version since valid: a node upgraded first applies the batches the
+// others still write.
+const firstBatchSchema = 5
 
 const schema = `
+-- The node's name, which only this node keeps; the version of the
+-- replicated state, the number of batches applied to it; and, in a
+-- cluster, the cluster's name and the index of the last log entry applied.
 CREATE TABLE meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -39,15 +52,26 @@ CREATE TABLE tenants (
 	generation  INTEGER NOT NULL,
 	created_at  TEXT NOT NULL,
 	updated_at  TEXT NOT NULL,
-	archived_at TEXT
+	archived_at TEXT,
+	-- The node that runs the tenant and keeps its data.
+	node        TEXT NOT NULL
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
+CREATE INDEX tenants_node ON tenants (node);
 
 -- Every image a tenant was given or ran: the candidates for removal once
--- no tenant needs them.
+-- no tenant needs them. Each node keeps its own, outside the replicated
+-- state.
 CREATE TABLE images (
 	ref TEXT PRIMARY KEY
+) STRICT;
+
+-- The nodes of a cluster, which all run tenants.
+CREATE TABLE nodes (
+	name       TEXT PRIMARY KEY,
+	address    TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL
 ) STRICT;
 
 -- Sealed secret values, kept until a purge deletes the tenant.
@@ -81,7 +105,7 @@ func checkSchema(q querier) error {
 		return err
 	}
 	switch {
-	case version == schemaVersion:
+	case version >= oldestSchema && version <= schemaVersion:
 		return nil
 	case version == 0:
 		var objects int
@@ -97,4 +121,48 @@ func checkSchema(q querier) error {
 	default:
 		return fmt.Errorf("it has schema version %d of a development release, which cannot be upgraded; create a new one with \"murder init\"", version)
 	}
+}
+
+// upgrade brings a database of an older schema version to this one, in one
+// transaction. Version 5 counts the batches and log entries applied to the
+// state and knows the nodes of a cluster.
+func upgrade(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version == schemaVersion {
+		return nil
+	}
+	if version == 4 {
+		if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('version', '0'), ('applied', '0')`); err != nil {
+			return err
+		}
+		// Every tenant so far runs on the node upgraded.
+		if _, err := tx.Exec(`ALTER TABLE tenants ADD COLUMN node TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE tenants SET node = (SELECT value FROM meta WHERE key = 'node')`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`CREATE INDEX tenants_node ON tenants (node)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`CREATE TABLE nodes (
+			name       TEXT PRIMARY KEY,
+			address    TEXT NOT NULL UNIQUE,
+					created_at TEXT NOT NULL
+		) STRICT`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

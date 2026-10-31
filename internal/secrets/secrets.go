@@ -3,9 +3,12 @@
 package secrets
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -23,6 +26,7 @@ const keySize = 32
 // Key seals and opens secrets with AES-256-GCM.
 type Key struct {
 	aead cipher.AEAD
+	raw  []byte
 }
 
 // LoadKey reads a base64 master key from path. The file must not be readable
@@ -59,7 +63,7 @@ func NewKey(raw []byte) (*Key, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Key{aead: aead}, nil
+	return &Key{aead: aead, raw: bytes.Clone(raw)}, nil
 }
 
 // CreateKey writes a new random master key to path, refusing to overwrite one.
@@ -155,4 +159,15 @@ func Generate(secret spec.Secret) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown secret kind %q", secret.Kind)
 	}
+}
+
+// Derive returns 32 bytes for purpose, derived from the master key: every
+// node with the same master key derives the same bytes, and they reveal
+// nothing of the key or of what it derives for other purposes.
+func (k *Key) Derive(purpose string) []byte {
+	derived, err := hkdf.Key(sha256.New, k.raw, nil, "murder "+purpose, keySize)
+	if err != nil {
+		panic(err) // only for lengths SHA-256 cannot reach
+	}
+	return derived
 }

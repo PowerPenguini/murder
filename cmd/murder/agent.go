@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/firewall"
@@ -95,6 +96,32 @@ func runAgent(args []string) error {
 	if cfg.Node != "" && cfg.Node != node {
 		return fmt.Errorf("config names node %q but the database belongs to node %q", cfg.Node, node)
 	}
+	// Run alone, a node of a cluster would change its state apart from the
+	// others', which then refuse everything they send it.
+	if cfg.Cluster == nil && (st.Cluster() != "" || len(st.Nodes()) > 0) {
+		return fmt.Errorf("the database belongs to cluster %s: give the node its cluster section back in %s", st.Cluster(), *configPath)
+	}
+	// A node that cannot apply what the cluster applied stops; its restart
+	// applies the entry again.
+	fatal := make(chan error, 1)
+	var member *cluster.Cluster
+	if cfg.Cluster != nil {
+		member, err = cluster.Start(cluster.Config{
+			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
+			Seed: key.Derive(clusterSeed), Store: st, Log: log,
+			Fatal: func(err error) {
+				select {
+				case fatal <- err:
+				default:
+				}
+			},
+		})
+		if err != nil {
+			return err
+		}
+		// Closed before the store, which the log applies to.
+		defer member.Close()
+	}
 	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: node, RegistryAuthFile: cfg.RegistryAuthFile})
 	volumes, err := newVolumes(cfg.Volumes)
 	if err != nil {
@@ -154,6 +181,9 @@ func runAgent(args []string) error {
 	}
 
 	apiHandler := api.NewServer(st, reconciler, docker, key, log)
+	if member != nil {
+		apiHandler.WithCluster(member)
+	}
 	apiServer := &http.Server{Handler: apiHandler.Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
 	go serve("api", apiServer, apiListener)
 	reconciled := make(chan struct{})
@@ -205,6 +235,8 @@ func runAgent(args []string) error {
 	case <-ctx.Done():
 	case runErr = <-failed:
 		log.Error("stopping the agent", "error", runErr)
+	case runErr = <-fatal:
+		log.Error("stopping the agent", "error", runErr)
 	}
 	// Tenant containers keep running while the agent is down or restarting;
 	// only the agent's own listeners stop. A pass, also one an API call
@@ -220,6 +252,10 @@ func runAgent(args []string) error {
 	log.Info("murder agent stopped")
 	return runErr
 }
+
+// clusterSeed is what the cluster's certificate authority is derived from
+// the master key for.
+const clusterSeed = "cluster ca"
 
 func newVolumes(cfg config.Volumes) (volume.Volumes, error) {
 	switch cfg.Driver {

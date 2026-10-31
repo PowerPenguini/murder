@@ -1350,3 +1350,38 @@ func TestExitWithoutRestartIsNotReported(t *testing.T) {
 		t.Fatalf("status = %+v", status)
 	}
 }
+
+func TestANodeRunsOnlyItsOwnTenants(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	if err := f.store.PutNode(store.Node{Name: "other-node", Address: "10.0.0.2:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	app := spec.Tenant{Image: imageB, HealthPath: "/health", User: fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
+	if _, err := f.store.PutApp(store.App{Name: "away", Spec: app}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Create(store.NewTenant{Name: "away", App: "away", Node: "other-node"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if f.runtime.count() != 1 || f.runtime.only(t).spec.Labels[runtime.LabelTenant] != "acme" {
+		t.Fatalf("containers: %d", f.runtime.count())
+	}
+	if _, ok := f.reconciler.Status("away"); ok {
+		t.Error("this node reports a tenant another node runs")
+	}
+	if exists, _ := f.volumes.Exists(context.Background(), "away"); exists {
+		t.Error("this node made data for a tenant another node runs")
+	}
+	// Its image is not this node's to keep.
+	if f.reconciler.needed(imageB) {
+		t.Error("another node's image counts as needed here")
+	}
+	if err := f.store.Archive("away", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reconciler.Purge(context.Background(), "away", "test"); !errors.Is(err, ErrElsewhere) {
+		t.Fatalf("purge a tenant another node runs: %v", err)
+	}
+}

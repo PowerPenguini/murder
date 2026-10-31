@@ -1,6 +1,7 @@
-// Package store keeps the desired state of a node: its apps, its tenants
-// (each an app plus a few overrides) and an audit log of every change. It is
-// kept in SQLite; stage 3 replicates the same changes between nodes.
+// Package store keeps the desired state: apps, tenants (each an app plus a
+// few overrides), the nodes of a cluster and an audit log of every change.
+// It is kept in SQLite on every node; in a cluster, every change is a batch
+// the cluster's log applies on every node.
 package store
 
 import (
@@ -28,8 +29,8 @@ var ErrNotArchived = errors.New("tenant is not archived")
 // ErrConflict reports a change based on an outdated read.
 var ErrConflict = errors.New("conflicting change")
 
-// ErrInUse reports an app that tenants still run.
-var ErrInUse = errors.New("app is in use")
+// ErrInUse reports an app or a node that tenants still run.
+var ErrInUse = errors.New("in use")
 
 // App is a spec shared by tenants: everything but the tenant's name. Its
 // image is pinned.
@@ -51,6 +52,8 @@ type Record struct {
 	// including secrets no longer in the spec: values are only replaced by a
 	// rotation and only deleted by a purge.
 	Sealed map[string]string `json:"-"`
+	// Node runs the tenant and keeps its data.
+	Node string `json:"node"`
 	// Subnet is the tenant network's IPv4 range; the tenant's address in it
 	// is fixed (see runtime.Addresses). A tenant keeps it until it is
 	// purged, archived or not, so no other tenant can be routed to a
@@ -91,6 +94,8 @@ type NewTenant struct {
 	Name      string
 	App       string
 	Overrides spec.Overrides
+	// Node runs the tenant; this node if empty.
+	Node string
 }
 
 // AppChange is the outcome of storing an app.
@@ -122,6 +127,15 @@ type EventQuery struct {
 	Before int64
 	// Limit caps the result; zero means 100.
 	Limit int
+}
+
+// Node is one node of a cluster. Every node runs tenants.
+type Node struct {
+	Name string `json:"name"`
+	// Address is where other nodes reach it: host:port on the private
+	// network.
+	Address   string    `json:"address"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Sealer makes a new value for one secret of a tenant and seals it.
@@ -179,6 +193,13 @@ type Store interface {
 	Archive(name, actor string) error
 	Restore(name, actor string) (Record, error)
 	Forget(name, actor string) error
+
+	// Nodes lists the nodes of the cluster by name; a node outside a
+	// cluster has none. PutNode adds a node or changes its address;
+	// RemoveNode removes one that runs no tenant, archived or not.
+	Nodes() []Node
+	PutNode(node Node, actor string) error
+	RemoveNode(name, actor string) error
 
 	Events(query EventQuery) ([]Event, error)
 	// Backup writes a copy of the whole database, as it is at one moment.
