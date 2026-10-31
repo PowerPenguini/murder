@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -462,5 +463,137 @@ func TestASilentNodeFailsItsRequestsWithinSeconds(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusBadGateway || time.Since(start) > 5*time.Second {
 		t.Fatalf("%s after %s", response.Status, time.Since(start))
+	}
+}
+
+// handedListener shares one socket between servers, as edges do across a
+// handover: closing one server's listener leaves the socket to the next.
+type handedListener struct {
+	conns <-chan net.Conn
+	done  chan struct{}
+	addr  net.Addr
+	once  sync.Once
+}
+
+func (l *handedListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *handedListener) Close() error   { l.once.Do(func() { close(l.done) }); return nil }
+func (l *handedListener) Addr() net.Addr { return l.addr }
+
+// A node whose edge hands over answers its open connections GOAWAY; a
+// relayed request it did not take, body and all, goes again on a new
+// connection instead of failing.
+func TestRelayedRequestsSurviveTheTargetsHandover(t *testing.T) {
+	creds := credentials(t, 7)
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write(body)
+	}))
+	defer app.Close()
+	relay := NewProxy("example.com", staticRoutes{"acme": {Backend: strings.TrimPrefix(app.URL, "http://")}}, quietLog()).Relay()
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inner.Close()
+	conns := make(chan net.Conn)
+	go func() {
+		for {
+			conn, err := inner.Accept()
+			if err != nil {
+				return
+			}
+			conns <- conn
+		}
+	}()
+	serve := func() *http.Server {
+		server := &http.Server{Handler: relay}
+		go server.Serve(tls.NewListener(&handedListener{conns: conns, done: make(chan struct{}), addr: inner.Addr()}, creds.RelayServer()))
+		return server
+	}
+	old := serve()
+	front := httptest.NewServer(NewProxy("example.com", staticRoutes{"acme": {Relay: inner.Addr().String()}}, quietLog()).WithRelay(creds.RelayClient()))
+	defer front.Close()
+
+	var failed atomic.Int32
+	var group sync.WaitGroup
+	stop := make(chan struct{})
+	for worker := range 8 {
+		group.Go(func() {
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				want := fmt.Sprintf("worker %d request %d", worker, i)
+				request, _ := http.NewRequest(http.MethodPut, front.URL, strings.NewReader(want))
+				request.Host = "acme.example.com"
+				response, err := http.DefaultClient.Do(request)
+				if err != nil {
+					failed.Add(1)
+					continue
+				}
+				got, _ := io.ReadAll(response.Body)
+				response.Body.Close()
+				if response.StatusCode != 200 || string(got) != want {
+					failed.Add(1)
+				}
+			}
+		})
+	}
+	// Hand over a few times while requests flow.
+	for range 5 {
+		time.Sleep(100 * time.Millisecond)
+		next := serve()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = old.Shutdown(ctx)
+		cancel()
+		old = next
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	group.Wait()
+	_ = old.Close()
+	if n := failed.Load(); n != 0 {
+		t.Fatalf("%d relayed requests failed across handovers", n)
+	}
+}
+
+// Only a small body of known length is kept to send again; others stream.
+func TestOnlySmallBodiesAreKeptToSendAgain(t *testing.T) {
+	for name, c := range map[string]struct {
+		length int64
+		kept   bool
+	}{
+		"small":          {length: 10, kept: true},
+		"over the cap":   {length: replayBody + 1, kept: false},
+		"length unknown": {length: -1, kept: false},
+	} {
+		body := strings.Repeat("x", int(max(c.length, 10)))
+		request, _ := http.NewRequest(http.MethodPut, "https://edge/", io.NopCloser(strings.NewReader(body)))
+		request.ContentLength = c.length
+		if err := replayable(request); err != nil {
+			t.Fatal(err)
+		}
+		if (request.GetBody != nil) != c.kept {
+			t.Errorf("%s: kept %v", name, request.GetBody != nil)
+			continue
+		}
+		if c.kept {
+			for range 2 {
+				again, _ := request.GetBody()
+				if got, _ := io.ReadAll(again); string(got) != body {
+					t.Errorf("%s: sent again as %q", name, got)
+				}
+			}
+		}
 	}
 }

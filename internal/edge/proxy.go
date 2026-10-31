@@ -4,6 +4,7 @@ package edge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -240,7 +241,33 @@ func (t relayTransport) RoundTrip(request *http.Request) (*http.Response, error)
 	if request.Header.Get("Upgrade") != "" {
 		return t.upgrades.RoundTrip(request)
 	}
+	if err := replayable(request); err != nil {
+		return nil, err
+	}
 	return t.multiplexed.RoundTrip(request)
+}
+
+// replayBody is the largest request body kept so that it can be sent
+// again: an edge handing over answers GOAWAY, and a request it did not take
+// is sent again on another connection, which needs its body anew. Larger
+// bodies stream through, as before.
+const replayBody = 1 << 20
+
+// replayable reads a small body of known length into memory, so the
+// transport can send the request again.
+func replayable(request *http.Request) error {
+	if request.Body == nil || request.Body == http.NoBody || request.GetBody != nil ||
+		request.ContentLength <= 0 || request.ContentLength > replayBody {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, request.ContentLength))
+	_ = request.Body.Close()
+	if err != nil {
+		return err
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	request.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	return nil
 }
 
 // Warm opens, or keeps open, a connection to each of relays, so the first
