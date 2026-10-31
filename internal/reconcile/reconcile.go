@@ -154,13 +154,20 @@ func (s *replacing) clear() {
 // Replacing reports whether tenant's container is being replaced, so that
 // requests for it wait instead of failing while it runs nowhere.
 func (r *Reconciler) Replacing(tenant string) bool {
+	if r == nil {
+		return false
+	}
 	r.replacing.mu.Lock()
 	defer r.replacing.mu.Unlock()
 	return r.replacing.tenants[tenant]
 }
 
-// WatchReplacing is closed when the tenants being replaced change.
+// WatchReplacing is closed when the tenants being replaced change; without
+// a reconciler, never.
 func (r *Reconciler) WatchReplacing() <-chan struct{} {
+	if r == nil {
+		return nil
+	}
 	r.replacing.mu.Lock()
 	defer r.replacing.mu.Unlock()
 	return r.replacing.changed
