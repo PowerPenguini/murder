@@ -1074,8 +1074,6 @@ func (s *SQLite) Observe(name, dataImage string) error {
 	return err
 }
 
-// Archive takes a live tenant out of service in one write; the edge stops
-// routing to it at once. Its suspension is kept for the restore.
 // notMoving refuses a change that would pull a tenant from under its move:
 // the move finishes or is undone first.
 func notMoving(record Record) error {
@@ -1085,6 +1083,8 @@ func notMoving(record Record) error {
 	return nil
 }
 
+// Archive takes a live tenant out of service in one write; the edge stops
+// routing to it at once. Its suspension is kept for the restore.
 func (s *SQLite) Archive(name, actor string) error {
 	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)

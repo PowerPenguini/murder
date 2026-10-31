@@ -147,6 +147,7 @@ func runAgent(args []string) error {
 		}
 		// Closed before the store, which the log applies to.
 		defer member.Close()
+		upgrader.catchUp = member.CatchUp
 		mover = &move.Mover{Store: st, Reconciler: reconciler, Volumes: volumes, Peer: clusterPeer{member}, Log: log, CatchUp: member.CatchUp}
 		moves.setCluster(member, mover)
 	}

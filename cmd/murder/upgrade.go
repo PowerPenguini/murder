@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -54,6 +55,23 @@ type agentUpgrader struct {
 	store      *store.SQLite
 	reconciler *reconcile.Reconciler
 	started    time.Time
+	// catchUp applies here what the cluster has applied; nil outside one.
+	catchUp func() error
+}
+
+// Install takes a binary only under an upgrade's freeze, as this node has
+// it once caught up: a rollback here then finds the freeze it undoes, and
+// no binary is installed while changes are taken.
+func (a *agentUpgrader) Install(ctx context.Context, binary io.Reader, sha string) error {
+	if a.catchUp != nil {
+		if err := a.catchUp(); err != nil {
+			return err
+		}
+	}
+	if frozen := a.store.Frozen(); !strings.HasPrefix(frozen, store.UpgradeFreeze) {
+		return fmt.Errorf("changes are not frozen for an upgrade here (%q): murder upgrade freezes them first", frozen)
+	}
+	return a.Node.Install(ctx, binary, sha)
 }
 
 func (a *agentUpgrader) Info() upgrade.Info {
@@ -129,15 +147,21 @@ func upgradeCluster(ctx context.Context, client *api.Client, binary string, wait
 	}
 	// A node that does not answer would stop the upgrade before it changed
 	// anything, with changes frozen: find out first.
+	// It also tells whether the nodes run one release now: only then does
+	// a refusal before any node changed leave nothing apart.
+	running := map[string]bool{}
 	for _, node := range nodes {
-		if _, err := client.NodeInfo(ctx, nodeOrSelf(node)); err != nil {
+		info, err := client.NodeInfo(ctx, nodeOrSelf(node))
+		if err != nil {
 			name := node
 			if name == "" {
 				name = "this node"
 			}
 			return fmt.Errorf("%s does not answer, so nothing was changed: %w", name, err)
 		}
+		running[info.Version.Binary] = true
 	}
+	oneRelease := len(running) == 1
 	fmt.Fprintf(stdout, "upgrading %v to %s (schema version %d)\n", nodes, short(version.Binary), version.Schema)
 	reason := store.UpgradeFreeze + short(version.Binary)
 	if err := client.Freeze(ctx, reason); err != nil {
@@ -151,12 +175,14 @@ func upgradeCluster(ctx context.Context, client *api.Client, binary string, wait
 		case err == nil:
 			upgraded++
 			continue
-		case errors.As(err, &refused) && upgraded == 0:
+		case errors.As(err, &refused) && upgraded == 0 && oneRelease:
 			// No node runs the new binary: nothing to keep apart.
 			if thawErr := client.Thaw(ctx); thawErr != nil {
 				return errors.Join(err, fmt.Errorf("thaw changes: %w", thawErr))
 			}
 			return fmt.Errorf("%w\nno node was upgraded; changes are taken again", err)
+		case errors.As(err, &refused) && upgraded == 0:
+			return fmt.Errorf("%w\nit runs its old binary, but the nodes ran different binaries before this upgrade (one stopped before it), so changes stay frozen: run an upgrade that every node takes, or roll the nodes that differ back", err)
 		case errors.As(err, &refused):
 			return fmt.Errorf("%w\nit runs its old binary; %d node(s) run the new one, so changes stay frozen until every node runs one release: run this upgrade again (it resumes), or one with a fixed binary", err, upgraded)
 		case errors.As(err, new(*backError)):

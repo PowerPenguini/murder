@@ -169,7 +169,7 @@ const (
 )
 
 // hopsOf is how many edges passed a relayed request on: one if the edge
-// before did not say, as an earlier release does not.
+// before did not say.
 func hopsOf(r *http.Request) int {
 	if hops, err := strconv.Atoi(r.Header.Get(hopsHeader)); err == nil && hops > 0 {
 		return hops

@@ -52,7 +52,7 @@ const healthChecks = 16
 // heldHealthEvery until it is healthy, for heldHealthWait at most in a pass.
 const (
 	heldHealthEvery = 200 * time.Millisecond
-	heldHealthWait  = 20 * time.Second
+	heldHealthWait  = 10 * time.Second
 )
 
 // Status is the observed state of one tenant.
@@ -280,6 +280,8 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	// each.
 	var checks sync.WaitGroup
 	limit := make(chan struct{}, healthChecks)
+	released := make([]bool, len(records))
+	releaseErrs := make([]error, len(records))
 	for i, record := range records {
 		// While its image is pulled, the old container still serves: its
 		// health is the tenant's.
@@ -308,9 +310,26 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 			if message != "" {
 				statuses[i].Message = message
 			}
+			// Served at once, and said so, not when the slowest check of
+			// the pass is done.
+			if record.MoveHeld && healthy && statuses[i].Phase == PhaseRunning {
+				released[i], releaseErrs[i] = true, r.store.ReleaseHold(record.Spec.Name)
+				status := statuses[i]
+				status.Generation, status.CheckedAt = record.Generation, time.Now().UTC()
+				r.mu.Lock()
+				if r.statuses != nil {
+					r.statuses[record.Spec.Name] = status
+				}
+				r.mu.Unlock()
+			}
 		})
 	}
 	checks.Wait()
+	for i, err := range releaseErrs {
+		if err != nil {
+			errs = append(errs, fmt.Errorf("tenant %s: serve it: %w", records[i].Spec.Name, err))
+		}
+	}
 	if err := r.interrupted(ctx); err != nil {
 		return errors.Join(append(errs, err)...)
 	}
@@ -326,7 +345,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	// A tenant that moved here is served once it is healthy: until then,
 	// requests for it wait.
 	for i, record := range records {
-		if record.MoveHeld && (statuses[i].Phase == PhaseRunning && statuses[i].Healthy || statuses[i].Phase == PhaseSuspended) {
+		if record.MoveHeld && !released[i] && (statuses[i].Phase == PhaseRunning && statuses[i].Healthy || statuses[i].Phase == PhaseSuspended) {
 			if err := r.store.ReleaseHold(record.Spec.Name); err != nil {
 				errs = append(errs, fmt.Errorf("tenant %s: serve it: %w", record.Spec.Name, err))
 			}

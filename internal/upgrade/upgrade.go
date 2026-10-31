@@ -250,7 +250,6 @@ func writeRecord(executable string, record Record) error {
 	return os.WriteFile(recordPath(executable), data, 0o644)
 }
 
-// ErrNothingToRollBack reports a node with no install to undo.
 // LastInstall is the record of the last install over executable, or
 // ErrNothingToRollBack.
 func LastInstall(executable string) (Record, error) {
@@ -268,6 +267,7 @@ func LastInstall(executable string) (Record, error) {
 	return record, nil
 }
 
+// ErrNothingToRollBack reports a node with no install to undo.
 var ErrNothingToRollBack = errors.New("no upgrade of this node to roll back")
 
 // Rollback puts back the binary the last install replaced, if the binary

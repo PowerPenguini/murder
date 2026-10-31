@@ -64,7 +64,9 @@ func (c *Cluster) membersOnly(handle http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, err)
 			return
 		}
-		if _, member := nodeNamed(c.config.Store.Nodes(), name); !member {
+		// A node being removed is out of the state before it is out of
+		// the voters: it may still finish its own removal.
+		if _, member := nodeNamed(c.config.Store.Nodes(), name); !member && !c.isVoter(name) {
 			writeError(w, http.StatusForbidden, fmt.Errorf("node %s is not a member of cluster %s", name, ours))
 			return
 		}
@@ -229,8 +231,10 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	}
 	// Nor does one take its place at the same address: a node joins with an
 	// empty log, which, as a voter, would let a node that lacks committed
-	// entries be elected.
-	if c.isVoter(name) {
+	// entries be elected. Every join checks first, so the check refuses it;
+	// the join itself, asked again after leadership moved, finds the node
+	// a voter already and adds it again, which changes nothing.
+	if request.Check && c.isVoter(name) {
 		writeError(w, http.StatusConflict, fmt.Errorf("node %s is a member already; to bring it back with a new database, run \"murder cluster remove %s\" on another node first", name, name))
 		return
 	}

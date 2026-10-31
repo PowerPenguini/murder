@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
+	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 )
 
@@ -157,5 +160,44 @@ func TestANodeThatDoesNotAnswerFreezesNothing(t *testing.T) {
 	err := upgradeCluster(context.Background(), client, binary, 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "nothing was changed") || agent.frozen || len(agent.installed) != 0 {
 		t.Fatalf("upgrade: %v, frozen %v, installed %v", err, agent.frozen, agent.installed)
+	}
+}
+
+// An upgrade that took over a stopped one does not take changes again when
+// its first node refuses: the nodes ran different binaries before it.
+func TestARefusalLeavesNodesThatDifferFrozen(t *testing.T) {
+	agent := &upgradeAgent{running: map[string]string{"n1": "old", "n2": "x", "n3": "old"}, refuse: map[string]bool{"n2": true}, frozen: true}
+	client, binary := startUpgradeAgent(t, agent)
+	capture(t)
+	err := upgradeCluster(context.Background(), client, binary, 5*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "changes stay frozen") || !agent.frozen || agent.thawed != 0 {
+		t.Fatalf("upgrade: %v, frozen %v, thawed %d", err, agent.frozen, agent.thawed)
+	}
+}
+
+// A node takes a binary only under an upgrade's freeze: one that has not
+// applied it yet refuses, and installs nothing.
+func TestANodeInstallsOnlyUnderAnUpgradeFreeze(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "murder.db")
+	if err := store.Init(path, "n1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(path, store.Options{NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: func(string, string, spec.Secret) (string, error) { return "sealed", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	executable := filepath.Join(t.TempDir(), "murder")
+	if err := os.WriteFile(executable, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	caughtUp := 0
+	upgrader := &agentUpgrader{store: st, Node: &upgrade.Node{Executable: executable}, catchUp: func() error { caughtUp++; return nil }}
+	err = upgrader.Install(context.Background(), strings.NewReader("new"), "sha")
+	if err == nil || !strings.Contains(err.Error(), "not frozen for an upgrade") || caughtUp != 1 {
+		t.Fatalf("install without a freeze: %v (caught up %d times)", err, caughtUp)
+	}
+	if data, _ := os.ReadFile(executable); string(data) != "old" {
+		t.Fatal("a binary was installed")
 	}
 }
