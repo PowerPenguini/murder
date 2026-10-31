@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -82,23 +83,24 @@ func Timestamp(t time.Time) float64 { return float64(t.UnixNano()) / 1e9 }
 // histogram: from a cached page to a slow report.
 var buckets = [...]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
 
-// Edge counts the edge proxy's requests.
+// Edge counts the edge proxy's requests. Counting takes no lock once a
+// tenant has counts: requests on many cores do not wait on each other.
 type Edge struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	tenants  map[string]*tenantRequests
-	unrouted uint64
+	unrouted atomic.Uint64
 }
 
 type tenantRequests struct {
 	// byClass counts responses by status class: 1xx (a protocol upgrade)
 	// to 5xx.
-	byClass       [5]uint64
-	backendErrors uint64
+	byClass       [5]atomic.Uint64
+	backendErrors atomic.Uint64
 	// waits is the response time histogram: counts per bucket (not
-	// cumulative), their sum and count.
-	waits [len(buckets)]uint64
-	sum   float64
-	count uint64
+	// cumulative), their sum in nanoseconds and count.
+	waits [len(buckets)]atomic.Uint64
+	sum   atomic.Int64
+	count atomic.Uint64
 }
 
 // NewEdge returns empty counters.
@@ -111,34 +113,24 @@ func (e *Edge) Request(tenant string, status int, wait time.Duration) {
 	if class < 0 || class > 4 {
 		return
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	counts := e.tenant(tenant)
-	counts.byClass[class]++
+	counts.byClass[class].Add(1)
 	seconds := wait.Seconds()
 	for i, bound := range buckets {
 		if seconds <= bound {
-			counts.waits[i]++
+			counts.waits[i].Add(1)
 			break
 		}
 	}
-	counts.sum += seconds
-	counts.count++
+	counts.sum.Add(int64(wait))
+	counts.count.Add(1)
 }
 
 // BackendError counts a request the proxy could not pass to tenant.
-func (e *Edge) BackendError(tenant string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.tenant(tenant).backendErrors++
-}
+func (e *Edge) BackendError(tenant string) { e.tenant(tenant).backendErrors.Add(1) }
 
 // Unrouted counts a request for no known tenant.
-func (e *Edge) Unrouted() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.unrouted++
-}
+func (e *Edge) Unrouted() { e.unrouted.Add(1) }
 
 // Keep forgets the counts of tenants that no longer exist.
 func (e *Edge) Keep(exists func(tenant string) bool) {
@@ -152,23 +144,49 @@ func (e *Edge) Keep(exists func(tenant string) bool) {
 }
 
 func (e *Edge) tenant(name string) *tenantRequests {
+	e.mu.RLock()
 	counts := e.tenants[name]
-	if counts == nil {
+	e.mu.RUnlock()
+	if counts != nil {
+		return counts
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if counts = e.tenants[name]; counts == nil {
 		counts = &tenantRequests{}
 		e.tenants[name] = counts
 	}
 	return counts
 }
 
+// tenantCounts is one tenant's counts at one moment.
+type tenantCounts struct {
+	byClass       [5]uint64
+	backendErrors uint64
+	waits         [len(buckets)]uint64
+	sum           float64
+	count         uint64
+}
+
 // Write writes the edge's families.
 func (e *Edge) Write(w *Writer) {
-	e.mu.Lock()
-	tenants := make(map[string]tenantRequests, len(e.tenants))
+	e.mu.RLock()
+	tenants := make(map[string]tenantCounts, len(e.tenants))
 	for name, counts := range e.tenants {
-		tenants[name] = *counts
+		var copied tenantCounts
+		for i := range counts.byClass {
+			copied.byClass[i] = counts.byClass[i].Load()
+		}
+		for i := range counts.waits {
+			copied.waits[i] = counts.waits[i].Load()
+		}
+		copied.backendErrors = counts.backendErrors.Load()
+		copied.sum = time.Duration(counts.sum.Load()).Seconds()
+		copied.count = counts.count.Load()
+		tenants[name] = copied
 	}
-	unrouted := e.unrouted
-	e.mu.Unlock()
+	unrouted := e.unrouted.Load()
+	e.mu.RUnlock()
 	names := slices.Sorted(maps.Keys(tenants))
 
 	w.Family("murder_edge_requests_total", "counter", "Responses the edge proxy gave, by tenant and status class.")

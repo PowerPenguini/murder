@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -42,6 +43,11 @@ func runEdge(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("process", "edge")
+	// The edge holds little but allocates per request: collecting less
+	// often spends less CPU on it, for a little more memory.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(200)
+	}
 	if err := os.MkdirAll(filepath.Dir(cfg.Edge.PIDFile), 0o755); err != nil {
 		return err
 	}
@@ -76,6 +82,9 @@ func runEdge(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go followRoutes(ctx, api.NewClient(cfg.Socket), table, cfg.Edge.Routes, log)
+	if credentials != nil {
+		go keepWarm(ctx, proxy, table)
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
@@ -242,10 +251,11 @@ func followRoutes(ctx context.Context, client *api.Client, table *edge.LiveTable
 			table.Touch()
 			continue
 		}
-		table.Set(got)
+		// Saved first: what is on disk is never older than what is served.
 		if err := edge.SaveTable(path, got); err != nil {
 			log.Warn("save the routes", "error", err)
 		}
+		table.Set(got)
 	}
 }
 
@@ -253,6 +263,25 @@ func followRoutes(ctx context.Context, client *api.Client, table *edge.LiveTable
 // requests on connections it accepted before it shuts down: a client sends
 // its request right after connecting.
 const handoverGrace = 2 * time.Second
+
+// warmEvery keeps a connection to each other node's edge from going idle
+// for long enough to close (the transport closes them after 90 s).
+const warmEvery = 30 * time.Second
+
+// keepWarm keeps a connection open to every other node's edge the routes
+// lead to, opening one as soon as the routes name a new one.
+func keepWarm(ctx context.Context, proxy *edge.Proxy, table *edge.LiveTable) {
+	for {
+		changed := table.Watch()
+		proxy.Warm(ctx, edge.Relays(table.Load()))
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		case <-time.After(warmEvery):
+		}
+	}
+}
 
 // routesPoll is about how long the agent holds a request for new routes.
 const routesPoll = 25 * time.Second
@@ -292,7 +321,7 @@ func (m *edgeMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // publicServer has no write timeout: tenants stream server-sent events.
 func publicServer(handler http.Handler) *http.Server {
-	return &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	return &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 }
 
 // obtainTLS retries until the certificate is available or ctx ends; the

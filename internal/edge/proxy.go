@@ -4,14 +4,17 @@ package edge
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/metrics"
@@ -50,17 +53,21 @@ type Routes interface {
 }
 
 // Proxy routes "<tenant>.<BaseDomain>" to the tenant's backend, or to the
-// edge of the node that runs it.
+// edge of the node that runs it. Its reverse proxies are made once and
+// shared by every request, with copy buffers from a pool: a request costs
+// the proxy little more than the bytes it passes on.
 type Proxy struct {
 	baseDomain string
 	routes     Routes
 	log        *slog.Logger
-	transport  http.RoundTripper
-	// relay reaches other nodes' edges; nil outside a cluster.
-	relay http.RoundTripper
-	stats *metrics.Edge
+	stats      *metrics.Edge
 	// hold is how long a request for a tenant that is moving waits for it.
 	hold time.Duration
+	// local passes requests to tenants on this node, forward to other
+	// nodes' edges (nil outside a cluster), relayed takes requests other
+	// edges passed on.
+	local, forward, relayed *httputil.ReverseProxy
+	relayTransport          *http.Transport
 }
 
 // HoldMoving is how long a request for a moving tenant waits before it is
@@ -72,31 +79,177 @@ type watcher interface {
 	Watch() <-chan struct{}
 }
 
-// WithRelay passes requests for tenants of other nodes on to their edges,
-// with the TLS config that proves this node belongs to the cluster.
-func (p *Proxy) WithRelay(config *tls.Config) *Proxy {
-	p.relay = &http.Transport{
-		TLSClientConfig:       config,
+// newTransport keeps connections open for the next request: to a tenant,
+// one per request at once, or to another edge. It passes bodies on as
+// they are: decompressing what a client did not ask compressed is the
+// app's choice, not work for the edge.
+func newTransport(tlsConfig *tls.Config) *http.Transport {
+	return &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConnsPerHost:   32,
+		TLSClientConfig:       tlsConfig,
+		MaxIdleConns:          0, // no limit across tenants
+		MaxIdleConnsPerHost:   128,
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 2*time.Minute + HoldMoving,
-		ForceAttemptHTTP2:     false,
+		ExpectContinueTimeout: time.Second,
+		DisableCompression:    true,
+		// WebSockets and other upgrades need HTTP/1.1 on every hop.
+		ForceAttemptHTTP2: false,
+		WriteBufferSize:   32 << 10,
+		ReadBufferSize:    32 << 10,
 	}
-	return p
 }
+
+// buffers lends the reverse proxies their copy buffers.
+var buffers = &bufferPool{pool: sync.Pool{New: func() any { buffer := make([]byte, 32<<10); return &buffer }}}
+
+type bufferPool struct{ pool sync.Pool }
+
+func (b *bufferPool) Get() []byte { return *b.pool.Get().(*[]byte) }
+
+func (b *bufferPool) Put(buffer []byte) {
+	if cap(buffer) == 32<<10 {
+		b.pool.Put(&buffer)
+	}
+}
+
+// hop is what one request needs from the shared reverse proxies.
+type hop struct {
+	tenant   string
+	target   *url.URL
+	secure   bool
+	recorder *recorder
+}
+
+type hopKey struct{}
+
+func hopOf(r *http.Request) *hop { return r.Context().Value(hopKey{}).(*hop) }
 
 // NewProxy returns a proxy for tenants below baseDomain.
 func NewProxy(baseDomain string, routes Routes, log *slog.Logger) *Proxy {
-	transport := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConnsPerHost:   32,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 2 * time.Minute,
-		ExpectContinueTimeout: time.Second,
-	}
-	return &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, transport: transport, stats: metrics.NewEdge(), hold: HoldMoving}
+	p := &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, stats: metrics.NewEdge(), hold: HoldMoving}
+	p.local = p.reverseProxy(newTransport(nil), false)
+	p.relayed = p.reverseProxy(newTransport(nil), true)
+	return p
 }
+
+// WithRelay passes requests for tenants of other nodes on to their edges,
+// with the TLS config that proves this node belongs to the cluster.
+func (p *Proxy) WithRelay(config *tls.Config) *Proxy {
+	config = config.Clone()
+	// A connection to another edge opened again resumes its TLS session.
+	config.ClientSessionCache = tls.NewLRUClientSessionCache(64)
+	p.relayTransport = newTransport(config)
+	p.forward = p.reverseProxy(p.relayTransport, false)
+	return p
+}
+
+// Warm opens, or keeps open, a connection to each of relays, so the first
+// request for a tenant of another node waits for no TLS handshake. It
+// asks for nothing: the relay answers a request with no tenant at once.
+func (p *Proxy) Warm(ctx context.Context, relays []string) {
+	if p.relayTransport == nil {
+		return
+	}
+	var group sync.WaitGroup
+	for _, relay := range relays {
+		group.Go(func() {
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodHead, "https://"+relay+"/", nil)
+			if err != nil {
+				return
+			}
+			request.Header.Set(warmHeader, "1")
+			response, err := p.relayTransport.RoundTrip(request)
+			if err != nil {
+				return
+			}
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+		})
+	}
+	group.Wait()
+}
+
+// Relays lists the other nodes' edges the routes lead to.
+func Relays(table Table) []string {
+	seen := map[string]bool{}
+	var relays []string
+	for _, route := range table.Routes {
+		if route.Relay != "" && !seen[route.Relay] {
+			seen[route.Relay] = true
+			relays = append(relays, route.Relay)
+		}
+	}
+	return relays
+}
+
+// reverseProxy passes requests on to the hop's target. A request the
+// client reached this edge with gets this edge's view of the client; one
+// another edge relayed keeps that edge's.
+func (p *Proxy) reverseProxy(transport http.RoundTripper, relayed bool) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		Rewrite: func(out *httputil.ProxyRequest) {
+			h := hopOf(out.In)
+			if relayed {
+				// The edge the client reached observed these.
+				for _, name := range forwarded {
+					if value := out.In.Header.Get(name); value != "" {
+						out.Out.Header.Set(name, value)
+					}
+				}
+			} else {
+				// The app sees only what this proxy observed: Rewrite
+				// drops Forwarded and X-Forwarded-For/-Host/-Proto, and
+				// every other header apps read a client address or URL
+				// from is dropped here.
+				for _, name := range spoofable {
+					out.Out.Header.Del(name)
+				}
+				// CGI-style servers map "X_Forwarded_For" to the same
+				// variable as "X-Forwarded-For"; no legitimate client
+				// needs underscores.
+				for name := range out.Out.Header {
+					if strings.IndexByte(name, '_') >= 0 {
+						out.Out.Header.Del(name)
+					}
+				}
+				out.SetXForwarded()
+			}
+			out.SetURL(h.target)
+			out.Out.Host = out.In.Host
+		},
+		Transport:  transport,
+		BufferPool: buffers,
+		// An app's own Strict-Transport-Security wins.
+		ModifyResponse: func(response *http.Response) error {
+			if hopOf(response.Request).secure && response.Header.Get("Strict-Transport-Security") == "" {
+				response.Header.Set("Strict-Transport-Security", hsts)
+			}
+			return nil
+		},
+		// Streams (server-sent events, responses of unknown length) are
+		// flushed as they come; others go out in full buffers, in fewer
+		// writes.
+		FlushInterval: 0,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			h := hopOf(r)
+			// Once the connection is taken over, a failure is the client's,
+			// and nothing can be written back.
+			if errors.Is(err, http.ErrAbortHandler) || r.Context().Err() != nil || h.recorder.hijacked {
+				return
+			}
+			p.stats.BackendError(h.tenant)
+			p.log.Warn("proxy to tenant", "tenant", h.tenant, "error", err)
+			w.Header().Set("Retry-After", "10")
+			http.Error(w, "this workspace is not available right now", http.StatusBadGateway)
+		},
+	}
+}
+
+// forwarded are the headers an edge passes on to the edge it relays to.
+var forwarded = []string{"X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host"}
 
 // Stats returns the proxy's request counters.
 func (p *Proxy) Stats() *metrics.Edge { return p.stats }
@@ -122,8 +275,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) { p.serve(w, r
 // handshake proved the peer belongs to the cluster. A tenant this node does
 // not run is not passed on again.
 func (p *Proxy) Relay() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { p.serve(w, r, true) })
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Another edge keeping its connection warm: nothing to count.
+		if r.Method == http.MethodHead && r.Header.Get(warmHeader) != "" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		p.serve(w, r, true)
+	})
 }
+
+// warmHeader marks a request that only keeps a relay connection open.
+const warmHeader = "X-Murder-Warm"
 
 // route looks a tenant up, waiting while it moves.
 func (p *Proxy) route(r *http.Request, tenant string) (Route, bool) {
@@ -187,74 +350,26 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 		w.Header().Set("Retry-After", "10")
 		http.Error(w, "this workspace is not available right now", http.StatusServiceUnavailable)
 	}
-	target, transport := &url.URL{Scheme: "http", Host: route.Backend}, p.transport
+	h := &hop{tenant: tenant, recorder: recorder, secure: r.TLS != nil && !relayed}
+	var proxy *httputil.ReverseProxy
 	switch {
 	case route.Moving:
 		unavailable() // it did not arrive in time
 		return
 	case route.Backend != "":
-	case route.Relay != "" && p.relay != nil && !relayed:
-		target, transport = &url.URL{Scheme: "https", Host: route.Relay}, p.relay
+		h.target, proxy = &url.URL{Scheme: "http", Host: route.Backend}, p.local
+		if relayed {
+			proxy = p.relayed
+		}
+	case route.Relay != "" && p.forward != nil && !relayed:
+		h.target, proxy = &url.URL{Scheme: "https", Host: route.Relay}, p.forward
 	default:
 		p.stats.BackendError(tenant)
 		p.log.Warn("no way to the tenant from this node", "tenant", tenant, "relayed", relayed)
 		unavailable()
 		return
 	}
-	secure := r.TLS != nil && !relayed
-	proxy := &httputil.ReverseProxy{
-		Rewrite: func(out *httputil.ProxyRequest) {
-			if relayed {
-				// The edge the client reached observed these.
-				for _, name := range []string{"X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host"} {
-					if value := out.In.Header.Get(name); value != "" {
-						out.Out.Header.Set(name, value)
-					}
-				}
-			} else {
-				// The app sees only what this proxy observed: Rewrite
-				// drops Forwarded and X-Forwarded-For/-Host/-Proto, and
-				// every other header apps read a client address or URL
-				// from is dropped here.
-				for _, name := range spoofable {
-					out.Out.Header.Del(name)
-				}
-				// CGI-style servers map "X_Forwarded_For" to the same
-				// variable as "X-Forwarded-For"; no legitimate client
-				// needs underscores.
-				for name := range out.Out.Header {
-					if strings.Contains(name, "_") {
-						out.Out.Header.Del(name)
-					}
-				}
-				out.SetXForwarded()
-			}
-			out.SetURL(target)
-			out.Out.Host = out.In.Host
-		},
-		Transport: transport,
-		// An app's own Strict-Transport-Security wins.
-		ModifyResponse: func(response *http.Response) error {
-			if secure && response.Header.Get("Strict-Transport-Security") == "" {
-				response.Header.Set("Strict-Transport-Security", hsts)
-			}
-			return nil
-		},
-		// Stream responses as they come, for server-sent events.
-		FlushInterval: -1,
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			// Once the connection is taken over, a failure is the client's,
-			// and nothing can be written back.
-			if errors.Is(err, http.ErrAbortHandler) || r.Context().Err() != nil || recorder.hijacked {
-				return
-			}
-			p.stats.BackendError(tenant)
-			p.log.Warn("proxy to tenant", "tenant", tenant, "error", err)
-			w.Header().Set("Retry-After", "10")
-			http.Error(w, "this workspace is not available right now", http.StatusBadGateway)
-		},
-	}
-	proxy.ServeHTTP(w, r)
+	proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), hopKey{}, h)))
 }
 
 // RedirectToHTTPS sends plain HTTP requests for tenant hosts to HTTPS once
