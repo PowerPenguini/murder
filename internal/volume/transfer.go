@@ -64,7 +64,10 @@ func (d Dir) Receive(ctx context.Context, tenant string, _ bool, r io.Reader) er
 
 // writeTar writes the tree below root, never leaving it: the tenant runs
 // meanwhile and may swap a directory for a symlink, which is then sent as
-// a symlink, not followed.
+// a symlink, not followed. What it changes meanwhile is sent as far as it
+// is there: a file removed is left out, one that shrank is padded, and
+// sockets and pipes, which hold no data, are left out; the copy made while
+// the tenant is stopped is the whole one.
 func writeTar(ctx context.Context, path string, w io.Writer) error {
 	root, err := os.OpenRoot(path)
 	if err != nil {
@@ -73,6 +76,9 @@ func writeTar(ctx context.Context, path string, w io.Writer) error {
 	defer root.Close()
 	archive := tar.NewWriter(w)
 	err = fs.WalkDir(root.FS(), ".", func(name string, _ fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -80,12 +86,36 @@ func writeTar(ctx context.Context, path string, w io.Writer) error {
 			return err
 		}
 		info, err := root.Lstat(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
+		if info.Mode()&(fs.ModeSocket|fs.ModeNamedPipe|fs.ModeDevice|fs.ModeCharDevice|fs.ModeIrregular) != 0 {
+			return nil
+		}
+		var file *os.File
+		if info.Mode().IsRegular() {
+			// Opened within root: a path swapped for a symlink meanwhile
+			// does not lead out of it.
+			file, err = root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			if info, err = file.Stat(); err != nil {
+				return err
+			}
+		}
 		link := ""
 		if info.Mode()&fs.ModeSymlink != 0 {
-			if link, err = root.Readlink(name); err != nil {
+			if link, err = root.Readlink(name); errors.Is(err, fs.ErrNotExist) {
+				return nil
+			} else if err != nil {
 				return err
 			}
 		}
@@ -101,23 +131,30 @@ func writeTar(ctx context.Context, path string, w io.Writer) error {
 		if err := archive.WriteHeader(header); err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
+		if file == nil {
 			return nil
 		}
-		// Opened within root: a path swapped for a symlink meanwhile does
-		// not lead out of it.
-		file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		copied, err := io.Copy(archive, io.LimitReader(file, header.Size))
 		if err != nil {
 			return err
 		}
-		defer file.Close()
-		_, err = io.CopyN(archive, file, header.Size)
+		// It shrank since: the rest is zeros, and the stopped copy has it
+		// as it is.
+		_, err = io.CopyN(archive, zeros{}, header.Size-copied)
 		return err
 	})
 	if err != nil {
 		return err
 	}
 	return archive.Close()
+}
+
+// zeros reads as zero bytes.
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
 }
 
 // readTar unpacks a stream writeTar wrote below path, never leaving it,
