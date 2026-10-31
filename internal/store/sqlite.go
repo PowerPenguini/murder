@@ -53,6 +53,9 @@ type SQLite struct {
 	// refused: an entry refused on one node is refused on every node.
 	applied appliedIndex
 	recent  recentStates
+	// published is closed, and replaced, whenever a new state is published.
+	publishMu sync.Mutex
+	published chan struct{}
 }
 
 type snapshot struct {
@@ -304,6 +307,26 @@ func (s *SQLite) Close() error {
 func (s *SQLite) Node() string { return s.state.Load().node }
 
 func (s *SQLite) Changed() <-chan struct{} { return s.changed }
+
+// Watch returns a channel closed when the next state is published, for any
+// number of watchers; each takes a new channel after every change.
+func (s *SQLite) Watch() <-chan struct{} {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	if s.published == nil {
+		s.published = make(chan struct{})
+	}
+	return s.published
+}
+
+func (s *SQLite) publish() {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	if s.published != nil {
+		close(s.published)
+		s.published = nil
+	}
+}
 
 // querier is what load needs: a database or a transaction.
 type querier interface {
@@ -569,6 +592,7 @@ func (s *SQLite) transactLocked(signal bool, change func(tx *sql.Tx, current *sn
 		return nil, err
 	}
 	s.state.Store(next)
+	s.publish()
 	if signal {
 		select {
 		case s.changed <- struct{}{}:

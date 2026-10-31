@@ -206,6 +206,9 @@ type Store interface {
 	Backup(w io.Writer) error
 	// Changed is signalled after every successful change of desired state.
 	Changed() <-chan struct{}
+	// Watch returns a channel closed at the next change of any state; any
+	// number of goroutines may watch.
+	Watch() <-chan struct{}
 	Close() error
 }
 

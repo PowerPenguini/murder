@@ -15,9 +15,11 @@ volumes:
   driver: zfs                      # or: driver: dir, root: /srv/murder/tenants
   parent: tank/murder/tenants      # datasets mount below /srv/murder/tenants (mountRoot)
 
-edge:
+edge:                              # served by "murder edge"
   http: ":80"
   https: ":443"
+  # metrics: 127.0.0.1:9465         # the edge's own /metrics
+  # drain: 30s                      # how long a replaced edge finishes its requests
   tls:
     mode: acme                     # off | internal | acme
     storage: /var/lib/murder/certs

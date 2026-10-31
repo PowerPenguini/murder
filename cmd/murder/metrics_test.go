@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
@@ -54,33 +55,33 @@ func TestMetricsDescribeTheNode(t *testing.T) {
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := reconcile.New(st, unusedRuntime{}, volume.Dir{Root: dir}, key, reconcile.Config{BaseDomain: "example.test"}, log)
-	edge := metrics.NewEdge()
-	edge.Request("acme", 200, 30*time.Millisecond)
-	edge.Request("gone", 200, time.Millisecond)   // archived: kept for its return
-	edge.Request("purged", 200, time.Millisecond) // forgotten
+	if err := st.PutNode(store.Node{Name: "node-2", Address: "10.0.0.2:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(store.NewTenant{Name: "away", App: "web", Node: "node-2"}, "test"); err != nil {
+		t.Fatal(err)
+	}
 	firewall := new(atomic.Int64)
 	firewall.Store(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC).UnixNano())
-	handler := &agentMetrics{store: st, reconciler: reconciler, api: api.NewServer(st, reconciler, nil, key, log), edge: edge, firewall: firewall}
+	handler := &agentMetrics{store: st, reconciler: reconciler, api: api.NewServer(st, reconciler, nil, key, log), firewall: firewall}
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest("GET", "/metrics", nil))
 	text := recorder.Body.String()
 	for _, want := range []string{
-		`murder_edge_requests_total{tenant="acme",code="2xx"} 1`,
-		`murder_edge_response_seconds_bucket{tenant="acme",le="0.05"} 1`,
 		`murder_tenant_phase{tenant="acme",phase="pending"} 1`,
 		`murder_tenant_phase{tenant="acme",phase="running"} 0`,
 		`murder_tenant_healthy{tenant="acme"} 0`,
 		`murder_firewall_loaded_timestamp_seconds 1.7932752e+09`,
-		`murder_edge_requests_total{tenant="gone",code="2xx"} 1`,
 	} {
 		if !strings.Contains(text, want+"\n") {
 			t.Errorf("missing %s", want)
 		}
 	}
-	// An archived tenant runs nothing; nothing before a first pass, backup
-	// or certificate is reported as if it happened.
-	for _, absent := range []string{`tenant="purged"`, `murder_tenant_phase{tenant="gone"`, "murder_reconcile_", "murder_backup_", "murder_tls_"} {
+	// An archived tenant runs nothing, another node reports its own, and
+	// nothing before a first pass or backup is reported as if it happened.
+	// The edge serves its own metrics.
+	for _, absent := range []string{`tenant="gone"`, `tenant="away"`, "murder_reconcile_", "murder_backup_", "murder_edge_", "murder_tls_"} {
 		if strings.Contains(text, absent) {
 			t.Errorf("unexpected %s", absent)
 		}
@@ -90,5 +91,35 @@ func TestMetricsDescribeTheNode(t *testing.T) {
 	}
 	if recorder.Header().Get("Content-Type") != "text/plain; version=0.0.4; charset=utf-8" {
 		t.Errorf("content type = %q", recorder.Header().Get("Content-Type"))
+	}
+}
+
+func TestEdgeMetricsDescribeTheEdge(t *testing.T) {
+	stats := metrics.NewEdge()
+	stats.Request("acme", 200, 30*time.Millisecond)
+	stats.Request("purged", 200, time.Millisecond) // no longer routed: forgotten
+	table := &edge.LiveTable{}
+	table.Set(edge.NewTable(map[string]edge.Route{"acme": {Backend: "10.240.0.2:8080"}}))
+	handler := &edgeMetrics{edge: stats, table: table}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest("GET", "/metrics", nil))
+	text := recorder.Body.String()
+	for _, want := range []string{
+		`murder_edge_requests_total{tenant="acme",code="2xx"} 1`,
+		`murder_edge_response_seconds_bucket{tenant="acme",le="0.05"} 1`,
+		`murder_edge_routes 1`,
+		`murder_edge_routes_timestamp_seconds `,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, absent := range []string{`tenant="purged"`, "murder_tls_"} {
+		if strings.Contains(text, absent) {
+			t.Errorf("unexpected %s", absent)
+		}
+	}
+	if t.Failed() {
+		t.Logf("metrics:\n%s", text)
 	}
 }

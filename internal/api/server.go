@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -103,19 +104,27 @@ type Server struct {
 	log        *slog.Logger
 	// cluster is this node's part of a cluster; nil outside one.
 	cluster Cluster
+	// stopping is closed when the agent stops, so requests that wait, such
+	// as the edge's for new routes, end at once.
+	stopping chan struct{}
+	stopOnce sync.Once
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }
 
 // NewServer returns the API server.
 func NewServer(st store.Store, reconciler *reconcile.Reconciler, rt runtime.Runtime, key *secrets.Key, log *slog.Logger) *Server {
-	return &Server{store: st, reconciler: reconciler, runtime: rt, key: key, log: log}
+	return &Server{store: st, reconciler: reconciler, runtime: rt, key: key, log: log, stopping: make(chan struct{})}
 }
+
+// Stop ends the requests that wait, before the server shuts down.
+func (s *Server) Stop() { s.stopOnce.Do(func() { close(s.stopping) }) }
 
 // Handler routes API requests.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.clusterRoutes(mux)
+	mux.HandleFunc("GET /v1/routes", s.routes)
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
 	mux.HandleFunc("PUT /v1/apps/{name}", s.putApp)

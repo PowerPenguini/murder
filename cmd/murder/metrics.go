@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
-	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -16,18 +15,16 @@ import (
 // no pass has seen yet.
 var phases = []string{"pending", reconcile.PhaseRunning, reconcile.PhasePulling, reconcile.PhaseRestarting, reconcile.PhaseFailed, reconcile.PhaseSuspended}
 
-// agentMetrics serves /metrics: the edge's requests, each live tenant's
-// state as of the last pass, and when the agent last reconciled, loaded
-// the firewall and sent a backup, and when its certificate expires.
+// agentMetrics serves /metrics: each live tenant's state as of the last
+// pass, and when the agent last reconciled, loaded the firewall and sent a
+// backup. The edge serves its own.
 type agentMetrics struct {
 	store      store.Store
 	reconciler *reconcile.Reconciler
 	api        *api.Server
-	edge       *metrics.Edge
 	// firewall is when the firewall was last loaded, in Unix nanoseconds;
 	// nil when it is off.
-	firewall     *atomic.Int64
-	certificates atomic.Pointer[edge.Certificates]
+	firewall *atomic.Int64
 }
 
 func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -38,13 +35,6 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	out := metrics.NewWriter(w)
 	records := m.store.List()
-	known := make(map[string]bool, len(records))
-	for _, record := range records {
-		known[record.Spec.Name] = true
-	}
-	// A purged tenant's counts go; an archived one's stay for its return.
-	m.edge.Keep(func(tenant string) bool { return known[tenant] })
-	m.edge.Write(out)
 
 	type tenant struct {
 		name   string
@@ -53,7 +43,8 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var tenants []tenant
 	for _, record := range records {
-		if !record.Archived() {
+		// Another node reports the tenants it runs.
+		if !record.Archived() && record.Node == m.store.Node() {
 			status, seen := m.reconciler.Status(record.Spec.Name)
 			tenants = append(tenants, tenant{record.Spec.Name, status, seen})
 		}
@@ -96,12 +87,6 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if at := m.api.LastBackup(); !at.IsZero() {
 		out.Family("murder_backup_last_timestamp_seconds", "gauge", "When the agent last sent a whole backup of its database.")
 		out.Sample("murder_backup_last_timestamp_seconds", metrics.Timestamp(at))
-	}
-	if certificates := m.certificates.Load(); certificates != nil {
-		if at := certificates.NotAfter(); !at.IsZero() {
-			out.Family("murder_tls_certificate_expiry_timestamp_seconds", "gauge", "When the first of the edge's certificates expires.")
-			out.Sample("murder_tls_certificate_expiry_timestamp_seconds", metrics.Timestamp(at))
-		}
 	}
 	_ = out.Err()
 }
