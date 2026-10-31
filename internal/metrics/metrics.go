@@ -174,6 +174,10 @@ func (e *Edge) Write(w *Writer) {
 	tenants := make(map[string]tenantCounts, len(e.tenants))
 	for name, counts := range e.tenants {
 		var copied tenantCounts
+		// Count first: a request adds to its bucket before the count, so
+		// buckets read after it hold at least as much; they are capped at
+		// it below, as a histogram's buckets never exceed its count.
+		copied.count = counts.count.Load()
 		for i := range counts.byClass {
 			copied.byClass[i] = counts.byClass[i].Load()
 		}
@@ -182,7 +186,6 @@ func (e *Edge) Write(w *Writer) {
 		}
 		copied.backendErrors = counts.backendErrors.Load()
 		copied.sum = time.Duration(counts.sum.Load()).Seconds()
-		copied.count = counts.count.Load()
 		tenants[name] = copied
 	}
 	unrouted := e.unrouted.Load()
@@ -200,7 +203,7 @@ func (e *Edge) Write(w *Writer) {
 		counts := tenants[name]
 		var cumulative uint64
 		for i, bound := range buckets {
-			cumulative += counts.waits[i]
+			cumulative = min(cumulative+counts.waits[i], counts.count)
 			w.Sample("murder_edge_response_seconds_bucket", float64(cumulative), "tenant", name, "le", format(bound))
 		}
 		w.Sample("murder_edge_response_seconds_bucket", float64(counts.count), "tenant", name, "le", "+Inf")

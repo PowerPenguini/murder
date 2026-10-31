@@ -47,6 +47,9 @@ type Mover struct {
 	CatchUp func() error
 	// Healthy bounds the wait for the tenant on its new node.
 	Healthy time.Duration
+	// Away bounds the part of a move in which the tenant runs nowhere: a
+	// target that hangs then does not keep it down; the move is undone.
+	Away time.Duration
 
 	mu     sync.Mutex
 	active map[string]bool
@@ -89,17 +92,23 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 		log.Info("copied the tenant's data to its new node", "took", time.Since(start).Round(time.Millisecond))
 	}
 	// From here on the tenant runs nowhere, and requests wait for it.
+	limit := m.Away
+	if limit == 0 {
+		limit = 5 * time.Minute
+	}
+	awayCtx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
 	if !record.Archived() {
 		if err := m.Store.HoldMove(tenant); err != nil {
 			return err
 		}
-		if err := m.Reconciler.Release(ctx, tenant); err != nil {
+		if err := m.Reconciler.Release(awayCtx, tenant); err != nil {
 			return fmt.Errorf("stop the tenant: %w", err)
 		}
 	}
 	away := time.Now()
 	if hasData {
-		if _, err := m.send(ctx, tenant, target, since); err != nil {
+		if _, err := m.send(awayCtx, tenant, target, since); err != nil {
 			return fmt.Errorf("copy the last changes: %w", err)
 		}
 	}
@@ -112,13 +121,25 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 	}
 	handedOver = true
 	log.Info("the tenant is its new node's", "away", time.Since(away).Round(time.Millisecond))
+	// The rest is the move's own: a client that stops waiting for it does
+	// not cut the wait for the tenant's health short.
+	ctx = context.WithoutCancel(ctx)
 	if !record.Archived() {
 		if err := m.waitHealthy(ctx, tenant, target); err != nil {
 			// Waiting longer helps no one: requests get answers again.
 			return errors.Join(err, m.Store.ReleaseHold(tenant))
 		}
 	}
-	// Its data here is a copy no one needs now.
+	// Its data here is a copy no one needs now, unless the tenant came
+	// back meanwhile.
+	if node := m.settled(tenant); node == "" || node == m.Store.Node() {
+		log.Warn("the moved tenant's data stays on this node: the tenant is this node's again, or its state is unknown")
+		return nil
+	}
+	if moving, err := m.Store.Get(tenant); err == nil && moving.MoveTo == m.Store.Node() {
+		log.Warn("the moved tenant's data stays on this node: the tenant is moving back")
+		return nil
+	}
 	if err := m.Volumes.Remove(ctx, tenant); err != nil {
 		log.Warn("remove the moved tenant's data from this node", "error", err)
 	}

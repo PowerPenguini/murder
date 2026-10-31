@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,19 +27,22 @@ const (
 type listener struct {
 	inner       net.Listener
 	credentials *Credentials
-	log         *slog.Logger
-	pending     chan struct{}
-	raft, http  chan net.Conn
-	done        chan struct{}
-	once        sync.Once
+	// cluster names the cluster this node belongs to; "" before it
+	// belongs to one.
+	cluster    func() string
+	log        *slog.Logger
+	pending    chan struct{}
+	raft, http chan net.Conn
+	done       chan struct{}
+	once       sync.Once
 }
 
-func listen(address string, credentials *Credentials, log *slog.Logger) (*listener, error) {
+func listen(address string, credentials *Credentials, cluster func() string, log *slog.Logger) (*listener, error) {
 	inner, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
 	}
-	l := &listener{inner: inner, credentials: credentials, log: log, pending: make(chan struct{}, handshakes), raft: make(chan net.Conn), http: make(chan net.Conn), done: make(chan struct{})}
+	l := &listener{inner: inner, credentials: credentials, cluster: cluster, log: log, pending: make(chan struct{}, handshakes), raft: make(chan net.Conn), http: make(chan net.Conn), done: make(chan struct{})}
 	go l.accept()
 	return l, nil
 }
@@ -78,11 +83,21 @@ func (l *listener) route(conn *tls.Conn) {
 		_ = conn.Close()
 		return
 	}
-	_ = conn.SetDeadline(time.Time{})
 	target := l.http
 	if conn.ConnectionState().NegotiatedProtocol == protocolRaft {
+		// Raft takes entries, and votes, from its own cluster only: not
+		// from another cluster with the same master key, such as the one
+		// a backup was restored from, nor from any cluster while this
+		// node belongs to none.
+		theirs, err := readClusterHeader(conn)
+		if ours := l.cluster(); err != nil || ours == "" || theirs != ours {
+			l.log.Debug("refused a Raft connection of another cluster", "from", conn.RemoteAddr().String(), "theirs", theirs, "ours", ours, "error", err)
+			_ = conn.Close()
+			return
+		}
 		target = l.raft
 	}
+	_ = conn.SetDeadline(time.Time{})
 	select {
 	case target <- conn:
 	case <-l.done:
@@ -131,7 +146,41 @@ func (s *stream) Addr() net.Addr { return s.l.inner.Addr() }
 func (s *stream) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return dial(ctx, s.l.credentials, s.protocol, string(address))
+	conn, err := dial(ctx, s.l.credentials, s.protocol, string(address))
+	if err != nil || s.protocol != protocolRaft {
+		return conn, err
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+	if _, err := io.WriteString(conn, clusterHeaderPrefix+s.l.cluster()+"\n"); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
+	return conn, nil
+}
+
+// A Raft connection begins with the name of the dialing node's cluster.
+const clusterHeaderPrefix = "murder-cluster "
+
+// readClusterHeader reads the cluster name a Raft connection begins with,
+// a byte at a time, so nothing of what follows is read.
+func readClusterHeader(conn net.Conn) (string, error) {
+	var line []byte
+	one := make([]byte, 1)
+	for len(line) < 256 {
+		if _, err := io.ReadFull(conn, one); err != nil {
+			return "", err
+		}
+		if one[0] == '\n' {
+			name, ok := strings.CutPrefix(string(line), clusterHeaderPrefix)
+			if !ok {
+				return "", errors.New("no cluster name")
+			}
+			return name, nil
+		}
+		line = append(line, one[0])
+	}
+	return "", errors.New("cluster name too long")
 }
 
 // dial connects to a node of the cluster for protocol; ctx bounds the

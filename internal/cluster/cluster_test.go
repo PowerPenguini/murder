@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -44,11 +47,18 @@ type node struct {
 	store   *store.SQLite
 	cluster *Cluster
 	fatal   chan error
+	// tune changes Raft's settings after the tests' own.
+	tune func(*raft.Config)
 }
 
 func newNode(t *testing.T, name string) *node {
 	t.Helper()
-	n := &node{t: t, name: name, dir: t.TempDir(), key: masterKey(t, 7), address: "127.0.0.1:0", fatal: make(chan error, 1)}
+	return newTunedNode(t, name, nil)
+}
+
+func newTunedNode(t *testing.T, name string, tune func(*raft.Config)) *node {
+	t.Helper()
+	n := &node{t: t, name: name, dir: t.TempDir(), key: masterKey(t, 7), address: "127.0.0.1:0", fatal: make(chan error, 1), tune: tune}
 	if err := store.Init(filepath.Join(n.dir, "murder.db"), name); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +85,9 @@ func (n *node) start() {
 			config.ElectionTimeout = time.Second
 			config.LeaderLeaseTimeout = 500 * time.Millisecond
 			config.CommitTimeout = 5 * time.Millisecond
+			if n.tune != nil {
+				n.tune(config)
+			}
 		},
 	})
 	if err != nil {
@@ -120,13 +133,20 @@ func eventually(t *testing.T, what string, check func() bool) {
 // threeNodes starts a cluster of three nodes.
 func threeNodes(t *testing.T) []*node {
 	t.Helper()
-	worker := newNode(t, "fsn-1")
+	return threeTunedNodes(t, nil)
+}
+
+// threeTunedNodes starts a cluster of three nodes with Raft's settings
+// changed by tune.
+func threeTunedNodes(t *testing.T, tune func(*raft.Config)) []*node {
+	t.Helper()
+	worker := newTunedNode(t, "fsn-1", tune)
 	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	nodes := []*node{worker}
 	for _, name := range []string{"nbg-1", "hel-1"} {
-		witness := newNode(t, name)
+		witness := newTunedNode(t, name, tune)
 		if err := witness.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
 			t.Fatalf("join %s: %v", name, err)
 		}
@@ -254,6 +274,49 @@ func TestTheClusterOutlivesItsLeader(t *testing.T) {
 	if record, _ := nodes[1].store.Get("acme"); !record.Spec.Suspended || record.Generation != 2 {
 		t.Fatalf("acme = %+v", record)
 	}
+}
+
+// A node down for longer than the others keep their log catches up from a
+// snapshot, as Raft installs it from the leader, and goes on applying
+// entries after it.
+func TestANodeFarBehindCatchesUpFromASnapshot(t *testing.T) {
+	nodes := threeTunedNodes(t, func(config *raft.Config) {
+		config.SnapshotThreshold = 4
+		config.TrailingLogs = 2
+		config.SnapshotInterval = 100 * time.Millisecond
+	})
+	if _, err := nodes[0].store.PutApp(store.App{Name: "web", Spec: appSpec()}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	sameState(t, nodes)
+	behind := nodes[2]
+	appliedAtStop := behind.store.Applied()
+	behind.stop()
+	for i := range 20 {
+		if _, err := nodes[i%2].store.Create(store.NewTenant{Name: fmt.Sprintf("t%02d", i), App: "web"}, "bob"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The log no longer has what the node missed.
+	for _, n := range nodes[:2] {
+		eventually(t, n.name+" compacted its log", func() bool {
+			first, err := n.cluster.logs.FirstIndex()
+			return err == nil && first > appliedAtStop+1
+		})
+	}
+	behind.start()
+	sameState(t, nodes)
+	if installed, _ := strconv.ParseUint(behind.cluster.raft.Stats()["last_snapshot_index"], 10, 64); installed <= appliedAtStop {
+		t.Fatalf("%s caught up without a snapshot newer than what it had (%d <= %d)", behind.name, installed, appliedAtStop)
+	}
+	if len(behind.store.List()) != 20 {
+		t.Fatalf("%s has %d tenants", behind.name, len(behind.store.List()))
+	}
+	// And it applies what comes next, as the others do.
+	if _, err := behind.store.SetSuspended("t07", true, "carol"); err != nil {
+		t.Fatal(err)
+	}
+	sameState(t, nodes)
 }
 
 func TestOneNodeLeftWritesNothing(t *testing.T) {
@@ -531,4 +594,74 @@ func TestHandshakesAreBounded(t *testing.T) {
 		conn.Close()
 	}
 	eventually(t, "the slots are free", func() bool { return len(n.cluster.listener.pending) == 0 })
+}
+
+// A node brought back with a new database at a member's name and address
+// joins only once the member was removed: its empty log, as a voter, would
+// let a node that lacks committed entries be elected.
+func TestAMemberIsRemovedBeforeItJoinsAgain(t *testing.T) {
+	nodes := threeNodes(t)
+	old := nodes[2]
+	old.stop()
+	again := &node{t: t, name: old.name, dir: t.TempDir(), key: masterKey(t, 7), address: old.address, fatal: make(chan error, 1)}
+	if err := store.Init(filepath.Join(again.dir, "murder.db"), again.name); err != nil {
+		t.Fatal(err)
+	}
+	again.start()
+	t.Cleanup(again.stop)
+	if err := again.cluster.Join(ctx(t), nodes[0].address, "alice"); err == nil || !strings.Contains(err.Error(), "murder cluster remove "+old.name) {
+		t.Fatalf("joining over a member: %v", err)
+	}
+	if err := nodes[0].cluster.Remove(ctx(t), old.name, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := again.cluster.Join(ctx(t), nodes[0].address, "alice"); err != nil {
+		t.Fatalf("joining once removed: %v", err)
+	}
+	sameState(t, []*node{nodes[0], nodes[1], again})
+}
+
+// Neither a node of another cluster with the same master key, such as the
+// one a backup was restored from, nor a node removed from this one reaches
+// it: Raft refuses its connections, and the cluster's endpoints its
+// requests.
+func TestOnlyMembersOfTheClusterReachIt(t *testing.T) {
+	nodes := threeNodes(t)
+	other := newNode(t, "fsn-1")
+	if err := other.cluster.Bootstrap(ctx(t), "mallory"); err != nil {
+		t.Fatal(err)
+	}
+	if other.store.Cluster() == nodes[0].store.Cluster() {
+		t.Fatal("two clusters of one name")
+	}
+	// Raft: a connection naming another cluster is closed unread.
+	conn, err := other.cluster.listener.raftLayer().Dial(raft.ServerAddress(nodes[0].address), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("a Raft connection of another cluster: %v", err)
+	}
+	conn.Close()
+	// Its requests are refused, and so are those of a node removed.
+	asked := func(from *node, what string) {
+		t.Helper()
+		request, _ := http.NewRequestWithContext(ctx(t), http.MethodGet, "https://"+nodes[1].address+"/cluster/v1/node", nil)
+		response, err := from.cluster.client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s: %s", what, response.Status)
+		}
+	}
+	asked(other, "a node of another cluster")
+	removed := nodes[2]
+	if err := nodes[0].cluster.Remove(ctx(t), removed.name, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the removal reaches nbg-1", func() bool { return len(nodes[1].store.Nodes()) == 2 })
+	asked(removed, "a removed node")
 }

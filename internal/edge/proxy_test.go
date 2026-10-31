@@ -422,3 +422,48 @@ func TestInternalRenewalKeepsTheCA(t *testing.T) {
 		t.Fatal("the CA changed")
 	}
 }
+
+// An edge handing over waits, within its drain, for connections taken over
+// for a protocol switch (WebSockets), which its servers do not wait for.
+func TestAHandoverWaitsForUpgradedConnections(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buffered, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = buffered.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		_ = buffered.Flush()
+		_, _ = io.Copy(conn, buffered) // echo until the client goes
+	}))
+	defer backend.Close()
+	proxy := NewProxy("example.com", staticRoutes{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}}, quietLog())
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+	conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(conn, "GET / HTTP/1.1\r\nHost: acme.example.com\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+	if response, err := http.ReadResponse(bufio.NewReader(conn), nil); err != nil || response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade = %v, %v", response, err)
+	}
+	short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	proxy.WaitUpgraded(short)
+	if time.Since(start) < 150*time.Millisecond {
+		t.Fatal("did not wait for the open connection")
+	}
+	conn.Close()
+	done := make(chan struct{})
+	go func() {
+		proxy.WaitUpgraded(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("still waiting after the connection closed")
+	}
+}

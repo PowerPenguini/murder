@@ -129,7 +129,7 @@ func Start(config Config) (*Cluster, error) {
 		_ = logs.Close()
 		return nil, err
 	}
-	l, err := listen(config.Address, credentials, config.Log)
+	l, err := listen(config.Address, credentials, config.Store.Cluster, config.Log)
 	if err != nil {
 		_ = logs.Close()
 		return nil, fmt.Errorf("cluster address: %w", err)
@@ -149,13 +149,13 @@ func Start(config Config) (*Cluster, error) {
 	}
 	c := &Cluster{config: config, address: l.inner.Addr().String(), raft: r, logs: logs, snapshots: snapshots, listener: l}
 	c.client = &http.Client{
-		Transport: &http.Transport{
+		Transport: namedTransport{cluster: config.Store.Cluster, next: &http.Transport{
 			DialTLSContext: func(ctx context.Context, _, address string) (net.Conn, error) {
 				return dial(ctx, credentials, protocolHTTP, address)
 			},
 			MaxIdleConnsPerHost: 2,
 			IdleConnTimeout:     time.Minute,
-		},
+		}},
 	}
 	c.server = &http.Server{Handler: c.handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -341,7 +341,13 @@ func (c *Cluster) apply(data []byte) (uint64, error) {
 		return 0, fmt.Errorf("%w: %w", ErrMaybe, err)
 	}
 	if err, _ := future.Response().(error); err != nil {
-		return future.Index(), err
+		if store.Refused(err) {
+			return future.Index(), err
+		}
+		// A failure of the leader's own, such as a full disk, is not the
+		// change's: it is committed, and every other node applies it. The
+		// leader stops; a writer here learns that it has not applied it.
+		c.config.Log.Error("committed a change this node could not apply", "index", future.Index(), "error", err)
 	}
 	return future.Index(), nil
 }

@@ -31,7 +31,9 @@ type Tenant struct {
 	Spec      spec.Tenant    `json:"spec"`
 	App       string         `json:"app"`
 	Overrides spec.Overrides `json:"overrides"`
-	// Node runs the tenant; Status and Address are known there only.
+	// Node runs the tenant. Address is reachable from there only; Status
+	// is asked of it when another node answers, and left out if it does
+	// not answer in time.
 	Node string `json:"node"`
 	// Elsewhere is set when another node than this one runs the tenant.
 	Elsewhere bool   `json:"elsewhere,omitempty"`
@@ -265,12 +267,13 @@ func (s *Server) deleteApp(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) list(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	records := s.store.List()
 	views := make([]Tenant, 0, len(records))
 	for _, record := range records {
 		views = append(views, s.view(record))
 	}
+	s.remoteStatus(r.Context(), views)
 	writeJSON(w, http.StatusOK, views)
 }
 
@@ -280,7 +283,41 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.view(record))
+	views := []Tenant{s.view(record)}
+	s.remoteStatus(r.Context(), views)
+	writeJSON(w, http.StatusOK, views[0])
+}
+
+// remoteStatusTimeout bounds asking other nodes for their tenants' status:
+// a node that is down leaves its tenants' status unknown instead of
+// holding the answer.
+const remoteStatusTimeout = 2 * time.Second
+
+// remoteStatus fills in the status of tenants other nodes run, asking for
+// all of them side by side, so that waiting for a tenant, or listing them,
+// works from any node.
+func (s *Server) remoteStatus(ctx context.Context, views []Tenant) {
+	if s.cluster == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, remoteStatusTimeout)
+	defer cancel()
+	asking := make(chan struct{}, 16)
+	var group sync.WaitGroup
+	for i := range views {
+		if !views[i].Elsewhere || views[i].Archived() {
+			continue
+		}
+		group.Go(func() {
+			asking <- struct{}{}
+			defer func() { <-asking }()
+			var status reconcile.Status
+			if err := s.cluster.StatusOn(ctx, views[i].Node, views[i].Spec.Name, &status); err == nil {
+				views[i].Status = &status
+			}
+		})
+	}
+	group.Wait()
 }
 
 func (s *Server) resolve(ctx context.Context, image string) (string, string, error) {

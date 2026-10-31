@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -188,5 +190,43 @@ func TestATenantWithoutDataSendsAnEmptyTree(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Join(to.Root, "acme")); err != nil || !info.IsDir() {
 		t.Fatalf("received %v, %v", info, err)
+	}
+}
+
+// A running tenant's data may hold a socket or a pipe, which hold no data
+// and are left out, instead of failing the copy.
+func TestDirLeavesOutSocketsAndPipes(t *testing.T) {
+	ctx := context.Background()
+	from := Dir{Root: filepath.Join(t.TempDir(), "from")}
+	to := Dir{Root: filepath.Join(t.TempDir(), "to")}
+	path, err := from.Ensure(ctx, "acme", os.Getuid(), os.Getgid(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "app.db"), []byte("database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	socket, err := net.Listen("unix", filepath.Join(path, "app.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	if err := syscall.Mkfifo(filepath.Join(path, "pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stream bytes.Buffer
+	if _, err := from.Send(ctx, "acme", "", &stream); err != nil {
+		t.Fatal(err)
+	}
+	if err := to.Receive(ctx, "acme", false, &stream); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(to.Root, "acme", "app.db")); err != nil || string(data) != "database" {
+		t.Fatalf("app.db: %q, %v", data, err)
+	}
+	for _, name := range []string{"app.sock", "pipe"} {
+		if _, err := os.Lstat(filepath.Join(to.Root, "acme", name)); !os.IsNotExist(err) {
+			t.Fatalf("%s was copied: %v", name, err)
+		}
 	}
 }

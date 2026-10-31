@@ -14,21 +14,64 @@ import (
 )
 
 // handler serves other nodes. They are all trusted alike: any of them holds
-// the master key.
+// the master key. Only members of this cluster are served, so neither a
+// node removed from it nor one of another cluster with the same master key
+// changes anything here; a node joins, and fetches the state it joins
+// with, before it is a member.
 func (c *Cluster) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /cluster/v1/commit", c.handleCommit)
-	mux.HandleFunc("GET /cluster/v1/index", c.handleIndex)
+	members := func(pattern string, handle http.HandlerFunc) { mux.HandleFunc(pattern, c.membersOnly(handle)) }
+	members("POST /cluster/v1/commit", c.handleCommit)
+	members("GET /cluster/v1/index", c.handleIndex)
 	mux.HandleFunc("GET /cluster/v1/snapshot", c.handleSnapshot)
 	mux.HandleFunc("POST /cluster/v1/nodes", c.handleJoin)
-	mux.HandleFunc("DELETE /cluster/v1/nodes/{name}", c.handleRemove)
-	mux.HandleFunc("GET /cluster/v1/node", c.handleNodeInfo)
-	mux.HandleFunc("PUT /cluster/v1/tenants/{name}/data", c.handleReceive)
-	mux.HandleFunc("DELETE /cluster/v1/tenants/{name}/data", c.handleDiscard)
-	mux.HandleFunc("GET /cluster/v1/tenants/{name}/status", c.handleTenantStatus)
-	mux.HandleFunc("POST /cluster/v1/tenants/{name}/move", c.handleMove)
-	mux.HandleFunc("PUT /cluster/v1/node/binary", c.handleInstall)
+	members("DELETE /cluster/v1/nodes/{name}", c.handleRemove)
+	members("GET /cluster/v1/node", c.handleNodeInfo)
+	members("PUT /cluster/v1/tenants/{name}/data", c.handleReceive)
+	members("DELETE /cluster/v1/tenants/{name}/data", c.handleDiscard)
+	members("GET /cluster/v1/tenants/{name}/status", c.handleTenantStatus)
+	members("POST /cluster/v1/tenants/{name}/move", c.handleMove)
+	members("PUT /cluster/v1/node/binary", c.handleInstall)
 	return mux
+}
+
+// clusterHeader names the cluster of the node that sends a request.
+const clusterHeader = "X-Murder-Cluster"
+
+// namedTransport says, on every request to another node, which cluster
+// this node belongs to.
+type namedTransport struct {
+	cluster func() string
+	next    http.RoundTripper
+}
+
+func (t namedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	request = request.Clone(request.Context())
+	request.Header.Set(clusterHeader, t.cluster())
+	return t.next.RoundTrip(request)
+}
+
+// membersOnly serves nodes of this cluster that are its members.
+func (c *Cluster) membersOnly(handle http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ours := c.config.Store.Cluster()
+		if theirs := r.Header.Get(clusterHeader); ours == "" || theirs != ours {
+			writeError(w, http.StatusForbidden, fmt.Errorf("node %s belongs to cluster %q, not %q", c.config.Node, ours, theirs))
+			return
+		}
+		name, err := peerName(r.TLS)
+		if err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+		// A node being removed is out of the state before it is out of
+		// the voters: it may still finish its own removal.
+		if _, member := nodeNamed(c.config.Store.Nodes(), name); !member && !c.isVoter(name) {
+			writeError(w, http.StatusForbidden, fmt.Errorf("node %s is not a member of cluster %s", name, ours))
+			return
+		}
+		handle(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -152,6 +195,19 @@ func (c *Cluster) memberAddress(name string) (string, bool) {
 	return "", false
 }
 
+func (c *Cluster) isVoter(name string) bool {
+	future := c.raft.GetConfiguration()
+	if future.Error() != nil {
+		return false
+	}
+	for _, server := range future.Configuration().Servers {
+		if server.ID == raft.ServerID(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleJoin adds a node: first to the state, so its role is known before
 // it votes, then to the voters.
 func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +227,15 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// A node of the same name elsewhere would take the member's place.
 	if address, member := c.memberAddress(name); member && address != request.Address {
 		writeError(w, http.StatusConflict, fmt.Errorf("node %s is already a member at %s; remove it first, or give the new node another name", name, address))
+		return
+	}
+	// Nor does one take its place at the same address: a node joins with an
+	// empty log, which, as a voter, would let a node that lacks committed
+	// entries be elected. Every join checks first, so the check refuses it;
+	// the join itself, asked again after leadership moved, finds the node
+	// a voter already and adds it again, which changes nothing.
+	if request.Check && c.isVoter(name) {
+		writeError(w, http.StatusConflict, fmt.Errorf("node %s is a member already; to bring it back with a new database, run \"murder cluster remove %s\" on another node first", name, name))
 		return
 	}
 	if request.Check {

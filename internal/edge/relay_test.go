@@ -1,9 +1,11 @@
 package edge
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -104,10 +106,11 @@ func TestTheRelayTakesOnlyTheCluster(t *testing.T) {
 			t.Errorf("%s: the relay answered", name)
 		}
 	}
-	// A relayed request is not passed on again.
+	// A request two edges passed on already is not passed on again.
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: credentials(t, 7).RelayClient()}}
 	request, _ := http.NewRequest("GET", pair.back.URL, nil)
 	request.Host = "beta.example.com"
+	request.Header.Set(hopsHeader, "2")
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -297,5 +300,167 @@ func TestAStreamOfUnknownLengthIsNotHeldBack(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the first chunk was held back")
+	}
+}
+
+// A request that waited on a node for its tenant, which then moved to
+// another node, is passed on to that node instead of failing, once.
+func TestARequestFollowsItsTenantToTheNodeItMovedTo(t *testing.T) {
+	creds := credentials(t, 7)
+	seen := make(chan http.Header, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		_, _ = io.WriteString(w, "acme on node 3")
+	}))
+	defer backend.Close()
+	third := httptest.NewUnstartedServer(NewProxy("example.com", staticRoutes{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}}, quietLog()).WithRelay(creds.RelayClient()).Relay())
+	third.TLS = creds.RelayServer()
+	third.StartTLS()
+	defer third.Close()
+	// The second node's routes say acme moved to the third.
+	second := httptest.NewUnstartedServer(NewProxy("example.com", staticRoutes{"acme": {Relay: strings.TrimPrefix(third.URL, "https://")}}, quietLog()).WithRelay(creds.RelayClient()).Relay())
+	second.TLS = creds.RelayServer()
+	second.StartTLS()
+	defer second.Close()
+	// The first node still has acme on the second.
+	front := httptest.NewServer(NewProxy("example.com", staticRoutes{"acme": {Relay: strings.TrimPrefix(second.URL, "https://")}}, quietLog()).WithRelay(creds.RelayClient()))
+	defer front.Close()
+
+	request, _ := http.NewRequest("GET", front.URL, nil)
+	request.Host = "acme.example.com"
+	request.Header.Set("X-Forwarded-For", "6.6.6.6")
+	request.Header.Set(hopsHeader, "9") // a client's claim counts for nothing
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != 200 || string(body) != "acme on node 3" {
+		t.Fatalf("%s %q", response.Status, body)
+	}
+	headers := <-seen
+	if headers.Get("X-Forwarded-For") != "127.0.0.1" || headers.Get(hopsHeader) != "" {
+		t.Fatalf("headers at the app: %v", headers)
+	}
+}
+
+// relayThrough starts a node whose edge runs backend as acme, and a front
+// edge that passes acme's requests on to it; protos gets the protocol of
+// each relayed request.
+func relayThrough(t *testing.T, backend http.Handler) (front *httptest.Server, protos chan string) {
+	t.Helper()
+	creds := credentials(t, 7)
+	app := httptest.NewServer(backend)
+	t.Cleanup(app.Close)
+	protos = make(chan string, 10)
+	relay := NewProxy("example.com", staticRoutes{"acme": {Backend: strings.TrimPrefix(app.URL, "http://")}}, quietLog()).Relay()
+	back := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protos <- r.Proto
+		relay.ServeHTTP(w, r)
+	}))
+	back.TLS = creds.RelayServer()
+	back.StartTLS()
+	t.Cleanup(back.Close)
+	front = httptest.NewServer(NewProxy("example.com", staticRoutes{"acme": {Relay: strings.TrimPrefix(back.URL, "https://")}}, quietLog()).WithRelay(creds.RelayClient()))
+	t.Cleanup(front.Close)
+	return front, protos
+}
+
+// An app may take its time before it reads an upload: the node is alive,
+// and the request is passed on whole, over HTTP/2.
+func TestARelayedUploadMayBeReadSlowly(t *testing.T) {
+	front, protos := relayThrough(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(7 * time.Second) // longer than any liveness timeout
+		n, _ := io.Copy(io.Discard, r.Body)
+		fmt.Fprint(w, n)
+	}))
+	body := bytes.Repeat([]byte("x"), 32<<20)
+	request, _ := http.NewRequest(http.MethodPost, front.URL+"/upload", bytes.NewReader(body))
+	request.Host = "acme.example.com"
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != 200 || string(got) != fmt.Sprint(len(body)) {
+		t.Fatalf("%s %q", response.Status, got)
+	}
+	if proto := <-protos; proto != "HTTP/2.0" {
+		t.Fatalf("relayed over %s", proto)
+	}
+}
+
+// A protocol switch (a WebSocket) is passed on to another node over
+// HTTP/1.1, and its connection carries both ways.
+func TestAnUpgradeIsRelayed(t *testing.T) {
+	front, protos := relayThrough(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buffered, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		_, _ = buffered.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		_ = buffered.Flush()
+		line, _ := buffered.ReadString('\n')
+		_, _ = conn.Write([]byte(line))
+	}))
+	conn, err := net.Dial("tcp", strings.TrimPrefix(front.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = io.WriteString(conn, "GET /socket HTTP/1.1\r\nHost: acme.example.com\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+	reader := bufio.NewReader(conn)
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil || response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade = %v, %v", response, err)
+	}
+	_, _ = io.WriteString(conn, "ping\n")
+	if line, err := reader.ReadString('\n'); err != nil || line != "ping\n" {
+		t.Fatalf("echo through the relayed upgrade = %q, %v", line, err)
+	}
+	if proto := <-protos; proto != "HTTP/1.1" {
+		t.Fatalf("an upgrade relayed over %s", proto)
+	}
+}
+
+// A node that completes the handshake and then answers nothing, as one
+// switched off answers nothing on a connection opened before, fails its
+// requests within seconds instead of holding them for minutes.
+func TestASilentNodeFailsItsRequestsWithinSeconds(t *testing.T) {
+	pingAfter, pingTimeout := relayPingAfter, relayPingTimeout
+	relayPingAfter, relayPingTimeout = 300*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { relayPingAfter, relayPingTimeout = pingAfter, pingTimeout })
+	creds := credentials(t, 7)
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", creds.RelayServer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.(*tls.Conn).Handshake()
+			defer conn.Close() // and never a byte more
+		}
+	}()
+	front := httptest.NewServer(NewProxy("example.com", staticRoutes{"acme": {Relay: listener.Addr().String()}}, quietLog()).WithRelay(creds.RelayClient()))
+	defer front.Close()
+	request, _ := http.NewRequest(http.MethodGet, front.URL, nil)
+	request.Host = "acme.example.com"
+	start := time.Now()
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway || time.Since(start) > 5*time.Second {
+		t.Fatalf("%s after %s", response.Status, time.Since(start))
 	}
 }

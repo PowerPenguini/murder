@@ -257,3 +257,37 @@ func TestAMoveCutShortIsUndone(t *testing.T) {
 		t.Fatal("recovery undid a move under way")
 	}
 }
+
+// hangSecond lets the first copy through and hangs on the second, as a
+// target switched off mid-copy would, until the move gives up.
+type hangSecond struct{ *target }
+
+func (p *hangSecond) Receive(ctx context.Context, node, tenant string, incremental bool, data io.Reader) error {
+	if len(p.received) > 0 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return p.target.Receive(ctx, node, tenant, incremental, data)
+}
+
+// A target that hangs while the tenant runs nowhere does not keep it down:
+// the move is undone once Away has passed, and the tenant runs here again.
+func TestATargetThatHangsDoesNotKeepTheTenantDown(t *testing.T) {
+	f := newFixture(t)
+	f.mover.Peer = &hangSecond{target: f.target}
+	f.mover.Away = 300 * time.Millisecond
+	start := time.Now()
+	if err := f.mover.Move(context.Background(), "acme", "n2", "alice"); err == nil {
+		t.Fatal("the move succeeded")
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("the move gave up after %s", took)
+	}
+	record, _ := f.st.Get("acme")
+	if record.Node != "n1" || record.MoveTo != "" || record.MoveHeld {
+		t.Fatalf("after a move whose target hung: %+v", record)
+	}
+	if exists, _ := f.source.Exists(context.Background(), "acme"); !exists {
+		t.Fatal("the data is gone")
+	}
+}

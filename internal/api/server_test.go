@@ -103,6 +103,7 @@ type apiFixture struct {
 	reconciler *reconcile.Reconciler
 	handler    http.Handler
 	dataRoot   string
+	api        *Server
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
@@ -125,10 +126,11 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	dataRoot := filepath.Join(t.TempDir(), "tenants")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := reconcile.New(st, rt, volume.Dir{Root: dataRoot}, key, reconcile.Config{BaseDomain: "example.test", HealthTimeout: 100 * time.Millisecond}, log)
-	handler := NewServer(st, reconciler, rt, key, log).Handler()
+	api := NewServer(st, reconciler, rt, key, log)
+	handler := api.Handler()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return &apiFixture{client: NewClientURL(server.URL), store: st, reconciler: reconciler, handler: handler, dataRoot: dataRoot}
+	return &apiFixture{client: NewClientURL(server.URL), store: st, reconciler: reconciler, handler: handler, dataRoot: dataRoot, api: api}
 }
 
 func appSpec() spec.Tenant {
@@ -550,6 +552,69 @@ func TestSuspendLogsAndRoutes(t *testing.T) {
 	}
 	if _, err := f.client.Logs(ctx, "away", 10); err == nil || !strings.Contains(err.Error(), "runs on node other-node") {
 		t.Fatalf("logs of a tenant elsewhere: %v", err)
+	}
+}
+
+// statusCluster answers for the tenants of other nodes as those nodes
+// would; a node missing from statuses does not answer.
+type statusCluster struct {
+	Cluster
+	statuses map[string]reconcile.Status
+}
+
+func (c statusCluster) StatusOn(ctx context.Context, node, tenant string, out any) error {
+	status, ok := c.statuses[node+"/"+tenant]
+	if !ok {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	*out.(*reconcile.Status) = status
+	return nil
+}
+
+// Waiting for a tenant, or listing them, works from any node of a cluster:
+// the status of a tenant another node runs is asked of that node, and a
+// node that does not answer leaves it unknown without holding the answer.
+func TestStatusOfTenantsOfOtherNodes(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	for i, node := range []string{"n2", "n3"} {
+		if err := f.store.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+2)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.store.Create(store.NewTenant{Name: "on-" + node, App: "web", Node: node}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	healthy := reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true, Generation: 1}
+	f.api.WithCluster(statusCluster{statuses: map[string]reconcile.Status{"n2/on-n2": healthy}})
+
+	tenant, err := f.client.Get(ctx, "on-n2")
+	if err != nil || tenant.Status == nil || !tenant.Status.Healthy || tenant.Status.Phase != reconcile.PhaseRunning {
+		t.Fatalf("on-n2 = %+v, %v", tenant, err)
+	}
+	start := time.Now()
+	tenants, err := f.client.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > remoteStatusTimeout+time.Second {
+		t.Errorf("listing waited %s for a node that does not answer", took)
+	}
+	for _, tenant := range tenants {
+		switch tenant.Spec.Name {
+		case "on-n2":
+			if tenant.Status == nil || !tenant.Status.Healthy {
+				t.Errorf("listed on-n2 = %+v", tenant)
+			}
+		case "on-n3":
+			if tenant.Status != nil {
+				t.Errorf("a node that does not answer has a status: %+v", tenant.Status)
+			}
+		}
 	}
 }
 

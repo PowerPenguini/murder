@@ -1,0 +1,41 @@
+#cloud-config
+# What a Murder node needs before its binary arrives: Docker, ZFS on the
+# attached volume, nftables. /var/lib/murder-test/ready marks the end.
+package_update: true
+packages: [docker.io, zfsutils-linux, nftables, jq]
+
+write_files:
+  # Hetzner may attach the private network after the first boot's network
+  # config is written; then its interface stays down. DHCP gives it its
+  # address and the route to the network, whenever it appears.
+  - path: /etc/netplan/60-private.yaml
+    permissions: "0600"
+    content: |
+      network:
+        version: 2
+        ethernets:
+          private:
+            match: {name: "enp*"}
+            dhcp4: true
+  # 1 GB servers: keep ZFS's cache small, for Docker and the tenants.
+  - path: /etc/modprobe.d/zfs.conf
+    content: "options zfs zfs_arc_max=134217728\n"
+  - path: /etc/systemd/system/docker.service.d/murder.conf
+    content: |
+      [Unit]
+      After=zfs-mount.service
+      Requires=zfs-mount.service
+
+runcmd:
+  - netplan apply
+  - echo 134217728 > /sys/module/zfs/parameters/zfs_arc_max
+  - |
+    # The volume is attached after the server starts.
+    for i in $(seq 120); do [ -e "${device}" ] && break; sleep 2; done
+    # A volume that already holds the pool, such as on a rebuilt server, keeps it.
+    zpool list tank >/dev/null 2>&1 || zpool import -f tank 2>/dev/null || zpool create -o ashift=12 -O compression=lz4 -O atime=off tank "${device}"
+    zfs create -p tank/murder/tenants
+  - systemctl daemon-reload
+  - systemctl enable --now docker
+  - groupadd -f murder
+  - mkdir -p /var/lib/murder-test && touch /var/lib/murder-test/ready

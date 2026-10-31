@@ -229,6 +229,19 @@ type Record struct {
 
 func recordPath(executable string) string { return executable + ".upgrade" }
 
+// RollbackTarget is the binary a rollback run as executable puts the old
+// one back for: the old binary, kept as murder.prev, rolls back the one in
+// place, so a node whose new binary does not even run can still be rolled
+// back.
+func RollbackTarget(executable string) string {
+	if installed, ok := strings.CutSuffix(executable, ".prev"); ok {
+		if _, err := os.Stat(recordPath(installed)); err == nil {
+			return installed
+		}
+	}
+	return executable
+}
+
 func writeRecord(executable string, record Record) error {
 	data, err := json.Marshal(record)
 	if err != nil {
@@ -237,13 +250,9 @@ func writeRecord(executable string, record Record) error {
 	return os.WriteFile(recordPath(executable), data, 0o644)
 }
 
-// ErrNothingToRollBack reports a node with no install to undo.
-var ErrNothingToRollBack = errors.New("no upgrade of this node to roll back")
-
-// Rollback puts back the binary the last install replaced, if the binary
-// in place is the one it installed. It returns the record, whose From
-// schema says which database the old binary opens.
-func Rollback(executable string) (Record, error) {
+// LastInstall is the record of the last install over executable, or
+// ErrNothingToRollBack.
+func LastInstall(executable string) (Record, error) {
 	data, err := os.ReadFile(recordPath(executable))
 	if errors.Is(err, os.ErrNotExist) {
 		return Record{}, ErrNothingToRollBack
@@ -254,6 +263,20 @@ func Rollback(executable string) (Record, error) {
 	var record Record
 	if err := json.Unmarshal(data, &record); err != nil {
 		return Record{}, fmt.Errorf("%s: %w", recordPath(executable), err)
+	}
+	return record, nil
+}
+
+// ErrNothingToRollBack reports a node with no install to undo.
+var ErrNothingToRollBack = errors.New("no upgrade of this node to roll back")
+
+// Rollback puts back the binary the last install replaced, if the binary
+// in place is the one it installed. It returns the record, whose From
+// schema says which database the old binary opens.
+func Rollback(executable string) (Record, error) {
+	record, err := LastInstall(executable)
+	if err != nil {
+		return Record{}, err
 	}
 	inPlace, err := Hash(executable)
 	if err != nil {
