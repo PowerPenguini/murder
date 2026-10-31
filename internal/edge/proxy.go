@@ -133,6 +133,19 @@ func NewProxy(baseDomain string, routes Routes, log *slog.Logger) *Proxy {
 	return p
 }
 
+// Connections to other edges cross the private network, where an answer
+// takes milliseconds: a node that does not answer within relayDialTimeout
+// is down. One that was switched off answers nothing on a connection
+// opened before either, so a request sent on it would wait for its response
+// for as long as a slow app may take; the kernel drops such a connection
+// once what was sent stays unacknowledged for relayUserTimeout, and the
+// request fails within seconds. A live node acknowledges at once, however
+// long its tenant takes to answer.
+const (
+	relayDialTimeout = 2 * time.Second
+	relayUserTimeout = 5 * time.Second
+)
+
 // WithRelay passes requests for tenants of other nodes on to their edges,
 // with the TLS config that proves this node belongs to the cluster.
 func (p *Proxy) WithRelay(config *tls.Config) *Proxy {
@@ -140,6 +153,9 @@ func (p *Proxy) WithRelay(config *tls.Config) *Proxy {
 	// A connection to another edge opened again resumes its TLS session.
 	config.ClientSessionCache = tls.NewLRUClientSessionCache(64)
 	p.relayTransport = newTransport(config)
+	p.relayTransport.DialContext = (&net.Dialer{
+		Timeout: relayDialTimeout, KeepAlive: 15 * time.Second, Control: userTimeout(relayUserTimeout),
+	}).DialContext
 	p.forward = p.reverseProxy(p.relayTransport, false)
 	return p
 }
