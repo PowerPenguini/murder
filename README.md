@@ -43,7 +43,13 @@ the state replicated between nodes.
   `acme`, which gets a wildcard certificate through DNS-01 from Hetzner Cloud DNS
   or Namecheap. It holds no state: the agent hands it the routes as soon as
   they change, and it keeps the last ones (also on disk, `edge.routes`), so
-  it serves while the agent restarts or is down. `murder_edge_routes_timestamp_seconds`
+  it serves while the agent restarts or is down. A request costs it little:
+  routes are one lookup in memory, its reverse proxies are shared and lend
+  copy buffers from a pool, connections to tenants and to other nodes' edges
+  stay open (one to each other edge is kept warm, and resumes its TLS
+  session), it neither compresses nor decompresses bodies, flushes only
+  streams as they come, speaks HTTP/2 to browsers over HTTPS, and counts
+  requests without a lock. `murder_edge_routes_timestamp_seconds`
   in its metrics (`edge.metrics`) says when the agent last answered.
 - **Local API.** A unix socket the `murder` CLI (and, later, the panel) talks to.
 - **Database.** One SQLite file holds the node's apps, tenants, sealed secrets

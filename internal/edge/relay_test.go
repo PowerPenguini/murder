@@ -2,18 +2,24 @@ package edge
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/cluster"
+	"github.com/PowerPenguini/murder/internal/metrics"
 )
 
-func credentials(t *testing.T, seed byte) *cluster.Credentials {
+func credentials(t *testing.T, seed byte) *cluster.Credentials { return credentialsFor(t, seed) }
+
+func credentialsFor(t testing.TB, seed byte) *cluster.Credentials {
 	t.Helper()
 	c, err := cluster.NewCredentials(bytes.Repeat([]byte{seed}, 32), "edge", time.Now())
 	if err != nil {
@@ -176,5 +182,120 @@ func TestAnEdgeWithoutRoutesYetAsksToComeBack(t *testing.T) {
 	table.Set(NewTable(nil))
 	if response := get(); response.StatusCode != http.StatusNotFound {
 		t.Fatalf("with routes: %s", response.Status)
+	}
+}
+
+func TestWarmKeepsAConnectionToEveryRelay(t *testing.T) {
+	creds := credentialsFor(t, 7)
+	connections := 0
+	var mu sync.Mutex
+	backProxy := NewProxy("example.com", staticRoutes{}, quietLog())
+	back := httptest.NewUnstartedServer(backProxy.Relay())
+	back.TLS = creds.RelayServer()
+	back.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			mu.Lock()
+			connections++
+			mu.Unlock()
+		}
+	}
+	back.StartTLS()
+	defer back.Close()
+	relay := strings.TrimPrefix(back.URL, "https://")
+	front := NewProxy("example.com", staticRoutes{}, quietLog()).WithRelay(creds.RelayClient())
+	table := NewTable(map[string]Route{"acme": {Relay: relay}, "beta": {Relay: relay}, "gamma": {Backend: "10.0.0.1:8080"}})
+	if relays := Relays(table); len(relays) != 1 || relays[0] != relay {
+		t.Fatalf("relays = %v", relays)
+	}
+	for range 3 {
+		front.Warm(context.Background(), Relays(table))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if connections != 1 {
+		t.Fatalf("%d connections for three warmings", connections)
+	}
+	// Warming counts as no request on the other edge.
+	var out bytes.Buffer
+	writer := metrics.NewWriter(&out)
+	backProxy.Stats().Write(writer)
+	if strings.Contains(out.String(), "murder_edge_unrouted_requests_total 1") || strings.Contains(out.String(), "murder_edge_unrouted_requests_total 3") {
+		t.Fatalf("warming was counted:\n%s", out.String())
+	}
+}
+
+// The edge passes bodies on as they are: it asks a tenant for no
+// compression a client did not ask for, and decompresses nothing.
+func TestTheEdgeLeavesCompressionToClientAndApp(t *testing.T) {
+	seen := make(chan string, 2)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("Accept-Encoding")
+		if r.Header.Get("Accept-Encoding") == "gzip" {
+			w.Header().Set("Content-Encoding", "gzip")
+			_, _ = w.Write([]byte("compressed bytes"))
+			return
+		}
+		_, _ = io.WriteString(w, "plain")
+	}))
+	defer backend.Close()
+	front := httptest.NewServer(NewProxy("example.com", staticRoutes{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}}, quietLog()))
+	defer front.Close()
+	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	for _, encoding := range []string{"", "gzip"} {
+		request, _ := http.NewRequest("GET", front.URL, nil)
+		request.Host = "acme.example.com"
+		if encoding != "" {
+			request.Header.Set("Accept-Encoding", encoding)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if got := <-seen; got != encoding {
+			t.Fatalf("the app was asked for %q, the client asked for %q", got, encoding)
+		}
+		if encoding == "gzip" && (string(body) != "compressed bytes" || response.Header.Get("Content-Encoding") != "gzip") {
+			t.Fatalf("the edge changed a compressed body: %q", body)
+		}
+	}
+}
+
+// A response of unknown length reaches the client as it comes, as an
+// event stream does, also when it is not one by its type.
+func TestAStreamOfUnknownLengthIsNotHeldBack(t *testing.T) {
+	release := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "first\n")
+		w.(http.Flusher).Flush()
+		<-release
+		_, _ = io.WriteString(w, "second\n")
+	}))
+	defer backend.Close()
+	defer close(release)
+	front := httptest.NewServer(NewProxy("example.com", staticRoutes{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}}, quietLog()))
+	defer front.Close()
+	request, _ := http.NewRequest("GET", front.URL, nil)
+	request.Host = "acme.example.com"
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	first := make(chan string, 1)
+	go func() {
+		line := make([]byte, 6)
+		_, _ = io.ReadFull(response.Body, line)
+		first <- string(line)
+	}()
+	select {
+	case got := <-first:
+		if got != "first\n" {
+			t.Fatalf("first chunk %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the first chunk was held back")
 	}
 }
