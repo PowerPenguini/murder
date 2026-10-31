@@ -97,9 +97,13 @@ func runEdge(args []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go followRoutes(ctx, api.NewClient(cfg.Socket), table, cfg.Edge.Routes, log)
+	// Routes are followed until this edge has drained, not only until it
+	// handed over: a request held for a moving tenant still serves it.
+	following, stopFollowing := context.WithCancel(context.Background())
+	defer stopFollowing()
+	go followRoutes(following, api.NewClient(cfg.Socket), table, cfg.Edge.Routes, log)
 	if credentials != nil {
-		go keepWarm(ctx, proxy, table)
+		go keepWarm(following, proxy, table)
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
@@ -163,6 +167,9 @@ func runEdge(args []string) error {
 			return nil // stopped while waiting
 		}
 		if upgrader.HasParent() {
+			// Its certificate is loaded: plain HTTP redirects at once, as
+			// the edge before it did, instead of answering "starting".
+			ready.Store(true)
 			httpListener, err := listen("edge http", cfg.Edge.HTTP)
 			if err != nil {
 				return err
@@ -227,6 +234,9 @@ func runEdge(args []string) error {
 			_ = server.Close()
 		}
 	}
+	// Connections taken over for a protocol switch (WebSockets) are not
+	// the servers' to wait for: they get the rest of the drain too.
+	proxy.WaitUpgraded(drain)
 	log.Info("murder edge stopped")
 	return runErr
 }

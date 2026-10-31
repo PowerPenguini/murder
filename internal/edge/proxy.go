@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/metrics"
@@ -72,6 +73,35 @@ type Proxy struct {
 	// tenant moved to while the request waited for it.
 	forwardRelayed *httputil.ReverseProxy
 	relayTransport *http.Transport
+	// upgraded counts connections taken over for a protocol switch, such as
+	// WebSockets, which a server shutting down does not wait for.
+	upgraded atomic.Int64
+}
+
+// WaitUpgraded returns once every connection taken over for a protocol
+// switch has closed, or ctx is done: an edge handing over lets them finish
+// within its drain.
+func (p *Proxy) WaitUpgraded(ctx context.Context) {
+	for p.upgraded.Load() > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// upgradedConn is a connection taken over for a protocol switch, counted
+// until it closes.
+type upgradedConn struct {
+	net.Conn
+	once sync.Once
+	done func()
+}
+
+func (c *upgradedConn) Close() error {
+	c.once.Do(c.done)
+	return c.Conn.Close()
 }
 
 // HoldMoving is how long a request for a moving tenant waits before it is
@@ -97,7 +127,7 @@ func newTransport(tlsConfig *tls.Config) *http.Transport {
 		ResponseHeaderTimeout: 2*time.Minute + HoldMoving,
 		ExpectContinueTimeout: time.Second,
 		DisableCompression:    true,
-		// WebSockets and other upgrades need HTTP/1.1 on every hop.
+		// To tenants: HTTP/1.1, which upgrades (WebSockets) need.
 		ForceAttemptHTTP2: false,
 		WriteBufferSize:   32 << 10,
 		ReadBufferSize:    32 << 10,
@@ -159,17 +189,20 @@ func NewProxy(baseDomain string, routes Routes, log *slog.Logger) *Proxy {
 	return p
 }
 
-// Connections to other edges cross the private network, where an answer
-// takes milliseconds: a node that does not answer within relayDialTimeout
-// is down. One that was switched off answers nothing on a connection
-// opened before either, so a request sent on it would wait for its response
-// for as long as a slow app may take; the kernel drops such a connection
-// once what was sent stays unacknowledged for relayUserTimeout, and the
-// request fails within seconds. A live node acknowledges at once, however
-// long its tenant takes to answer.
-const (
+// Requests go to other edges over HTTP/2, many on one connection, across
+// the private network, where an answer takes milliseconds: a node that
+// does not answer within relayDialTimeout is down. A node switched off
+// answers nothing on a connection opened before either; HTTP/2 pings it
+// when nothing came for relayPingAfter, and drops the connection, failing
+// its requests, when no answer comes within relayPingTimeout. Pings are
+// answered however slowly the node's tenant reads a request's body, so a
+// live node is never taken for a dead one. Protocol switches (WebSockets)
+// need HTTP/1.1; they go on connections of their own, which TCP keep-alive
+// watches.
+var (
 	relayDialTimeout = 2 * time.Second
-	relayUserTimeout = 5 * time.Second
+	relayPingAfter   = 5 * time.Second
+	relayPingTimeout = 3 * time.Second
 )
 
 // WithRelay passes requests for tenants of other nodes on to their edges,
@@ -178,13 +211,36 @@ func (p *Proxy) WithRelay(config *tls.Config) *Proxy {
 	config = config.Clone()
 	// A connection to another edge opened again resumes its TLS session.
 	config.ClientSessionCache = tls.NewLRUClientSessionCache(64)
-	p.relayTransport = newTransport(config)
-	p.relayTransport.DialContext = (&net.Dialer{
-		Timeout: relayDialTimeout, KeepAlive: 15 * time.Second, Control: userTimeout(relayUserTimeout),
+	dial := (&net.Dialer{
+		Timeout:         relayDialTimeout,
+		KeepAliveConfig: net.KeepAliveConfig{Enable: true, Idle: 5 * time.Second, Interval: 2 * time.Second, Count: 3},
 	}).DialContext
-	p.forward = p.reverseProxy(p.relayTransport, false)
-	p.forwardRelayed = p.reverseProxy(p.relayTransport, true)
+	multiplexed := config.Clone()
+	multiplexed.NextProtos = []string{"h2"}
+	p.relayTransport = newTransport(multiplexed)
+	p.relayTransport.DialContext = dial
+	p.relayTransport.Protocols = new(http.Protocols)
+	p.relayTransport.Protocols.SetHTTP2(true)
+	p.relayTransport.HTTP2 = &http.HTTP2Config{SendPingTimeout: relayPingAfter, PingTimeout: relayPingTimeout}
+	upgrades := config.Clone()
+	upgrades.NextProtos = []string{"http/1.1"}
+	upgradeTransport := newTransport(upgrades)
+	upgradeTransport.DialContext = dial
+	transport := relayTransport{multiplexed: p.relayTransport, upgrades: upgradeTransport}
+	p.forward = p.reverseProxy(transport, false)
+	p.forwardRelayed = p.reverseProxy(transport, true)
 	return p
+}
+
+// relayTransport sends protocol switches over HTTP/1.1, everything else
+// over HTTP/2.
+type relayTransport struct{ multiplexed, upgrades http.RoundTripper }
+
+func (t relayTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Header.Get("Upgrade") != "" {
+		return t.upgrades.RoundTrip(request)
+	}
+	return t.multiplexed.RoundTrip(request)
 }
 
 // Warm opens, or keeps open, a connection to each of relays, so the first
@@ -382,7 +438,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 		http.Error(w, "unknown tenant", http.StatusNotFound)
 		return
 	}
-	recorder := &recorder{ResponseWriter: w, start: time.Now()}
+	recorder := &recorder{ResponseWriter: w, start: time.Now(), upgraded: &p.upgraded}
 	w = recorder
 	// A request the client gave up before any response is not counted.
 	defer func() {
@@ -455,6 +511,7 @@ type recorder struct {
 	status   int
 	wait     time.Duration
 	hijacked bool
+	upgraded *atomic.Int64
 }
 
 func (r *recorder) WriteHeader(status int) {
@@ -481,6 +538,10 @@ func (r *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	conn, buffered, err := http.NewResponseController(r.ResponseWriter).Hijack()
 	if err == nil {
 		r.hijacked = true
+		if r.upgraded != nil {
+			r.upgraded.Add(1)
+			conn = &upgradedConn{Conn: conn, done: func() { r.upgraded.Add(-1) }}
+		}
 		if r.status == 0 {
 			r.status, r.wait = http.StatusSwitchingProtocols, time.Since(r.start)
 		}
