@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -593,4 +594,74 @@ func TestHandshakesAreBounded(t *testing.T) {
 		conn.Close()
 	}
 	eventually(t, "the slots are free", func() bool { return len(n.cluster.listener.pending) == 0 })
+}
+
+// A node brought back with a new database at a member's name and address
+// joins only once the member was removed: its empty log, as a voter, would
+// let a node that lacks committed entries be elected.
+func TestAMemberIsRemovedBeforeItJoinsAgain(t *testing.T) {
+	nodes := threeNodes(t)
+	old := nodes[2]
+	old.stop()
+	again := &node{t: t, name: old.name, dir: t.TempDir(), key: masterKey(t, 7), address: old.address, fatal: make(chan error, 1)}
+	if err := store.Init(filepath.Join(again.dir, "murder.db"), again.name); err != nil {
+		t.Fatal(err)
+	}
+	again.start()
+	t.Cleanup(again.stop)
+	if err := again.cluster.Join(ctx(t), nodes[0].address, "alice"); err == nil || !strings.Contains(err.Error(), "murder cluster remove "+old.name) {
+		t.Fatalf("joining over a member: %v", err)
+	}
+	if err := nodes[0].cluster.Remove(ctx(t), old.name, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := again.cluster.Join(ctx(t), nodes[0].address, "alice"); err != nil {
+		t.Fatalf("joining once removed: %v", err)
+	}
+	sameState(t, []*node{nodes[0], nodes[1], again})
+}
+
+// Neither a node of another cluster with the same master key, such as the
+// one a backup was restored from, nor a node removed from this one reaches
+// it: Raft refuses its connections, and the cluster's endpoints its
+// requests.
+func TestOnlyMembersOfTheClusterReachIt(t *testing.T) {
+	nodes := threeNodes(t)
+	other := newNode(t, "fsn-1")
+	if err := other.cluster.Bootstrap(ctx(t), "mallory"); err != nil {
+		t.Fatal(err)
+	}
+	if other.store.Cluster() == nodes[0].store.Cluster() {
+		t.Fatal("two clusters of one name")
+	}
+	// Raft: a connection naming another cluster is closed unread.
+	conn, err := other.cluster.listener.raftLayer().Dial(raft.ServerAddress(nodes[0].address), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("a Raft connection of another cluster: %v", err)
+	}
+	conn.Close()
+	// Its requests are refused, and so are those of a node removed.
+	asked := func(from *node, what string) {
+		t.Helper()
+		request, _ := http.NewRequestWithContext(ctx(t), http.MethodGet, "https://"+nodes[1].address+"/cluster/v1/node", nil)
+		response, err := from.cluster.client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s: %s", what, response.Status)
+		}
+	}
+	asked(other, "a node of another cluster")
+	removed := nodes[2]
+	if err := nodes[0].cluster.Remove(ctx(t), removed.name, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the removal reaches nbg-1", func() bool { return len(nodes[1].store.Nodes()) == 2 })
+	asked(removed, "a removed node")
 }

@@ -108,10 +108,10 @@ func (c *Credentials) client(protocol string) *tls.Config {
 }
 
 // RelayServer accepts other nodes' edges passing requests on to this
-// node's tenants.
+// node's tenants: over HTTP/2, or HTTP/1.1 for protocol switches.
 func (c *Credentials) RelayServer() *tls.Config {
 	config := c.server()
-	config.NextProtos = []string{protocolHTTP}
+	config.NextProtos = []string{"h2", protocolHTTP}
 	return config
 }
 
