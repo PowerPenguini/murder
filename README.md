@@ -105,6 +105,16 @@ finish the requests it has (up to `edge.drain`, 30 s; event streams are then
 closed and reconnect) and exit. A new edge that does not start leaves the old
 one serving. Restarting the agent leaves containers alone and the edge routing.
 
+A new release replaces no container either: a container is replaced only
+when what it is made from changes (the tenant's spec, limits, secrets,
+address or data path), not when Murder makes containers differently. To
+apply such a change, roll the tenants, one at a time, each healthy before
+the next; it stops at the first that is not:
+
+```bash
+sudo murder tenant roll -all          # this node's tenants; or: murder tenant roll NAME
+```
+
 With the `zfs` driver, create the parent dataset first, for example
 `zfs create -p tank/murder/tenants`, and make Docker start after ZFS has mounted
 everything: install `deploy/docker-after-zfs.conf` as

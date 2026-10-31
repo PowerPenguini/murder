@@ -1158,7 +1158,7 @@ func TestFailuresAreReportedPerTenant(t *testing.T) {
 	}
 }
 
-func TestSpecHashIsStable(t *testing.T) {
+func TestInputsHashIsStable(t *testing.T) {
 	f := newFixture(t)
 	record := f.create(t, "acme")
 	first, err := f.reconciler.containerSpec(record, "/srv/acme")
@@ -1383,5 +1383,92 @@ func TestANodeRunsOnlyItsOwnTenants(t *testing.T) {
 	}
 	if err := f.reconciler.Purge(context.Background(), "away", "test"); !errors.Is(err, ErrElsewhere) {
 		t.Fatalf("purge a tenant another node runs: %v", err)
+	}
+}
+
+// The hash of a tenant's inputs is part of every running container's
+// labels: a release that hashed the same inputs differently would replace
+// every container. This pins it.
+func TestInputsHashDoesNotChangeBetweenReleases(t *testing.T) {
+	r := &Reconciler{config: Config{BaseDomain: "example.test", Scheme: "https", DefaultLimits: spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128}}}
+	record := store.Record{
+		Spec: spec.Tenant{
+			Name: "acme", Image: imageA, HealthPath: "/health", User: "1000:1000", Port: 8080, DataPath: "/data",
+			Env: map[string]string{"PUBLIC_URL": "{{url}}"}, Secrets: spec.Secrets{"SESSION": {}},
+			Tmpfs: map[string]string{"/tmp": spec.DefaultTmpfs}, Limits: spec.Limits{MemoryMB: 512},
+		},
+		Subnet: "10.240.0.0/28",
+		Sealed: map[string]string{"SESSION": "sealed-value", "OLD": "dropped-from-the-spec"},
+	}
+	hash, err := r.inputsHash(record, "/srv/murder/tenants/acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pinned = "599132ac130c62cf5da9bfc10b0cf130"
+	if hash != pinned {
+		t.Fatalf("the inputs hash changed to %s: every running container would be replaced; add new inputs omitted when empty instead", hash)
+	}
+}
+
+func TestRollReplacesTheContainerOnce(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	first := f.runtime.only(t).ID
+	if _, err := f.store.Roll("acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	second := f.runtime.only(t).ID
+	if second == first {
+		t.Fatal("a rollout kept the container")
+	}
+	f.reconcile(t)
+	if f.runtime.only(t).ID != second {
+		t.Fatal("a rollout replaced the container more than once")
+	}
+	// Suspending and resuming is not a change of inputs either way.
+	record, _ := f.store.Get("acme")
+	suspended := record
+	suspended.Spec.Suspended = true
+	a, _ := f.reconciler.inputsHash(record, "/srv/acme")
+	b, _ := f.reconciler.inputsHash(suspended, "/srv/acme")
+	if a != b {
+		t.Fatal("suspension is part of the inputs")
+	}
+}
+
+// A container a release before inputs hashing made is adopted, not
+// replaced, by the first pass of this one.
+func TestContainersOfTheReleaseBeforeAreAdopted(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	container := f.runtime.only(t)
+	legacy, err := legacyHash(container.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container.Labels[runtime.LabelHash] = legacy
+	container.spec.Labels[runtime.LabelHash] = legacy
+	id := container.ID
+	f.reconcile(t)
+	if f.runtime.count() != 1 || f.runtime.only(t).ID != id {
+		t.Fatal("the container of the release before was replaced")
+	}
+}
+
+func TestWhatTheContainerDoesNotUseReplacesNothing(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	before, _ := f.reconciler.inputsHash(record, "/srv/acme")
+	record.Spec.HealthPath, record.Spec.Port, record.Spec.Limits.DiskGB = "/ready", 9090, 50
+	after, _ := f.reconciler.inputsHash(record, "/srv/acme")
+	if before != after {
+		t.Fatal("a health path, port or disk limit replaces the container")
+	}
+	record.Spec.Limits.MemoryMB = 999
+	if changed, _ := f.reconciler.inputsHash(record, "/srv/acme"); changed == before {
+		t.Fatal("a memory limit does not replace the container")
 	}
 }

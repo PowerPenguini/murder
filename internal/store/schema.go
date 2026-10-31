@@ -9,8 +9,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// version 4 in place.
-const schemaVersion = 5
+// versions 4 and 5 in place.
+const schemaVersion = 6
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -54,7 +54,9 @@ CREATE TABLE tenants (
 	updated_at  TEXT NOT NULL,
 	archived_at TEXT,
 	-- The node that runs the tenant and keeps its data.
-	node        TEXT NOT NULL
+	node        TEXT NOT NULL,
+	-- Rollouts asked for: each replaces the container as it is.
+	rollout     INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -124,8 +126,8 @@ func checkSchema(q querier) error {
 }
 
 // upgrade brings a database of an older schema version to this one, in one
-// transaction. Version 5 counts the batches and log entries applied to the
-// state and knows the nodes of a cluster.
+// transaction, one version after the other. Version 5 counts the batches
+// and log entries applied to the state and knows the nodes of a cluster.
 func upgrade(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -156,8 +158,15 @@ func upgrade(db *sql.DB) error {
 		if _, err := tx.Exec(`CREATE TABLE nodes (
 			name       TEXT PRIMARY KEY,
 			address    TEXT NOT NULL UNIQUE,
-					created_at TEXT NOT NULL
+			created_at TEXT NOT NULL
 		) STRICT`); err != nil {
+			return err
+		}
+		version = 5
+	}
+	// Version 6 counts the rollouts asked for each tenant.
+	if version == 5 {
+		if _, err := tx.Exec(`ALTER TABLE tenants ADD COLUMN rollout INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
 	}

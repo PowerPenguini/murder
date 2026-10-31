@@ -140,6 +140,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/tenants/{name}", s.purge)
 	mux.HandleFunc("GET /v1/tenants/{name}/secrets/{key}", s.secret)
 	mux.HandleFunc("POST /v1/tenants/{name}/secrets/{key}/rotate", s.rotate)
+	mux.HandleFunc("POST /v1/tenants/{name}/roll", s.roll)
 	mux.HandleFunc("GET /v1/tenants/{name}/logs", s.logs)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
@@ -474,6 +475,17 @@ func (s *Server) secret(w http.ResponseWriter, r *http.Request) {
 // rotate gives one secret of the spec a new value; the container is
 // replaced with it. Values are otherwise generated once and kept, even when
 // a secret leaves the spec and comes back.
+// roll replaces a tenant's container as it is, made as this release makes
+// containers.
+func (s *Server) roll(w http.ResponseWriter, r *http.Request) {
+	record, err := s.store.Roll(r.PathValue("name"), actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.view(record))
+}
+
 func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	name, key := r.PathValue("name"), r.PathValue("key")
 	record, err := s.store.Rotate(name, key, actor(r))

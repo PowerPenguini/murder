@@ -404,10 +404,17 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err != nil {
 		return Status{}, err
 	}
+	// A container made by a release before inputs were hashed carries the
+	// hash of the container as made: it is current as well.
+	legacy, err := legacyHash(desired)
+	if err != nil {
+		return Status{}, err
+	}
 	var current *runtime.Container
 	var outdated []runtime.Container
 	for i := range existing {
-		if current == nil && existing[i].Labels[runtime.LabelHash] == desired.Labels[runtime.LabelHash] {
+		hash := existing[i].Labels[runtime.LabelHash]
+		if current == nil && (hash == desired.Labels[runtime.LabelHash] || hash == legacy) {
 			current = &existing[i]
 			continue
 		}
@@ -728,7 +735,7 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 			runtime.LabelImage:  tenant.Image,
 		},
 	}
-	hash, err := specHash(desired)
+	hash, err := r.inputsHash(record, dataPath)
 	if err != nil {
 		return runtime.ContainerSpec{}, err
 	}
@@ -736,10 +743,65 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 	return desired, nil
 }
 
-// specHash fingerprints everything that shapes the container. A container
-// whose label differs from the desired hash is replaced. JSON encodes maps
-// in sorted key order, so equal specs always hash alike.
-func specHash(desired runtime.ContainerSpec) (string, error) {
+// inputs are what a tenant's container is made from that the operator
+// decides: the tenant's spec, its limits, address, names, secrets and data.
+// How Murder turns them into a container is not among them, so a new
+// release of Murder replaces no container; "murder tenant roll" applies
+// what it changed. Fields only ever get added, omitted when empty, so a
+// tenant whose inputs are as they were keeps its container across releases.
+type inputs struct {
+	Spec     spec.Tenant       `json:"spec"`
+	Limits   spec.Limits       `json:"limits"`
+	Subnet   string            `json:"subnet"`
+	Host     string            `json:"host"`
+	URL      string            `json:"url"`
+	Sealed   map[string]string `json:"sealed,omitempty"`
+	DataPath string            `json:"dataPath"`
+	Rollout  int64             `json:"rollout,omitempty"`
+}
+
+// inputsHash fingerprints a tenant's inputs. A container whose label differs
+// is replaced. JSON encodes maps in sorted key order, so equal inputs hash
+// alike.
+func (r *Reconciler) inputsHash(record store.Record, dataPath string) (string, error) {
+	tenant := record.Spec
+	tenant.Suspended = false // a resumed tenant gets a new container anyway
+	// Health checks, routing and the disk limit (set on the volume as it
+	// runs) use these; the container does not.
+	tenant.HealthPath, tenant.Port, tenant.Limits.DiskGB = "", 0, 0
+	limits := tenant.Limits.Or(r.config.DefaultLimits)
+	limits.DiskGB = 0
+	// No mounts, variables or secrets are none, however written.
+	if len(tenant.Tmpfs) == 0 {
+		tenant.Tmpfs = nil
+	}
+	if len(tenant.Env) == 0 {
+		tenant.Env = nil
+	}
+	if len(tenant.Secrets) == 0 {
+		tenant.Secrets = nil
+	}
+	sealed := map[string]string{}
+	for name := range tenant.Secrets {
+		sealed[name] = record.Sealed[name]
+	}
+	encoded, err := json.Marshal(inputs{
+		Spec: tenant, Limits: limits, Subnet: record.Subnet,
+		Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Sealed: sealed, DataPath: dataPath, Rollout: record.Rollout,
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:16]), nil
+}
+
+// legacyHash is the label releases before inputs hashing gave a container:
+// the fingerprint of the container as made, before its hash label. Such a
+// container keeps it until it is replaced.
+func legacyHash(desired runtime.ContainerSpec) (string, error) {
+	desired.Labels = maps.Clone(desired.Labels)
+	delete(desired.Labels, runtime.LabelHash)
 	encoded, err := json.Marshal(desired)
 	if err != nil {
 		return "", err

@@ -70,7 +70,7 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(tenant)
 			return
 		}
-		tenant.Status = &reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: name != "slow", Message: "health check: HTTP 500", CheckedAt: time.Now()}
+		tenant.Status = &reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: name != "slow", Message: "health check: HTTP 500", Generation: tenant.Generation, CheckedAt: time.Now()}
 		_ = json.NewEncoder(w).Encode(tenant)
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/apps/"):
 		name := strings.TrimPrefix(r.URL.Path, "/v1/apps/")
@@ -86,6 +86,13 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tenant.App, tenant.Overrides = request.App, request.Overrides
 		a.tenants[name] = tenant
 		_ = json.NewEncoder(w).Encode(api.Applied{Tenant: tenant, Changed: changed})
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/roll"):
+		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/tenants/"), "/roll")
+		tenant := a.tenants[name]
+		tenant.Generation++
+		tenant.UpdatedAt = time.Now().Add(-time.Second)
+		a.tenants[name] = tenant
+		_ = json.NewEncoder(w).Encode(tenant)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/tenants":
 		var request api.TenantRequest
 		_ = json.Unmarshal(body, &request)
@@ -288,5 +295,38 @@ func TestTenantListShowsRestartsAndWarnings(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 3 || !strings.Contains(lines[1], "restarting (3 restarts, warning)") || !strings.Contains(lines[2], "running ") || strings.Contains(lines[2], "(") {
 		t.Fatalf("list:\n%s", out)
+	}
+}
+
+func TestRollAllGoesOneAtATimeAndStopsAtTheFirstUnhealthy(t *testing.T) {
+	tenant := func(name string, change func(*api.Tenant)) api.Tenant {
+		view := api.Tenant{Spec: spec.Tenant{Name: name}, App: "web"}
+		if change != nil {
+			change(&view)
+		}
+		return view
+	}
+	agent, socket := startAgent(t,
+		tenant("acme", nil),
+		tenant("away", func(view *api.Tenant) { view.Elsewhere = true }),
+		tenant("beta", nil),
+		tenant("old", func(view *api.Tenant) { view.ArchivedAt = time.Now() }),
+		tenant("paused", func(view *api.Tenant) { view.Spec.Suspended = true }),
+		tenant("slow", nil),
+		tenant("zeta", nil),
+	)
+	out := capture(t)
+	err := run([]string{"tenant", "roll", "-all", "-socket", socket, "-wait", "2s"})
+	if err == nil || !strings.Contains(err.Error(), "stopped after 2 tenant(s)") {
+		t.Fatalf("roll -all: %v\n%s", err, out)
+	}
+	var rolled []string
+	for _, call := range agent.calls {
+		if name, ok := strings.CutSuffix(call, "/roll"); ok {
+			rolled = append(rolled, strings.TrimPrefix(name, "POST /v1/tenants/"))
+		}
+	}
+	if !slices.Equal(rolled, []string{"acme", "beta", "slow"}) {
+		t.Fatalf("rolled %v", rolled)
 	}
 }
