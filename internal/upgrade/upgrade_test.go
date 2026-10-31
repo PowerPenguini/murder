@@ -230,3 +230,100 @@ func TestAnEdgeThatTakesOverLetsTheAgentRestart(t *testing.T) {
 		t.Fatal("the agent was not restarted")
 	}
 }
+
+// startEdge runs script as the edge, its PID in the PID file.
+func startEdge(t *testing.T, f *fixture, script string) *exec.Cmd {
+	t.Helper()
+	path := filepath.Join(f.dir, "edge.sh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	t.Cleanup(func() { signal.Stop(hup) })
+	edge := exec.Command(path, "edge")
+	if err := edge.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = edge.Process.Kill(); _ = edge.Wait() })
+	for range 200 {
+		if pid, err := readPID(f.node.EdgePIDFile); err == nil && pid == edge.Process.Pid {
+			return edge
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the edge did not start")
+	return nil
+}
+
+// An edge whose new binary does not start says so, and the install gives
+// up at once instead of waiting out the handover's limit.
+func TestAFailedHandoverIsReportedAtOnce(t *testing.T) {
+	f := newFixture(t)
+	failed := HandoverFailedPath(f.node.EdgePIDFile)
+	// A failure left by an earlier install counts for nothing.
+	if err := os.WriteFile(failed, []byte("long ago\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	_ = os.Chtimes(failed, past, past)
+	startEdge(t, f, "#!/bin/sh\ntrap 'echo \"child 42 exited: this release does not start\" > "+failed+"' HUP\necho $$ > "+f.node.EdgePIDFile+"\nwhile true; do sleep 0.05; done\n")
+	f.node.edgeWait = 30 * time.Second
+	f.node.lateEdgeWait = time.Second
+	binary := fakeBinary(6, "new")
+	start := time.Now()
+	err := f.node.Install(context.Background(), bytes.NewReader(binary), sha(binary))
+	if err == nil || !strings.Contains(err.Error(), "this release does not start") {
+		t.Fatalf("install: %v", err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("the failure was noticed after %s", took)
+	}
+	if installed, _ := os.ReadFile(f.node.Executable); !bytes.Equal(installed, fakeBinary(5, "old")) || f.restarted != 0 {
+		t.Fatal("the new binary stayed though its edge did not start")
+	}
+}
+
+// A new edge that took over late, from a binary that is no longer in
+// place, is handed back; one running another binary is left alone.
+func TestALateEdgeIsHandedBack(t *testing.T) {
+	f := newFixture(t)
+	f.node.lateEdgeWait = 5 * time.Second
+	shell, err := os.ReadFile("/bin/sh")
+	if err != nil {
+		t.Skip("no /bin/sh")
+	}
+	late := filepath.Join(f.dir, "murder-new")
+	if err := os.WriteFile(late, shell, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(f.dir, "handed-back")
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	edge := exec.Command(late, "-c", "trap 'echo yes > "+marker+"; exit' HUP; while true; do sleep 0.05; done", "edge")
+	if err := edge.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = edge.Process.Kill(); _ = edge.Wait() }()
+	if err := os.WriteFile(f.node.EdgePIDFile, []byte(strconv.Itoa(edge.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.node.revertLateEdge(1, sha(shell))
+	var data []byte
+	for range 100 {
+		if data, err = os.ReadFile(marker); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if string(data) != "yes\n" {
+		t.Fatalf("the late edge was not handed back: %q, %v", data, err)
+	}
+	// An edge of another binary is not touched.
+	_ = os.Remove(marker)
+	f.node.revertLateEdge(1, sha([]byte("another binary")))
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("an edge of another binary was signalled")
+	}
+}

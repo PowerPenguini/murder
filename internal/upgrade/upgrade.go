@@ -89,8 +89,9 @@ type Node struct {
 	// binary.
 	Restart func()
 	Log     *slog.Logger
-	// edgeWait bounds the edge's handover; tests shorten it.
-	edgeWait time.Duration
+	// edgeWait bounds the edge's handover, lateEdgeWait the watch for a
+	// late one; tests shorten them.
+	edgeWait, lateEdgeWait time.Duration
 }
 
 // ErrDowngrade refuses a binary of an older schema: the database, once the
@@ -156,6 +157,11 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 		return err
 	}
 	if err := n.handOverEdge(ctx); err != nil {
+		// A new edge may yet take over, late, from the new binary: it is
+		// handed back to the old one, once that is in place again.
+		if pid, pidErr := readPID(n.EdgePIDFile); pidErr == nil {
+			go n.revertLateEdge(pid, sha)
+		}
 		// Put the old binary back; the old edge serves on.
 		if restoreErr := os.Rename(previous, n.Executable); restoreErr != nil {
 			err = errors.Join(err, fmt.Errorf("put the old binary back: %w", restoreErr))
@@ -184,15 +190,24 @@ func (n *Node) handOverEdge(ctx context.Context) error {
 		wait = 90 * time.Second
 	}
 	deadline := time.Now().Add(wait)
-	var signalled time.Time
+	var signalled, first time.Time
+	failed := HandoverFailedPath(n.EdgePIDFile)
 	for {
 		if next, err := readPID(n.EdgePIDFile); err == nil && next != pid {
 			return nil
+		}
+		// The edge says at once when its new binary did not start.
+		if info, err := os.Stat(failed); err == nil && !first.IsZero() && !info.ModTime().Before(first) {
+			why, _ := os.ReadFile(failed)
+			return fmt.Errorf("the edge's new binary did not take over (%s); the old edge serves on", strings.TrimSpace(string(why)))
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("the edge did not hand over to the new binary within %v; the old edge serves on", wait)
 		}
 		if time.Since(signalled) >= resignal {
+			if first.IsZero() {
+				first = time.Now()
+			}
 			if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
 				return fmt.Errorf("signal the edge: %w", err)
 			}
@@ -208,6 +223,53 @@ func (n *Node) handOverEdge(ctx context.Context) error {
 
 // resignal is how long a handover gets before the edge is asked again.
 const resignal = 10 * time.Second
+
+// HandoverFailedPath is where, beside its PID file, an edge whose new
+// binary did not take over says why.
+func HandoverFailedPath(pidFile string) string {
+	return filepath.Join(filepath.Dir(pidFile), "handover-failed")
+}
+
+// RecordHandoverFailure says, for an install waiting on the handover, that
+// the new binary did not take over, and why.
+func RecordHandoverFailure(pidFile string, why error) error {
+	path := HandoverFailedPath(pidFile)
+	temp := path + ".new"
+	if err := os.WriteFile(temp, []byte(why.Error()+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(temp, path)
+}
+
+// lateEdge is how long after a failed handover a new edge may still take
+// over: tableflip gives a new process a minute to become ready, and a
+// signal sent again starts another.
+const lateEdge = 75 * time.Second
+
+// revertLateEdge watches, after a failed handover, for a new edge that took
+// over late from the new binary, which no longer is in place: it is handed
+// over again, to the old binary, so edge and agent run one release.
+func (n *Node) revertLateEdge(oldPID int, newBinary string) {
+	wait := n.lateEdgeWait
+	if wait == 0 {
+		wait = lateEdge
+	}
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		time.Sleep(time.Second)
+		pid, err := readPID(n.EdgePIDFile)
+		if err != nil || pid == oldPID || !isEdge(pid) {
+			continue
+		}
+		if running, err := Hash(fmt.Sprintf("/proc/%d/exe", pid)); err == nil && running == newBinary {
+			n.Log.Warn("a new edge took over late from the binary that was not installed; handing it back to the old one", "pid", pid)
+			if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+				n.Log.Error("hand the late edge back to the old binary", "error", err)
+			}
+		}
+		return
+	}
+}
 
 // isEdge reports whether pid is a murder edge, not a process that took
 // the PID of one that is gone.
