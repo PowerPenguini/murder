@@ -218,6 +218,25 @@ func DatabaseSchema(path string) (int, error) {
 	return version, nil
 }
 
+// DatabaseFrozen is why the database at path takes no changes: the reason
+// of its freeze, or "" if it takes them.
+func DatabaseFrozen(path string) (string, error) {
+	db, err := sql.Open("sqlite", uri(path, "mode=ro"))
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	var reason string
+	err = db.QueryRow(`SELECT value FROM meta WHERE key = 'frozen'`).Scan(&reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("database %s: %w", path, err)
+	}
+	return reason, nil
+}
+
 // InUse reports whether an agent holds the database at path.
 func InUse(path string) (bool, error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)

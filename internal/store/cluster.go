@@ -153,7 +153,7 @@ func (r *recentStates) outcome(id string, index uint64, err error) {
 	}
 	r.outcomes[id] = Outcome{Index: index, Err: err}
 	r.ids = append(r.ids, id)
-	if len(r.ids) > recentKept {
+	if len(r.ids) > outcomesKept {
 		delete(r.outcomes, r.ids[0])
 		r.ids = r.ids[1:]
 	}
@@ -169,6 +169,12 @@ func (s *SQLite) Outcome(id string) (Outcome, bool) {
 }
 
 const recentKept = 64
+
+// outcomesKept is how many batches' outcomes a node remembers, from every
+// node's writes: enough that a write whose leader went away while it was
+// committed finds how it went, however busy the cluster was meanwhile,
+// instead of being made again. One costs about a hundred bytes.
+const outcomesKept = 16384
 
 func (r *recentStates) put(index uint64, state *snapshot) {
 	r.mu.Lock()
@@ -470,6 +476,11 @@ func (s *SQLite) RemoveNode(name, actor string) error {
 		if len(tenants) > 0 {
 			return fmt.Errorf("%w: node %s runs tenants %s; purge them first (archived ones count)", ErrInUse, name, strings.Join(tenants, ", "))
 		}
+		for _, tenant := range slices.Sorted(maps.Keys(current.tenants)) {
+			if current.tenants[tenant].MoveTo == name {
+				return fmt.Errorf("%w: tenant %s is moving to node %s; wait until it has moved, or the move is undone", ErrInUse, tenant, name)
+			}
+		}
 		if err := tx.Exec(`DELETE FROM nodes WHERE name = ?`, name); err != nil {
 			return err
 		}
@@ -479,6 +490,9 @@ func (s *SQLite) RemoveNode(name, actor string) error {
 }
 
 func (s *SQLite) Frozen() string { return s.state.Load().frozen }
+
+// UpgradeFreeze begins the reason of an upgrade's freeze.
+const UpgradeFreeze = "upgrade to "
 
 // Freeze refuses changes from now on, on every node, and says why. A freeze
 // for the same reason again is no change: an upgrade that stopped resumes
@@ -490,10 +504,13 @@ func (s *SQLite) Freeze(reason, actor string) error {
 		return errors.New("a freeze needs a reason")
 	}
 	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
-		switch current.frozen {
-		case reason:
+		switch {
+		case current.frozen == reason:
 			return errUnchanged
-		case "":
+		case current.frozen == "":
+		// An upgrade that stopped is taken over by one with a fixed
+		// binary, under its own freeze: nodes stay apart until then.
+		case strings.HasPrefix(current.frozen, UpgradeFreeze) && strings.HasPrefix(reason, UpgradeFreeze):
 		default:
 			return fmt.Errorf("%w: %s", ErrFrozen, current.frozen)
 		}
@@ -563,8 +580,12 @@ func (s *SQLite) StartMove(name, target, actor string) (Record, error) {
 
 func (s *SQLite) HoldMove(name string) error {
 	_, err := s.write(true, func(tx *recorder, current *snapshot, _ time.Time) error {
-		if record, ok := current.tenants[name]; !ok || record.MoveTo == "" {
+		record, ok := current.tenants[name]
+		if !ok || record.MoveTo == "" {
 			return fmt.Errorf("tenant %s is not moving: %w", name, ErrConflict)
+		}
+		if err := targetMember(current, record); err != nil {
+			return err
 		}
 		return tx.Exec(`UPDATE tenants SET move_held = 1 WHERE name = ?`, name)
 	})
@@ -577,6 +598,9 @@ func (s *SQLite) FinishMove(name, actor string) (Record, error) {
 		if !ok || record.MoveTo == "" {
 			return fmt.Errorf("tenant %s is not moving: %w", name, ErrConflict)
 		}
+		if err := targetMember(current, record); err != nil {
+			return err
+		}
 		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
 			return err
 		}
@@ -588,8 +612,23 @@ func (s *SQLite) FinishMove(name, actor string) (Record, error) {
 	return next.tenants[name].clone(), nil
 }
 
+// targetMember refuses to hand a tenant to a node that left the cluster:
+// nothing could run it or move it back.
+func targetMember(current *snapshot, record Record) error {
+	if _, member := current.nodes[record.MoveTo]; !member {
+		return fmt.Errorf("%w: node %s, which tenant %s was moving to, left the cluster", ErrConflict, record.MoveTo, record.Spec.Name)
+	}
+	return nil
+}
+
+// moveSchema is the schema version that added moves. Cancelling a move and
+// serving a moved tenant go on while changes are frozen, so that a move
+// under way ends; their batches are marked as of this version, which every
+// node that can be part of a move applies, during an upgrade too.
+const moveSchema = 7
+
 func (s *SQLite) CancelMove(name, actor string) (bool, error) {
-	_, err := s.writeIf(false, true, func(tx *recorder, current *snapshot, now time.Time) error {
+	_, err := s.writeAs(moveSchema, false, true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
 		if !ok || record.MoveTo == "" {
 			return errUnchanged
@@ -606,7 +645,7 @@ func (s *SQLite) CancelMove(name, actor string) (bool, error) {
 }
 
 func (s *SQLite) ReleaseHold(name string) error {
-	_, err := s.writeIf(false, true, func(tx *recorder, current *snapshot, _ time.Time) error {
+	_, err := s.writeAs(moveSchema, false, true, func(tx *recorder, current *snapshot, _ time.Time) error {
 		if record, ok := current.tenants[name]; !ok || !record.MoveHeld {
 			return errUnchanged
 		}

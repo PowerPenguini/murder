@@ -566,3 +566,86 @@ func TestEveryNodeKnowsHowALatelyAppliedBatchWent(t *testing.T) {
 		t.Fatal("an unknown batch has an outcome")
 	}
 }
+
+// Nothing pulls a tenant from under its move: the node it moves to stays
+// in the cluster, and it is neither archived, purged nor restored, until it
+// has moved or the move is undone. Undoing a move and serving the moved
+// tenant are batches nodes of the release that added moves apply.
+func TestNothingPullsATenantFromUnderItsMove(t *testing.T) {
+	st, _ := withApp(t, options())
+	entries := logged(t, st)
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartMove("acme", "nbg-1", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RemoveNode("nbg-1", "alice"); !errors.Is(err, ErrInUse) {
+		t.Fatalf("removing the node a tenant moves to: %v", err)
+	}
+	if err := st.Archive("acme", "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("archiving a moving tenant: %v", err)
+	}
+	if moved, err := st.CancelMove("acme", "alice"); err != nil || !moved {
+		t.Fatalf("cancel: %v, %v", moved, err)
+	}
+	if last := (*entries)[len(*entries)-1]; last.Schema != moveSchema {
+		t.Fatalf("a cancelled move is a batch of schema %d", last.Schema)
+	}
+	// An archived tenant moves too, and is not purged or restored meanwhile.
+	if err := st.Archive("acme", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartMove("acme", "nbg-1", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Forget("acme", "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("purging a moving tenant: %v", err)
+	}
+	if _, err := st.Restore("acme", "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("restoring a moving tenant: %v", err)
+	}
+	if err := st.HoldMove("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.FinishMove("acme", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReleaseHold("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if last := (*entries)[len(*entries)-1]; last.Schema != moveSchema {
+		t.Fatalf("serving a moved tenant is a batch of schema %d", last.Schema)
+	}
+}
+
+// An upgrade that stopped is taken over by one with a fixed binary; a
+// freeze for anything else is not.
+func TestAFixedUpgradeTakesOverTheFreeze(t *testing.T) {
+	st, _ := openNew(t, options())
+	if err := st.Freeze(UpgradeFreeze+"aaa", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Freeze(UpgradeFreeze+"bbb", "alice"); err != nil || st.Frozen() != UpgradeFreeze+"bbb" {
+		t.Fatalf("a fixed upgrade: %v, frozen %q", err, st.Frozen())
+	}
+	if err := st.Freeze("maintenance", "alice"); !errors.Is(err, ErrFrozen) {
+		t.Fatalf("another freeze over an upgrade's: %v", err)
+	}
+	if err := st.Thaw("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Freeze("maintenance", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Freeze(UpgradeFreeze+"ccc", "alice"); !errors.Is(err, ErrFrozen) {
+		t.Fatalf("an upgrade over another freeze: %v", err)
+	}
+	frozen, err := DatabaseFrozen(st.path)
+	if err != nil || frozen != "maintenance" {
+		t.Fatalf("DatabaseFrozen = %q, %v", frozen, err)
+	}
+}

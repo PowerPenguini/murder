@@ -1076,10 +1076,22 @@ func (s *SQLite) Observe(name, dataImage string) error {
 
 // Archive takes a live tenant out of service in one write; the edge stops
 // routing to it at once. Its suspension is kept for the restore.
+// notMoving refuses a change that would pull a tenant from under its move:
+// the move finishes or is undone first.
+func notMoving(record Record) error {
+	if record.MoveTo != "" {
+		return fmt.Errorf("%w: tenant %s is moving to node %s; wait until it has moved, or the move is undone", ErrConflict, record.Spec.Name, record.MoveTo)
+	}
+	return nil
+}
+
 func (s *SQLite) Archive(name, actor string) error {
 	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)
 		if err != nil {
+			return err
+		}
+		if err := notMoving(record); err != nil {
 			return err
 		}
 		if err := tx.Exec(`UPDATE tenants SET archived_at = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
@@ -1099,6 +1111,9 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 			return fmt.Errorf("archived tenant %s: %w", name, ErrNotFound)
 		case !record.Archived():
 			return fmt.Errorf("tenant %s: %w", name, ErrNotArchived)
+		}
+		if err := notMoving(record); err != nil {
+			return err
 		}
 		composed, err := prepare(current, name, record.App, record.Overrides)
 		if err != nil {
@@ -1126,6 +1141,11 @@ func (s *SQLite) Forget(name, actor string) error {
 		record, ok := current.tenants[name]
 		if ok && !record.Archived() {
 			return fmt.Errorf("tenant %s: %w", name, ErrNotArchived)
+		}
+		if ok {
+			if err := notMoving(record); err != nil {
+				return err
+			}
 		}
 		app, detail := "", "leftover data"
 		if ok {
