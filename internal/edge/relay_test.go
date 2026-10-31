@@ -104,10 +104,11 @@ func TestTheRelayTakesOnlyTheCluster(t *testing.T) {
 			t.Errorf("%s: the relay answered", name)
 		}
 	}
-	// A relayed request is not passed on again.
+	// A request two edges passed on already is not passed on again.
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: credentials(t, 7).RelayClient()}}
 	request, _ := http.NewRequest("GET", pair.back.URL, nil)
 	request.Host = "beta.example.com"
+	request.Header.Set(hopsHeader, "2")
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -297,5 +298,47 @@ func TestAStreamOfUnknownLengthIsNotHeldBack(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the first chunk was held back")
+	}
+}
+
+// A request that waited on a node for its tenant, which then moved to
+// another node, is passed on to that node instead of failing, once.
+func TestARequestFollowsItsTenantToTheNodeItMovedTo(t *testing.T) {
+	creds := credentials(t, 7)
+	seen := make(chan http.Header, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		_, _ = io.WriteString(w, "acme on node 3")
+	}))
+	defer backend.Close()
+	third := httptest.NewUnstartedServer(NewProxy("example.com", staticRoutes{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}}, quietLog()).WithRelay(creds.RelayClient()).Relay())
+	third.TLS = creds.RelayServer()
+	third.StartTLS()
+	defer third.Close()
+	// The second node's routes say acme moved to the third.
+	second := httptest.NewUnstartedServer(NewProxy("example.com", staticRoutes{"acme": {Relay: strings.TrimPrefix(third.URL, "https://")}}, quietLog()).WithRelay(creds.RelayClient()).Relay())
+	second.TLS = creds.RelayServer()
+	second.StartTLS()
+	defer second.Close()
+	// The first node still has acme on the second.
+	front := httptest.NewServer(NewProxy("example.com", staticRoutes{"acme": {Relay: strings.TrimPrefix(second.URL, "https://")}}, quietLog()).WithRelay(creds.RelayClient()))
+	defer front.Close()
+
+	request, _ := http.NewRequest("GET", front.URL, nil)
+	request.Host = "acme.example.com"
+	request.Header.Set("X-Forwarded-For", "6.6.6.6")
+	request.Header.Set(hopsHeader, "9") // a client's claim counts for nothing
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != 200 || string(body) != "acme on node 3" {
+		t.Fatalf("%s %q", response.Status, body)
+	}
+	headers := <-seen
+	if headers.Get("X-Forwarded-For") != "127.0.0.1" || headers.Get(hopsHeader) != "" {
+		t.Fatalf("headers at the app: %v", headers)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,7 +68,10 @@ type Proxy struct {
 	// nodes' edges (nil outside a cluster), relayed takes requests other
 	// edges passed on.
 	local, forward, relayed *httputil.ReverseProxy
-	relayTransport          *http.Transport
+	// forwardRelayed passes a relayed request on once more, to the node a
+	// tenant moved to while the request waited for it.
+	forwardRelayed *httputil.ReverseProxy
+	relayTransport *http.Transport
 }
 
 // HoldMoving is how long a request for a moving tenant waits before it is
@@ -119,6 +123,28 @@ type hop struct {
 	target   *url.URL
 	secure   bool
 	recorder *recorder
+	// hops is how many edges passed the request on, this one included,
+	// when it goes to another edge; 0 when it goes to a tenant.
+	hops int
+}
+
+// A request is passed on between edges twice at most: to the node its
+// tenant runs on, and, if the tenant moved while the request waited there,
+// on to the node it moved to. hopsHeader counts the edges it went through;
+// only edges of the cluster reach the relay port, and the edge a client
+// reaches sets it anew, so a client cannot.
+const (
+	hopsHeader = "X-Murder-Hops"
+	maxHops    = 2
+)
+
+// hopsOf is how many edges passed a relayed request on: one if the edge
+// before did not say, as an earlier release does not.
+func hopsOf(r *http.Request) int {
+	if hops, err := strconv.Atoi(r.Header.Get(hopsHeader)); err == nil && hops > 0 {
+		return hops
+	}
+	return 1
 }
 
 type hopKey struct{}
@@ -157,6 +183,7 @@ func (p *Proxy) WithRelay(config *tls.Config) *Proxy {
 		Timeout: relayDialTimeout, KeepAlive: 15 * time.Second, Control: userTimeout(relayUserTimeout),
 	}).DialContext
 	p.forward = p.reverseProxy(p.relayTransport, false)
+	p.forwardRelayed = p.reverseProxy(p.relayTransport, true)
 	return p
 }
 
@@ -233,6 +260,11 @@ func (p *Proxy) reverseProxy(transport http.RoundTripper, relayed bool) *httputi
 				}
 				out.SetXForwarded()
 			}
+			if h.hops > 0 {
+				out.Out.Header.Set(hopsHeader, strconv.Itoa(h.hops))
+			} else {
+				out.Out.Header.Del(hopsHeader)
+			}
 			out.SetURL(h.target)
 			out.Out.Host = out.In.Host
 		},
@@ -289,7 +321,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) { p.serve(w, r
 // Relay serves other nodes' edges passing requests on to tenants this node
 // runs. The client's address and scheme are theirs to say: the TLS
 // handshake proved the peer belongs to the cluster. A tenant this node does
-// not run is not passed on again.
+// not run, say one that moved away while the request waited for it, is
+// passed on once more, to the node it runs on, and no further.
 func (p *Proxy) Relay() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Another edge keeping its connection warm: nothing to count.
@@ -378,7 +411,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 			proxy = p.relayed
 		}
 	case route.Relay != "" && p.forward != nil && !relayed:
-		h.target, proxy = &url.URL{Scheme: "https", Host: route.Relay}, p.forward
+		h.target, h.hops, proxy = &url.URL{Scheme: "https", Host: route.Relay}, 1, p.forward
+	case route.Relay != "" && p.forward != nil && hopsOf(r) < maxHops:
+		// The tenant moved away while the request waited for it here.
+		h.target, h.hops, proxy = &url.URL{Scheme: "https", Host: route.Relay}, hopsOf(r)+1, p.forwardRelayed
 	default:
 		p.stats.BackendError(tenant)
 		p.log.Warn("no way to the tenant from this node", "tenant", tenant, "relayed", relayed)
