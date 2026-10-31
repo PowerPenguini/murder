@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -29,15 +30,40 @@ func NewTable(routes map[string]Route) Table {
 	sum := sha256.New()
 	for _, tenant := range slices.Sorted(maps.Keys(routes)) {
 		route := routes[tenant]
-		fmt.Fprintf(sum, "%s\x00%s\x00%t\x00", tenant, route.Backend, route.Suspended)
+		fmt.Fprintf(sum, "%s\x00%s\x00%s\x00%t\x00%t\x00", tenant, route.Backend, route.Relay, route.Suspended, route.Moving)
 	}
 	return Table{Version: hex.EncodeToString(sum.Sum(nil))[:16], Routes: routes}
 }
 
 // LiveTable is the table the edge serves from, replaced whole.
 type LiveTable struct {
-	table   atomic.Pointer[Table]
+	table atomic.Pointer[Table]
+	// ready is set once the table holds routes the agent gave, now or
+	// before a restart.
+	ready   atomic.Bool
 	updated atomic.Int64
+	// changed is closed, and replaced, whenever the table is replaced.
+	mu      sync.Mutex
+	changed chan struct{}
+}
+
+// Watch returns a channel closed when the table is next replaced.
+func (l *LiveTable) Watch() <-chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.changed == nil {
+		l.changed = make(chan struct{})
+	}
+	return l.changed
+}
+
+func (l *LiveTable) replaced() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.changed != nil {
+		close(l.changed)
+		l.changed = nil
+	}
 }
 
 // Route implements Routes.
@@ -61,12 +87,22 @@ func (l *LiveTable) Load() Table {
 // Set serves table from now on.
 func (l *LiveTable) Set(table Table) {
 	l.table.Store(&table)
+	l.ready.Store(true)
 	l.updated.Store(time.Now().UnixNano())
+	l.replaced()
 }
 
 // Restore serves a saved table until the agent confirms one; it does not
 // count as confirmed.
-func (l *LiveTable) Restore(table Table) { l.table.Store(&table) }
+func (l *LiveTable) Restore(table Table) {
+	l.table.Store(&table)
+	l.ready.Store(true)
+	l.replaced()
+}
+
+// Ready reports whether the table holds routes the agent gave: until then,
+// a tenant it does not know may simply not have reached it yet.
+func (l *LiveTable) Ready() bool { return l.ready.Load() }
 
 // Updated is when the agent last confirmed the table; zero before.
 func (l *LiveTable) Updated() time.Time {

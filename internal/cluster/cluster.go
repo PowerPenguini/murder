@@ -41,6 +41,10 @@ var ErrNoLeader = errors.New("the cluster has no leader")
 // ErrNotLeader reports a request made to a node that is not the leader.
 var ErrNotLeader = errors.New("not the leader")
 
+// ErrMaybe reports a change whose leader lost its leadership while it was
+// in flight: the change may yet be made.
+var ErrMaybe = errors.New("the cluster log did not take the change, though it may yet be made")
+
 // ErrMember reports a node that is, or was, part of a cluster, where only a
 // new one will do.
 var ErrMember = errors.New("already part of a cluster")
@@ -82,6 +86,8 @@ type Config struct {
 	// Upgrade reports on and installs this node's binary for an upgrade
 	// run from another node.
 	Upgrade Upgrader
+	// Moves is this node's part in moving tenants between nodes.
+	Moves Moves
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
@@ -179,6 +185,26 @@ func (c *Cluster) commit(batch store.Batch) (uint64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
 	index, err := c.propose(ctx, data)
+	for attempt := 0; errors.Is(err, ErrMaybe) && attempt < 3; attempt++ {
+		// Leadership moved while the batch was in flight: it is in the
+		// log, or will never be. Once this node has applied what the new
+		// leader has, it knows which, and sends it again if it is not.
+		if catchUpErr := c.catchUp(); catchUpErr != nil {
+			return 0, errors.Join(err, catchUpErr)
+		}
+		if outcome, ok := c.config.Store.Outcome(batch.ID); ok {
+			index, err = outcome.Index, outcome.Err
+			break
+		}
+		index, err = c.propose(ctx, data)
+	}
+	// A batch sent again is refused once its first copy reached the log;
+	// that first copy is what happened.
+	if err != nil && batch.ID != "" {
+		if outcome, ok := c.config.Store.Outcome(batch.ID); ok && outcome.Err == nil {
+			index, err = outcome.Index, nil
+		}
+	}
 	if index == 0 {
 		return 0, err
 	}
@@ -222,6 +248,10 @@ func (c *Cluster) catchUp() error {
 	}
 	return c.config.Store.WaitApplied(ctx, target)
 }
+
+// CatchUp returns once this node has applied every change the cluster has
+// acknowledged, such as one another node just made.
+func (c *Cluster) CatchUp() error { return c.catchUp() }
 
 // leaderApplied is the index of the last change the leader applied, which
 // is at least that of every change acknowledged. A new leader first applies
@@ -270,10 +300,12 @@ func (c *Cluster) propose(ctx context.Context, data []byte) (uint64, error) {
 			switch {
 			case err == nil:
 				index, err = result.Index, result.err()
+			case errors.As(err, &peer) && peer.Status == http.StatusServiceUnavailable:
+				err = fmt.Errorf("%w: %s", ErrMaybe, peer.Message)
 			case !errors.Is(err, ErrNotLeader) && !errors.Is(err, ErrNoLeader) && !errors.As(err, &peer):
 				// The request may have reached the leader before the
 				// answer was lost.
-				err = fmt.Errorf("the leader did not answer, and the change may yet be made: %w", err)
+				err = fmt.Errorf("%w: the leader did not answer: %w", ErrMaybe, err)
 			}
 		}
 		if !errors.Is(err, ErrNotLeader) && !errors.Is(err, ErrNoLeader) {
@@ -306,7 +338,7 @@ func (c *Cluster) apply(data []byte) (uint64, error) {
 		if errors.Is(err, raft.ErrNotLeader) {
 			return 0, ErrNotLeader
 		}
-		return 0, fmt.Errorf("the cluster log did not take the change, though it may yet be made: %w", err)
+		return 0, fmt.Errorf("%w: %w", ErrMaybe, err)
 	}
 	if err, _ := future.Response().(error); err != nil {
 		return future.Index(), err
@@ -482,9 +514,84 @@ func (c *Cluster) join(ctx context.Context, peer string, request joinRequest, ou
 	}
 }
 
-// Remove takes a node out of the cluster.
+// Remove takes a node out of the cluster, once there is a leader to ask.
 func (c *Cluster) Remove(ctx context.Context, node, actor string) error {
-	return c.toLeader(ctx, http.MethodDelete, "/cluster/v1/nodes/"+node+"?actor="+url.QueryEscape(actor), nil, nil)
+	for {
+		err := c.toLeader(ctx, http.MethodDelete, "/cluster/v1/nodes/"+node+"?actor="+url.QueryEscape(actor), nil, nil)
+		if !errors.Is(err, ErrNoLeader) && !errors.Is(err, ErrNotLeader) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// Moves is the node's part in moving tenants: it receives the data of a
+// tenant moving here, reports on tenants it runs, and moves its own away.
+type Moves interface {
+	Receive(ctx context.Context, tenant string, incremental bool, data io.Reader) error
+	Discard(ctx context.Context, tenant string) error
+	Status(tenant string) (any, bool)
+	Move(ctx context.Context, tenant, to, actor string) error
+}
+
+// ReceiveOn streams a moving tenant's data to node.
+func (c *Cluster) ReceiveOn(ctx context.Context, node, tenant string, incremental bool, data io.Reader) error {
+	path := "/cluster/v1/tenants/" + url.PathEscape(tenant) + "/data"
+	if incremental {
+		path += "?incremental=1"
+	}
+	return c.stream(ctx, node, http.MethodPut, path, data, nil)
+}
+
+// DiscardOn drops what node received for a move that failed.
+func (c *Cluster) DiscardOn(ctx context.Context, node, tenant string) error {
+	return c.stream(ctx, node, http.MethodDelete, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/data", nil, nil)
+}
+
+// StatusOn decodes a tenant's status on node into out.
+func (c *Cluster) StatusOn(ctx context.Context, node, tenant string, out any) error {
+	return c.stream(ctx, node, http.MethodGet, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/status", nil, out)
+}
+
+// MoveOn has node move one of its tenants to another node; it returns once
+// the move is done.
+func (c *Cluster) MoveOn(ctx context.Context, node, tenant, to, actor string) error {
+	body := marshal(moveRequest{To: to, Actor: actor})
+	return c.stream(ctx, node, http.MethodPost, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/move", bytes.NewReader(body), nil)
+}
+
+// moveRequest asks a node to move one of its tenants.
+type moveRequest struct {
+	To    string `json:"to"`
+	Actor string `json:"actor"`
+}
+
+// stream sends a request with any body to node and decodes its answer.
+func (c *Cluster) stream(ctx context.Context, node, method, path string, body io.Reader, out any) error {
+	address, err := c.addressOf(node)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, method, "https://"+address+path, body)
+	if err != nil {
+		return err
+	}
+	response, err := c.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("node %s: %w", node, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return responseError(response)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(response.Body).Decode(out)
 }
 
 // Upgrader is the node's part in an upgrade.

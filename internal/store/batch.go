@@ -18,6 +18,9 @@ var ErrSchema = errors.New("schema mismatch")
 // Version. Applying a batch is deterministic, so every node that applies
 // the same batches in the same order holds the same state.
 type Batch struct {
+	// ID names the batch, so its writer can tell whether it was applied
+	// after the leader changed while it was in flight.
+	ID string `json:"id,omitempty"`
 	// Schema is the schema version of the release that made the batch.
 	Schema  int   `json:"schema"`
 	Version int64 `json:"version"`

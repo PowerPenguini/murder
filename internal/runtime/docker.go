@@ -250,6 +250,18 @@ func (d *Docker) pull(ctx context.Context, repository, tag string) error {
 	}
 }
 
+// absent reports a pull the registry refused because it has no such image
+// for this client, rather than one that failed.
+func absent(err error) bool {
+	message := strings.ToLower(err.Error())
+	for _, sign := range []string{"not found", "pull access denied", "repository does not exist", "manifest unknown", "name unknown"} {
+		if strings.Contains(message, sign) {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *Docker) Resolve(ctx context.Context, ref string) (string, string, error) {
 	if spec.Pinned(ref) {
 		return ref, "", nil
@@ -268,6 +280,14 @@ func (d *Docker) Resolve(ctx context.Context, ref string) (string, string, error
 			return "", "", pullErr
 		}
 		return "", "", fmt.Errorf("inspect %s: %w", ref, err)
+	}
+	// An image the registry says it does not have is local only: its ID
+	// pins it, as one that cannot be pulled again. With containerd's image
+	// store a local build has a repository digest too, which names no
+	// registry's image. A registry that only failed to answer keeps its
+	// digest, which other nodes can pull.
+	if pullErr != nil && absent(pullErr) {
+		return image.ID, fmt.Sprintf("using the local image %s:%s (%v)", repository, tag, pullErr), nil
 	}
 	note := ""
 	if pullErr != nil {

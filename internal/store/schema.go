@@ -9,8 +9,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 and 5 in place.
-const schemaVersion = 6
+// versions 4 to 6 in place.
+const schemaVersion = 7
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -57,7 +57,11 @@ CREATE TABLE tenants (
 	-- The node that runs the tenant and keeps its data.
 	node        TEXT NOT NULL,
 	-- Rollouts asked for: each replaces the container as it is.
-	rollout     INTEGER NOT NULL DEFAULT 0
+	rollout     INTEGER NOT NULL DEFAULT 0,
+	-- A move to another node under way: its target, and whether requests
+	-- are held because the tenant runs nowhere for a moment.
+	move_to     TEXT NOT NULL DEFAULT '',
+	move_held   INTEGER NOT NULL DEFAULT 0 CHECK (move_held IN (0, 1))
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -169,6 +173,18 @@ func upgrade(db *sql.DB) error {
 	if version == 5 {
 		if _, err := tx.Exec(`ALTER TABLE tenants ADD COLUMN rollout INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
+		}
+		version = 6
+	}
+	// Version 7 moves tenants between nodes.
+	if version == 6 {
+		for _, statement := range []string{
+			`ALTER TABLE tenants ADD COLUMN move_to TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE tenants ADD COLUMN move_held INTEGER NOT NULL DEFAULT 0 CHECK (move_held IN (0, 1))`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

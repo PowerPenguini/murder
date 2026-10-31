@@ -69,6 +69,10 @@ type Record struct {
 	// PreviousImage is the image the data had before DataImage, kept on
 	// the node so a rollback needs no registry.
 	PreviousImage string `json:"previousImage,omitempty"`
+	// MoveTo is the node the tenant is moving to, while a move is under
+	// way; MoveHeld is set while it runs nowhere and requests wait for it.
+	MoveTo   string `json:"moveTo,omitempty"`
+	MoveHeld bool   `json:"moveHeld,omitempty"`
 	// Rollout counts the rollouts asked for the tenant; each gives it a new
 	// container made as this release of Murder makes them.
 	Rollout int64 `json:"rollout,omitempty"`
@@ -189,6 +193,17 @@ type Store interface {
 	// Roll has a live tenant's container replaced as it is: what a new
 	// release of Murder changed in containers then applies to it.
 	Roll(name, actor string) (Record, error)
+	// StartMove marks a tenant of this node, live or archived, as moving to
+	// another node; HoldMove has requests wait while it runs nowhere;
+	// FinishMove gives it to the target, requests still held until it
+	// serves there (ReleaseHold); CancelMove leaves it here, and reports
+	// whether there was a move to cancel. Cancelling and releasing work
+	// while changes are frozen: a frozen state must not strand a tenant.
+	StartMove(name, target, actor string) (Record, error)
+	HoldMove(name string) error
+	FinishMove(name, actor string) (Record, error)
+	ReleaseHold(name string) error
+	CancelMove(name, actor string) (bool, error)
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error
@@ -208,6 +223,8 @@ type Store interface {
 	// cluster has none. PutNode adds a node or changes its address;
 	// RemoveNode removes one that runs no tenant, archived or not.
 	Nodes() []Node
+	// Cluster names the cluster the state belongs to; empty outside one.
+	Cluster() string
 	PutNode(node Node, actor string) error
 	RemoveNode(name, actor string) error
 

@@ -110,7 +110,11 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		f.datasets[dataset].mounted = true
 		return nil, nil
 	case "set":
-		_, value, _ := strings.Cut(args[1], "=")
+		key, value, _ := strings.Cut(args[1], "=")
+		if key == "mountpoint" {
+			f.datasets[dataset].mountpoint = value
+			return nil, nil
+		}
 		if quota := parseQuota(value); quota != 0 && quota < f.datasets[dataset].used {
 			return []byte("cannot set property for '" + dataset + "': size is less than current used or reserved space\n"), errors.New("exit status 1")
 		}

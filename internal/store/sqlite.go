@@ -1,13 +1,14 @@
 package store
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
-	"math/rand/v2"
+	mathrand "math/rand/v2"
 	"net/netip"
 	"net/url"
 	"os"
@@ -395,7 +396,7 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout FROM tenants`)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held FROM tenants`)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +405,7 @@ func load(q querier) (state *snapshot, err error) {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -521,12 +522,12 @@ func (s *SQLite) writeAs(schema int, unlessFrozen, signal bool, change func(tx *
 		if err := change(tx, current, s.now().UTC()); err != nil {
 			return nil, err
 		}
-		next, err := s.commit(Batch{Schema: schema, Version: current.version, Signal: signal, Statements: tx.statements})
+		next, err := s.commit(Batch{ID: rand.Text(), Schema: schema, Version: current.version, Signal: signal, Statements: tx.statements})
 		if !errors.Is(err, ErrStale) || attempt == staleAttempts {
 			return next, err
 		}
 		// Writers racing on other nodes back off by different times.
-		time.Sleep(time.Duration(rand.Int64N(int64(attempt) * int64(20*time.Millisecond))))
+		time.Sleep(time.Duration(mathrand.Int64N(int64(attempt) * int64(20*time.Millisecond))))
 	}
 }
 

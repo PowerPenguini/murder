@@ -461,3 +461,108 @@ func TestAFrozenStateTakesNoChanges(t *testing.T) {
 		t.Fatalf("the follower's freeze is %q", follower.Frozen())
 	}
 }
+
+func TestAMoveGivesTheTenantToItsTarget(t *testing.T) {
+	st, _ := withApp(t, options())
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartMove("acme", "nbg-1", "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a move to an unknown node: %v", err)
+	}
+	if err := st.PutNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartMove("acme", "node-1", "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a move to the node it runs on: %v", err)
+	}
+	moving, err := st.StartMove("acme", "nbg-1", "alice")
+	if err != nil || moving.MoveTo != "nbg-1" || moving.MoveHeld || moving.Node != "node-1" {
+		t.Fatalf("moving: %+v, %v", moving, err)
+	}
+	if _, err := st.StartMove("acme", "nbg-1", "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a second move: %v", err)
+	}
+	if err := st.HoldMove("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := st.Get("acme"); !record.MoveHeld {
+		t.Fatal("not held")
+	}
+	moved, err := st.FinishMove("acme", "alice")
+	if err != nil || moved.Node != "nbg-1" || moved.MoveTo != "" || !moved.MoveHeld || moved.Generation != moving.Generation+1 {
+		t.Fatalf("moved: %+v, %v", moved, err)
+	}
+	// Requests wait until the new node serves it.
+	if err := st.Freeze("upgrade", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReleaseHold("acme"); err != nil {
+		t.Fatalf("release while frozen: %v", err)
+	}
+	if record, _ := st.Get("acme"); record.MoveHeld {
+		t.Fatal("still held")
+	}
+	if err := st.Thaw("alice"); err != nil {
+		t.Fatal(err)
+	}
+	// From here on, nbg-1 moves it.
+	if _, err := st.StartMove("acme", "node-1", "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a move started away from the node that runs it: %v", err)
+	}
+	if _, err := st.Create(NewTenant{Name: "beta", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartMove("beta", "nbg-1", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Freeze("upgrade", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled, err := st.CancelMove("beta", "alice"); err != nil || !cancelled {
+		t.Fatalf("cancel while frozen: %v %v", cancelled, err)
+	}
+	if cancelled, err := st.CancelMove("beta", "alice"); err != nil || cancelled {
+		t.Fatalf("cancel nothing: %v %v", cancelled, err)
+	}
+	if err := st.Thaw("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := st.Get("beta"); record.MoveTo != "" || record.Node != "node-1" {
+		t.Fatalf("after cancelling: %+v", record)
+	}
+	events, _ := st.Events(EventQuery{Tenant: "acme", Limit: 2})
+	if events[0].Action != "tenant.moved" || events[0].Detail != "node-1 → nbg-1" || events[1].Action != "tenant.moving" {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
+func TestEveryNodeKnowsHowALatelyAppliedBatchWent(t *testing.T) {
+	st, _ := withApp(t, options())
+	var last Batch
+	st.Replicate(func(batch Batch) (uint64, error) {
+		last = batch
+		return 1, st.ApplyEntry(1, batch)
+	}, func() error { return nil })
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if last.ID == "" {
+		t.Fatal("a batch without an ID")
+	}
+	if outcome, ok := st.Outcome(last.ID); !ok || outcome.Index != 1 || outcome.Err != nil {
+		t.Fatalf("outcome = %+v, %v", outcome, ok)
+	}
+	// A refused one is known as refused.
+	stale := last
+	stale.ID = "again"
+	if err := st.ApplyEntry(2, stale); !errors.Is(err, ErrStale) {
+		t.Fatalf("apply stale: %v", err)
+	}
+	if outcome, ok := st.Outcome("again"); !ok || !errors.Is(outcome.Err, ErrStale) {
+		t.Fatalf("refused outcome = %+v, %v", outcome, ok)
+	}
+	if _, ok := st.Outcome("never"); ok {
+		t.Fatal("an unknown batch has an outcome")
+	}
+}

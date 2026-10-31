@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,6 +50,13 @@ type Volumes interface {
 	Prune(ctx context.Context, tenant, reason string, keep int) error
 	// Remove deletes the tenant's data and snapshots.
 	Remove(ctx context.Context, tenant string) error
+	// Send writes the tenant's data for another node's Receive: all of it,
+	// or what changed since the snapshot an earlier Send returned. It
+	// returns what to send changes since next time ("" if it cannot).
+	Send(ctx context.Context, tenant, since string, w io.Writer) (string, error)
+	// Receive takes what Send wrote: whole, or what changed since an
+	// earlier whole one.
+	Receive(ctx context.Context, tenant string, incremental bool, r io.Reader) error
 }
 
 func checkTenant(tenant string) error { return spec.ValidLabel(tenant) }
@@ -150,7 +158,9 @@ type ZFS struct {
 	Parent    string
 	MountRoot string
 	Run       Runner
-	Now       func() time.Time
+	// Pipe streams sends and receives; ExecPipe if nil.
+	Pipe Pipe
+	Now  func() time.Time
 	// ProcRoot is where process information is read; "/proc" if empty.
 	ProcRoot string
 }
