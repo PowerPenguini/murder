@@ -50,6 +50,15 @@ cmd_wait() {
     on "$node" test -e /var/lib/murder-test/ready || die "$node is not ready; see /var/log/cloud-init-output.log there"
     on "$node" 'zpool list -H -o name,size tank'
   done
+  local client; client=$(tofu -chdir="$HERE" output -raw client 2>/dev/null || true)
+  if [[ -n $client ]]; then
+    log "waiting for the client"
+    for _ in $(seq 60); do
+      ssh "${SSH_OPTS[@]}" "root@$client" test -e /var/lib/murder-test/ready 2>/dev/null && return
+      sleep 5
+    done
+    die "the client is not ready"
+  fi
 }
 
 config_for() {
@@ -219,30 +228,22 @@ cmd_upgrade() {
   on "$node" 'murder upgrade /tmp/murder-test/murder-new'
 }
 
-# Reads each tenant through each node's edge, one after the other, until
-# SECONDS pass; every answer that is not the tenant's value is a failure.
+# Reads each tenant through each node's edge (load.sh) for SECONDS, from
+# the client server when there is one. EDGES and TENANTS pick the nodes and
+# tenants (all by default).
 cmd_load() {
-  local seconds=${1:-60} edges tenants ok=0 bad=0 slow=0 end
-  # EDGES picks the nodes whose edges are read through (all by default).
+  local seconds=${1:-60} edges tenants pairs="" client
   read -ra edges <<< "${EDGES:-$(names | tr '\n' ' ')}"
-  mapfile -t tenants < <(on n2 'murder tenant list -json' | jq -r '.[].spec.name')
-  local -A ip; for node in "${edges[@]}"; do ip[$node]=$(public_ip "$node"); done
-  end=$((SECONDS + seconds))
-  while ((SECONDS < end)); do
-    for node in "${edges[@]}"; do
-      for tenant in "${tenants[@]}"; do
-        local out
-        out=$(curl -sk -m 70 --resolve "$tenant.$DOMAIN:443:${ip[$node]}" -w ' %{http_code} %{time_total}' "https://$tenant.$DOMAIN/value") || out="curl-error $?"
-        if [[ $out == "value of $tenant 200 "* ]]; then
-          ok=$((ok + 1))
-          awk -v t="${out##* }" 'BEGIN{exit !(t>1)}' && { slow=$((slow + 1)); echo "$(date +%T) slow $node -> $tenant: ${out##* }s" >&2; }
-        else
-          bad=$((bad + 1)); echo "$(date +%T) FAILED $node -> $tenant: $out" >&2
-        fi
-      done
-    done
-  done
-  echo "ok=$ok failed=$bad slow(>1s)=$slow"
+  if [[ -n ${TENANTS:-} ]]; then read -ra tenants <<< "$TENANTS"
+  else mapfile -t tenants < <(on n2 'murder tenant list -json' | jq -r '.[].spec.name'); fi
+  for node in "${edges[@]}"; do pairs+="$node=$(public_ip "$node") "; done
+  client=$(tofu -chdir="$HERE" output -raw client 2>/dev/null || true)
+  if [[ -n $client ]]; then
+    scp -q "${SSH_OPTS[@]}" "$HERE/load.sh" "root@$client:/root/load.sh"
+    ssh "${SSH_OPTS[@]}" "root@$client" /root/load.sh "$seconds" "$DOMAIN" "'$pairs'" "'${tenants[*]}'"
+  else
+    "$HERE/load.sh" "$seconds" "$DOMAIN" "$pairs" "${tenants[*]}"
+  fi
 }
 
 cmd_status() {

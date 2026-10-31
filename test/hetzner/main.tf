@@ -37,6 +37,12 @@ variable "spare_type" {
   default     = "cpx12"
 }
 
+variable "client" {
+  description = "Add a server outside the cluster that load tests run from, inside Hetzner's network, so the operator's own link does not blur the numbers."
+  type        = bool
+  default     = true
+}
+
 variable "image" {
   type    = string
   default = "ubuntu-26.04"
@@ -161,6 +167,26 @@ resource "hcloud_volume_attachment" "pool" {
   volume_id = hcloud_volume.pool[each.key].id
   server_id = hcloud_server.node[each.key].id
   automount = false
+}
+
+resource "hcloud_server" "client" {
+  count        = var.client ? 1 : 0
+  name         = "murder-test-client"
+  server_type  = var.server_type
+  image        = var.image
+  location     = "nbg1"
+  ssh_keys     = [hcloud_ssh_key.test.id]
+  firewall_ids = [hcloud_firewall.test.id]
+  labels       = local.labels
+  user_data    = "#cloud-config\npackages: [curl, jq]\nruncmd:\n  - mkdir -p /var/lib/murder-test && touch /var/lib/murder-test/ready\n"
+  public_net {
+    ipv4_enabled = true
+    ipv6_enabled = true
+  }
+}
+
+output "client" {
+  value = var.client ? hcloud_server.client[0].ipv4_address : ""
 }
 
 output "nodes" {
