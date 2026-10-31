@@ -18,6 +18,8 @@ type Cluster interface {
 	Bootstrap(ctx context.Context, actor string) error
 	Join(ctx context.Context, peer, actor string) error
 	Remove(ctx context.Context, node, actor string) error
+	// StatusOn decodes the status of a tenant node runs into out.
+	StatusOn(ctx context.Context, node, tenant string, out any) error
 }
 
 // JoinRequest asks the node to join the cluster of the node at Peer.
