@@ -7,6 +7,7 @@
 #   nodes.sh join NODE          init and join one node (the spare)
 #   nodes.sh smoke              one tenant per node, read through every edge
 #   nodes.sh ssh NODE [CMD]     a shell, or a command, on a node
+#   nodes.sh image TAR          load a docker image (docker save) on every node
 #   nodes.sh upgrade            build Murder and upgrade the cluster with it
 #   nodes.sh load SECONDS       read every tenant through every edge, count failures
 #   nodes.sh status             the cluster and its tenants as n1 sees them
@@ -220,6 +221,16 @@ murder app apply /tmp/murder-test/testapp.yaml -wait 3m'
   log "every tenant answered through every edge"
 }
 
+# Loads an image from a "docker save" archive on every node, so tenants
+# can run an image that is in no registry, such as a branch's build.
+cmd_image() {
+  local archive=${1:?archive}
+  for node in $(names); do
+    log "loading $(basename "$archive") on $node"
+    on "$node" 'docker load -q' < "$archive"
+  done
+}
+
 cmd_upgrade() {
   build
   # From a node of the cluster: the first may have been replaced.
@@ -260,7 +271,8 @@ case $cmd in
   smoke) cmd_smoke ;;
   status) cmd_status ;;
   upgrade) cmd_upgrade ;;
+  image) cmd_image "${1:?archive}" ;;
   load) cmd_load "${1:-60}" ;;
   ssh) node=${1:?node}; shift; on "$node" "$@" ;;
-  *) sed -n 2,13p "$0" >&2; exit 2 ;;
+  *) sed -n 2,14p "$0" >&2; exit 2 ;;
 esac

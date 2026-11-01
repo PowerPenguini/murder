@@ -5,3 +5,5 @@
 /.vm/
 /test/hetzner/.state/
 /test/hetzner/.terraform/
+/test/hetzner/addhoc/.mfa-*
+/test/hetzner/addhoc/__pycache__/
