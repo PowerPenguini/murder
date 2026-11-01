@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -62,20 +63,23 @@ func (s *SQLite) ReplicaReady(name, replica string) error {
 // keeps the fewest copies (the first by name among equals); "" if there is
 // none. Moving tenants are left as they are: a move settles their nodes.
 func placeReplicas(current *snapshot) map[string]string {
+	// Failed nodes keep no copies until they answer again.
 	counts := map[string]int{}
-	for name := range current.nodes {
-		counts[name] = 0
+	for name, node := range current.nodes {
+		if !node.Failed() {
+			counts[name] = 0
+		}
 	}
 	valid := func(record Record) bool {
-		_, member := current.nodes[record.Replica]
-		return record.Replica != "" && member && record.Replica != record.Node
+		_, usable := counts[record.Replica]
+		return record.Replica != "" && usable && record.Replica != record.Node
 	}
 	for _, record := range current.tenants {
 		if valid(record) {
 			counts[record.Replica]++
 		}
 	}
-	nodes := slices.Sorted(maps.Keys(current.nodes))
+	nodes := slices.Sorted(maps.Keys(counts))
 	changes := map[string]string{}
 	for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
 		record := current.tenants[name]
@@ -97,4 +101,94 @@ func placeReplicas(current *snapshot) map[string]string {
 		}
 	}
 	return changes
+}
+
+func (s *SQLite) FailOver(node, actor string) (FailedOver, error) {
+	var outcome FailedOver
+	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
+		outcome = FailedOver{Promoted: []string{}, Stranded: []string{}}
+		failed, member := current.nodes[node]
+		if !member {
+			return fmt.Errorf("node %s: %w", node, ErrNotFound)
+		}
+		if node == current.node {
+			return fmt.Errorf("%w: node %s cannot fail itself over", ErrConflict, node)
+		}
+		changed := !failed.Failed()
+		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
+			record := current.tenants[name]
+			switch {
+			case record.MoveTo == node:
+				// Its target is gone: it stays where it is.
+				if err := tx.Exec(`UPDATE tenants SET move_to = '', move_held = 0, updated_at = ? WHERE name = ? AND move_to = ?`, formatTime(now), name, node); err != nil {
+					return err
+				}
+				if err := event(tx, now, actor, "tenant.move-cancelled", name, record.App, "its target "+node+" failed"); err != nil {
+					return err
+				}
+				changed = true
+			case record.Node != node:
+				continue
+			case record.Replica == "" || record.Replica == node || current.nodes[record.Replica].Failed():
+				outcome.Stranded = append(outcome.Stranded, name)
+				continue
+			default:
+				if _, ok := current.nodes[record.Replica]; !ok {
+					outcome.Stranded = append(outcome.Stranded, name)
+					continue
+				}
+				if err := tx.Exec(`UPDATE tenants SET node = replica, replica = '', move_to = '', move_held = 0, generation = generation + 1, updated_at = ? WHERE name = ? AND node = ?`, formatTime(now), name, node); err != nil {
+					return err
+				}
+				if err := event(tx, now, actor, "tenant.failed-over", name, record.App, node+" → "+record.Replica); err != nil {
+					return err
+				}
+				outcome.Promoted = append(outcome.Promoted, name)
+				changed = true
+			}
+		}
+		// The copies the failed node kept are gone with it.
+		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
+			if current.tenants[name].Replica == node && current.tenants[name].Node != node {
+				if err := tx.Exec(`UPDATE tenants SET replica = '' WHERE name = ? AND replica = ?`, name, node); err != nil {
+					return err
+				}
+				changed = true
+			}
+		}
+		if !changed {
+			return errUnchanged
+		}
+		if !failed.Failed() {
+			if err := tx.Exec(`UPDATE nodes SET failed_at = ? WHERE name = ?`, formatTime(now), node); err != nil {
+				return err
+			}
+		}
+		detail := fmt.Sprintf("%d tenants run from their replicas", len(outcome.Promoted))
+		if len(outcome.Stranded) > 0 {
+			detail += fmt.Sprintf("; %d had no replica and stay: %v", len(outcome.Stranded), outcome.Stranded)
+		}
+		return event(tx, now, actor, "node.failed-over", "", "", node+": "+detail)
+	})
+	if errors.Is(err, errUnchanged) {
+		return outcome, nil
+	}
+	return outcome, err
+}
+
+func (s *SQLite) NodeBack(node, actor string) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		failed, member := current.nodes[node]
+		if !member || !failed.Failed() {
+			return errUnchanged
+		}
+		if err := tx.Exec(`UPDATE nodes SET failed_at = NULL WHERE name = ?`, node); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "node.back", "", "", node+" answers again; it keeps copies again")
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
 }

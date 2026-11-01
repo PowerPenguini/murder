@@ -1,7 +1,10 @@
 package store
 
 import (
+	"errors"
+	"slices"
 	"testing"
+	"time"
 )
 
 // Every tenant gets a replica on another node of the cluster, spread over
@@ -84,6 +87,84 @@ func TestReplicasAreSpreadOverTheOtherNodes(t *testing.T) {
 		if _, member := st.state.Load().nodes[record.Replica]; !member || record.Replica == record.Node {
 			t.Fatalf("tenant %s on %s: replica %q", record.Spec.Name, record.Node, record.Replica)
 		}
+	}
+}
+
+// A failover gives a dead node's tenants to their replicas' nodes in one
+// batch and marks the node failed: it keeps no copies, nothing moves to it,
+// until it answers again.
+func TestAFailoverGivesTenantsToTheirReplicas(t *testing.T) {
+	st, _ := withApp(t, options())
+	for _, node := range []Node{{Name: "node-1", Address: "10.0.0.1:7400"}, {Name: "nbg-1", Address: "10.0.0.2:7400"}, {Name: "hel-1", Address: "10.0.0.3:7400"}} {
+		if err := st.PutNode(node, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, node := range map[string]string{"a": "nbg-1", "b": "nbg-1", "c": "node-1", "lone": "nbg-1"} {
+		if _, err := st.Create(NewTenant{Name: name, App: "web", Node: node}, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.PlaceReplicas("murder"); err != nil {
+		t.Fatal(err)
+	}
+	// "lone" has no copy anywhere, as if replication never caught up.
+	if _, err := st.writeAs(schemaVersion, true, false, func(tx *recorder, _ *snapshot, _ time.Time) error {
+		return tx.Exec(`UPDATE tenants SET replica = '' WHERE name = 'lone'`)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]Record{}
+	for _, record := range st.List() {
+		before[record.Spec.Name] = record
+	}
+	if _, err := st.FailOver("node-1", "murder"); err == nil {
+		t.Fatal("a node failed itself over")
+	}
+	outcome, err := st.FailOver("nbg-1", "murder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(outcome.Promoted, []string{"a", "b"}) || !slices.Equal(outcome.Stranded, []string{"lone"}) {
+		t.Fatalf("outcome %+v", outcome)
+	}
+	for _, name := range []string{"a", "b"} {
+		record, _ := st.Get(name)
+		if record.Node != before[name].Replica || record.Replica != "" || record.Generation != before[name].Generation+1 {
+			t.Fatalf("%s after the failover: %+v (replica was %s)", name, record, before[name].Replica)
+		}
+	}
+	if c, _ := st.Get("c"); c.Replica == "nbg-1" {
+		t.Fatal("a copy stays on the failed node")
+	}
+	if !st.state.Load().nodes["nbg-1"].Failed() {
+		t.Fatal("the node is not marked failed")
+	}
+	// Again: nothing more to do.
+	version := st.state.Load().version
+	if again, err := st.FailOver("nbg-1", "murder"); err != nil || len(again.Promoted) != 0 || st.state.Load().version != version {
+		t.Fatalf("a second failover: %+v, %v", again, err)
+	}
+	// No copies and no moves go to the failed node.
+	if _, err := st.PlaceReplicas("murder"); err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range st.List() {
+		if record.Replica == "nbg-1" {
+			t.Fatalf("tenant %s keeps its copy on the failed node", record.Spec.Name)
+		}
+	}
+	if _, err := st.StartMove("c", "nbg-1", "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a move to the failed node: %v", err)
+	}
+	if err := st.NodeBack("nbg-1", "murder"); err != nil || st.state.Load().nodes["nbg-1"].Failed() {
+		t.Fatalf("back: %v", err)
+	}
+	events, _ := st.Events(EventQuery{Tenant: "a"})
+	if !slices.ContainsFunc(events, func(event Event) bool {
+		return event.Action == "tenant.failed-over" && event.Detail == "nbg-1 → "+before["a"].Replica
+	}) {
+		t.Fatalf("events of a: %+v", events)
 	}
 }
 

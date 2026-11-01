@@ -154,6 +154,22 @@ type Node struct {
 	// network.
 	Address   string    `json:"address"`
 	CreatedAt time.Time `json:"createdAt"`
+	// FailedAt is set when the node's tenants failed over to their
+	// replicas, until it answers again; it keeps no copies meanwhile.
+	FailedAt time.Time `json:"failedAt,omitzero"`
+}
+
+// Failed reports whether the node's tenants failed over and it has not
+// answered since.
+func (n Node) Failed() bool { return !n.FailedAt.IsZero() }
+
+// FailedOver is the outcome of a failover.
+type FailedOver struct {
+	// Promoted are the tenants that now run on their replica's node.
+	Promoted []string `json:"promoted"`
+	// Stranded are the tenants that had no replica to run from: they stay
+	// on the failed node.
+	Stranded []string `json:"stranded"`
 }
 
 // Sealer makes a new value for one secret of a tenant and seals it.
@@ -219,6 +235,12 @@ type Store interface {
 	// ReplicaReady records that the copy of a tenant on replica holds its
 	// whole data; nothing changes unless replica is still its replica.
 	ReplicaReady(name, replica string) error
+	// FailOver gives every tenant of node, a node confirmed powered off,
+	// to its replica's node, and marks node failed: it keeps no copies
+	// until NodeBack, once it answers again. Tenants moving away from node
+	// stop moving; those moving to it stay where they are.
+	FailOver(node, actor string) (FailedOver, error)
+	NodeBack(node, actor string) error
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error

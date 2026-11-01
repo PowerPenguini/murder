@@ -40,6 +40,11 @@ edge:                              # served by "murder edge"
 # cluster:                         # replicate the state to other nodes (see README)
 #   address: 10.0.0.2:7400         # this node on the private network
 #   dir: /var/lib/murder/cluster
+#   failover:                      # run a dead node's tenants from their replicas (docs/failover.md)
+#     after: 30s                   # unanswered this long counts as dead
+#     hetzner:
+#       tokenFile: /etc/murder/hcloud.token   # read/write token of the project (0600)
+#       # servers: {n1: murder-n1}           # server names, where not the node names
 
 defaults: {memoryMB: 512, cpus: 1, pids: 512, diskGB: 20}   # diskGB needs the zfs driver
 reconcileInterval: 10s

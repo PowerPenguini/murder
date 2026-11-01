@@ -22,6 +22,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/failover"
 	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/move"
 	"github.com/PowerPenguini/murder/internal/reconcile"
@@ -134,6 +135,7 @@ func runAgent(args []string) error {
 	var member *cluster.Cluster
 	var mover *move.Mover
 	var replicator *replicate.Replicator
+	var monitor *failover.Monitor
 	if cfg.Cluster != nil {
 		// Copies of other nodes' tenants, on ZFS only: requests for them may
 		// come as soon as the cluster listens, before it is returned here.
@@ -176,6 +178,7 @@ func runAgent(args []string) error {
 				CatchUp: member.CatchUp, Moving: mover.Moving, Leader: member.Leader,
 			}
 		}
+		monitor = newMonitor(cfg.Cluster, st, member, log.With("component", "failover"))
 	}
 	// murder-firewall.service loads the rules before Docker starts the
 	// tenants at boot; loading them here covers a node without that unit
@@ -251,6 +254,9 @@ func runAgent(args []string) error {
 	if replicator != nil {
 		go replicator.Run(ctx)
 	}
+	if monitor != nil {
+		go monitor.Run(ctx)
+	}
 	reconciled := make(chan struct{})
 	go func() {
 		defer close(reconciled)
@@ -274,7 +280,7 @@ func runAgent(args []string) error {
 	}
 
 	servers := []*http.Server{apiServer}
-	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator}
+	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator, monitor: monitor}
 	if metricsListener != nil {
 		metricsServer := &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, metricsServer)
@@ -318,6 +324,27 @@ func keepRestartPolicies(ctx context.Context, reconciler *reconcile.Reconciler, 
 			log.Warn("change the containers' restart policy", "error", err)
 		}
 	}
+}
+
+// newMonitor watches the other nodes from the leader. With a provider set
+// up it powers a dead node off and fails it over; a token that cannot be
+// read leaves failover to an operator, which the log and metrics say when
+// a node dies, rather than stopping the agent.
+func newMonitor(cfg *config.Cluster, st *store.SQLite, member *cluster.Cluster, log *slog.Logger) *failover.Monitor {
+	monitor := &failover.Monitor{Store: st, Probe: member.Ping, Leader: member.Leader, Log: log}
+	if cfg.Failover == nil {
+		return monitor
+	}
+	monitor.After = cfg.Failover.After.Duration
+	if h := cfg.Failover.Hetzner; h != nil {
+		token, err := readSecret(h.TokenFile)
+		if err != nil {
+			log.Error("no automatic failover: the Hetzner token cannot be read", "error", err)
+			return monitor
+		}
+		monitor.Fence = &failover.Hetzner{Token: token, Servers: h.Servers, Endpoint: h.Endpoint}
+	}
+	return monitor
 }
 
 // waitCaughtUp returns once this node has applied what the cluster has, or
