@@ -638,6 +638,15 @@ func lastExit(state runtime.ContainerState, memoryMB int) string {
 		return "exited at " + at
 	case state.OOMKilled:
 		return fmt.Sprintf("killed for using more than its %d MB of memory, at %s", memoryMB, at)
+	// SIGKILL, and the engine restarting the container: nothing but the
+	// kernel kills a tenant's process so, most often for its memory. The
+	// engine misses some out-of-memory kills (a quarter on GitHub's
+	// runners, Docker 28 on cgroup v2), so a kill it did not report as one
+	// is most likely one still.
+	case state.ExitCode == 137 && memoryMB > 0:
+		return fmt.Sprintf("killed (SIGKILL) at %s, most likely for using more than its %d MB of memory", at, memoryMB)
+	case state.ExitCode == 137:
+		return "killed (SIGKILL) at " + at
 	default:
 		return fmt.Sprintf("exited with code %d at %s", state.ExitCode, at)
 	}
