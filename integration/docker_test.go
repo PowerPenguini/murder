@@ -451,5 +451,16 @@ func TestOutOfMemoryIsReportedOnDocker(t *testing.T) {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
+	// What the engine logged and reports, to tell a missing oom event from
+	// a late one.
+	for _, args := range [][]string{
+		{"version", "--format", "{{.Server.Version}}"},
+		{"info", "--format", "cgroup {{.CgroupVersion}} {{.CgroupDriver}}, kernel {{.KernelVersion}}"},
+		{"events", "--since", time.Now().Add(-90 * time.Second).Format(time.RFC3339), "--until", time.Now().Format(time.RFC3339), "--filter", "container=" + status.ContainerID, "--format", "{{.TimeNano}} {{.Action}} {{json .Actor.Attributes}}"},
+		{"inspect", "--format", "{{json .State}}", status.ContainerID},
+	} {
+		out, err := exec.Command("docker", args...).CombinedOutput()
+		t.Logf("docker %s: %s %v", args[0], out, err)
+	}
 	t.Fatalf("status = %+v, want it serving again after one restart, killed for its memory", status)
 }
