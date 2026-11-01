@@ -200,8 +200,7 @@ func runAgent(args []string) error {
 		if err != nil {
 			return fmt.Errorf("backups: %w", err)
 		}
-		backups = &agentBackups{backups: made, store: st, zfs: made.Volumes.(volume.ZFS), every: cfg.Backups.Every.Duration, verify: cfg.Backups.VerifyEvery.Duration, log: log.With("component", "backups"), leader: func() bool { return true }}
-		made.Log = backups.log
+		backups = newAgentBackups(made, st, cfg.Backups, reconciler.Exclusive, log.With("component", "backups"))
 		if member != nil {
 			backups.leader = member.Leader
 		}
@@ -235,7 +234,7 @@ func runAgent(args []string) error {
 	}
 
 	servers := []*http.Server{apiServer}
-	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded}
+	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups}
 	if metricsListener != nil {
 		metricsServer := &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, metricsServer)

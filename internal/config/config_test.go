@@ -138,14 +138,26 @@ func TestBackupsFitTheirMode(t *testing.T) {
 	if production.Backups.LockFor.Duration != 30*24*time.Hour || production.Backups.KeepMonthly.Duration != 365*24*time.Hour {
 		t.Fatalf("production backups = %+v", production.Backups)
 	}
-	for name, extra := range map[string]string{
-		"test with a lock":    "  mode: test\n  lockFor: 24h\n",
-		"lock beyond keepAll": "  mode: production\n  lockFor: 1000h\n  keepAll: 100h\n",
-		"no mode":             "",
-		"another mode":        "  mode: maybe\n",
+	week, err := Parse([]byte(base + "  mode: production\n  keepDaily: 168h\n"))
+	if err != nil || week.Backups.LockFor.Duration != 168*time.Hour {
+		t.Fatalf("the default lock with daily backups kept a week: %+v, %v", week.Backups, err)
+	}
+	endpoint := func(value string) string {
+		return strings.Replace(base, "https://hel1.your-objectstorage.com", value, 1) + "  mode: test\n"
+	}
+	for name, c := range map[string]struct{ config, problem string }{
+		"test with a lock":        {base + "  mode: test\n  lockFor: 24h\n", "not locked"},
+		"lock beyond keepDaily":   {base + "  mode: production\n  lockFor: 1000h\n  keepDaily: 100h\n", "lockFor must not outlast"},
+		"no mode":                 {base, "mode must be"},
+		"another mode":            {base + "  mode: maybe\n", "mode must be"},
+		"negative verifyEvery":    {base + "  mode: test\n  verifyEvery: -1h\n", "verifyEvery"},
+		"verifyEvery below every": {base + "  mode: test\n  every: 2h\n  keepHourly: 48h\n  verifyEvery: 1h\n", "verifyEvery"},
+		"plain http":              {endpoint("http://hel1.your-objectstorage.com"), "endpoint"},
+		"no host":                 {endpoint("https://"), "endpoint"},
+		"a path":                  {endpoint("https://hel1.your-objectstorage.com/bucket"), "endpoint"},
 	} {
-		if _, err := Parse([]byte(base + extra)); err == nil {
-			t.Errorf("%s: accepted", name)
+		if _, err := Parse([]byte(c.config)); err == nil || !strings.Contains(err.Error(), c.problem) {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 	if _, err := Parse([]byte(strings.Replace(base, "driver: zfs, parent: tank/murder/tenants", "driver: dir", 1) + "  mode: test\n")); err == nil {

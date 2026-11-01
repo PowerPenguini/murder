@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -110,8 +111,10 @@ func (b Backups) problems(driver string) []string {
 	if b.Mode != "test" && b.Mode != "production" {
 		problems = append(problems, "backups.mode must be test or production")
 	}
-	if !strings.HasPrefix(b.Endpoint, "https://") && !strings.HasPrefix(b.Endpoint, "http://") {
-		problems = append(problems, "backups.endpoint must be a URL, such as https://hel1.your-objectstorage.com")
+	// HTTPS only: the backups are encrypted anyway, but the requests sign
+	// with the bucket's keys.
+	if endpoint, err := url.Parse(b.Endpoint); err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || strings.Trim(endpoint.Path, "/") != "" || endpoint.RawQuery != "" || endpoint.User != nil {
+		problems = append(problems, "backups.endpoint must be an https URL without a path, such as https://hel1.your-objectstorage.com")
 	}
 	if b.Bucket == "" || b.AccessKeyFile == "" || b.SecretKeyFile == "" {
 		problems = append(problems, "backups need bucket, accessKeyFile and secretKeyFile")
@@ -126,6 +129,9 @@ func (b Backups) problems(driver string) []string {
 		problems = append(problems, "production backups need backups.lockFor")
 	case b.LockFor.Duration > b.KeepDaily.Duration:
 		problems = append(problems, "backups.lockFor must not outlast backups.keepDaily")
+	}
+	if b.VerifyEvery.Duration < b.Every.Duration {
+		problems = append(problems, "backups.verifyEvery must be at least backups.every")
 	}
 	if b.Every.Duration < time.Minute || b.KeepHourly.Duration < b.Every.Duration || b.KeepDaily.Duration < b.KeepHourly.Duration || b.KeepMonthly.Duration < b.KeepDaily.Duration || b.KeepLocal < 1 {
 		problems = append(problems, "backups: every at least 1m, keepHourly at least every, keepDaily at least keepHourly, keepMonthly at least keepDaily, keepLocal at least 1")
@@ -244,8 +250,9 @@ func Parse(data []byte) (Agent, error) {
 				d.field.Duration = d.value
 			}
 		}
+		// The default lock never outlasts the daily backups it locks.
 		if b.Mode == "production" && b.LockFor.Duration == 0 {
-			b.LockFor.Duration = 30 * day
+			b.LockFor.Duration = min(30*day, b.KeepDaily.Duration)
 		}
 		if b.KeepLocal == 0 {
 			b.KeepLocal = 24

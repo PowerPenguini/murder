@@ -14,6 +14,11 @@ import (
 // would not be of one moment.
 var ErrBackupsUnsupported = errors.New("backups need the zfs driver")
 
+// ErrNotACopy refuses a replacement with something that is not a copy of
+// the tenant's data; nothing is changed, and the copy is not the tenant's
+// to remove.
+var ErrNotACopy = errors.New("not a copy of the tenant's data")
+
 // Backups is a driver whose tenants' data is backed up whole, from a
 // snapshot, and restored into a copy that then takes its place.
 type Backups interface {
@@ -46,7 +51,7 @@ func CopyName(tenant, suffix string) string { return copyPrefix + tenant + "-" +
 
 func checkCopy(name string) error {
 	if !strings.HasPrefix(name, copyPrefix) || strings.ContainsAny(name, "/@ .") {
-		return fmt.Errorf("%q is not the name of a copy", name)
+		return fmt.Errorf("%q: %w", name, ErrNotACopy)
 	}
 	return nil
 }
@@ -109,7 +114,10 @@ func (z ZFS) DestroyCopy(ctx context.Context, name string) error {
 }
 
 // ReplaceWithCopy renames the tenant's dataset aside, unmounted, and the
-// copy into its place, mounted where the tenant's data belongs.
+// copy into its place, mounted where the tenant's data belongs. A step that
+// fails undoes the ones before: the tenant keeps its data, and the copy
+// stays a copy. Only when even that fails is the returned dataset where the
+// tenant's data is.
 func (z ZFS) ReplaceWithCopy(ctx context.Context, tenant, name string) (string, error) {
 	if err := checkTenant(tenant); err != nil {
 		return "", err
@@ -122,32 +130,95 @@ func (z ZFS) ReplaceWithCopy(ctx context.Context, tenant, name string) (string, 
 		return "", err
 	}
 	if !exists || copied.owner != tenant {
-		return "", fmt.Errorf("copy %s is not of tenant %s", name, tenant)
+		return "", fmt.Errorf("copy %s of tenant %s: %w", name, tenant, ErrNotACopy)
 	}
-	aside := ""
-	if _, exists, err := z.properties(ctx, z.dataset(tenant)); err != nil {
+	dataset, mountpoint := z.dataset(tenant), filepath.Join(z.MountRoot, tenant)
+	current, hasData, err := z.properties(ctx, dataset)
+	if err != nil {
 		return "", err
-	} else if exists {
-		short := strings.Replace(name, copyPrefix, "murder-replaced-", 1)
-		aside = z.Parent + "/" + short
-		if _, err := z.Run(ctx, "zfs", "unmount", z.dataset(tenant)); err != nil && !strings.Contains(err.Error(), "not currently mounted") {
+	}
+	if hasData {
+		if err := z.owned(tenant, current.owner, current.mountpoint); err != nil {
 			return "", err
 		}
-		if _, err := z.Run(ctx, "zfs", "rename", z.dataset(tenant), aside); err != nil {
-			return "", err
-		}
-		for _, property := range []string{"canmount=noauto", "mountpoint=" + filepath.Join(z.MountRoot, ".replaced", short)} {
-			if _, err := z.Run(ctx, "zfs", "set", property, aside); err != nil {
-				return aside, err
+	}
+	short := strings.Replace(name, copyPrefix, "murder-replaced-", 1)
+	aside := z.Parent + "/" + short
+	// steps undone, newest first, when a later one fails
+	var undo []func() error
+	failed := func(cause error) (string, error) {
+		var errs []error
+		for i := len(undo) - 1; i >= 0; i-- {
+			if err := undo[i](); err != nil {
+				errs = append(errs, err)
 			}
 		}
+		if len(errs) > 0 {
+			where := ""
+			if hasData {
+				where = aside
+			}
+			return where, fmt.Errorf("%w; undoing it failed too: %w", cause, errors.Join(errs...))
+		}
+		return "", fmt.Errorf("%w; nothing was changed", cause)
 	}
-	if _, err := z.Run(ctx, "zfs", "rename", z.Parent+"/"+name, z.dataset(tenant)); err != nil {
-		return aside, err
+	run := func(args ...string) error {
+		_, err := z.Run(ctx, "zfs", args...)
+		return err
 	}
+	if hasData {
+		if err := run("unmount", dataset); err != nil && !strings.Contains(err.Error(), "not currently mounted") {
+			return "", err
+		}
+		undo = append(undo, func() error {
+			if err := run("mount", dataset); err != nil && !strings.Contains(err.Error(), "already mounted") {
+				return err
+			}
+			return nil
+		})
+		if err := run("rename", dataset, aside); err != nil {
+			return failed(err)
+		}
+		undo = append(undo, func() error { return run("rename", aside, dataset) })
+		if err := run("set", "canmount=noauto", aside); err != nil {
+			return failed(err)
+		}
+		undo = append(undo, func() error { return run("set", "canmount=on", aside) })
+		if err := run("set", "mountpoint="+filepath.Join(z.MountRoot, ".replaced", short), aside); err != nil {
+			return failed(err)
+		}
+		undo = append(undo, func() error { return run("set", "mountpoint="+mountpoint, aside) })
+	}
+	if err := run("rename", z.Parent+"/"+name, dataset); err != nil {
+		return failed(err)
+	}
+	undo = append(undo, func() error { return run("rename", dataset, z.Parent+"/"+name) })
 	// Setting the mountpoint mounts it there.
-	if _, err := z.Run(ctx, "zfs", "set", "mountpoint="+filepath.Join(z.MountRoot, tenant), z.dataset(tenant)); err != nil {
-		return aside, err
+	if err := run("set", "mountpoint="+mountpoint, dataset); err != nil {
+		return failed(err)
+	}
+	if !hasData {
+		return "", nil
 	}
 	return aside, nil
+}
+
+// replacedOf names the datasets a restore put a tenant's data aside in.
+func (z ZFS) replacedOf(ctx context.Context, tenant string) ([]string, error) {
+	output, err := z.Run(ctx, "zfs", "list", "-H", "-o", "name", "-d", "1", z.Parent)
+	if err != nil {
+		// No parent yet, so nothing put aside in it.
+		if strings.Contains(err.Error(), "does not exist") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var found []string
+	prefix := z.Parent + "/murder-replaced-" + tenant + "-"
+	for _, name := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(name, prefix) {
+			found = append(found, name)
+		}
+	}
+	return found, nil
 }

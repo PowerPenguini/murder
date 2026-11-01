@@ -26,6 +26,7 @@ Client commands (talk to the local agent):
   events     show the audit log: who changed what, and when
   reconcile  run one reconcile pass now and report its errors
   backup     save a copy of the agent's database to a directory
+  backups    back tenants up to an S3 bucket, list, verify and restore them
 
 Run "murder <command> -h" for a command's options.
 `

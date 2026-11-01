@@ -234,6 +234,13 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (s
 		return "", err
 	}
 	if !exists {
+		// A restore that failed half way may have left the tenant's data
+		// aside: a new, empty dataset would hide that its data is there.
+		if replaced, err := z.replacedOf(ctx, tenant); err != nil {
+			return "", err
+		} else if len(replaced) > 0 {
+			return "", fmt.Errorf("tenant %s has no data, but a restore put its data aside in %s: rename it back to %s, or destroy it, first", tenant, strings.Join(replaced, ", "), dataset)
+		}
 		if _, err := z.Run(ctx, "zfs", "create", "-p",
 			"-o", "mountpoint="+mountpoint, "-o", "setuid=off", "-o", "devices=off",
 			"-o", "refquota="+refquota(diskGB), "-o", ownerProperty+"="+tenant, dataset); err != nil {

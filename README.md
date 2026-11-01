@@ -209,7 +209,12 @@ leader also keeps copies of the cluster's state there.
 
 Backups are thinned out as they age: every one for 48 hours, the first of
 each day for 30 days, the first of each month for a year (`keepHourly`,
-`keepDaily`, `keepMonthly`).
+`keepDaily`, `keepMonthly`). The newest backup of a tenant always stays,
+however old, so backups that keep failing never cost the last one that
+worked. A purged tenant's backups are thinned out the same way, down to that
+newest one; `murder backups forget TENANT -yes` deletes the rest (in
+production, once their locks end). Use one bucket per cluster, or per node
+without a cluster: backups are kept by tenant name.
 
 ```yaml
 backups:
@@ -241,12 +246,36 @@ sudo murder backups restore acme -at 2026-11-01T18:50:55Z -identity key.txt
 sudo murder tenant restore acme
 ```
 
-A restore puts the backup into a new dataset and keeps what the tenant had
-beside it, unmounted (`murder-replaced-…`). With `identityFile` set on a
-node, it verifies its tenants' backups weekly by itself. Hetzner Object
-Storage drops a lock given with a multipart upload: Murder locks each
-backup after it is stored and reads the lock back, failing the backup if it
-is not there.
+A restore unpacks the backup into a new dataset, apart from the tenant's
+data. The agent then puts it in the tenant's place, checking once more that
+the tenant is still archived on this node, with no backup, reconcile pass or
+purge running beside it. What the tenant had stays beside it, unmounted
+(`murder-replaced-…`). A restore that fails, or is stopped, midway is undone
+and leaves the tenant's data where it was. A restore needs the tenant in the
+cluster's state: after losing a node and its state, restore the state first
+(`murder backups state`, then `murder restore`). Murder never deletes
+either kind of dataset by itself: once the restored data is checked, remove
+what was put aside with `zfs destroy -r tank/murder/murder-replaced-…`. While
+it exists, Murder makes no new empty dataset for that tenant, so the old
+data is not hidden by mistake. A `murder-copy-…` dataset is a restore that
+was interrupted and can be removed the same way.
+
+With `identityFile` set on a node, it verifies its tenants' backups weekly
+by itself. An agent that restarts makes no new backup of a tenant backed up
+less than a run ago. `/metrics` has
+`murder_tenant_backup_last_success_timestamp_seconds` and
+`murder_tenant_backup_failing` for each tenant; `murder backups now` exits
+with an error when any backup failed. Hetzner Object Storage drops a lock given with a multipart
+upload: Murder locks each backup after it is stored and reads the lock
+back, failing the backup if it is not there.
+
+Limits to know:
+
+- Monthly backups are kept for a year but **locked for only `lockFor`**
+  (30 days); after that, someone with the bucket's keys could delete them.
+  Raise `lockFor` to lock longer, which also costs longer.
+- One backup holds at most about 156 GiB compressed (10,000 parts of 16 MiB,
+  the S3 limit).
 
 ### Join nodes into a cluster
 

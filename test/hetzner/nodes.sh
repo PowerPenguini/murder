@@ -92,12 +92,17 @@ reconcileInterval: 10s
 EOF
   # Backups, when .state/backup holds S3 keys (see test/hetzner/README.md).
   if [[ -s $STATE/backup/s3.access ]]; then
+    local bucket=$STATE/backup/bucket-${BACKUP_MODE:-test}.txt
+    if [[ ! -s $bucket || ! -s $STATE/backup/recipient.txt ]]; then
+      echo "backups: $bucket and $STATE/backup/recipient.txt are needed beside the S3 keys" >&2
+      exit 1
+    fi
     cat <<EOF
 backups:
   mode: ${BACKUP_MODE:-test}
   endpoint: https://hel1.your-objectstorage.com
   region: hel1
-  bucket: $(cat "$STATE/backup/bucket-${BACKUP_MODE:-test}.txt")
+  bucket: $(cat "$bucket")
   accessKeyFile: /etc/murder/s3.access
   secretKeyFile: /etc/murder/s3.secret
   recipient: $(cat "$STATE/backup/recipient.txt")

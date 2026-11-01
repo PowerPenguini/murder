@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -263,7 +264,28 @@ func (b *Backups) upload(ctx context.Context, key string, lock time.Duration, wr
 	}
 	put := b.Store.Put(ctx, key, reader, until)
 	_ = reader.CloseWithError(put)
-	return stored.n, errors.Join(<-written, put)
+	err := errors.Join(<-written, put)
+	return stored.n, err
+}
+
+// drained reads what is left of r after an archive: nothing but the zero
+// blocks that end a tar, read through age's and zstd's checks.
+func drained(r io.Reader) error {
+	buffer := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(buffer)
+		for _, b := range buffer[:n] {
+			if b != 0 {
+				return errors.New("data after the end of the archive")
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // open returns the decrypted, decompressed content of the object at key.
@@ -299,10 +321,14 @@ func (r readCloser) Close() error {
 
 // keep decides which backups stay: every one younger than KeepHourly, the
 // first of each day younger than KeepDaily, the first of each month younger
-// than KeepMonthly.
+// than KeepMonthly, and the newest whatever its age, so backups that stop
+// working never cost the last one that did.
 func (b *Backups) keep(backups []Backup) map[string]bool {
 	now := b.now()
 	kept := map[string]bool{}
+	if len(backups) > 0 {
+		kept[backups[len(backups)-1].Key] = true
+	}
 	days, months := map[string]bool{}, map[string]bool{}
 	for _, backup := range backups { // oldest first: the first of a day is met first
 		age := now.Sub(backup.At)
@@ -410,6 +436,10 @@ func (b *Backups) Verify(ctx context.Context, tenant, dataset string, identity a
 		result.Files++
 		result.Bytes += n
 	}
+	// Read to the end, so age and zstd check what follows the archive too.
+	if err := drained(content); err != nil {
+		return result, fmt.Errorf("read %s to its end: %w", newest.Key, err)
+	}
 	snapshot := dataset + "@murder-" + snapshotReason + "-" + newest.At.Format(stamp)
 	dir, err := b.Volumes.SnapshotDir(ctx, tenant, snapshot)
 	if err != nil {
@@ -455,6 +485,21 @@ func (b *Backups) Verify(ctx context.Context, tenant, dataset string, identity a
 // when. What the tenant had stays, as the returned dataset. The tenant must
 // not run meanwhile.
 func (b *Backups) Restore(ctx context.Context, tenant string, when time.Time, identity age.Identity) (Backup, string, error) {
+	chosen, name, err := b.Fill(ctx, tenant, when, identity)
+	if err != nil {
+		return Backup{}, "", err
+	}
+	aside, err := b.ReplaceCopy(ctx, tenant, name)
+	if err != nil {
+		return Backup{}, aside, err
+	}
+	return chosen, aside, nil
+}
+
+// Fill unpacks a tenant's newest backup at or before when into a new copy
+// of its data, apart from it, and names the copy, for ReplaceCopy. A fill
+// that fails, or is stopped, leaves no copy.
+func (b *Backups) Fill(ctx context.Context, tenant string, when time.Time, identity age.Identity) (Backup, string, error) {
 	backups, err := b.List(ctx, tenant)
 	if err != nil {
 		return Backup{}, "", err
@@ -468,24 +513,92 @@ func (b *Backups) Restore(ctx context.Context, tenant string, when time.Time, id
 	if err != nil {
 		return Backup{}, "", err
 	}
-	failed := func(err error) (Backup, string, error) {
+	content, err := b.open(ctx, chosen.Key, identity)
+	if err == nil {
+		err = volume.ReadTar(ctx, path, content)
+		if err == nil {
+			err = drained(content)
+		}
+		content.Close()
+		if err != nil {
+			err = fmt.Errorf("unpack %s: %w", chosen.Key, err)
+		}
+	}
+	if err != nil {
 		_ = b.Volumes.DestroyCopy(context.WithoutCancel(ctx), name)
 		return Backup{}, "", err
 	}
-	content, err := b.open(ctx, chosen.Key, identity)
-	if err != nil {
-		return failed(err)
-	}
-	err = volume.ReadTar(ctx, path, content)
-	content.Close()
-	if err != nil {
-		return failed(fmt.Errorf("unpack %s: %w", chosen.Key, err))
-	}
+	return chosen, name, nil
+}
+
+// ReplaceCopy makes copy name, filled by Fill, the tenant's data. What the
+// tenant had stays, as the returned dataset. A replacement that fails is
+// undone and takes the copy away; only if undoing it failed too is the
+// returned dataset where the tenant's data is. The tenant must not run
+// meanwhile.
+func (b *Backups) ReplaceCopy(ctx context.Context, tenant, name string) (string, error) {
 	aside, err := b.Volumes.ReplaceWithCopy(ctx, tenant, name)
-	if err != nil {
-		return Backup{}, aside, err
+	if err == nil {
+		return aside, nil
 	}
-	return chosen, aside, nil
+	if aside == "" {
+		if !errors.Is(err, volume.ErrNotACopy) {
+			_ = b.DiscardCopy(context.WithoutCancel(ctx), name)
+		}
+		return "", err
+	}
+	return aside, fmt.Errorf("%w (the restored data is in copy %s)", err, name)
+}
+
+// DiscardCopy removes a copy Fill made.
+func (b *Backups) DiscardCopy(ctx context.Context, name string) error {
+	return b.Volumes.DestroyCopy(ctx, name)
+}
+
+// Tenants names every tenant with backups in the bucket.
+func (b *Backups) Tenants(ctx context.Context) ([]string, error) {
+	objects, err := b.Store.List(ctx, "tenants/")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, object := range objects {
+		name, rest, ok := strings.Cut(strings.TrimPrefix(object.Key, "tenants/"), "/")
+		if ok && rest != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// Forget deletes every backup of a tenant. In production, those still
+// locked stay until their locks end, and each is reported as an error.
+func (b *Backups) Forget(ctx context.Context, tenant string) (int, error) {
+	backups, err := b.List(ctx, tenant)
+	if err != nil {
+		return 0, err
+	}
+	deleted := 0
+	var errs []error
+	for _, backup := range backups {
+		if err := b.Store.Delete(ctx, backup.Key); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", backup.Key, err))
+			continue
+		}
+		deleted++
+	}
+	return deleted, errors.Join(errs...)
+}
+
+// StateAt returns the newest copy of the state at or before when, timed as
+// a restore's.
+func (b *Backups) StateAt(ctx context.Context, when time.Time) (Backup, error) {
+	states, err := b.States(ctx)
+	if err != nil {
+		return Backup{}, err
+	}
+	return at(states, when)
 }
 
 // BackUpState stores a copy of the cluster's state, the database file at

@@ -1,8 +1,8 @@
 // Package backup keeps tenants' data, and the cluster's state, in an S3
-// bucket: encrypted ZFS streams, a whole one a week and what changed every
-// hour, kept by a retention policy, and in production under object lock,
-// which no one, not even a node holding the bucket's keys, can delete
-// early.
+// bucket: every backup the whole data of a tenant from a snapshot,
+// compressed and encrypted, thinned out as it ages, and in production under
+// object lock, which no one, not even a node holding the bucket's keys, can
+// delete early.
 package backup
 
 import (
@@ -78,15 +78,24 @@ func (s *S3) Put(ctx context.Context, key string, r io.Reader, retainUntil time.
 	// is, may be dropped (Hetzner Object Storage drops it): the version
 	// stored is locked on its own, and the lock read back.
 	mode, until := minio.Compliance, retainUntil.UTC().Truncate(time.Second).Add(time.Second)
-	if err := s.client.PutObjectRetention(ctx, s.bucket, key, minio.PutObjectRetentionOptions{Mode: &mode, RetainUntilDate: &until, VersionID: info.VersionID}); err != nil {
-		return fmt.Errorf("lock %s: %w", key, err)
+	locked := s.client.PutObjectRetention(ctx, s.bucket, key, minio.PutObjectRetentionOptions{Mode: &mode, RetainUntilDate: &until, VersionID: info.VersionID})
+	if locked == nil {
+		got, gotUntil, err := s.client.GetObjectRetention(ctx, s.bucket, key, info.VersionID)
+		switch {
+		case err != nil:
+			locked = fmt.Errorf("read the lock back: %w", err)
+		case got == nil || *got != minio.Compliance || gotUntil == nil || gotUntil.Before(retainUntil):
+			locked = errors.New("the lock read back is not the one set")
+		}
 	}
-	got, gotUntil, err := s.client.GetObjectRetention(ctx, s.bucket, key, info.VersionID)
-	if err != nil {
-		return fmt.Errorf("read the lock of %s: %w", key, err)
-	}
-	if got == nil || *got != minio.Compliance || gotUntil == nil || gotUntil.Before(retainUntil) {
-		return fmt.Errorf("%s is stored but not locked until %s", key, retainUntil.Format(time.RFC3339))
+	if locked != nil {
+		// An unlocked backup would be taken for a locked one: it goes,
+		// which it can, unlocked, and the backup is reported failed.
+		removed := s.client.RemoveObject(context.WithoutCancel(ctx), s.bucket, key, minio.RemoveObjectOptions{VersionID: info.VersionID})
+		if removed != nil {
+			return fmt.Errorf("lock %s: %w; it stays unlocked, as removing it failed: %w", key, locked, removed)
+		}
+		return fmt.Errorf("lock %s: %w; it was removed", key, locked)
 	}
 	return nil
 }
