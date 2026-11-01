@@ -88,6 +88,8 @@ type Config struct {
 	Upgrade Upgrader
 	// Moves is this node's part in moving tenants between nodes.
 	Moves Moves
+	// Replicas keeps the copies of other nodes' tenants this node holds.
+	Replicas Replicas
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
@@ -568,6 +570,36 @@ func (c *Cluster) StatusOn(ctx context.Context, node, tenant string, out any) er
 func (c *Cluster) MoveOn(ctx context.Context, node, tenant, to, actor string) error {
 	body := marshal(moveRequest{To: to, Actor: actor})
 	return c.stream(ctx, node, http.MethodPost, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/move", bytes.NewReader(body), nil)
+}
+
+// Replicas is the node's part in keeping copies of tenants other nodes
+// run. sender is the node a request comes from, as its cluster certificate
+// proves.
+type Replicas interface {
+	// Newest is the newest snapshot of the copy of tenant this node keeps
+	// for sender; "" if it keeps none yet.
+	Newest(ctx context.Context, sender, tenant string) (string, error)
+	// Receive takes a stream of tenant's data from sender into the copy:
+	// whole, or the changes since its newest snapshot.
+	Receive(ctx context.Context, sender, tenant string, whole bool, data io.Reader) error
+}
+
+// NewestOn is the newest snapshot of the copy of tenant node keeps.
+func (c *Cluster) NewestOn(ctx context.Context, node, tenant string) (string, error) {
+	var answer struct {
+		Snapshot string `json:"snapshot"`
+	}
+	err := c.stream(ctx, node, http.MethodGet, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/replica", nil, &answer)
+	return answer.Snapshot, err
+}
+
+// ReplicateOn streams tenant's data to the copy node keeps.
+func (c *Cluster) ReplicateOn(ctx context.Context, node, tenant string, whole bool, data io.Reader) error {
+	path := "/cluster/v1/tenants/" + url.PathEscape(tenant) + "/replica"
+	if whole {
+		path += "?whole=1"
+	}
+	return c.stream(ctx, node, http.MethodPut, path, data, nil)
 }
 
 // moveRequest asks a node to move one of its tenants.

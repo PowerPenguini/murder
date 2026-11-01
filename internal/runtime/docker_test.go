@@ -521,3 +521,27 @@ func TestInspectTakesALateOOMEvent(t *testing.T) {
 		t.Fatalf("after the oom event: %+v, %v", state, err)
 	}
 }
+
+// A container's restart policy is read with its state and changed in
+// place; new containers get the policy that leaves starts at boot to the
+// agent.
+func TestTheRestartPolicyIsReadAndChanged(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	engine.handlers["GET /containers/old/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"State":{"Pid":42},"HostConfig":{"RestartPolicy":{"Name":"unless-stopped"}}}`))
+	}
+	var update map[string]map[string]string
+	engine.handlers["POST /containers/old/update"] = func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+			t.Error(err)
+		}
+		_, _ = w.Write([]byte(`{"Warnings":[]}`))
+	}
+	state, err := docker.Inspect(context.Background(), "old")
+	if err != nil || state.RestartPolicy != "unless-stopped" {
+		t.Fatalf("Inspect = %+v, %v", state, err)
+	}
+	if err := docker.SetRestartPolicy(context.Background(), "old", RestartPolicy); err != nil || update["RestartPolicy"]["Name"] != "on-failure" {
+		t.Fatalf("update = %v, %v", update, err)
+	}
+}

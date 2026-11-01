@@ -524,7 +524,7 @@ func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error)
 		"PidsLimit":      spec.PIDs,
 		"ReadonlyRootfs": spec.ReadOnlyRoot,
 		"Tmpfs":          spec.Tmpfs,
-		"RestartPolicy":  map[string]any{"Name": "unless-stopped"},
+		"RestartPolicy":  map[string]any{"Name": RestartPolicy},
 		"SecurityOpt":    []string{"no-new-privileges"},
 		"CapDrop":        []string{"ALL"},
 		"NetworkMode":    spec.Network,
@@ -581,6 +581,11 @@ func (d *Docker) Remove(ctx context.Context, id string) error {
 	return err
 }
 
+func (d *Docker) SetRestartPolicy(ctx context.Context, id, policy string) error {
+	body := map[string]any{"RestartPolicy": map[string]any{"Name": policy}}
+	return d.do(ctx, request{method: http.MethodPost, path: "/containers/" + url.PathEscape(id) + "/update", body: body}, nil)
+}
+
 func (d *Docker) Inspect(ctx context.Context, id string) (ContainerState, error) {
 	var inspected struct {
 		RestartCount int `json:"RestartCount"`
@@ -591,14 +596,20 @@ func (d *Docker) Inspect(ctx context.Context, id string) (ContainerState, error)
 			ExitCode   int       `json:"ExitCode"`
 			FinishedAt time.Time `json:"FinishedAt"`
 		} `json:"State"`
+		HostConfig struct {
+			RestartPolicy struct {
+				Name string `json:"Name"`
+			} `json:"RestartPolicy"`
+		} `json:"HostConfig"`
 	}
 	if err := d.do(ctx, request{method: http.MethodGet, path: "/containers/" + url.PathEscape(id) + "/json"}, &inspected); err != nil {
 		return ContainerState{}, err
 	}
 	state := ContainerState{
-		Pid:        max(inspected.State.Pid, 0),
-		Restarting: inspected.State.Restarting,
-		Restarts:   inspected.RestartCount,
+		Pid:           max(inspected.State.Pid, 0),
+		Restarting:    inspected.State.Restarting,
+		Restarts:      inspected.RestartCount,
+		RestartPolicy: inspected.HostConfig.RestartPolicy.Name,
 	}
 	// The engine reports "never" as the zero time, 0001-01-01T00:00:00Z.
 	if inspected.State.FinishedAt.Year() <= 1 {

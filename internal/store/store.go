@@ -73,6 +73,10 @@ type Record struct {
 	// way; MoveHeld is set while it runs nowhere and requests wait for it.
 	MoveTo   string `json:"moveTo,omitempty"`
 	MoveHeld bool   `json:"moveHeld,omitempty"`
+	// Replica is the node that keeps a copy of the tenant's data, sent
+	// every few seconds, to run the tenant from if its node fails; never
+	// Node. Empty while the cluster has no other node for it.
+	Replica string `json:"replica,omitempty"`
 	// Rollout counts the rollouts asked for the tenant; each gives it a new
 	// container made as this release of Murder makes them.
 	Rollout int64 `json:"rollout,omitempty"`
@@ -204,6 +208,11 @@ type Store interface {
 	FinishMove(name, actor string) (Record, error)
 	ReleaseHold(name string) error
 	CancelMove(name, actor string) (bool, error)
+	// PlaceReplicas gives every tenant whose replica is missing, on its own
+	// node or on a node no longer in the cluster another node of the
+	// cluster to keep its copy: the one keeping the fewest. Tenants that
+	// are moving keep theirs. It reports how many it placed.
+	PlaceReplicas(actor string) (int, error)
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error

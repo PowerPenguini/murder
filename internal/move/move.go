@@ -146,6 +146,14 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 	return nil
 }
 
+// Moving reports whether a move of tenant away from this node is under
+// way here.
+func (m *Mover) Moving(tenant string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.active[tenant]
+}
+
 func (m *Mover) begin(tenant string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -330,6 +330,37 @@ edge answers 503, "starting"; the old one's serves every tenant it knows),
 and switch the old one off. `murder cluster drain NODE
 -to TARGET` moves the tenants without taking the node out.
 
+### A copy of every tenant on a second node
+
+In a cluster of ZFS nodes, every tenant has a **replica**: another node
+that keeps a copy of its data, never mounted, to run it from if its node
+fails. The cluster's leader picks the replicas and spreads them over the
+nodes. Every 15 s, the node that runs a tenant snapshots its data and sends
+the replica what changed since the copy's newest snapshot; when nothing
+changed, nothing is sent. So the copy is at most about 30 s behind. A node
+takes a copy only from the node that runs the tenant, so a node that lost
+its tenants never writes over the copies that took over.
+
+- **`tenant show`:** shows the replica, and when its copy last matched the
+  data (`replicaSyncedAt`), when asked on the node that runs the tenant.
+- **Metrics:** `/metrics` has `murder_tenant_replica_lag_seconds` and
+  `murder_tenant_replica_failing` for each tenant.
+- **Cleanup:** a copy a node no longer keeps, of a tenant purged or whose
+  replica moved, is dropped.
+- **A node that comes back with data of tenants it no longer runs:** it
+  puts that data aside, unmounted, as `murder-failed-<tenant>-…`, because
+  it may hold writes the cluster lost. Murder never destroys such data;
+  check it, then run `zfs destroy -r`.
+
+**Containers no longer start with the server.** The engine restarts a
+container whose app fails, but starts none when the server or Docker
+starts; the agent starts them once it has applied what the cluster decided
+while the node was down. A node that cannot reach a majority starts none.
+Containers made by older releases change in place, without a restart.
+
+How a dead node's tenants then run from their replicas is described in
+[docs/failover.md](docs/failover.md).
+
 Nodes talk over one TLS port on the private network. A node proves it
 belongs to the cluster with a certificate of an authority derived from the
 master key, so every node needs the same master key and nothing else is
@@ -529,9 +560,10 @@ through Murder's real components:
 ## Known limits
 
 - **Tenants stay on their node until moved.** A tenant's data lives on the
-  node that runs it; replicating it to another node, and moving tenants
-  when a node fails, come next. Until a node switched off returns,
-  requests for its tenants fail within seconds (502) on every other edge. Moving a tenant with the `dir` driver
+  node that runs it, with a copy on its replica (ZFS only); running
+  tenants from their replicas when a node fails comes next. Until a node
+  switched off returns, requests for its tenants fail within seconds (502)
+  on every other edge. Moving a tenant with the `dir` driver
   copies all its data twice, the second time while it is stopped; ZFS
   sends only what changed.
 - **Upgrades.** A node applies changes made by its own release and older

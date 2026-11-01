@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,8 @@ type node struct {
 	fatal   chan error
 	// tune changes Raft's settings after the tests' own.
 	tune func(*raft.Config)
+	// replicas keeps copies of other nodes' tenants; none if nil.
+	replicas Replicas
 }
 
 func newNode(t *testing.T, name string) *node {
@@ -75,7 +78,7 @@ func (n *node) start() {
 	}
 	c, err := Start(Config{
 		Node: n.name, Address: n.address, Dir: filepath.Join(n.dir, "raft"),
-		Seed: n.key.Derive("cluster ca"), Store: st,
+		Seed: n.key.Derive("cluster ca"), Store: st, Replicas: n.replicas,
 		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Fatal: func(err error) { n.fatal <- err },
 		raft: func(config *raft.Config) {
@@ -664,4 +667,53 @@ func TestOnlyMembersOfTheClusterReachIt(t *testing.T) {
 	}
 	eventually(t, "the removal reaches nbg-1", func() bool { return len(nodes[1].store.Nodes()) == 2 })
 	asked(removed, "a removed node")
+}
+
+// recordedReplicas answers for copies and records who asked.
+type recordedReplicas struct {
+	mu      sync.Mutex
+	senders []string
+	data    string
+}
+
+func (r *recordedReplicas) Newest(_ context.Context, sender, tenant string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.senders = append(r.senders, sender+" asks for "+tenant)
+	return "murder-replica-1", nil
+}
+
+func (r *recordedReplicas) Receive(_ context.Context, sender, tenant string, whole bool, data io.Reader) error {
+	body, err := io.ReadAll(data)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.senders = append(r.senders, fmt.Sprintf("%s sends %s whole=%v", sender, tenant, whole))
+	r.data = string(body)
+	return err
+}
+
+// A node keeping copies learns from the cluster certificate which node
+// sends them; a node that keeps none says so.
+func TestCopiesKnowTheirSender(t *testing.T) {
+	nodes := threeNodes(t)
+	replicas := &recordedReplicas{}
+	nodes[1].stop()
+	nodes[1].replicas = replicas
+	nodes[1].start()
+	snapshot, err := nodes[0].cluster.NewestOn(ctx(t), "nbg-1", "acme")
+	if err != nil || snapshot != "murder-replica-1" {
+		t.Fatalf("newest: %q, %v", snapshot, err)
+	}
+	if err := nodes[0].cluster.ReplicateOn(ctx(t), "nbg-1", "acme", true, strings.NewReader("stream")); err != nil {
+		t.Fatal(err)
+	}
+	replicas.mu.Lock()
+	senders, data := replicas.senders, replicas.data
+	replicas.mu.Unlock()
+	if !slices.Equal(senders, []string{"fsn-1 asks for acme", "fsn-1 sends acme whole=true"}) || data != "stream" {
+		t.Fatalf("senders %v, data %q", senders, data)
+	}
+	if _, err := nodes[0].cluster.NewestOn(ctx(t), "hel-1", "acme"); err == nil {
+		t.Fatal("a node that keeps no copies answered for one")
+	}
 }

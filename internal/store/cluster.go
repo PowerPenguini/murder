@@ -481,6 +481,10 @@ func (s *SQLite) RemoveNode(name, actor string) error {
 				return fmt.Errorf("%w: tenant %s is moving to node %s; wait until it has moved, or the move is undone", ErrInUse, tenant, name)
 			}
 		}
+		// Copies kept there go with it; placement gives those tenants others.
+		if err := tx.Exec(`UPDATE tenants SET replica = '' WHERE replica = ?`, name); err != nil {
+			return err
+		}
 		if err := tx.Exec(`DELETE FROM nodes WHERE name = ?`, name); err != nil {
 			return err
 		}
@@ -601,7 +605,8 @@ func (s *SQLite) FinishMove(name, actor string) (Record, error) {
 		if err := targetMember(current, record); err != nil {
 			return err
 		}
-		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
+		// A tenant moved onto its replica's node needs another replica.
+		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', replica = CASE WHEN replica = move_to THEN '' ELSE replica END, generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "tenant.moved", name, record.App, record.Node+" → "+record.MoveTo)

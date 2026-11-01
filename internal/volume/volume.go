@@ -179,12 +179,22 @@ type properties struct {
 	owner, mounted, mountpoint string
 	// refquota is the limit on the dataset's own data in bytes; 0 is none.
 	refquota int64
+	// role is "replica" for a copy of a tenant another node runs, never
+	// mounted; canmount is ZFS's, "noauto" on such a copy.
+	role, canmount string
 }
+
+// roleProperty marks a dataset that is a replica: a copy of the data of a
+// tenant another node runs, kept unmounted until it takes over.
+const roleProperty = "io.murder:role"
+
+// replicaRole is roleProperty's value on a replica.
+const replicaRole = "replica"
 
 // properties returns the dataset's properties, or ok=false if the dataset
 // does not exist.
 func (z ZFS) properties(ctx context.Context, dataset string) (properties, bool, error) {
-	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", ownerProperty+",mounted,mountpoint,refquota", dataset)
+	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", ownerProperty+",mounted,mountpoint,refquota,"+roleProperty+",canmount", dataset)
 	if err != nil {
 		if strings.Contains(string(output), "does not exist") {
 			return properties{}, false, nil
@@ -192,14 +202,14 @@ func (z ZFS) properties(ctx context.Context, dataset string) (properties, bool, 
 		return properties{}, false, err
 	}
 	values := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
-	if len(values) != 4 {
+	if len(values) != 6 {
 		return properties{}, false, fmt.Errorf("zfs get %s: unexpected output %q", dataset, output)
 	}
 	refquota, err := strconv.ParseInt(values[3], 10, 64)
 	if err != nil {
 		return properties{}, false, fmt.Errorf("zfs get %s: refquota %q", dataset, values[3])
 	}
-	return properties{owner: values[0], mounted: values[1], mountpoint: values[2], refquota: refquota}, true, nil
+	return properties{owner: values[0], mounted: values[1], mountpoint: values[2], refquota: refquota, role: values[4], canmount: values[5]}, true, nil
 }
 
 // diskBytes is the refquota for diskGB; 0 is none.
@@ -250,6 +260,16 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (s
 	}
 	if err := z.owned(tenant, current.owner, current.mountpoint); err != nil {
 		return "", err
+	}
+	// A replica that took over is the tenant's data now: mounted, at boot
+	// too, and no longer marked as a copy.
+	if current.role == replicaRole || current.canmount == "noauto" {
+		if _, err := z.Run(ctx, "zfs", "set", "canmount=on", dataset); err != nil {
+			return "", err
+		}
+		if _, err := z.Run(ctx, "zfs", "inherit", roleProperty, dataset); err != nil {
+			return "", err
+		}
 	}
 	var limitErr error
 	if current.refquota != diskBytes(diskGB) {

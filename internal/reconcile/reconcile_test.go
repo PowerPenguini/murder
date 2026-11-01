@@ -39,6 +39,9 @@ type fakeRuntime struct {
 	mu         sync.Mutex
 	images     map[string]bool
 	containers map[string]*fakeContainer
+	// policies are containers' restart policies, as SetRestartPolicy or a
+	// test set them; none for a container made by Create.
+	policies   map[string]string
 	networks   map[string]map[string]string // name → labels
 	subnets    map[string]string            // name → subnet
 	pulled     []string
@@ -72,7 +75,7 @@ type fakeContainer struct {
 }
 
 func newFakeRuntime() *fakeRuntime {
-	return &fakeRuntime{images: map[string]bool{imageA: true}, containers: map[string]*fakeContainer{}, networks: map[string]map[string]string{}, subnets: map[string]string{}}
+	return &fakeRuntime{images: map[string]bool{imageA: true}, containers: map[string]*fakeContainer{}, networks: map[string]map[string]string{}, subnets: map[string]string{}, policies: map[string]string{}}
 }
 
 func (f *fakeRuntime) record(event string) { f.events = append(f.events, event) }
@@ -206,6 +209,7 @@ func (f *fakeRuntime) Create(_ context.Context, spec runtime.ContainerSpec) (str
 	f.next++
 	id := fmt.Sprintf("c%d", f.next)
 	f.containers[id] = &fakeContainer{Container: runtime.Container{ID: id, Name: spec.Name, State: "created", Labels: spec.Labels}, spec: spec}
+	f.policies[id] = runtime.RestartPolicy
 	f.record("create " + id)
 	return id, nil
 }
@@ -249,6 +253,14 @@ func (f *fakeRuntime) Resolve(_ context.Context, ref string) (string, string, er
 	return ref, "", nil
 }
 
+func (f *fakeRuntime) SetRestartPolicy(_ context.Context, id, policy string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("restart-policy " + id + " " + policy)
+	f.policies[id] = policy
+	return nil
+}
+
 func (f *fakeRuntime) Inspect(_ context.Context, id string) (runtime.ContainerState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -259,6 +271,9 @@ func (f *fakeRuntime) Inspect(_ context.Context, id string) (runtime.ContainerSt
 	state := f.state
 	if container.Running && !state.Restarting && !f.exitBeforeInspect {
 		state.Pid = 4242
+	}
+	if policy, ok := f.policies[id]; ok {
+		state.RestartPolicy = policy
 	}
 	f.exitBeforeInspect = false
 	return state, nil
@@ -1716,5 +1731,27 @@ func TestAReplacedTenantIsServedBeforeThePassEnds(t *testing.T) {
 	}
 	if alphaHeldDuringBetasStop {
 		t.Fatal("alpha's requests still waited while beta was being replaced")
+	}
+}
+
+// Containers made when the engine still started them at boot get the
+// restart policy that leaves that to the agent, in place: not replaced.
+func TestOldContainersGetTheNewRestartPolicyInPlace(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	var id string
+	for candidate := range f.runtime.containers {
+		id = candidate
+	}
+	f.runtime.policies[id] = "unless-stopped"
+	f.runtime.takeEvents()
+	f.reconcile(t)
+	if events := f.runtime.takeEvents(); len(events) != 1 || events[0] != "restart-policy "+id+" "+runtime.RestartPolicy {
+		t.Fatalf("events = %v, want only the policy changed", events)
+	}
+	f.reconcile(t)
+	if events := f.runtime.takeEvents(); len(events) != 0 {
+		t.Fatalf("events after = %v", events)
 	}
 }

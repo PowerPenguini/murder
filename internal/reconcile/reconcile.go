@@ -565,6 +565,12 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 			current = nil // removed since List; recreated below
 		case err != nil:
 			return Status{}, fmt.Errorf("inspect container: %w", err)
+		case state.RestartPolicy != "" && state.RestartPolicy != runtime.RestartPolicy:
+			// Containers made before the engine stopped starting them at
+			// boot change in place.
+			if err := r.runtime.SetRestartPolicy(ctx, current.ID, runtime.RestartPolicy); err != nil {
+				r.log.Warn("change the container's restart policy", "tenant", tenant.Name, "container", current.ID, "error", err)
+			}
 		}
 	}
 	// A container started before its dataset was mounted runs on the empty

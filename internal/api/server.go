@@ -36,9 +36,14 @@ type Tenant struct {
 	// not answer in time.
 	Node string `json:"node"`
 	// Elsewhere is set when another node than this one runs the tenant.
-	Elsewhere bool   `json:"elsewhere,omitempty"`
-	Host      string `json:"host"`
-	URL       string `json:"url"`
+	Elsewhere bool `json:"elsewhere,omitempty"`
+	// Replica is the node that keeps a copy of the tenant's data;
+	// ReplicaSyncedAt is when the copy last matched the data, as the node
+	// that runs the tenant knows it (asked of that node only).
+	Replica         string    `json:"replica,omitempty"`
+	ReplicaSyncedAt time.Time `json:"replicaSyncedAt,omitzero"`
+	Host            string    `json:"host"`
+	URL             string    `json:"url"`
 	// Address is where the tenant listens, reachable from this node only.
 	Address    string    `json:"address,omitempty"`
 	Generation int64     `json:"generation"`
@@ -117,6 +122,9 @@ type Server struct {
 	relayPort int
 	// moves moves tenants between nodes; nil if this node moves none.
 	moves Moves
+	// replicas reports on the copies of this node's tenants; nil when it
+	// keeps none.
+	replicas Replicas
 	// backups backs this node's tenants up; nil without backups set up.
 	backups Backups
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
@@ -172,11 +180,14 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) view(record store.Record) Tenant {
 	view := Tenant{
-		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node,
+		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node, Replica: record.Replica,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
 	}
 	view.Elsewhere = record.Node != s.store.Node()
+	if !view.Elsewhere && s.replicas != nil {
+		view.ReplicaSyncedAt = s.replicas.Synced(record.Spec.Name)
+	}
 	if record.Archived() || view.Elsewhere {
 		return view
 	}

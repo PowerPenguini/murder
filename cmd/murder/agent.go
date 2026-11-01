@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/move"
 	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/replicate"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -131,10 +133,27 @@ func runAgent(args []string) error {
 	moves := &agentMoves{store: st, reconciler: reconciler, volumes: volumes}
 	var member *cluster.Cluster
 	var mover *move.Mover
+	var replicator *replicate.Replicator
 	if cfg.Cluster != nil {
+		// Copies of other nodes' tenants, on ZFS only: requests for them may
+		// come as soon as the cluster listens, before it is returned here.
+		var started atomic.Pointer[cluster.Cluster]
+		catchUp := func() error {
+			if c := started.Load(); c != nil {
+				return c.CatchUp()
+			}
+			return errors.New("the cluster is starting")
+		}
+		zfs, replicas := volumes.(volume.ZFS)
+		var receiver cluster.Replicas
+		if replicas {
+			receiver = &replicate.Receiver{Store: st, Volumes: zfs, CatchUp: catchUp}
+		} else {
+			log.Warn("tenants' data is not copied to a second node: that needs the zfs volume driver")
+		}
 		member, err = cluster.Start(cluster.Config{
 			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
-			Seed: key.Derive(clusterSeed), Store: st, Log: log, Upgrade: upgrader, Moves: moves,
+			Seed: key.Derive(clusterSeed), Store: st, Log: log, Upgrade: upgrader, Moves: moves, Replicas: receiver,
 			Fatal: func(err error) {
 				select {
 				case fatal <- err:
@@ -147,9 +166,16 @@ func runAgent(args []string) error {
 		}
 		// Closed before the store, which the log applies to.
 		defer member.Close()
+		started.Store(member)
 		upgrader.catchUp = member.CatchUp
 		mover = &move.Mover{Store: st, Reconciler: reconciler, Volumes: volumes, Peer: clusterPeer{member}, Log: log, CatchUp: member.CatchUp}
 		moves.setCluster(member, mover)
+		if replicas {
+			replicator = &replicate.Replicator{
+				Store: st, Volumes: zfs, Peer: replicaPeer{member}, Log: log.With("component", "replication"),
+				CatchUp: member.CatchUp, Moving: mover.Moving, Leader: member.Leader,
+			}
+		}
 	}
 	// murder-firewall.service loads the rules before Docker starts the
 	// tenants at boot; loading them here covers a node without that unit
@@ -206,6 +232,9 @@ func runAgent(args []string) error {
 		}
 		apiHandler.WithBackups(backups)
 	}
+	if replicator != nil {
+		apiHandler.WithReplicas(replicator)
+	}
 	if member != nil {
 		apiHandler.WithRelayPort(cfg.Edge.RelayPort)
 		apiHandler.WithCluster(member)
@@ -219,9 +248,18 @@ func runAgent(args []string) error {
 	if backups != nil {
 		go backups.loop(ctx)
 	}
+	if replicator != nil {
+		go replicator.Run(ctx)
+	}
 	reconciled := make(chan struct{})
 	go func() {
 		defer close(reconciled)
+		// A node that was down may have lost its tenants to their replicas
+		// meanwhile: it starts nothing until it knows what the cluster
+		// decided. A node that cannot reach a majority starts nothing.
+		if member != nil && !waitCaughtUp(ctx, member, log) {
+			return
+		}
 		reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
 	}()
 	if cfg.Firewall == config.FirewallNftables {
@@ -229,7 +267,7 @@ func runAgent(args []string) error {
 	}
 
 	servers := []*http.Server{apiServer}
-	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups}
+	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator}
 	if metricsListener != nil {
 		metricsServer := &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, metricsServer)
@@ -258,6 +296,37 @@ func runAgent(args []string) error {
 	<-reconciled
 	log.Info("murder agent stopped")
 	return runErr
+}
+
+// waitCaughtUp returns once this node has applied what the cluster has, or
+// false when ctx ends first.
+func waitCaughtUp(ctx context.Context, member *cluster.Cluster, log *slog.Logger) bool {
+	for attempt := 0; ; attempt++ {
+		err := member.CatchUp()
+		// A node not yet in a cluster decides alone.
+		if err == nil || errors.Is(err, cluster.ErrNotJoined) {
+			return true
+		}
+		if attempt%10 == 0 {
+			log.Warn("starting no tenants until this node has what the cluster decided", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// replicaPeer reaches the nodes that keep tenants' copies.
+type replicaPeer struct{ cluster *cluster.Cluster }
+
+func (p replicaPeer) Newest(ctx context.Context, node, tenant string) (string, error) {
+	return p.cluster.NewestOn(ctx, node, tenant)
+}
+
+func (p replicaPeer) Send(ctx context.Context, node, tenant string, whole bool, data io.Reader) error {
+	return p.cluster.ReplicateOn(ctx, node, tenant, whole, data)
 }
 
 // recoverMoves undoes moves away from this node cut short, now and every
