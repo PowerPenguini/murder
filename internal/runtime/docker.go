@@ -615,8 +615,9 @@ func (d *Docker) Inspect(ctx context.Context, id string) (ContainerState, error)
 
 // exitFromEvents finds how a container's process that runs again last
 // exited, at exitedAt: the engine's "die" event carries the exit code, an
-// "oom" event comes just before it. The answer is kept per container, so
-// the log is read once per exit.
+// "oom" event comes just before it, or, as the kernel's notice and the
+// exit race, just after. The answer is kept per container, so the log is
+// read once per exit, once a late "oom" event can no longer come.
 func (d *Docker) exitFromEvents(ctx context.Context, id string, exitedAt time.Time) (known bool, code int, oom bool) {
 	d.exitsMu.Lock()
 	cached, ok := d.exits[id]
@@ -675,14 +676,26 @@ func (d *Docker) exitFromEvents(ctx context.Context, id string, exitedAt time.Ti
 			known, code, die = true, e.code, e.at
 		}
 	}
+	// The exit's "oom" event is one after the exit before it and before
+	// the next, at most lateOOM after its own.
+	var previous, next time.Time
 	for _, e := range events {
 		switch {
-		case !known || e.at.After(die):
-		case e.die && e.at.Before(die):
-			oom = false // an earlier exit's
-		case !e.die:
+		case !known || !e.die:
+		case e.at.Before(die):
+			previous = e.at
+		case e.at.After(die) && next.IsZero():
+			next = e.at
+		}
+	}
+	for _, e := range events {
+		if known && !e.die && e.at.After(previous) && (next.IsZero() || e.at.Before(next)) && !e.at.After(die.Add(lateOOM)) {
 			oom = true
 		}
+	}
+	// Without its "oom" event yet, the answer may still change.
+	if !oom && time.Now().Before(exitedAt.Add(exitWindow)) {
+		return known, code, oom
 	}
 	d.exitsMu.Lock()
 	if d.exits == nil {
@@ -699,6 +712,9 @@ func engineTime(t time.Time) string { return fmt.Sprintf("%d.%09d", t.Unix(), t.
 
 // exitWindow is how far from the exit time the event log is searched.
 const exitWindow = 5 * time.Second
+
+// lateOOM is how long after its exit an "oom" event still belongs to it.
+const lateOOM = time.Second
 
 // exit is what exitFromEvents found for one exit.
 type exit struct {

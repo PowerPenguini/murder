@@ -445,13 +445,11 @@ func TestOutOfMemoryIsReportedOnDocker(t *testing.T) {
 	for time.Now().Before(deadline) {
 		_ = n.reconciler.Reconcile(ctx)
 		status, _ = n.reconciler.Status(tenant)
-		if status.Phase == reconcile.PhaseRunning && status.Healthy && status.Restarts == 1 {
-			if !strings.Contains(status.LastExit, "more than its 16 MB of memory") {
-				t.Fatalf("status = %+v, want the out-of-memory exit", status)
-			}
+		// The engine may log the out-of-memory kill just after the exit.
+		if status.Phase == reconcile.PhaseRunning && status.Healthy && status.Restarts == 1 && strings.Contains(status.LastExit, "more than its 16 MB of memory") {
 			return
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	t.Fatalf("status = %+v, want it serving again after one restart", status)
+	t.Fatalf("status = %+v, want it serving again after one restart, killed for its memory", status)
 }
