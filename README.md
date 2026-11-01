@@ -16,7 +16,9 @@ the state replicated between nodes.
 
 - **Reconciler.** Keeps Docker in line with the desired state. Each tenant gets
   its own container, network and data volume. A container is replaced when its
-  spec changes, and the volume is snapshotted first if the image changed; a
+  spec changes (requests for the tenant wait meanwhile, on every edge, until
+  the new container answers, instead of failing), and the volume is
+  snapshotted first if the image changed; a
   tenant keeps the last five of those snapshots. Each pass removes registry
   images no tenant needs: a tenant needs the image it runs, the one its data
   has and the one before, so a rollback by one release needs no registry.

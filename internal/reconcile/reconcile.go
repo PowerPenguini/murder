@@ -113,6 +113,75 @@ type Reconciler struct {
 	// it had.
 	passAt     time.Time
 	passErrors int
+	// replacing are the tenants whose container is being replaced: until
+	// the new one answers, or the pass ends, requests for them wait.
+	replacing *replacing
+	// replacedWaits are the waits, within a pass, for replaced containers
+	// to answer.
+	replacedWaits sync.WaitGroup
+	// replaceNotice and replacedWait are replaceNotice and heldHealthWait;
+	// tests shorten them.
+	replaceNotice, replacedWait time.Duration
+}
+
+// replaceNotice is how long a replacement waits, once requests for the
+// tenant are held, before it stops the old container: the edge learns of
+// the hold through its long poll, in milliseconds.
+const replaceNotice = 300 * time.Millisecond
+
+// replacing is a set of tenants that says when it changes.
+type replacing struct {
+	mu      sync.Mutex
+	tenants map[string]bool
+	changed chan struct{}
+}
+
+func (s *replacing) set(tenant string, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tenants[tenant] == on {
+		return
+	}
+	if on {
+		s.tenants[tenant] = true
+	} else {
+		delete(s.tenants, tenant)
+	}
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
+func (s *replacing) clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.tenants) == 0 {
+		return
+	}
+	clear(s.tenants)
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
+// Replacing reports whether tenant's container is being replaced, so that
+// requests for it wait instead of failing while it runs nowhere.
+func (r *Reconciler) Replacing(tenant string) bool {
+	if r == nil {
+		return false
+	}
+	r.replacing.mu.Lock()
+	defer r.replacing.mu.Unlock()
+	return r.replacing.tenants[tenant]
+}
+
+// WatchReplacing is closed when the tenants being replaced change; without
+// a reconciler, never.
+func (r *Reconciler) WatchReplacing() <-chan struct{} {
+	if r == nil {
+		return nil
+	}
+	r.replacing.mu.Lock()
+	defer r.replacing.mu.Unlock()
+	return r.replacing.changed
 }
 
 // New returns a reconciler. All dependencies are required.
@@ -129,13 +198,15 @@ func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secret
 	life, stop := context.WithCancel(context.Background())
 	return &Reconciler{
 		store: st, runtime: rt, volumes: volumes, key: key, config: config, log: log,
-		health:       &http.Client{Timeout: config.HealthTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		statuses:     map[string]Status{},
-		imageRetryAt: map[string]time.Time{},
-		backend:      Backend,
-		pulls:        newPulls(life, rt.PullImage),
-		life:         life,
-		stop:         stop,
+		health:        &http.Client{Timeout: config.HealthTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		statuses:      map[string]Status{},
+		imageRetryAt:  map[string]time.Time{},
+		replacing:     &replacing{tenants: map[string]bool{}, changed: make(chan struct{})},
+		replaceNotice: replaceNotice, replacedWait: heldHealthWait,
+		backend: Backend,
+		pulls:   newPulls(life, rt.PullImage),
+		life:    life,
+		stop:    stop,
 	}
 }
 
@@ -198,6 +269,9 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	defer context.AfterFunc(r.life, cancel)()
 	r.pass.Lock()
 	defer r.pass.Unlock()
+	// However the pass ends, no request waits for a replacement beyond it.
+	defer r.replacing.clear()
+	defer r.replacedWaits.Wait()
 	if err := r.interrupted(ctx); err != nil {
 		return err
 	}
@@ -601,6 +675,16 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	if err := r.store.Observe(tenant.Name, tenant.Image); err != nil {
 		return "", false, fmt.Errorf("record the data's image: %w", err)
 	}
+	// A running tenant runs nowhere from here until its new container
+	// answers: requests for it wait meanwhile.
+	held := len(outdated) > 0 && !tenant.Suspended
+	if held {
+		r.replacing.set(tenant.Name, true)
+		select {
+		case <-ctx.Done():
+		case <-time.After(r.replaceNotice):
+		}
+	}
 	if err := r.removeContainers(ctx, outdated); err != nil {
 		return "", false, err
 	}
@@ -611,6 +695,13 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	if err := r.runtime.Start(ctx, id); err != nil {
 		return id, true, fmt.Errorf("start: %w", err)
 	}
+	// Served as soon as it answers, not once every other tenant of the
+	// pass is reconciled.
+	if held {
+		// The tenant's step ends now; the wait lasts as long as the
+		// reconciler, within its own bound.
+		r.replacedWaits.Go(func() { r.awaitReplaced(r.life, record) })
+	}
 	r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
 	return id, true, nil
 }
@@ -618,6 +709,23 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 // image returns nil once image is present. Until then a pull runs in the
 // background and image returns errPulling, or the failure of the last
 // attempt until the next one is due.
+// awaitReplaced serves a tenant whose container was replaced once it
+// answers, checking every heldHealthEvery for heldHealthWait at most;
+// after that its requests are served, or fail, as they would.
+func (r *Reconciler) awaitReplaced(ctx context.Context, record store.Record) {
+	defer r.replacing.set(record.Spec.Name, false)
+	deadline := time.Now().Add(r.replacedWait)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if healthy, _ := r.checkHealth(ctx, record); healthy {
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(heldHealthEvery):
+		}
+	}
+}
+
 func (r *Reconciler) image(ctx context.Context, image string) error {
 	present, err := r.runtime.HasImage(ctx, image)
 	if err != nil {

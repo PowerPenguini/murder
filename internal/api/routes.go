@@ -35,13 +35,13 @@ func (s *Server) routes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusError{http.StatusServiceUnavailable, errors.New("this node is not part of a cluster yet: it has no routes")})
 		return
 	}
-	routes := Routes{Store: s.store, RelayPort: s.relayPort}
+	routes := Routes{Store: s.store, RelayPort: s.relayPort, Replacing: s.reconciler.Replacing}
 	after := r.URL.Query().Get("after")
 	timeout := time.NewTimer(routesWait)
 	defer timeout.Stop()
 	for {
 		// Watch before reading, so no change between the two is missed.
-		changed := s.store.Watch()
+		changed, replacing := s.store.Watch(), s.reconciler.WatchReplacing()
 		table := routes.Table()
 		if table.Version != after {
 			writeJSON(w, http.StatusOK, table)
@@ -49,6 +49,7 @@ func (s *Server) routes(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-changed:
+		case <-replacing:
 		case <-timeout.C:
 			writeJSON(w, http.StatusOK, table)
 			return

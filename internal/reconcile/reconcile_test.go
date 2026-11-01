@@ -395,6 +395,7 @@ func newFixture(t *testing.T) *fixture {
 	reconciler := New(st, rt, volumes, key, Config{BaseDomain: "example.test", DefaultLimits: spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128, DiskGB: 7}}, log)
 	// Every tenant's health is checked at the test server.
 	reconciler.backend = func(store.Record) (string, error) { return "127.0.0.1:" + strconv.Itoa(port), nil }
+	reconciler.replaceNotice, reconciler.replacedWait = 10*time.Millisecond, 2*time.Second
 	return &fixture{store: st, storePath: statePath, runtime: rt, volumes: volumes, key: key, reconciler: reconciler}
 }
 
@@ -1631,5 +1632,83 @@ func TestAnUnhealthyMovedTenantHoldsBackNoOther(t *testing.T) {
 	<-done
 	if record, _ := f.store.Get("sick"); !record.MoveHeld {
 		t.Fatal("the sick tenant was served")
+	}
+}
+
+// A running tenant whose container is replaced runs nowhere for a moment:
+// requests for it wait from before the old container stops until the new
+// one answers, and no longer than the pass.
+func TestRequestsWaitWhileAContainerIsReplaced(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	if f.reconciler.Replacing("acme") {
+		t.Fatal("a tenant started for the first time counts as replaced")
+	}
+	var ready atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+	f.reconciler.backend = func(store.Record) (string, error) { return strings.TrimPrefix(server.URL, "http://"), nil }
+	changed := f.reconciler.WatchReplacing()
+	var heldWhileStopped bool
+	f.runtime.onStop = func() { heldWhileStopped = f.reconciler.Replacing("acme") }
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Env = map[string]string{"NEW": "1"} })
+	time.AfterFunc(500*time.Millisecond, func() { ready.Store(true) })
+	start := time.Now()
+	served := make(chan time.Duration, 1)
+	go func() {
+		<-changed // held
+		for f.reconciler.Replacing("acme") {
+			time.Sleep(10 * time.Millisecond)
+		}
+		served <- time.Since(start)
+	}()
+	f.reconcile(t)
+	if !heldWhileStopped {
+		t.Fatal("requests did not wait while the old container stopped")
+	}
+	if took := <-served; took < 400*time.Millisecond || took > 5*time.Second {
+		t.Fatalf("requests waited %s for a container that answered after 500ms", took)
+	}
+	// One that never answers is served again once the pass ends.
+	ready.Store(false)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Env = map[string]string{"NEW": "2"} })
+	f.reconcile(t)
+	if f.reconciler.Replacing("acme") {
+		t.Fatal("requests still wait after the pass")
+	}
+}
+
+// A replaced tenant is served as soon as its new container answers, not
+// once every other tenant of the pass is replaced too.
+func TestAReplacedTenantIsServedBeforeThePassEnds(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "alpha")
+	f.create(t, "beta")
+	f.reconcile(t)
+	stops := 0
+	var alphaHeldDuringBetasStop bool
+	f.runtime.onStop = func() {
+		stops++
+		if stops == 2 { // beta's container stops slowly
+			time.Sleep(1500 * time.Millisecond)
+			alphaHeldDuringBetasStop = f.reconciler.Replacing("alpha")
+		}
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		f.updateApp(t, name, func(app *spec.Tenant) { app.Env = map[string]string{"NEW": "1"} })
+	}
+	f.reconcile(t)
+	if stops != 2 {
+		t.Fatalf("%d containers stopped", stops)
+	}
+	if alphaHeldDuringBetasStop {
+		t.Fatal("alpha's requests still waited while beta was being replaced")
 	}
 }

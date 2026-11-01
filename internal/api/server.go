@@ -668,6 +668,9 @@ type Routes struct {
 	// RelayPort is where every node's edge takes requests other nodes pass
 	// on; 0 outside a cluster.
 	RelayPort int
+	// Replacing reports a tenant of this node whose container is being
+	// replaced; nil if none ever is.
+	Replacing func(tenant string) bool
 }
 
 func (r Routes) Route(tenant string) (edge.Route, bool) {
@@ -681,6 +684,11 @@ func (r Routes) Route(tenant string) (edge.Route, bool) {
 	}
 	if record.Node != r.Store.Node() {
 		return r.relay(record)
+	}
+	// So does a tenant whose container is being replaced. Other nodes' edges
+	// pass its requests on to this one, which holds them.
+	if r.Replacing != nil && r.Replacing(tenant) {
+		return edge.Route{Moving: true, Suspended: record.Spec.Suspended}, true
 	}
 	backend, err := reconcile.Backend(record)
 	if err != nil {
