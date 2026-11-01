@@ -395,6 +395,7 @@ func newFixture(t *testing.T) *fixture {
 	reconciler := New(st, rt, volumes, key, Config{BaseDomain: "example.test", DefaultLimits: spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128, DiskGB: 7}}, log)
 	// Every tenant's health is checked at the test server.
 	reconciler.backend = func(store.Record) (string, error) { return "127.0.0.1:" + strconv.Itoa(port), nil }
+	reconciler.replaceNotice, reconciler.replacedWait = 10*time.Millisecond, 2*time.Second
 	return &fixture{store: st, storePath: statePath, runtime: rt, volumes: volumes, key: key, reconciler: reconciler}
 }
 
@@ -1681,5 +1682,33 @@ func TestRequestsWaitWhileAContainerIsReplaced(t *testing.T) {
 	f.reconcile(t)
 	if f.reconciler.Replacing("acme") {
 		t.Fatal("requests still wait after the pass")
+	}
+}
+
+// A replaced tenant is served as soon as its new container answers, not
+// once every other tenant of the pass is replaced too.
+func TestAReplacedTenantIsServedBeforeThePassEnds(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "alpha")
+	f.create(t, "beta")
+	f.reconcile(t)
+	stops := 0
+	var alphaHeldDuringBetasStop bool
+	f.runtime.onStop = func() {
+		stops++
+		if stops == 2 { // beta's container stops slowly
+			time.Sleep(1500 * time.Millisecond)
+			alphaHeldDuringBetasStop = f.reconciler.Replacing("alpha")
+		}
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		f.updateApp(t, name, func(app *spec.Tenant) { app.Env = map[string]string{"NEW": "1"} })
+	}
+	f.reconcile(t)
+	if stops != 2 {
+		t.Fatalf("%d containers stopped", stops)
+	}
+	if alphaHeldDuringBetasStop {
+		t.Fatal("alpha's requests still waited while beta was being replaced")
 	}
 }
