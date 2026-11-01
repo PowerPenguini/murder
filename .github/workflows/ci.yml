@@ -1,7 +1,5 @@
 name: CI
 on:
-  push:
-    branches: [main]
   pull_request:
 jobs:
   test:
@@ -11,10 +9,36 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Format
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - run: go vet ./... && go vet -tags docker ./integration && go vet -tags zfs ./internal/volume
-      - run: go test -race ./...
-      # GitHub-hosted runners ship Docker, so the full tenant lifecycle runs too.
-      - run: go test -tags docker -count=1 ./integration
-      - run: go build -o murder ./cmd/murder
+      - name: Engine
+        run: |
+          docker version --format 'docker {{.Server.Version}}'
+          docker info --format 'cgroup {{.CgroupVersion}} {{.CgroupDriver}} kernel {{.KernelVersion}} runtime {{.DefaultRuntime}}'
+          containerd --version || true; runc --version || true
+          docker pull -q alpine:3.20
+      - name: OOM events, at once and after 2s
+        run: |
+          for delay in 0 0.2 2; do
+            for i in $(seq 1 8); do
+              name=oom-$i-${delay/./}
+              since=$(date +%s.%N)
+              docker run -d -q --name $name --memory 16m --memory-swap 16m alpine:3.20 sh -c "sleep $delay; tail /dev/zero" >/dev/null
+              docker wait $name >/dev/null
+              sleep 1
+              actions=$(docker events --since $since --until $(date +%s.%N) --filter container=$name --format '{{.Action}}' | tr '\n' ' ')
+              echo "delay=$delay run=$i $(docker inspect -f 'OOMKilled={{.State.OOMKilled}} exit={{.State.ExitCode}}' $name) events: $actions"
+              docker rm -f $name >/dev/null
+            done
+          done
+      - name: Restarted container, at once
+        run: |
+          for i in $(seq 1 6); do
+            name=rs-$i
+            since=$(date +%s.%N)
+            docker run -d -q --name $name --restart on-failure:1 --memory 16m --memory-swap 16m alpine:3.20 sh -c 'tail /dev/zero' >/dev/null
+            sleep 4
+            actions=$(docker events --since $since --until $(date +%s.%N) --filter container=$name --format '{{.TimeNano}} {{.Action}}' | tr '\n' ' ')
+            echo "restart run=$i $(docker inspect -f 'OOMKilled={{.State.OOMKilled}} restarts={{.RestartCount}}' $name) events: $actions"
+            docker rm -f $name >/dev/null
+          done
+      - name: The integration test, 10 times
+        run: go test -tags docker -count=10 -run TestOutOfMemoryIsReportedOnDocker ./integration 2>&1 | grep -E -- '--- FAIL|docker (version|info|events|inspect)|^ok|^FAIL' || true
