@@ -496,3 +496,28 @@ func TestInspectDoesNotBlameAnEarlierOOM(t *testing.T) {
 		t.Fatalf("Inspect = %+v, %v; want exit code 1, not killed", state, err)
 	}
 }
+
+// The kernel's out-of-memory notice and the exit race: an "oom" event
+// logged just after the exit is that exit's, and an exit looked up before
+// the event is logged is looked up again.
+func TestInspectTakesALateOOMEvent(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	exited := time.Now().UTC().Add(-time.Second)
+	engine.handlers["GET /containers/leaky/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"RestartCount":1,"State":{"Pid":4242,"FinishedAt":%q}}`, exited.Format(time.RFC3339Nano))
+	}
+	logged := false
+	engine.handlers["GET /events"] = func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"Action":"die","timeNano":%d,"Actor":{"Attributes":{"exitCode":"137"}}}`+"\n", exited.UnixNano())
+		if logged {
+			fmt.Fprintf(w, `{"Action":"oom","timeNano":%d}`+"\n", exited.UnixNano()+int64(2*time.Millisecond))
+		}
+	}
+	if state, err := docker.Inspect(context.Background(), "leaky"); err != nil || state.ExitCode != 137 || state.OOMKilled {
+		t.Fatalf("before the oom event: %+v, %v", state, err)
+	}
+	logged = true
+	if state, err := docker.Inspect(context.Background(), "leaky"); err != nil || state.ExitCode != 137 || !state.OOMKilled {
+		t.Fatalf("after the oom event: %+v, %v", state, err)
+	}
+}
