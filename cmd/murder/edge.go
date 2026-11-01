@@ -26,6 +26,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/upgrade"
 )
 
 // slowStartSetting is the kernel setting deploy/murder-sysctl.conf turns off.
@@ -117,6 +118,15 @@ func runEdge(args []string) error {
 			log.Info("starting the edge anew to take over")
 			if err := upgrader.Upgrade(); err != nil {
 				log.Error("the new edge did not take over; this one goes on", "error", err)
+				// The new process failed (rather than one being under way
+				// already): an install waiting on it learns at once.
+				// tableflip (v1.2) says "child" in exactly those errors:
+				// can't start child, child exited, new child timed out.
+				if strings.Contains(err.Error(), "child") {
+					if err := upgrade.RecordHandoverFailure(cfg.Edge.PIDFile, err); err != nil {
+						log.Warn("say that the handover failed", "error", err)
+					}
+				}
 			}
 		}
 	}()

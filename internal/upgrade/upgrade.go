@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -89,8 +90,12 @@ type Node struct {
 	// binary.
 	Restart func()
 	Log     *slog.Logger
-	// edgeWait bounds the edge's handover; tests shorten it.
-	edgeWait time.Duration
+	// edgeWait bounds the edge's handover, lateEdgeWait the watch for a
+	// late one; tests shorten them.
+	edgeWait, lateEdgeWait time.Duration
+	// stopRevert ends the watch for a late edge of an earlier install.
+	revertMu   sync.Mutex
+	stopRevert context.CancelFunc
 }
 
 // ErrDowngrade refuses a binary of an older schema: the database, once the
@@ -102,6 +107,14 @@ var ErrDowngrade = errors.New("the binary has an older schema version")
 // edge running, there is nothing to hand over. If the edge does not take
 // the new binary, the old one is put back and nothing else changes.
 func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
+	// An earlier install's watch for a late edge would hand this one's
+	// edge back.
+	n.revertMu.Lock()
+	if n.stopRevert != nil {
+		n.stopRevert()
+		n.stopRevert = nil
+	}
+	n.revertMu.Unlock()
 	dir := filepath.Dir(n.Executable)
 	temp, err := os.CreateTemp(dir, "."+filepath.Base(n.Executable)+".new-*")
 	if err != nil {
@@ -158,9 +171,17 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 	if err := n.handOverEdge(ctx); err != nil {
 		// Put the old binary back; the old edge serves on.
 		if restoreErr := os.Rename(previous, n.Executable); restoreErr != nil {
-			err = errors.Join(err, fmt.Errorf("put the old binary back: %w", restoreErr))
-		} else {
-			_ = os.Remove(recordPath(n.Executable))
+			return errors.Join(err, fmt.Errorf("put the old binary back: %w", restoreErr))
+		}
+		_ = os.Remove(recordPath(n.Executable))
+		// A new edge may yet take over, late, from the new binary: it is
+		// handed back to the old one, now in place again.
+		if pid, pidErr := readPID(n.EdgePIDFile); pidErr == nil {
+			revert, stop := context.WithCancel(context.Background())
+			n.revertMu.Lock()
+			n.stopRevert = stop
+			n.revertMu.Unlock()
+			go n.revertLateEdge(revert, pid, sha)
 		}
 		return err
 	}
@@ -184,15 +205,27 @@ func (n *Node) handOverEdge(ctx context.Context) error {
 		wait = 90 * time.Second
 	}
 	deadline := time.Now().Add(wait)
-	var signalled time.Time
+	var signalled, first time.Time
+	failed := HandoverFailedPath(n.EdgePIDFile)
+	// What an earlier handover left says nothing of this one.
+	_ = os.Remove(failed)
 	for {
 		if next, err := readPID(n.EdgePIDFile); err == nil && next != pid {
 			return nil
+		}
+		// The edge says at once when its new binary did not start.
+		// File times come from a coarser clock: a few milliseconds' slack.
+		if info, err := os.Stat(failed); err == nil && !first.IsZero() && !info.ModTime().Before(first.Add(-50*time.Millisecond)) {
+			why, _ := os.ReadFile(failed)
+			return fmt.Errorf("the edge's new binary did not take over (%s); the old edge serves on", strings.TrimSpace(string(why)))
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("the edge did not hand over to the new binary within %v; the old edge serves on", wait)
 		}
 		if time.Since(signalled) >= resignal {
+			if first.IsZero() {
+				first = time.Now()
+			}
 			if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
 				return fmt.Errorf("signal the edge: %w", err)
 			}
@@ -208,6 +241,75 @@ func (n *Node) handOverEdge(ctx context.Context) error {
 
 // resignal is how long a handover gets before the edge is asked again.
 const resignal = 10 * time.Second
+
+// HandoverFailedPath is where, beside its PID file, an edge whose new
+// binary did not take over says why.
+func HandoverFailedPath(pidFile string) string {
+	return filepath.Join(filepath.Dir(pidFile), "handover-failed")
+}
+
+// RecordHandoverFailure says, for an install waiting on the handover, that
+// the new binary did not take over, and why.
+func RecordHandoverFailure(pidFile string, why error) error {
+	path := HandoverFailedPath(pidFile)
+	temp := path + ".new"
+	if err := os.WriteFile(temp, []byte(why.Error()+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(temp, path)
+}
+
+// lateEdge is how long after a failed handover a new edge may still take
+// over: tableflip gives a new process a minute to become ready, and a
+// signal sent again starts another.
+const lateEdge = 75 * time.Second
+
+// revertLateEdge watches, after a failed handover, for a new edge that took
+// over late from the new binary, which no longer is in place, and hands it
+// over again, to the old binary, so edge and agent run one release. Such an
+// edge refuses a handover while its own predecessor still drains, so it is
+// asked again until it runs another binary, or the watch ends.
+func (n *Node) revertLateEdge(ctx context.Context, oldPID int, newBinary string) {
+	wait := n.lateEdgeWait
+	if wait == 0 {
+		wait = lateEdge
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	var signalled time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+		pid, err := readPID(n.EdgePIDFile)
+		if err != nil || pid == oldPID || !isEdge(pid) {
+			continue
+		}
+		running, err := Hash(fmt.Sprintf("/proc/%d/exe", pid))
+		if err != nil {
+			continue
+		}
+		if running != newBinary {
+			return // handed back, or never late
+		}
+		if time.Since(signalled) >= n.resignalEvery() {
+			n.Log.Warn("a new edge took over late from the binary that was not installed; handing it back to the old one", "pid", pid)
+			if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+				n.Log.Error("hand the late edge back to the old binary", "error", err)
+			}
+			signalled = time.Now()
+		}
+	}
+}
+
+func (n *Node) resignalEvery() time.Duration {
+	if n.lateEdgeWait != 0 && n.lateEdgeWait < resignal {
+		return n.lateEdgeWait / 5
+	}
+	return resignal
+}
 
 // isEdge reports whether pid is a murder edge, not a process that took
 // the PID of one that is gone.
