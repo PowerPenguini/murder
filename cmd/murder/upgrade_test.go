@@ -201,3 +201,11 @@ func TestANodeInstallsOnlyUnderAnUpgradeFreeze(t *testing.T) {
 		t.Fatal("a binary was installed")
 	}
 }
+
+// Backups commands take their flags before or after the tenant.
+func TestBackupsFlagsComeAnywhere(t *testing.T) {
+	err := runBackups([]string{"verify", "acme", "-identity", "/nonexistent", "-config", "/nonexistent.yaml"})
+	if err == nil || strings.Contains(err.Error(), "needs a tenant") {
+		t.Fatalf("flags after the tenant: %v", err)
+	}
+}

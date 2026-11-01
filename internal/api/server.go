@@ -117,6 +117,8 @@ type Server struct {
 	relayPort int
 	// moves moves tenants between nodes; nil if this node moves none.
 	moves Moves
+	// backups backs this node's tenants up; nil without backups set up.
+	backups Backups
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }
@@ -163,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
 	mux.HandleFunc("GET /v1/backup", s.backup)
+	mux.HandleFunc("POST /v1/backups/run", rootOnly(s.runBackups))
 	return mux
 }
 

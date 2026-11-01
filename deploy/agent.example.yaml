@@ -28,6 +28,15 @@ edge:                              # served by "murder edge"
     dnsProvider: hetzner           # hetzner (Hetzner Cloud DNS) | namecheap
     dnsTokenFile: /etc/murder/dns.token
 
+# backups:                         # whole, compressed, encrypted backups to a bucket (see README)
+#   mode: production               # test: no lock, the bucket can be destroyed at once
+#   endpoint: https://hel1.your-objectstorage.com
+#   region: hel1
+#   bucket: acme-murder-backups
+#   accessKeyFile: /etc/murder/s3.access
+#   secretKeyFile: /etc/murder/s3.secret
+#   recipient: age1...             # public key; keep the private key offline
+
 # cluster:                         # replicate the state to other nodes (see README)
 #   address: 10.0.0.2:7400         # this node on the private network
 #   dir: /var/lib/murder/cluster

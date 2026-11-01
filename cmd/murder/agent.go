@@ -192,6 +192,26 @@ func runAgent(args []string) error {
 	}
 
 	apiHandler := api.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves)
+	// Backups to a bucket, if set up: this node's tenants, and the
+	// cluster's state from its leader.
+	var backups *agentBackups
+	if cfg.Backups != nil {
+		made, _, err := newBackups(cfg)
+		if err != nil {
+			return fmt.Errorf("backups: %w", err)
+		}
+		backups = &agentBackups{backups: made, store: st, zfs: made.Volumes.(volume.ZFS), every: cfg.Backups.Every.Duration, verify: cfg.Backups.VerifyEvery.Duration, log: log.With("component", "backups"), leader: func() bool { return true }}
+		made.Log = backups.log
+		if member != nil {
+			backups.leader = member.Leader
+		}
+		if cfg.Backups.IdentityFile != "" {
+			if backups.identity, err = readIdentity(cfg.Backups.IdentityFile); err != nil {
+				return fmt.Errorf("backups.identityFile: %w", err)
+			}
+		}
+		apiHandler.WithBackups(backups)
+	}
 	if member != nil {
 		apiHandler.WithRelayPort(cfg.Edge.RelayPort)
 		apiHandler.WithCluster(member)
@@ -201,6 +221,9 @@ func runAgent(args []string) error {
 	// Moves an agent restart cut short leave the tenant here.
 	if mover != nil {
 		go recoverMoves(ctx, mover, log)
+	}
+	if backups != nil {
+		go backups.loop(ctx)
 	}
 	reconciled := make(chan struct{})
 	go func() {

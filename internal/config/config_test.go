@@ -119,3 +119,36 @@ func TestParseCluster(t *testing.T) {
 		t.Error("a role was accepted: every node runs tenants")
 	}
 }
+
+// Backups fit their mode: a test bucket keeps no lock, a production one
+// needs one, which fills in, and never longer than every backup is kept.
+func TestBackupsFitTheirMode(t *testing.T) {
+	base := "baseDomain: example.com\nvolumes: {driver: zfs, parent: tank/murder/tenants}\nbackups:\n  endpoint: https://hel1.your-objectstorage.com\n  bucket: b\n  accessKeyFile: /etc/murder/s3.access\n  secretKeyFile: /etc/murder/s3.secret\n  recipient: age1qqq\n"
+	test, err := Parse([]byte(base + "  mode: test\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if test.Backups.LockFor.Duration != 0 || test.Backups.Every.Duration != time.Hour || test.Backups.KeepHourly.Duration != 48*time.Hour || test.Backups.KeepLocal != 24 {
+		t.Fatalf("test backups = %+v", test.Backups)
+	}
+	production, err := Parse([]byte(base + "  mode: production\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if production.Backups.LockFor.Duration != 30*24*time.Hour || production.Backups.KeepMonthly.Duration != 365*24*time.Hour {
+		t.Fatalf("production backups = %+v", production.Backups)
+	}
+	for name, extra := range map[string]string{
+		"test with a lock":    "  mode: test\n  lockFor: 24h\n",
+		"lock beyond keepAll": "  mode: production\n  lockFor: 1000h\n  keepAll: 100h\n",
+		"no mode":             "",
+		"another mode":        "  mode: maybe\n",
+	} {
+		if _, err := Parse([]byte(base + extra)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := Parse([]byte(strings.Replace(base, "driver: zfs, parent: tank/murder/tenants", "driver: dir", 1) + "  mode: test\n")); err == nil {
+		t.Error("backups with the dir driver: accepted")
+	}
+}

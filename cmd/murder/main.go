@@ -69,6 +69,8 @@ func run(args []string) error {
 		return runCluster(args[1:])
 	case "upgrade":
 		return runUpgrade(args[1:])
+	case "backups":
+		return runBackups(args[1:])
 	case "version":
 		return runVersion(args[1:])
 	case "-h", "--help", "help":

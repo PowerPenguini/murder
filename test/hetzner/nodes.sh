@@ -90,6 +90,20 @@ cluster:
 defaults: {memoryMB: 128, cpus: 1, pids: 256, diskGB: 2}
 reconcileInterval: 10s
 EOF
+  # Backups, when .state/backup holds S3 keys (see test/hetzner/README.md).
+  if [[ -s $STATE/backup/s3.access ]]; then
+    cat <<EOF
+backups:
+  mode: ${BACKUP_MODE:-test}
+  endpoint: https://hel1.your-objectstorage.com
+  region: hel1
+  bucket: $(cat "$STATE/backup/bucket-${BACKUP_MODE:-test}.txt")
+  accessKeyFile: /etc/murder/s3.access
+  secretKeyFile: /etc/murder/s3.secret
+  recipient: $(cat "$STATE/backup/recipient.txt")
+  every: ${BACKUP_EVERY:-1h}
+EOF
+  fi
 }
 
 build() {
@@ -110,6 +124,10 @@ install_on() {
   put "$node" /tmp/murder-test/ "$STATE/build/murder" "$STATE/build/testapp" "$STATE/build/Dockerfile" \
     "$REPO"/deploy/murder-*.service "$REPO"/deploy/murder-backup.timer "$REPO"/deploy/murder-sysctl.conf
   put "$node" /etc/murder/agent.yaml "$STATE/build/agent-$node.yaml"
+  if [[ -s $STATE/backup/s3.access ]]; then
+    put "$node" /etc/murder/ "$STATE/backup/s3.access" "$STATE/backup/s3.secret"
+    on "$node" 'chmod 600 /etc/murder/s3.access /etc/murder/s3.secret'
+  fi
   on "$node" 'set -e; cd /tmp/murder-test
     install -m 0644 murder-*.service murder-backup.timer /etc/systemd/system/
     install -m 0644 murder-sysctl.conf /etc/sysctl.d/90-murder.conf && sysctl -q -p /etc/sysctl.d/90-murder.conf

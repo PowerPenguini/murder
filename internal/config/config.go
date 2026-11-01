@@ -59,10 +59,78 @@ type Agent struct {
 	// replicated between the nodes with Raft.
 	Cluster *Cluster `yaml:"cluster"`
 
+	// Backups, if set, keeps the node's tenants and the cluster's state in
+	// an S3 bucket.
+	Backups *Backups `yaml:"backups"`
+
 	// Defaults fill in tenant limits left at zero. Disk use is unlimited
 	// unless diskGB is set (with the zfs driver).
 	Defaults          spec.Limits `yaml:"defaults"`
 	ReconcileInterval Duration    `yaml:"reconcileInterval"`
+}
+
+// Backups keeps tenants' data and the cluster's state in an S3 bucket,
+// such as Hetzner Object Storage: every backup is the whole data of a
+// tenant (its database, receipts, everything), from a snapshot, compressed
+// and encrypted for a recipient whose key is kept apart. Mode test keeps no
+// lock, so the bucket can be deleted at once; mode production locks
+// objects (compliance: no one deletes them before the lock ends), and needs
+// a bucket made with object lock.
+type Backups struct {
+	Mode          string `yaml:"mode"`
+	Endpoint      string `yaml:"endpoint"` // https://hel1.your-objectstorage.com
+	Region        string `yaml:"region"`
+	Bucket        string `yaml:"bucket"`
+	AccessKeyFile string `yaml:"accessKeyFile"`
+	SecretKeyFile string `yaml:"secretKeyFile"`
+	// Recipient is the age public key (age1…) backups are encrypted for.
+	Recipient string `yaml:"recipient"`
+	// IdentityFile, if set, holds the matching private key on this node,
+	// which then verifies its tenants' backups by restoring them; without
+	// it, verification runs from the CLI with the key brought along.
+	IdentityFile string   `yaml:"identityFile"`
+	Every        Duration `yaml:"every"`
+	// Backups are thinned out as they age: every one for keepHourly, the
+	// first of each day for keepDaily, of each month for keepMonthly.
+	KeepHourly  Duration `yaml:"keepHourly"`
+	KeepDaily   Duration `yaml:"keepDaily"`
+	KeepMonthly Duration `yaml:"keepMonthly"`
+	// LockFor locks, in production, the first backup of each day; the
+	// others are locked while they are kept.
+	LockFor     Duration `yaml:"lockFor"`
+	VerifyEvery Duration `yaml:"verifyEvery"`
+	KeepLocal   int      `yaml:"keepLocal"`
+}
+
+func (b Backups) problems(driver string) []string {
+	var problems []string
+	if driver != "zfs" {
+		problems = append(problems, "backups need the zfs volume driver")
+	}
+	if b.Mode != "test" && b.Mode != "production" {
+		problems = append(problems, "backups.mode must be test or production")
+	}
+	if !strings.HasPrefix(b.Endpoint, "https://") && !strings.HasPrefix(b.Endpoint, "http://") {
+		problems = append(problems, "backups.endpoint must be a URL, such as https://hel1.your-objectstorage.com")
+	}
+	if b.Bucket == "" || b.AccessKeyFile == "" || b.SecretKeyFile == "" {
+		problems = append(problems, "backups need bucket, accessKeyFile and secretKeyFile")
+	}
+	if !strings.HasPrefix(b.Recipient, "age1") {
+		problems = append(problems, "backups.recipient must be an age public key (age1…)")
+	}
+	switch {
+	case b.Mode == "test" && b.LockFor.Duration != 0:
+		problems = append(problems, "test backups are not locked: leave backups.lockFor out")
+	case b.Mode == "production" && b.LockFor.Duration <= 0:
+		problems = append(problems, "production backups need backups.lockFor")
+	case b.LockFor.Duration > b.KeepDaily.Duration:
+		problems = append(problems, "backups.lockFor must not outlast backups.keepDaily")
+	}
+	if b.Every.Duration < time.Minute || b.KeepHourly.Duration < b.Every.Duration || b.KeepDaily.Duration < b.KeepHourly.Duration || b.KeepMonthly.Duration < b.KeepDaily.Duration || b.KeepLocal < 1 {
+		problems = append(problems, "backups: every at least 1m, keepHourly at least every, keepDaily at least keepHourly, keepMonthly at least keepDaily, keepLocal at least 1")
+	}
+	return problems
 }
 
 // Cluster sets up the node's part of a cluster.
@@ -166,6 +234,23 @@ func Parse(data []byte) (Agent, error) {
 			agent.Cluster.Dir = "/var/lib/murder/cluster"
 		}
 	}
+	if b := agent.Backups; b != nil {
+		day := 24 * time.Hour
+		for _, d := range []struct {
+			field *Duration
+			value time.Duration
+		}{{&b.Every, time.Hour}, {&b.KeepHourly, 2 * day}, {&b.KeepDaily, 30 * day}, {&b.KeepMonthly, 365 * day}, {&b.VerifyEvery, 7 * day}} {
+			if d.field.Duration == 0 {
+				d.field.Duration = d.value
+			}
+		}
+		if b.Mode == "production" && b.LockFor.Duration == 0 {
+			b.LockFor.Duration = 30 * day
+		}
+		if b.KeepLocal == 0 {
+			b.KeepLocal = 24
+		}
+	}
 	return agent, agent.Validate()
 }
 
@@ -177,6 +262,9 @@ func (a Agent) Validate() error {
 	}
 	if a.Cluster != nil {
 		problems = append(problems, a.Cluster.problems()...)
+	}
+	if a.Backups != nil {
+		problems = append(problems, a.Backups.problems(a.Volumes.Driver)...)
 	}
 	switch a.Volumes.Driver {
 	case "dir":
