@@ -4,14 +4,20 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"filippo.io/age"
 
 	"github.com/PowerPenguini/murder/internal/backup"
+	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -101,5 +107,72 @@ func TestABackupReplacesOnlyAnArchivedTenantOfThisNode(t *testing.T) {
 	cancel()
 	if _, err := a.ReplaceTenant(waiting, "acme", "murder-copy-acme-restore-2"); !errors.Is(err, context.Canceled) || len(volumes.replaced) != 1 {
 		t.Fatalf("beside a run: %v", err)
+	}
+}
+
+// Backups that cannot be set up, as with a key file missing, leave the
+// agent running: a run on request says why, /metrics says they are not
+// ready, and once the file is there they are set up. A missing identity
+// skips verifying only; a recipient that is no age key refuses the agent.
+func TestBackupsThatCannotBeSetUpWaitForAFix(t *testing.T) {
+	dir := t.TempDir()
+	agentConfig := func(recipient string) config.Agent {
+		return config.Agent{
+			Volumes: config.Volumes{Driver: "zfs", Parent: "tank/murder/tenants", MountRoot: filepath.Join(dir, "tenants")},
+			Backups: &config.Backups{
+				Mode: "test", Endpoint: "https://hel1.your-objectstorage.com", Region: "hel1", Bucket: "b",
+				AccessKeyFile: filepath.Join(dir, "s3.access"), SecretKeyFile: filepath.Join(dir, "s3.secret"),
+				IdentityFile: filepath.Join(dir, "identity.txt"), Recipient: recipient,
+				Every: config.Duration{Duration: time.Hour}, KeepHourly: config.Duration{Duration: 48 * time.Hour},
+				KeepDaily: config.Duration{Duration: 30 * 24 * time.Hour}, KeepMonthly: config.Duration{Duration: 365 * 24 * time.Hour},
+				VerifyEvery: config.Duration{Duration: 7 * 24 * time.Hour}, KeepLocal: 24,
+			},
+		}
+	}
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := newAgentBackups(agentConfig("age1notavalidkey"), nil, nil, discard); err == nil {
+		t.Fatal("a recipient that is no age key accepted")
+	}
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := newAgentBackups(agentConfig(identity.Recipient().String()), nil, nil, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.RunNow(context.Background()); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a run with the S3 keys missing: %v", err)
+	}
+	var page strings.Builder
+	a.writeMetrics(metrics.NewWriter(&page))
+	if !strings.Contains(page.String(), "murder_backups_ready 0") {
+		t.Fatalf("metrics:\n%s", page.String())
+	}
+	for _, name := range []string{"s3.access", "s3.secret"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("key\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.ready(); err != nil || a.backups == nil {
+		t.Fatalf("set up once the keys are there: %v", err)
+	}
+	page.Reset()
+	a.writeMetrics(metrics.NewWriter(&page))
+	if !strings.Contains(page.String(), "murder_backups_ready 1") {
+		t.Fatalf("metrics:\n%s", page.String())
+	}
+	// Verifications wait a run after backups start, and for the identity.
+	if time.Until(a.verified.Add(a.verify)) < 50*time.Minute {
+		t.Fatalf("the first verification at %v, not a run after backups start", a.verified.Add(a.verify))
+	}
+	if a.loadIdentity() {
+		t.Fatal("a missing identity read")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "identity.txt"), []byte(identity.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !a.loadIdentity() {
+		t.Fatal("the identity, once there, not read")
 	}
 }

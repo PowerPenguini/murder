@@ -196,18 +196,13 @@ func runAgent(args []string) error {
 	// cluster's state from its leader.
 	var backups *agentBackups
 	if cfg.Backups != nil {
-		made, _, err := newBackups(cfg)
-		if err != nil {
-			return fmt.Errorf("backups: %w", err)
+		// A key file missing or unreadable leaves the agent running without
+		// backups, saying why, until it is fixed: tenants keep running.
+		if backups, err = newAgentBackups(cfg, st, reconciler.Exclusive, log.With("component", "backups")); err != nil {
+			return err
 		}
-		backups = newAgentBackups(made, st, cfg.Backups, reconciler.Exclusive, log.With("component", "backups"))
 		if member != nil {
 			backups.leader = member.Leader
-		}
-		if cfg.Backups.IdentityFile != "" {
-			if backups.identity, err = readIdentity(cfg.Backups.IdentityFile); err != nil {
-				return fmt.Errorf("backups.identityFile: %w", err)
-			}
 		}
 		apiHandler.WithBackups(backups)
 	}
