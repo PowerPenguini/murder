@@ -41,7 +41,7 @@ func (s *Server) upgradeRoutes(mux *http.ServeMux) {
 func rootOnly(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !root(r) {
-			writeError(w, statusError{http.StatusForbidden, errors.New("only root (the agent's user) upgrades murder")})
+			writeError(w, statusError{http.StatusForbidden, errors.New("only root (the agent's user) may do this")})
 			return
 		}
 		handler(w, r)

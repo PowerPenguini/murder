@@ -56,9 +56,9 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 }
 
 type fakeDataset struct {
-	owner, mountpoint string
-	mounted           bool
-	refquota, used    int64
+	owner, mountpoint, canmount string
+	mounted                     bool
+	refquota, used              int64
 }
 
 // fakeZFS answers zfs commands from an in-memory set of datasets.
@@ -67,13 +67,25 @@ type fakeZFS struct {
 	snapshots []string // what "zfs list -t snapshot" prints
 	held      string   // a snapshot that cannot be destroyed
 	calls     []string
+	fail      string // a command that fails, as a fragment of it
 }
 
 func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, error) {
 	call := name + " " + strings.Join(args, " ")
 	f.calls = append(f.calls, call)
+	if f.fail != "" && strings.Contains(call, f.fail) {
+		return []byte("cannot " + args[0] + "\n"), errors.New("exit status 1")
+	}
 	dataset := args[len(args)-1]
 	switch args[0] {
+	case "rename":
+		from, to := args[1], args[2]
+		f.datasets[to] = f.datasets[from]
+		delete(f.datasets, from)
+		return nil, nil
+	case "unmount":
+		f.datasets[dataset].mounted = false
+		return nil, nil
 	case "get":
 		d, ok := f.datasets[dataset]
 		if !ok {
@@ -112,7 +124,12 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 	case "set":
 		key, value, _ := strings.Cut(args[1], "=")
 		if key == "mountpoint" {
+			// ZFS remounts a mounted dataset there; one unmounted stays so.
 			f.datasets[dataset].mountpoint = value
+			return nil, nil
+		}
+		if key == "canmount" {
+			f.datasets[dataset].canmount = value
 			return nil, nil
 		}
 		if quota := parseQuota(value); quota != 0 && quota < f.datasets[dataset].used {
@@ -128,6 +145,13 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		}
 		return nil, nil
 	case "list":
+		if !strings.Contains(call, "-t snapshot") {
+			var names []string
+			for name := range f.datasets {
+				names = append(names, name)
+			}
+			return []byte(strings.Join(names, "\n") + "\n"), nil
+		}
 		return []byte(strings.Join(f.snapshots, "\n") + "\n"), nil
 	}
 	return nil, errors.New("unexpected command " + call)

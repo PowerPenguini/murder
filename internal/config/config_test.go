@@ -119,3 +119,48 @@ func TestParseCluster(t *testing.T) {
 		t.Error("a role was accepted: every node runs tenants")
 	}
 }
+
+// Backups fit their mode: a test bucket keeps no lock, a production one
+// needs one, which fills in, and never longer than every backup is kept.
+func TestBackupsFitTheirMode(t *testing.T) {
+	base := "baseDomain: example.com\nvolumes: {driver: zfs, parent: tank/murder/tenants}\nbackups:\n  endpoint: https://hel1.your-objectstorage.com\n  bucket: b\n  accessKeyFile: /etc/murder/s3.access\n  secretKeyFile: /etc/murder/s3.secret\n  recipient: age1qqq\n"
+	test, err := Parse([]byte(base + "  mode: test\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if test.Backups.LockFor.Duration != 0 || test.Backups.Every.Duration != time.Hour || test.Backups.KeepHourly.Duration != 48*time.Hour || test.Backups.KeepLocal != 24 {
+		t.Fatalf("test backups = %+v", test.Backups)
+	}
+	production, err := Parse([]byte(base + "  mode: production\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if production.Backups.LockFor.Duration != 30*24*time.Hour || production.Backups.KeepMonthly.Duration != 365*24*time.Hour {
+		t.Fatalf("production backups = %+v", production.Backups)
+	}
+	week, err := Parse([]byte(base + "  mode: production\n  keepDaily: 168h\n"))
+	if err != nil || week.Backups.LockFor.Duration != 168*time.Hour {
+		t.Fatalf("the default lock with daily backups kept a week: %+v, %v", week.Backups, err)
+	}
+	endpoint := func(value string) string {
+		return strings.Replace(base, "https://hel1.your-objectstorage.com", value, 1) + "  mode: test\n"
+	}
+	for name, c := range map[string]struct{ config, problem string }{
+		"test with a lock":        {base + "  mode: test\n  lockFor: 24h\n", "not locked"},
+		"lock beyond keepDaily":   {base + "  mode: production\n  lockFor: 1000h\n  keepDaily: 100h\n", "lockFor must not outlast"},
+		"no mode":                 {base, "mode must be"},
+		"another mode":            {base + "  mode: maybe\n", "mode must be"},
+		"negative verifyEvery":    {base + "  mode: test\n  verifyEvery: -1h\n", "verifyEvery"},
+		"verifyEvery below every": {base + "  mode: test\n  every: 2h\n  keepHourly: 48h\n  verifyEvery: 1h\n", "verifyEvery"},
+		"plain http":              {endpoint("http://hel1.your-objectstorage.com"), "endpoint"},
+		"no host":                 {endpoint("https://"), "endpoint"},
+		"a path":                  {endpoint("https://hel1.your-objectstorage.com/bucket"), "endpoint"},
+	} {
+		if _, err := Parse([]byte(c.config)); err == nil || !strings.Contains(err.Error(), c.problem) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := Parse([]byte(strings.Replace(base, "driver: zfs, parent: tank/murder/tenants", "driver: dir", 1) + "  mode: test\n")); err == nil {
+		t.Error("backups with the dir driver: accepted")
+	}
+}

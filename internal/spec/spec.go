@@ -271,6 +271,11 @@ func ValidName(name string) error {
 	if reserved[name] {
 		return fmt.Errorf("tenant name %q is reserved", name)
 	}
+	// Datasets of restores in progress, and of data a restore put aside,
+	// are named murder-...: no tenant is, so none is taken for another.
+	if strings.HasPrefix(name, "murder-") {
+		return fmt.Errorf("tenant names beginning with murder- are reserved")
+	}
 	return nil
 }
 

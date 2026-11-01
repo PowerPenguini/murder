@@ -25,6 +25,8 @@ type agentMetrics struct {
 	// firewall is when the firewall was last loaded, in Unix nanoseconds;
 	// nil when it is off.
 	firewall *atomic.Int64
+	// backups is nil without backups set up.
+	backups *agentBackups
 }
 
 func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +89,9 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if at := m.api.LastBackup(); !at.IsZero() {
 		out.Family("murder_backup_last_timestamp_seconds", "gauge", "When the agent last sent a whole backup of its database.")
 		out.Sample("murder_backup_last_timestamp_seconds", metrics.Timestamp(at))
+	}
+	if m.backups != nil {
+		m.backups.writeMetrics(out)
 	}
 	_ = out.Err()
 }

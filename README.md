@@ -196,6 +196,87 @@ events` shows what changed since the backup was taken:
   an empty data directory;
 - secrets rotated since go back to their old values.
 
+### Back tenants up to a bucket
+
+With a `backups:` section, every node backs its tenants up to an S3 bucket
+(Hetzner Object Storage, say) every hour: each backup is the **whole** data
+of a tenant (database, receipts, everything) from a ZFS snapshot, so of one
+moment with nothing stopped, as `tar`, compressed with zstd and encrypted
+with [age](https://age-encryption.org) for a public key; the private key
+stays offline. Any one backup restores alone, even without Murder:
+`age -d -i key.txt < backup.tar.zst.age | zstd -d | tar x`. The cluster's
+leader also keeps copies of the cluster's state there.
+
+Backups are thinned out as they age: every one for 48 hours, the first of
+each day for 30 days, the first of each month for a year (`keepHourly`,
+`keepDaily`, `keepMonthly`). The newest backup of a tenant always stays,
+however old, so backups that keep failing never cost the last one that
+worked. A purged tenant's backups are thinned out the same way, down to that
+newest one; `murder backups forget TENANT -yes` deletes the rest (in
+production, once their locks end). Use one bucket per cluster, or per node
+without a cluster: backups are kept by tenant name.
+
+```yaml
+backups:
+  mode: production                 # or test
+  endpoint: https://hel1.your-objectstorage.com
+  region: hel1
+  bucket: acme-murder-backups
+  accessKeyFile: /etc/murder/s3.access
+  secretKeyFile: /etc/murder/s3.secret
+  recipient: age1...               # the public key; age-keygen makes the pair
+```
+
+- **`mode: production`** locks backups under S3 object lock (compliance):
+  no one, not even someone holding the bucket's keys, deletes one or
+  shortens its lock before it ends. The first backup of each day is locked
+  for `lockFor` (30 days), the others for as long as they are kept. The
+  bucket must be made with object lock: `murder backups setup` does.
+- **`mode: test`** locks nothing: `murder backups destroy -yes` deletes every
+  backup and the bucket at once. It refuses a production config, and a
+  locked bucket.
+
+```bash
+sudo murder backups setup                       # make the bucket, or check it fits the mode
+sudo murder backups now                         # this node's tenants, now
+sudo murder backups list acme
+sudo murder backups verify acme -identity key.txt   # read it through, compare every file with its snapshot
+sudo murder tenant archive acme
+sudo murder backups restore acme -at 2026-11-01T18:50:55Z -identity key.txt
+sudo murder tenant restore acme
+```
+
+A restore unpacks the backup into a new dataset, apart from the tenant's
+data. The agent then puts it in the tenant's place, checking once more that
+the tenant is still archived on this node, with no backup, reconcile pass or
+purge running beside it. What the tenant had stays beside it, unmounted
+(`murder-replaced-…`). A restore that fails, or is stopped, midway is undone
+and leaves the tenant's data where it was. A restore needs the tenant in the
+cluster's state: after losing a node and its state, restore the state first
+(`murder backups state`, then `murder restore`). Murder never deletes
+either kind of dataset by itself: once the restored data is checked, remove
+what was put aside with `zfs destroy -r tank/murder/murder-replaced-…`. While
+it exists, Murder makes no new empty dataset for that tenant, so the old
+data is not hidden by mistake. A `murder-copy-…` dataset is a restore that
+was interrupted and can be removed the same way.
+
+With `identityFile` set on a node, it verifies its tenants' backups weekly
+by itself. An agent that restarts makes no new backup of a tenant backed up
+less than a run ago. `/metrics` has
+`murder_tenant_backup_last_success_timestamp_seconds` and
+`murder_tenant_backup_failing` for each tenant; `murder backups now` exits
+with an error when any backup failed. Hetzner Object Storage drops a lock given with a multipart
+upload: Murder locks each backup after it is stored and reads the lock
+back, failing the backup if it is not there.
+
+Limits to know:
+
+- Monthly backups are kept for a year but **locked for only `lockFor`**
+  (30 days); after that, someone with the bucket's keys could delete them.
+  Raise `lockFor` to lock longer, which also costs longer.
+- One backup holds at most about 156 GiB compressed (10,000 parts of 16 MiB,
+  the S3 limit).
+
 ### Join nodes into a cluster
 
 A cluster keeps the same state (apps, tenants, sealed secrets, the audit
