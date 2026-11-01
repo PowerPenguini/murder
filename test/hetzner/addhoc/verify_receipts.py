@@ -6,6 +6,8 @@ from addhoc_api import Client
 tenant, ip, email = sys.argv[1:4]
 c = Client(tenant, ip).sign_in(email, os.environ["PW"])
 status, items = c.request("GET", "/api/fuelings")
+if status != 200:
+    sys.exit("fuelings: %s %s" % (status, str(items)[:300]))
 items = items if isinstance(items, list) else items.get("items", [])
 checked = bad = 0
 for item in items:

@@ -68,6 +68,7 @@ class Client:
             status, started = self.request("POST", "/api/auth/mfa/enrollment")
             assert status == 200, (status, started)
             fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)  # a file there from before keeps its mode otherwise
             os.write(fd, started["secret"].encode()); os.close(fd)
             status, confirmed = self.request("POST", "/api/auth/mfa/enrollment/confirm", {"code": totp(started["secret"]), "trustBrowser": True})
             assert status == 200, (status, confirmed)

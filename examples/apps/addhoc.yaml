@@ -18,11 +18,13 @@ env:
   APP_PUBLIC_URL: "{{url}}"                  # https://<tenant>.<baseDomain>
   TRUSTED_PROXIES: "{{network}}"             # the edge connects from this range
   COOKIE_SECURE: "true"
-  APP_ADMIN_EMAIL: "admin@{{host}}"          # override per tenant with the owner's address
+  # Also the contact address for web push, which Apple wants to be a real
+  # mailbox: give each tenant its owner's address (-env at create).
+  APP_ADMIN_EMAIL: "admin@{{host}}"
 secrets:
   SESSION_SECRET: hex                        # 32 random bytes, 64 characters
   SECRETS_KEY: hex                           # seals integration secrets (OpenAI key)
-  APP_ADMIN_PASSWORD: password               # the first administrator's, 24 characters
+  APP_ADMIN_PASSWORD: {kind: password, bytes: 24}   # the first administrator's, 24 characters
 limits:
   memoryMB: 512
   cpus: 1

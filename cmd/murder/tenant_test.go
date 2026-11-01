@@ -271,7 +271,7 @@ func TestExampleAppsAreValid(t *testing.T) {
 		}
 	}
 	_, addhoc, _ := loadApp(filepath.Join("..", "..", "examples", "apps", "addhoc.yaml"))
-	if addhoc.HealthPath != "/api/health" || addhoc.Limits.MemoryMB != 512 || addhoc.Secrets["APP_ADMIN_PASSWORD"].Kind != "password" || addhoc.Env["TRUSTED_PROXIES"] != "{{network}}" {
+	if addhoc.HealthPath != "/api/health" || addhoc.Limits.MemoryMB != 512 || addhoc.Secrets["APP_ADMIN_PASSWORD"] != (spec.Secret{Kind: "password", Bytes: 24}) || addhoc.Env["TRUSTED_PROXIES"] != "{{network}}" {
 		t.Fatalf("addhoc = %+v", addhoc)
 	}
 }

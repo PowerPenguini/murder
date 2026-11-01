@@ -10,8 +10,17 @@ drivers_n, vehicles_n, fuelings_n = (int(x) for x in sys.argv[4:7])
 c = Client(tenant, ip).sign_in(email, os.environ["PW"])
 start = time.time()
 run = "".join(chr(65 + int(d)) for d in str(int(start))[-3:])  # three letters, new each run
-drivers = [c.request("POST", "/api/drivers", {"name": "Kierowca %s %03d" % (run, i), "wageType": "hourly_base", "monthlyBaseCents": 0, "hourlyRateMicros": 0, "active": True})[1]["id"] for i in range(drivers_n)]
-vehicles = [c.request("POST", "/api/vehicles", {"kind": "tractor", "registrationNumber": "W%s%04d" % (run, i)})[1]["id"] for i in range(vehicles_n)]
+
+
+def created(path, body):
+    status, answer = c.request("POST", path, body)
+    if status not in (200, 201) or not isinstance(answer, dict):
+        sys.exit("%s: %s %s" % (path, status, str(answer)[:300]))
+    return answer["id"]
+
+
+drivers = [created("/api/drivers", {"name": "Kierowca %s %03d" % (run, i), "wageType": "hourly_base", "monthlyBaseCents": 0, "hourlyRateMicros": 0, "active": True}) for i in range(drivers_n)]
+vehicles = [created("/api/vehicles", {"kind": "tractor", "registrationNumber": "W%s%04d" % (run, i)}) for i in range(vehicles_n)]
 failed = 0
 day = datetime.datetime(2026, 1, 1, 8, tzinfo=datetime.timezone.utc)
 for i in range(fuelings_n):

@@ -14,7 +14,7 @@ def worker(signed, ip, tenant):
     c = signed.via(ip)
     status, fuelings = c.request("GET", "/api/fuelings")
     receipt = None
-    if status == 200:
+    if status == 200 and isinstance(fuelings, (list, dict)):
         items = fuelings if isinstance(fuelings, list) else fuelings.get("items", [])
         for item in items:
             attachments = item.get("receiptAttachments") or []
