@@ -385,24 +385,65 @@ type agentBackups struct {
 	running  chan struct{}
 	verified time.Time
 
+	// setUp makes the backups as the config says; ready calls it until
+	// it works.
+	setUp func() (*backup.Backups, error)
+	// identityFile, if set, holds the identity verifications decrypt with;
+	// read when first needed, and again while it cannot be.
+	identityFile string
+
 	mu sync.Mutex
+	// up is whether backups are set up.
+	up bool
 	// last is each tenant's newest backup that worked, and failing whether
 	// its last try failed, for /metrics.
 	last    map[string]time.Time
 	failing map[string]bool
 }
 
-func newAgentBackups(made *backup.Backups, st *store.SQLite, cfg *config.Backups, exclusive func(func() error) error, log *slog.Logger) *agentBackups {
-	a := &agentBackups{
-		backups: made, store: st, zfs: made.Volumes.(volume.ZFS), leader: func() bool { return true },
-		every: cfg.Every.Duration, verify: cfg.VerifyEvery.Duration, log: log, exclusive: exclusive,
-		running: make(chan struct{}, 1), last: map[string]time.Time{}, failing: map[string]bool{},
+// newAgentBackups refuses a config that is wrong, such as a recipient that
+// is no age key: only files that may be missing or unreadable for a while,
+// the S3 keys and the identity, wait for a fix.
+func newAgentBackups(cfg config.Agent, st *store.SQLite, exclusive func(func() error) error, log *slog.Logger) (*agentBackups, error) {
+	if _, err := age.ParseX25519Recipient(cfg.Backups.Recipient); err != nil {
+		return nil, fmt.Errorf("backups.recipient: %w", err)
 	}
-	// The first verification comes a run after the start, not with it: an
-	// agent restarted often still verifies, without a burst at each start.
+	return &agentBackups{
+		store: st, leader: func() bool { return true },
+		every: cfg.Backups.Every.Duration, verify: cfg.Backups.VerifyEvery.Duration, log: log, exclusive: exclusive,
+		running: make(chan struct{}, 1), last: map[string]time.Time{}, failing: map[string]bool{},
+		identityFile: cfg.Backups.IdentityFile,
+		setUp: func() (*backup.Backups, error) {
+			made, _, err := newBackups(cfg)
+			return made, err
+		},
+	}, nil
+}
+
+// setupRetry is how often backups that cannot be set up, as with a key
+// file missing, are tried again.
+const setupRetry = time.Minute
+
+// ready sets backups up, if they are not yet; the caller holds running.
+// Until it works, the agent runs, without backups, and says why.
+func (a *agentBackups) ready() error {
+	if a.backups != nil {
+		return nil
+	}
+	made, err := a.setUp()
+	if err != nil {
+		return fmt.Errorf("backups are not set up: %w", err)
+	}
+	made.Log = a.log
+	a.backups, a.zfs = made, made.Volumes.(volume.ZFS)
+	// The first verification comes a run after backups start, not with
+	// them: an agent restarted often still verifies, without a burst at
+	// each start.
 	a.verified = time.Now().Add(a.every - a.verify)
-	made.Log = log
-	return a
+	a.mu.Lock()
+	a.up = true
+	a.mu.Unlock()
+	return nil
 }
 
 // lock waits for no run or replacement to be under way, or for ctx.
@@ -423,6 +464,9 @@ func (a *agentBackups) RunNow(ctx context.Context) ([]api.BackupResult, error) {
 		return nil, err
 	}
 	defer a.unlock()
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
 	return a.run(ctx, true), nil
 }
 
@@ -435,6 +479,9 @@ func (a *agentBackups) ReplaceTenant(ctx context.Context, tenant, copy string) (
 		return api.ReplaceResult{}, err
 	}
 	defer a.unlock()
+	if err := a.ready(); err != nil {
+		return api.ReplaceResult{}, err
+	}
 	var result api.ReplaceResult
 	err := a.exclusive(func() error {
 		record, err := a.store.Get(tenant)
@@ -463,13 +510,32 @@ func (a *agentBackups) ReplaceTenant(ctx context.Context, tenant, copy string) (
 }
 
 func (a *agentBackups) loop(ctx context.Context) {
+	for {
+		if a.lock(ctx) != nil {
+			return
+		}
+		err := a.ready()
+		a.unlock()
+		if err == nil {
+			break
+		}
+		a.log.Error("no backups until this is fixed; trying again in a minute", "error", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(setupRetry):
+		}
+	}
+	// Set up, which nothing undoes: the bucket is read without holding
+	// runs and replacements up.
 	a.checkBucket(ctx)
 	for {
 		if a.lock(ctx) != nil {
 			return
 		}
 		a.run(ctx, false)
-		if a.identity != nil && time.Since(a.verified) >= a.verify {
+		// An identity that cannot be read is tried again next run.
+		if a.identityFile != "" && time.Since(a.verified) >= a.verify && a.loadIdentity() {
 			a.verifyAll(ctx)
 			a.verified = time.Now()
 		}
@@ -610,6 +676,21 @@ func (a *agentBackups) pruneGone(ctx context.Context) {
 	}
 }
 
+// loadIdentity reads the identity verifications need, if not yet read;
+// one that cannot be read skips verifying, not backing up.
+func (a *agentBackups) loadIdentity() bool {
+	if a.identity != nil {
+		return true
+	}
+	identity, err := readIdentity(a.identityFile)
+	if err != nil {
+		a.log.Error("no verification of backups until backups.identityFile is fixed", "error", err)
+		return false
+	}
+	a.identity = identity
+	return true
+}
+
 func (a *agentBackups) verifyAll(ctx context.Context) {
 	for _, name := range a.own(ctx) {
 		verified, err := a.backups.Verify(ctx, name, a.zfs.Dataset(name), a.identity)
@@ -626,6 +707,8 @@ func (a *agentBackups) verifyAll(ctx context.Context) {
 func (a *agentBackups) writeMetrics(out *metrics.Writer) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	out.Family("murder_backups_ready", "gauge", "1 once backups are set up; 0 while they cannot be, as with a key file missing.")
+	out.Sample("murder_backups_ready", metrics.Bool(a.up))
 	names := slices.Sorted(maps.Keys(a.failing))
 	out.Family("murder_tenant_backup_last_success_timestamp_seconds", "gauge", "When the tenant's newest backup that worked was made.")
 	for _, name := range names {

@@ -265,7 +265,13 @@ by itself. An agent that restarts makes no new backup of a tenant backed up
 less than a run ago. `/metrics` has
 `murder_tenant_backup_last_success_timestamp_seconds` and
 `murder_tenant_backup_failing` for each tenant; `murder backups now` exits
-with an error when any backup failed. Hetzner Object Storage drops a lock given with a multipart
+with an error when any backup failed. An S3 key file missing or unreadable does not stop
+the agent: it runs without backups, logs why every minute and sets
+`murder_backups_ready` to 0 until the file is fixed. A missing
+`identityFile` skips only the verifications. A recipient that is no age key
+stops the agent, as any other mistake in the config does.
+
+Hetzner Object Storage drops a lock given with a multipart
 upload: Murder locks each backup after it is stored and reads the lock
 back, failing the backup if it is not there.
 
