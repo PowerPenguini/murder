@@ -1256,7 +1256,13 @@ func TestRestartingContainerReportsWhyItExited(t *testing.T) {
 	if status.Phase != PhaseRunning || !status.Healthy || status.Restarts != 4 || status.LastExit != "exited with code 2 at 2026-10-29T15:02:00Z" {
 		t.Fatalf("status = %+v", status)
 	}
-	f.runtime.state = runtime.ContainerState{Restarts: 5, ExitedAt: exited}
+	// A kill the engine did not report as out of memory is most likely one.
+	f.runtime.state = runtime.ContainerState{Restarts: 5, ExitedAt: exited, ExitKnown: true, ExitCode: 137}
+	f.reconcile(t)
+	if status, _ = f.reconciler.Status("acme"); status.LastExit != "killed (SIGKILL) at 2026-10-29T15:02:00Z, most likely for using more than its 256 MB of memory" {
+		t.Fatalf("status = %+v", status)
+	}
+	f.runtime.state = runtime.ContainerState{Restarts: 6, ExitedAt: exited}
 	f.reconcile(t)
 	if status, _ = f.reconciler.Status("acme"); status.LastExit != "exited at 2026-10-29T15:02:00Z" {
 		t.Fatalf("status = %+v", status)
