@@ -42,6 +42,7 @@ func runPanel(args []string) error {
 	server.Name = cfg.Panel.Name
 	// Root reaches the socket's panel through SSH: no one signs in there.
 	server.Access = func(actor string) panel.AccessAgent { return client.WithActor(actor) }
+	server.Actions = func(actor string) panel.ActionAgent { return client.WithActor(actor) }
 	if t := cfg.Panel.Tunnel; t != nil {
 		server.TunnelNetwork, _ = netip.ParsePrefix(t.Network)
 	}
@@ -76,7 +77,7 @@ func runPanel(args []string) error {
 		if err != nil {
 			return err
 		}
-		inTunnel.Name, inTunnel.Access, inTunnel.TunnelNetwork = server.Name, server.Access, server.TunnelNetwork
+		inTunnel.Name, inTunnel.Access, inTunnel.TunnelNetwork, inTunnel.Actions = server.Name, server.Access, server.TunnelNetwork, server.Actions
 		if inTunnel.Auth, err = panel.NewAuth(client, cfg.Panel.Name, log); err != nil {
 			return err
 		}

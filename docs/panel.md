@@ -51,8 +51,14 @@ Each stage is one PR, reviewed and tested before the next.
    DNS records for that name (the tunnel addresses of the nodes that
    serve). Done before accounts: passkeys are bound to the name they were
    made for, so the panel has its final name first.
-4. **Live pages and tenant actions:** updates as they happen; create,
-   suspend, resume, move, roll, archive, restore, purge; logs.
+4. **Live pages and tenant actions:** pages fetch themselves every 5 s and
+   put in their new content (not while someone types, nor on a page that
+   shows something once); a tenant's page suspends, resumes, rolls, moves,
+   archives, restores and purges it (the last two with its name typed),
+   and shows its logs; the overview creates tenants, on the node asked.
+   Each action is a form posted to the panel, which acts through the
+   agent's API for the person signed in and sends back to the page with
+   what it did, once (a cookie, so a reload repeats nothing).
 5. **Cluster actions:** upgrades, drain and replace, a manual failover,
    backups and restores.
 6. **Apps and secrets:** edit app specs, a tenant's settings and secrets

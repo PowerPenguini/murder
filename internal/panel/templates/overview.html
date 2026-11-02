@@ -30,6 +30,14 @@
 
 <section>
   <h2>tenants</h2>
+  {{if and .Acts $d.Apps}}
+  <form method="post" action="/tenants" class="filter add">
+    <input type="text" name="name" placeholder="new tenant, such as acme" aria-label="tenant name" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?">
+    <select name="app" aria-label="app">{{range $d.Apps}}<option>{{.}}</option>{{end}}</select>
+    <button type="submit">create a tenant</button>
+    <span class="dim">on {{.Cluster.Self}}, the node you ask; move it after</span>
+  </form>
+  {{end}}
   <table>
     <thead><tr><th>name</th><th>app</th><th>node</th><th>state</th><th>copy</th><th class="num hide-narrow">restarts</th><th class="hide-narrow">url</th></tr></thead>
     <tbody>

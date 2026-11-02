@@ -1,0 +1,112 @@
+package panel
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+
+	"github.com/PowerPenguini/murder/internal/store"
+)
+
+// A panel acting on the demo cluster, as a browser on its own pages.
+func newActingPanel(t *testing.T) (*DemoCluster, *httptest.Server, *http.Client) {
+	t.Helper()
+	cluster := NewDemoCluster()
+	s, err := New(cluster, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Actions = cluster.As
+	server := httptest.NewServer(s.Handler())
+	t.Cleanup(server.Close)
+	jar, _ := cookiejar.New(nil)
+	return cluster, server, &http.Client{Jar: jar}
+}
+
+func submit(t *testing.T, client *http.Client, server *httptest.Server, path string, form url.Values, origin string) (*http.Response, string) {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", origin)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	return response, string(body)
+}
+
+// Each action does its one thing, says so once on the page it sends to,
+// and is in the audit log; dangerous ones need the tenant's name typed.
+func TestActingOnTenants(t *testing.T) {
+	cluster, server, client := newActingPanel(t)
+	ctx := context.Background()
+	_, body := submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"suspend"}}, server.URL)
+	if !strings.Contains(body, "iqtms is suspended") || !strings.Contains(body, ">SUSPENDED<") {
+		t.Fatalf("after suspending:\n%s", body)
+	}
+	// Said once: a reload does not say it again.
+	if response, err := client.Get(server.URL + "/tenants/iqtms"); err == nil {
+		again, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if strings.Contains(string(again), "iqtms is suspended") {
+			t.Fatal("the action's notice shown twice")
+		}
+	}
+	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "iqtms", Limit: 1}); events[0].Action != "tenant.suspended" || events[0].Actor != "murder-panel socket" {
+		t.Fatalf("event %+v", events[0])
+	}
+	// Archiving without the name typed does nothing.
+	_, body = submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"archive"}, "confirm": {"iqtm"}}, server.URL)
+	if !strings.Contains(body, "type the tenant&#39;s name") {
+		t.Fatalf("an archive unconfirmed:\n%s", body)
+	}
+	if tenant, _ := cluster.Get(ctx, "iqtms"); tenant.Archived() {
+		t.Fatal("archived unconfirmed")
+	}
+	submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"archive"}, "confirm": {"iqtms"}}, server.URL)
+	if tenant, _ := cluster.Get(ctx, "iqtms"); !tenant.Archived() {
+		t.Fatal("not archived")
+	}
+	// Purged, it is gone, and the page is the overview.
+	response, body := submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"purge"}, "confirm": {"iqtms"}}, server.URL)
+	if response.Request.URL.Path != "/" || !strings.Contains(body, "iqtms is purged") {
+		t.Fatalf("after purging: %s", response.Request.URL)
+	}
+	if _, err := cluster.Get(ctx, "iqtms"); err == nil {
+		t.Fatal("purged, still there")
+	}
+	// A move, and a tenant made.
+	submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"move"}, "to": {"nbg-1"}}, server.URL)
+	if tenant, _ := cluster.Get(ctx, "acme-logistics"); tenant.Node != "nbg-1" {
+		t.Fatalf("moved to %s", tenant.Node)
+	}
+	response, body = submit(t, client, server, "/tenants", url.Values{"name": {"newco"}, "app": {"addhoc"}}, server.URL)
+	if response.Request.URL.Path != "/tenants/newco" || !strings.Contains(body, "newco is created") {
+		t.Fatalf("created: %s", response.Request.URL)
+	}
+	if _, body = submit(t, client, server, "/tenants", url.Values{"name": {"Bad Name"}, "app": {"addhoc"}}, server.URL); !strings.Contains(body, "lowercase letters") {
+		t.Fatal("a bad name taken")
+	}
+	// From elsewhere, nothing.
+	if response, _ := submit(t, client, server, "/tenants/newco", url.Values{"do": {"suspend"}}, "https://evil.example"); response.StatusCode != http.StatusForbidden {
+		t.Fatalf("an action from elsewhere: %d", response.StatusCode)
+	}
+	// Logs, without terminal escapes.
+	response, err := client.Get(server.URL + "/tenants/newco/logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(logs), "slow query") || strings.Contains(string(logs), "\x1b") {
+		t.Fatalf("logs:\n%s", logs)
+	}
+}

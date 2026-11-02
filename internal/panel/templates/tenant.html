@@ -2,8 +2,42 @@
 <div class="title">
   <h1>{{$t.Spec.Name}}</h1>
   <span class="tag {{$d.State.Kind}}">{{$d.State.Label}}</span>
-  <span class="sub">app {{$t.App}} · on {{$t.Node}} · <a href="{{$t.URL}}">{{$t.Host}}</a></span>
+  <span class="sub">app {{$t.App}} · on {{$t.Node}} · <a href="{{$t.URL}}">{{$t.Host}}</a>{{if .Acts}} · <a href="/tenants/{{$t.Spec.Name}}/logs">logs</a>{{end}}</span>
 </div>
+
+{{if .Acts}}
+<section class="actions">
+  <h2>act</h2>
+  <div class="bar-actions">
+    {{if $t.Archived}}
+      <form method="post" class="inline"><input type="hidden" name="do" value="restore"><button type="submit">restore</button></form>
+    {{else}}
+      {{if $t.Spec.Suspended}}
+        <form method="post" class="inline"><input type="hidden" name="do" value="resume"><button type="submit">resume</button></form>
+      {{else}}
+        <form method="post" class="inline"><input type="hidden" name="do" value="suspend"><button type="submit">suspend</button></form>
+      {{end}}
+      <form method="post" class="inline"><input type="hidden" name="do" value="roll"><button type="submit" title="a new container, the data kept">roll</button></form>
+      {{if $d.Targets}}
+      <form method="post" class="inline"><input type="hidden" name="do" value="move">
+        <select name="to" aria-label="node">{{range $d.Targets}}<option>{{.}}</option>{{end}}</select>
+        <button type="submit" title="moves the data and the container; requests wait meanwhile">move</button></form>
+      {{end}}
+    {{end}}
+  </div>
+  <div class="danger-zone">
+    {{if $t.Archived}}
+      <form method="post" class="inline"><input type="hidden" name="do" value="purge">
+        <input type="text" name="confirm" placeholder="type {{$t.Spec.Name}} to purge" aria-label="the tenant's name" autocomplete="off" required>
+        <button type="submit" class="danger">purge — its data is gone</button></form>
+    {{else}}
+      <form method="post" class="inline"><input type="hidden" name="do" value="archive">
+        <input type="text" name="confirm" placeholder="type {{$t.Spec.Name}} to archive" aria-label="the tenant's name" autocomplete="off" required>
+        <button type="submit" class="danger">archive — it stops serving</button></form>
+    {{end}}
+  </div>
+</section>
+{{end}}
 
 <section>
 <div class="panes">

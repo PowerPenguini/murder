@@ -18,11 +18,13 @@ func main() {
 	signIn := flag.Bool("signin", false, "sign in with passkeys, at http://localhost:<port>; an invitation for jan is printed")
 	flag.Parse()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	server, err := panel.New(panel.Demo{}, log)
+	cluster := panel.NewDemoCluster()
+	server, err := panel.New(cluster, log)
 	if err != nil {
 		log.Error("panel", "error", err)
 		os.Exit(1)
 	}
+	server.Actions = cluster.As
 	url := "http://" + *listen
 	if *signIn {
 		_, port, _ := net.SplitHostPort(*listen)
