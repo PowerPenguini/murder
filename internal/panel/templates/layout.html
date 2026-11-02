@@ -30,8 +30,8 @@
   <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
   <a href="/access" {{if eq .Section "access"}}class="on"{{end}}>Access</a>
 </nav>
-{{with .Cluster.Frozen}}<div class="frozen">changes frozen — {{.}}</div>{{end}}
 <main id="live">
+{{with .Cluster.Frozen}}<div class="frozen">changes frozen — {{.}}</div>{{end}}
 {{with .Problem}}<div class="notice bad">&gt; {{.}}</div>{{end}}
 {{with .Done}}<div class="notice">&gt; {{.}}</div>{{end}}
 {{template "content" .}}

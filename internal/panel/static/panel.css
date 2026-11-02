@@ -216,3 +216,6 @@ select { background: var(--bg); color: var(--fg); border: 1px solid var(--line-s
 pre.logs { background: #000; border: 1px solid var(--line-strong); padding: 12px 14px; margin: 0; font: inherit; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 75vh; overflow: auto; }
 .notice { margin-bottom: 18px; }
 .danger-zone input[type=text] { min-width: 300px; }
+.live.off { opacity: 0.4; text-decoration: line-through; }
+.live.off::before { animation: none; }
+main .frozen { margin: -26px -28px 22px; }

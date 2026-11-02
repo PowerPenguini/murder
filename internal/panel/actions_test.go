@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -84,9 +85,38 @@ func TestActingOnTenants(t *testing.T) {
 		t.Fatal("purged, still there")
 	}
 	// A move, and a tenant made.
-	submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"move"}, "to": {"nbg-1"}}, server.URL)
-	if tenant, _ := cluster.Get(ctx, "acme-logistics"); tenant.Node != "nbg-1" {
-		t.Fatalf("moved to %s", tenant.Node)
+	// A move goes on after the page is back: the page says it began.
+	if _, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"move"}, "to": {"nbg-1"}}, server.URL); !strings.Contains(body, "moves to nbg-1") {
+		t.Fatalf("after a move began:\n%s", body)
+	}
+	for i := 0; ; i++ {
+		if tenant, _ := cluster.Get(ctx, "acme-logistics"); tenant.Node == "nbg-1" {
+			break
+		}
+		if i == 100 {
+			t.Fatal("not moved")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// A page following the cluster leaves an action's notice to the page
+	// it was meant for.
+	cookieURL, _ := url.Parse(server.URL)
+	client.Jar.SetCookies(cookieURL, []*http.Cookie{{Name: flashCookie, Value: url.QueryEscape("done:moved"), Path: "/"}})
+	live, _ := http.NewRequest(http.MethodGet, server.URL+"/", nil)
+	live.Header.Set("X-Murder-Live", "1")
+	if response, err := client.Do(live); err == nil {
+		page, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if strings.Contains(string(page), "&gt; moved") {
+			t.Fatal("a live fetch took the notice")
+		}
+	}
+	if response, err := client.Get(server.URL + "/"); err == nil {
+		page, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if !strings.Contains(string(page), "&gt; moved") {
+			t.Fatal("the notice was lost")
+		}
 	}
 	response, body = submit(t, client, server, "/tenants", url.Values{"name": {"newco"}, "app": {"addhoc"}}, server.URL)
 	if response.Request.URL.Path != "/tenants/newco" || !strings.Contains(body, "newco is created") {

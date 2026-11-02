@@ -272,7 +272,11 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, sec
 // what their last action did.
 func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section string, nodes api.Nodes, data any) page {
 	p := page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Data: data}
-	p.Done, p.Problem = takeFlash(w, r)
+	// A page following the cluster leaves what an action did to the page
+	// it was meant for.
+	if r.Header.Get("X-Murder-Live") == "" {
+		p.Done, p.Problem = takeFlash(w, r)
+	}
 	return p
 }
 

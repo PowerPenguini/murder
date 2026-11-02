@@ -2,7 +2,7 @@
 <div class="title">
   <h1>{{$d.Tenant}}</h1><span class="sub">its container's last {{$d.Tail}} lines · <a href="/tenants/{{$d.Tenant}}">back</a> · <a href="?tail=2000">more</a></span>
 </div>
-<section>
+<section data-still>
   <pre class="logs">{{if $d.Lines}}{{$d.Lines}}{{else}}— nothing written yet —{{end}}</pre>
 </section>
 {{end}}

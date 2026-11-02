@@ -27,13 +27,22 @@ type ActionAgent interface {
 	Logs(ctx context.Context, name string, tail int) ([]byte, error)
 }
 
-const flashCookie = "murder_flash"
+// flashCookie is __Host-, so only the panel's own name sets it, not a
+// tenant's site under the same base domain (browsers take Secure cookies
+// on localhost too, for the socket's panel).
+const flashCookie = "__Host-murder_flash"
+
+// flashLength bounds what a cookie carries of a message.
+const flashLength = 400
 
 // flash keeps what an action did for the page it sends to, once: a
 // reload does not do it again, and nothing of it is in the address.
 func flash(w http.ResponseWriter, r *http.Request, kind, message string) {
+	if len(message) > flashLength {
+		message = message[:flashLength] + "…"
+	}
 	http.SetCookie(w, &http.Cookie{Name: flashCookie, Value: url.QueryEscape(kind + ":" + message), Path: "/", MaxAge: 60,
-		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode})
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 }
 
 // takeFlash is what the last action did, if anything, and forgets it.
@@ -42,7 +51,7 @@ func takeFlash(w http.ResponseWriter, r *http.Request) (done, problem string) {
 	if err != nil {
 		return "", ""
 	}
-	http.SetCookie(w, &http.Cookie{Name: flashCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: flashCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	value, _ := url.QueryUnescape(cookie.Value)
 	kind, message, _ := strings.Cut(value, ":")
 	if kind == "problem" {
@@ -73,9 +82,18 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 		_, err = agent.Roll(ctx, name)
 		done = name + " gets a new container"
 	case "move":
+		// A move outlives the request: a browser that stops waiting, or
+		// a panel that restarts, would otherwise have it undone.
 		to := r.FormValue("to")
-		_, err = agent.Move(ctx, name, to)
-		done = name + " runs on " + to + " now"
+		actor := s.actor(userOf(r))
+		go func() {
+			move, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
+			defer cancel()
+			if _, err := agent.Move(move, name, to); err != nil {
+				s.log.Warn("a move from the panel failed", "tenant", name, "to", to, "by", actor, "error", err)
+			}
+		}()
+		done = name + " moves to " + to + ": the page follows it, the audit log says when it is done"
 	case "archive":
 		if !confirmed {
 			err = errors.New("type the tenant's name to archive it")
@@ -134,6 +152,9 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/tenants/"+url.PathEscape(name), http.StatusSeeOther)
 }
 
+// logBytes bounds the logs a page shows.
+const logBytes = 2 << 20
+
 type logsData struct {
 	Tenant string
 	Lines  string
@@ -155,6 +176,10 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	// The newest lines, should a few be very long.
+	if len(data) > logBytes {
+		data = data[len(data)-logBytes:]
 	}
 	s.render(w, r, "logs", name+" logs", "overview", logsData{Tenant: name, Lines: ansi.ReplaceAllString(string(data), ""), Tail: tail})
 }
