@@ -274,7 +274,9 @@ func runAgent(args []string) error {
 			return
 		}
 		if member != nil {
-			if err := st.Away(node, time.Time{}); err != nil {
+			if err := st.Away(node, time.Time{}); errors.Is(err, store.ErrFrozen) {
+				log.Info("this node is not marked back from a restart while an upgrade freezes changes", "error", err)
+			} else if err != nil {
 				log.Warn("mark this node back from a restart", "error", err)
 			}
 		}
@@ -303,7 +305,11 @@ func runAgent(args []string) error {
 	// A clean stop, as for a reboot, marks the node away for a while: the
 	// leader does not power it off for not answering meanwhile.
 	if member != nil && runErr == nil {
-		if err := st.Away(node, time.Now().Add(awayFor)); err != nil {
+		// During an upgrade the freeze itself keeps the node from being
+		// failed over.
+		if err := st.Away(node, time.Now().Add(awayFor)); errors.Is(err, store.ErrFrozen) {
+			log.Info("this node is not marked away while an upgrade freezes changes", "error", err)
+		} else if err != nil {
 			log.Warn("mark this node away while it restarts", "error", err)
 		}
 	}
