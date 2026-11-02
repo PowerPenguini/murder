@@ -30,6 +30,8 @@ type memoryVolumes struct {
 	aside   []string
 	clock   func() time.Time
 	failRcv error
+	// failSend fails this node's sends.
+	failSend error
 }
 
 type memoryData struct {
@@ -121,6 +123,9 @@ func (v *memoryVolumes) SendSnapshot(_ context.Context, tenant, from, to string,
 	v.mu.Unlock()
 	if !ok || (from != "" && !hasFrom) {
 		return fmt.Errorf("send %s→%s: no such snapshot", from, to)
+	}
+	if v.failSend != nil {
+		return v.failSend
 	}
 	_, err := fmt.Fprintf(w, "%s|%s|%d", from, to, version)
 	return err
@@ -228,6 +233,7 @@ type node struct {
 type peer struct {
 	from  string
 	nodes map[string]*node
+	mu    sync.Mutex
 	sends []string
 }
 
@@ -236,7 +242,9 @@ func (p *peer) Snapshots(ctx context.Context, to, tenant string) ([]string, erro
 }
 
 func (p *peer) Send(ctx context.Context, to, tenant string, whole bool, data io.Reader) error {
+	p.mu.Lock()
 	p.sends = append(p.sends, fmt.Sprintf("%s→%s whole=%v", tenant, to, whole))
+	p.mu.Unlock()
 	return p.nodes[to].receiver.Receive(ctx, p.from, tenant, whole, data)
 }
 
@@ -565,5 +573,188 @@ func TestPlacementWaitsForTheThaw(t *testing.T) {
 	r.step(context.Background())
 	if record, _ := n1.store.Get("later"); record.Replica == "" {
 		t.Fatal("not placed once thawed")
+	}
+}
+
+// A copy moving to another node is sent there whole while the replica
+// keeps getting the changes; once whole it is the replica, and the old
+// node drops its copy.
+func TestACopyMovesToAnotherNode(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	n1, n2, n3 := f.nodes["n1"], f.nodes["n2"], f.nodes["n3"]
+	// While n3 was away, every copy of n1's tenants went to n2.
+	f.change(t, func(st *store.SQLite) {
+		if err := st.RemoveNode("n3", "test"); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"b", "c"} {
+			if _, err := st.Create(store.NewTenant{Name: name, App: "web", Node: "n1"}, "test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.PlaceReplicas("test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, name := range []string{"acme", "b", "c"} {
+		n1.volumes.write(name)
+	}
+	r, p := f.replicator("n1")
+	r.Pass(ctx)
+	f.change(t, func(st *store.SQLite) {
+		for _, name := range []string{"acme", "b", "c"} {
+			if err := st.ReplicaReady(name, "n2"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.PutNode(store.Node{Name: "n3", Address: "10.0.0.3:7400"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if placed, err := st.PlaceReplicas("test"); err != nil || placed != 1 {
+			t.Fatalf("moved %d copies, %v", placed, err)
+		}
+	})
+	if record, _ := n1.store.Get("acme"); record.ReplicaNext != "n3" {
+		t.Fatalf("acme: %+v", record)
+	}
+	p.sends = nil
+	n1.volumes.write("acme")
+	r.Pass(ctx)
+	if !slices.Equal(p.sends, []string{"acme→n2 whole=false", "acme→n3 whole=true"}) {
+		t.Fatalf("sends = %v", p.sends)
+	}
+	record, _ := n1.store.Get("acme")
+	if record.Replica != "n3" || !record.ReplicaReady || record.ReplicaNext != "" {
+		t.Fatalf("after the copy moved: %+v", record)
+	}
+	if copy := n3.volumes.data["acme"]; copy == nil || !copy.replica || copy.version != n1.volumes.data["acme"].version {
+		t.Fatalf("the copy on n3: %+v", copy)
+	}
+	// The old node keeps its copy until it learns of the switch, then
+	// drops it; the new one keeps its own.
+	r2, _ := f.replicator("n2")
+	if err := r2.Sweep(ctx); err != nil || n2.volumes.data["acme"] == nil {
+		t.Fatalf("dropped before the switch: %v", err)
+	}
+	for _, st := range []*store.SQLite{n2.store, n3.store} {
+		if _, err := st.SwitchReplica("acme", "n3"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r2.Sweep(ctx); err != nil || n2.volumes.data["acme"] != nil {
+		t.Fatalf("the old copy stays: %v", err)
+	}
+	r3, _ := f.replicator("n3")
+	if err := r3.Sweep(ctx); err != nil || n3.volumes.data["acme"] == nil {
+		t.Fatalf("the new copy went: %v", err)
+	}
+	// Its metrics are the replica's: synced at the last send.
+	if synced := r.Synced("acme"); synced.IsZero() {
+		t.Fatal("no sync time")
+	}
+}
+
+// A copy that never gets to the node it moves to stops moving after a few
+// tries, so the other copies may move.
+func TestAStuckCopyMoveIsGivenUp(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	n1, n3 := f.nodes["n1"], f.nodes["n3"]
+	f.change(t, func(st *store.SQLite) {
+		if err := st.RemoveNode("n3", "test"); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"b", "c"} {
+			if _, err := st.Create(store.NewTenant{Name: name, App: "web", Node: "n1"}, "test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.PlaceReplicas("test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, name := range []string{"acme", "b", "c"} {
+		n1.volumes.write(name)
+	}
+	r, _ := f.replicator("n1")
+	r.Pass(ctx)
+	f.change(t, func(st *store.SQLite) {
+		for _, name := range []string{"acme", "b", "c"} {
+			if err := st.ReplicaReady(name, "n2"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.PutNode(store.Node{Name: "n3", Address: "10.0.0.3:7400"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.PlaceReplicas("test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// n3 refuses every copy.
+	n3.volumes.failRcv = errors.New("pool full")
+	for i := range copyGiveUp {
+		if record, _ := n1.store.Get("acme"); record.ReplicaNext != "n3" {
+			t.Fatalf("given up after %d tries: %+v", i, record)
+		}
+		r.Pass(ctx)
+	}
+	record, _ := n1.store.Get("acme")
+	if record.ReplicaNext != "" || record.Replica != "n2" || !record.ReplicaReady {
+		t.Fatalf("after %d failed sends: %+v", copyGiveUp, record)
+	}
+	if events, _ := n1.store.Events(store.EventQuery{Tenant: "acme"}); len(events) == 0 || !strings.Contains(events[0].Detail, "no copy is kept on n3") {
+		t.Fatalf("events: %+v", events)
+	}
+	// No copy moves to n3 again for a while: none would get there.
+	if placed, err := n1.store.PlaceReplicas("test"); err != nil || placed != 0 {
+		t.Fatalf("moved %d copies to the node that refused one, %v", placed, err)
+	}
+}
+
+// A first copy that never gets to the replica is given up, after a few
+// tries, and placement gives the tenant another node; a send failing on
+// this node's side counts for nothing against the other.
+func TestAReplicaThatNeverGetsItsCopyIsReplaced(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	n1, n2 := f.nodes["n1"], f.nodes["n2"]
+	n1.volumes.write("acme")
+	r, _ := f.replicator("n1")
+	// This node's own failures: n2 is not to blame.
+	n1.volumes.failSend = errors.New("pool busy")
+	for range copyGiveUp + 1 {
+		r.Pass(ctx)
+	}
+	if record, _ := n1.store.Get("acme"); record.Replica != "n2" {
+		t.Fatalf("a replica given up for this node's failures: %+v", record)
+	}
+	n1.volumes.failSend = nil
+	n2.volumes.failRcv = errors.New("pool full")
+	for range copyGiveUp {
+		r.Pass(ctx)
+	}
+	record, _ := n1.store.Get("acme")
+	if record.Replica != "" {
+		t.Fatalf("after %d refused copies: %+v", copyGiveUp, record)
+	}
+	if _, err := n1.store.PlaceReplicas("test"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := n1.store.Get("acme"); record.Replica != "n3" {
+		t.Fatalf("placed on %q, not on the other node", record.Replica)
+	}
+	// Back from a failure, a node takes copies again at once.
+	if _, err := n1.store.MarkFailed("n2", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := n1.store.NodeBack("n2", "test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range n1.store.Nodes() {
+		if node.Name == "n2" && !node.CopiesRefusedUntil.IsZero() {
+			t.Fatalf("n2 still refused: %+v", node)
+		}
 	}
 }

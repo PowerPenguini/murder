@@ -396,7 +396,7 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready FROM tenants`)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next FROM tenants`)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +405,7 @@ func load(q querier) (state *snapshot, err error) {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -425,17 +425,20 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, address, created_at, failed_at, away_until FROM nodes`)
+	rows, err = q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var node Node
 		var created string
-		var failed, away sql.NullString
-		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away); err != nil {
+		var failed, away, refused sql.NullString
+		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away, &refused); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if refused.Valid {
+			node.CopiesRefusedUntil = parseTime(refused.String)
 		}
 		node.CreatedAt = parseTime(created)
 		if failed.Valid {

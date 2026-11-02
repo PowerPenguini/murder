@@ -80,6 +80,10 @@ type Record struct {
 	// ReplicaReady is set once the copy on Replica holds the whole data:
 	// only then may it take over from the tenant's node.
 	ReplicaReady bool `json:"replicaReady,omitempty"`
+	// ReplicaNext is the node the copy moves to, to even out the copies
+	// the nodes keep: it gets a whole copy while Replica keeps its own,
+	// and becomes Replica once that copy is whole.
+	ReplicaNext string `json:"replicaNext,omitempty"`
 	// Rollout counts the rollouts asked for the tenant; each gives it a new
 	// container made as this release of Murder makes them.
 	Rollout int64 `json:"rollout,omitempty"`
@@ -160,6 +164,9 @@ type Node struct {
 	// AwayUntil is set while the node restarts on purpose, its agent
 	// stopped cleanly: until then it is not failed over for not answering.
 	AwayUntil time.Time `json:"awayUntil,omitzero"`
+	// CopiesRefusedUntil is set when a copy failed to move to the node:
+	// until then no copy moves there.
+	CopiesRefusedUntil time.Time `json:"copiesRefusedUntil,omitzero"`
 }
 
 // Failed reports whether the node's tenants failed over and it has not
@@ -233,11 +240,22 @@ type Store interface {
 	// PlaceReplicas gives every tenant whose replica is missing, on its own
 	// node or on a node no longer in the cluster another node of the
 	// cluster to keep its copy: the one keeping the fewest. Tenants that
-	// are moving keep theirs. It reports how many it placed.
+	// are moving keep theirs. Once every tenant has a whole copy, it
+	// moves one copy at a time from a node keeping at least two more than
+	// another to that other (ReplicaNext). It reports how many it changed.
 	PlaceReplicas(actor string) (int, error)
 	// ReplicaReady records that the copy of a tenant on replica holds its
 	// whole data; nothing changes unless replica is still its replica.
 	ReplicaReady(name, replica string) error
+	// SwitchReplica makes next, the tenant's ReplicaNext, its replica,
+	// ready, once next holds the whole data; nothing changes unless next
+	// is still its ReplicaNext. It reports whether it switched.
+	SwitchReplica(name, next string) (bool, error)
+	// GiveUpCopy gives up the tenant's copy on node, for why: its
+	// ReplicaNext, or its replica while that copy is not whole yet. No
+	// copy goes to node for a while. It reports whether it changed
+	// anything.
+	GiveUpCopy(name, node, why string) (bool, error)
 	// FailOver gives every tenant of node, a node confirmed powered off,
 	// to its replica's node, and marks node failed: it keeps no copies
 	// until NodeBack, once it answers again. Tenants moving away from node

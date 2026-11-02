@@ -275,3 +275,205 @@ func TestMovesClearACopysReadiness(t *testing.T) {
 		t.Fatalf("moved elsewhere: %+v, %v", moved, err)
 	}
 }
+
+// ready marks every tenant's copy whole, as their nodes report once sent.
+func ready(t *testing.T, st *SQLite) {
+	t.Helper()
+	for _, record := range st.List() {
+		if record.Replica != "" && !record.ReplicaReady {
+			if err := st.ReplicaReady(record.Spec.Name, record.Replica); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func copiesPerNode(st *SQLite) map[string]int {
+	counts := map[string]int{}
+	for _, record := range st.List() {
+		counts[record.Replica]++
+	}
+	return counts
+}
+
+// A node back from a failure gets its share of copies again: one copy at
+// a time moves to it, the old copy staying the replica until the new one
+// holds the whole data.
+func TestCopiesMoveToANodeThatCameBack(t *testing.T) {
+	st, _ := withApp(t, options())
+	for _, node := range []Node{{Name: "node-1", Address: "10.0.0.1:7400"}, {Name: "n2", Address: "10.0.0.2:7400"}, {Name: "n3", Address: "10.0.0.3:7400"}, {Name: "n4", Address: "10.0.0.4:7400"}} {
+		if err := st.PutNode(node, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// n4 is failed while the tenants get their copies.
+	if _, err := st.MarkFailed("n4", "murder"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		if _, err := st.Create(NewTenant{Name: name, App: "web"}, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.PlaceReplicas("murder"); err != nil {
+		t.Fatal(err)
+	}
+	if counts := copiesPerNode(st); counts["n2"] != 3 || counts["n3"] != 3 {
+		t.Fatalf("copies %v", counts)
+	}
+	if err := st.NodeBack("n4", "murder"); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing moves while a copy is not whole.
+	if placed, _ := st.PlaceReplicas("murder"); placed != 0 {
+		t.Fatalf("moved %d copies before every copy was whole", placed)
+	}
+	ready(t, st)
+	moves := 0
+	for range 10 {
+		placed, err := st.PlaceReplicas("murder")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if placed == 0 {
+			break
+		}
+		// One at a time; the old copy stays the replica, whole.
+		var next []Record
+		for _, record := range st.List() {
+			if record.ReplicaNext != "" {
+				next = append(next, record)
+			}
+		}
+		if len(next) != 1 || next[0].ReplicaNext != "n4" || !next[0].ReplicaReady || next[0].Replica == "n4" {
+			t.Fatalf("copies moving: %+v", next)
+		}
+		if again, _ := st.PlaceReplicas("murder"); again != 0 {
+			t.Fatal("a second copy moves at once")
+		}
+		// A stale switch changes nothing; the real one does.
+		if switched, err := st.SwitchReplica(next[0].Spec.Name, "n3x"); err != nil || switched {
+			t.Fatalf("a stale switch: %v, %v", switched, err)
+		}
+		if switched, err := st.SwitchReplica(next[0].Spec.Name, "n4"); err != nil || !switched {
+			t.Fatalf("the switch: %v, %v", switched, err)
+		}
+		switched, _ := st.Get(next[0].Spec.Name)
+		if switched.Replica != "n4" || !switched.ReplicaReady || switched.ReplicaNext != "" {
+			t.Fatalf("after the switch: %+v", switched)
+		}
+		moves++
+	}
+	if counts := copiesPerNode(st); moves != 2 || counts["n2"] != 2 || counts["n3"] != 2 || counts["n4"] != 2 {
+		t.Fatalf("after %d moves: %v", moves, counts)
+	}
+}
+
+// A copy stops moving when its target fails or leaves, when the tenant
+// moves or fails over, and a failover promotes the old, whole copy.
+func TestAMovingCopyStops(t *testing.T) {
+	st, _ := withApp(t, options())
+	for _, node := range []Node{{Name: "node-1", Address: "10.0.0.1:7400"}, {Name: "n2", Address: "10.0.0.2:7400"}, {Name: "n3", Address: "10.0.0.3:7400"}} {
+		if err := st.PutNode(node, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.MarkFailed("n3", "murder"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a", "b"} {
+		if _, err := st.Create(NewTenant{Name: name, App: "web"}, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Tenant c runs on n2, its copy on node-1.
+	if _, err := st.Create(NewTenant{Name: "c", App: "web", Node: "n2"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PlaceReplicas("murder"); err != nil {
+		t.Fatal(err)
+	}
+	ready(t, st)
+	if err := st.NodeBack("n3", "murder"); err != nil {
+		t.Fatal(err)
+	}
+	moving := func() string {
+		t.Helper()
+		if _, err := st.PlaceReplicas("murder"); err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range st.List() {
+			if record.ReplicaNext != "" {
+				return record.Spec.Name
+			}
+		}
+		t.Fatalf("no copy moves: %v", copiesPerNode(st))
+		return ""
+	}
+	// Its target fails: the move of the copy stops.
+	name := moving()
+	if _, err := st.MarkFailed("n3", "murder"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := st.Get(name); record.ReplicaNext != "" || record.Replica != "n2" || !record.ReplicaReady {
+		t.Fatalf("after its target failed: %+v", record)
+	}
+	if err := st.NodeBack("n3", "murder"); err != nil {
+		t.Fatal(err)
+	}
+	// The tenant moves: so does nothing else.
+	name = moving()
+	if _, err := st.StartMove(name, "n3", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := st.Get(name); record.ReplicaNext != "" {
+		t.Fatalf("a moving tenant's copy still moves: %+v", record)
+	}
+	if _, err := st.CancelMove(name, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// The target leaves the cluster.
+	name = moving()
+	if err := st.RemoveNode("n3", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := st.Get(name); record.ReplicaNext != "" {
+		t.Fatalf("a copy moves to a node that left: %+v", record)
+	}
+}
+
+// A tenant whose node fails while its copy moves runs from its replica,
+// whole, not from the copy half sent.
+func TestAFailoverPromotesTheWholeCopyNotTheMovingOne(t *testing.T) {
+	st, _ := withApp(t, options())
+	for _, node := range []Node{{Name: "node-1", Address: "10.0.0.1:7400"}, {Name: "n2", Address: "10.0.0.2:7400"}} {
+		if err := st.PutNode(node, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"x", "y", "z"} {
+		if _, err := st.Create(NewTenant{Name: name, App: "web", Node: "n2"}, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.PlaceReplicas("murder"); err != nil {
+		t.Fatal(err)
+	}
+	ready(t, st)
+	if err := st.PutNode(Node{Name: "n3", Address: "10.0.0.3:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if placed, err := st.PlaceReplicas("murder"); err != nil || placed != 1 {
+		t.Fatalf("moved %d copies, %v", placed, err)
+	}
+	if record, _ := st.Get("x"); record.ReplicaNext != "n3" || record.Replica != "node-1" {
+		t.Fatalf("x: %+v", record)
+	}
+	outcome, err := st.FailOver("n2", "murder")
+	if err != nil || len(outcome.Promoted) != 3 {
+		t.Fatalf("failover: %+v, %v", outcome, err)
+	}
+	if record, _ := st.Get("x"); record.Node != "node-1" || record.ReplicaNext != "" || record.Replica != "" {
+		t.Fatalf("x after the failover: %+v", record)
+	}
+}
