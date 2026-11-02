@@ -16,6 +16,7 @@ import (
 func main() {
 	listen := flag.String("listen", "127.0.0.1:7480", "address to serve on")
 	signIn := flag.Bool("signin", false, "sign in with passkeys, at http://localhost:<port>; an invitation for jan is printed")
+	name := flag.String("name", "", "a name the panel answers as besides localhost, such as the address it listens on in a private network")
 	flag.Parse()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	cluster := panel.NewDemoCluster()
@@ -24,6 +25,7 @@ func main() {
 		log.Error("panel", "error", err)
 		os.Exit(1)
 	}
+	server.Name = *name
 	server.Actions = cluster.As
 	server.Cluster = cluster.AsCluster
 	server.Apps = cluster.AsApps

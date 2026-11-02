@@ -1,14 +1,11 @@
 {{define "content"}}
 <div class="gatebox">
   <img class="crow" src="{{static "crow.svg"}}" alt="">
-  <div class="wordmark">MURDER<span class="cursor"></span></div>
-  <div class="frame">
-    <div class="label">// sign in</div>
-    <p class="dim">With the passkey on this device, or a phone near it.</p>
-    <button type="button" class="wide" id="signin">sign in with a passkey</button>
-    <p class="status" id="status" role="status" aria-live="polite">&gt; ready</p>
-  </div>
-  <p class="aside"><a href="/enroll">an invitation, or a lost passkey? →</a></p>
+  <h1>Sign in to murder</h1>
+  <p class="dim">With the passkey on this device, or a phone near it.</p>
+  <button type="button" class="primary wide" id="signin">Sign in with a passkey</button>
+  <p class="status" id="status" role="status" aria-live="polite"></p>
+  <p class="aside"><a href="/enroll">An invitation, or a lost passkey?</a></p>
 </div>
 <script src="{{static "auth.js"}}"></script>
 {{end}}

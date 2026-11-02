@@ -49,10 +49,10 @@ func TestTheOverviewShowsTheCluster(t *testing.T) {
 		t.Fatalf("status %d", response.StatusCode)
 	}
 	for _, want := range []string{
-		"fsn-1", "nbg-1", "hel-1", ">FAILED<", ">leader<",
-		`href="/tenants/kowalski-trans"`, "fsn-1 -&gt; hel-1", ">UNHEALTHY<", ">ARCHIVED<", ">SUSPENDED<",
-		"2<small>/3</small>", // nodes up
-		"5<small>/6</small>", // healthy of those meant to run
+		"fsn-1", "nbg-1", "hel-1", ">failed<", ">leader<",
+		`href="/tenants/kowalski-trans"`, "the copy moves to hel-1", ">unhealthy<", ">archived<", ">suspended<",
+		"2<small> / 3</small>", // nodes up
+		"5<small> / 6</small>", // healthy of those meant to run
 		"copy moves from fsn-1 to hel-1",
 	} {
 		if !strings.Contains(body, want) {
@@ -75,7 +75,7 @@ func TestTheOverviewShowsTheCluster(t *testing.T) {
 func TestATenantsPage(t *testing.T) {
 	server := newTestServer(t, Demo{Now: demoNow})
 	_, body := get(t, server.URL+"/tenants/baltic-freight")
-	for _, want := range []string{"baltic-freight", ">UNHEALTHY<", "exit 137", "SESSION_KEY", "secret · hex", "Europe/Warsaw", "256 MB"} {
+	for _, want := range []string{"baltic-freight", ">unhealthy<", "exit 137", "SESSION_KEY", "secret · hex", "Europe/Warsaw", "256 MB"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the tenant's page lacks %q", want)
 		}

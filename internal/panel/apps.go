@@ -47,6 +47,8 @@ secrets:
 
 type appsData struct {
 	Apps []api.App
+	// Bars draw each app's tenants against the most any app has.
+	Bars []meter
 	// Name and File are a new app's form, kept when it was refused.
 	Name, File string
 }
@@ -65,6 +67,13 @@ func (s *Server) appsPage(w http.ResponseWriter, r *http.Request, data appsData,
 	}
 	slices.SortFunc(apps, func(a, b api.App) int { return strings.Compare(a.Name, b.Name) })
 	data.Apps = apps
+	most := 0
+	for _, app := range apps {
+		most = max(most, len(app.Tenants))
+	}
+	for _, app := range apps {
+		data.Bars = append(data.Bars, meterOf(len(app.Tenants), most))
+	}
 	s.renderWith(w, r, "apps", "Apps", "apps", data, problem, status)
 }
 

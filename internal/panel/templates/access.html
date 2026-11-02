@@ -1,27 +1,28 @@
 {{define "content"}}{{$d := .Data}}
-<div class="title"><h1>Access</h1><span class="sub">who signs in, and which devices reach the panel</span></div>
+<h1>Access</h1>
+<p class="lead">Who signs in, and which devices reach the panel through its tunnel.</p>
 
-{{with $d.Problem}}<div class="notice bad">&gt; {{.}}</div>{{end}}
-{{with $d.Done}}<div class="notice">&gt; {{.}}</div>{{end}}
+{{with $d.Problem}}<div class="notice bad">{{.}}</div>{{end}}
+{{with $d.Done}}<div class="notice">{{.}}</div>{{end}}
 
 {{with $d.Invite}}
 <section class="once">
-  <h2>the invitation — shown once</h2>
-  <p>Send it to the person through a channel you trust; it adds one passkey, within 24 hours.</p>
+  <h2>The invitation, shown once</h2>
+  <p>Send it through a channel you trust; it adds one passkey, within 24 hours.</p>
   <code class="secret">{{.}}</code>
 </section>
 {{end}}
 
 {{with $d.Codes}}
 <section class="once">
-  <h2>your new recovery codes — shown once</h2>
+  <h2>Your new recovery codes, shown once</h2>
   <ol class="codes">{{range .}}<li>{{.}}</li>{{end}}</ol>
 </section>
 {{end}}
 
 {{with $d.Device}}
 <section class="once">
-  <h2>device {{.Name}} — shown once</h2>
+  <h2>Device {{.Name}}, shown once</h2>
   <div class="device">
     {{if .QR}}<div class="qr">{{.QR}}</div>{{end}}
     <div>
@@ -33,63 +34,80 @@
 {{end}}
 
 <section>
-  <h2>people</h2>
+  <div class="head">
+    <h2>People</h2>
+    <div class="row">
+      {{if $d.Me}}<form method="post" action="/access" class="row"><input type="hidden" name="do" value="codes"><button type="submit">New recovery codes</button></form>{{end}}
+      <details>
+        <summary class="button">Invite</summary>
+        <div class="pop">
+          <form method="post" action="/access" class="stack"><input type="hidden" name="do" value="invite">
+            <label class="field">Name <input type="text" name="name" placeholder="anna" aria-label="name" autocomplete="off" required></label>
+            <div><button type="submit" class="primary">Invite</button></div>
+          </form>
+        </div>
+      </details>
+    </div>
+  </div>
   <table>
-    <thead><tr><th>name</th><th>passkeys</th><th class="num">recovery codes</th><th class="hide-narrow">added</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Passkeys</th><th class="num">Recovery codes</th><th class="hide-narrow">Added</th><th class="end"></th></tr></thead>
     <tbody>
-    {{range $d.People}}{{$person := .}}
+    {{range $d.People}}
       <tr>
-        <td>{{.Name}}{{if eq .Name $d.Me}} <span class="tag plain">you</span>{{end}}</td>
-        <td>
-          {{range .Passkeys}}
-            <form method="post" action="/access" class="inline">
-              <span class="tag mute">{{.Label}}</span> <span class="dim">{{if .UsedAt.IsZero}}never used{{else}}used {{ago .UsedAt}} ago{{end}}</span>
-              <input type="hidden" name="do" value="remove-passkey"><input type="hidden" name="id" value="{{.ID}}">
-              <button type="submit" class="small" title="remove this passkey">×</button>
-            </form>
-          {{else}}<span class="dim">none yet: invited</span>{{end}}
-        </td>
+        <td>{{.Name}}{{if eq .Name $d.Me}} <span class="dim">you</span>{{end}}</td>
+        <td>{{if .Passkeys}}<span class="keys">{{range .Passkeys}}<span>{{.Label}} <span class="dim">{{if .UsedAt.IsZero}}never used{{else}}{{ago .UsedAt}} ago{{end}}</span></span>{{end}}</span>{{else}}<span class="dim">invited</span>{{end}}</td>
         <td class="num">{{.Recovery}}</td>
         <td class="dim hide-narrow">{{ago .CreatedAt}} ago, by {{.CreatedBy}}</td>
-        <td class="actions">
-          {{if or (eq .Name $d.Me) (not .Passkeys)}}<form method="post" action="/access" class="inline"><input type="hidden" name="do" value="invite"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="small">{{if eq .Name $d.Me}}add a passkey{{else}}invite again{{end}}</button></form>{{end}}
-          {{if ne .Name $d.Me}}<form method="post" action="/access" class="inline"><input type="hidden" name="do" value="remove-person"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="small danger">remove</button></form>{{end}}
+        <td class="end">
+          <details class="menu">
+            <summary aria-label="what to do with {{.Name}}">⋯</summary>
+            <div class="pop">
+              {{if or (eq .Name $d.Me) (not .Passkeys)}}<form method="post" action="/access" class="row"><input type="hidden" name="do" value="invite"><input type="hidden" name="name" value="{{.Name}}"><button type="submit">{{if eq .Name $d.Me}}Add a passkey{{else}}Invite again{{end}}</button></form>{{end}}
+              {{range .Passkeys}}<form method="post" action="/access" class="row"><input type="hidden" name="do" value="remove-passkey"><input type="hidden" name="id" value="{{.ID}}"><button type="submit" class="danger" title="remove this passkey">Remove passkey {{.Label}}</button></form>{{end}}
+              {{if ne .Name $d.Me}}<form method="post" action="/access" class="row"><input type="hidden" name="do" value="remove-person"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="danger">Remove {{.Name}}</button></form>{{end}}
+            </div>
+          </details>
         </td>
       </tr>
     {{else}}
-      <tr><td colspan="5" class="empty">no one signs in yet</td></tr>
+      <tr><td colspan="5" class="empty">No one signs in yet.</td></tr>
     {{end}}
     </tbody>
   </table>
-  <form method="post" action="/access" class="filter add">
-    <input type="hidden" name="do" value="invite">
-    <input type="text" name="name" placeholder="name, such as anna" aria-label="name" required>
-    <button type="submit">invite a person</button>
-  </form>
-  {{if $d.Me}}<form method="post" action="/access" class="filter"><input type="hidden" name="do" value="codes"><button type="submit" class="ghost">new recovery codes for me</button></form>{{end}}
 </section>
 
 <section>
-  <h2>devices in the tunnel</h2>
+  <div class="head">
+    <h2>Devices</h2>
+    <details>
+      <summary class="button">Add a device</summary>
+      <div class="pop">
+        <form method="post" action="/access" class="stack"><input type="hidden" name="do" value="add-device">
+          <label class="field">Name <input type="text" name="name" placeholder="anna-phone" aria-label="device name" autocomplete="off" required></label>
+          <div><button type="submit" class="primary">Add</button></div>
+        </form>
+      </div>
+    </details>
+  </div>
   <table>
-    <thead><tr><th>name</th><th>address</th><th class="hide-narrow">added</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Address</th><th class="hide-narrow">Added</th><th class="end"></th></tr></thead>
     <tbody>
     {{range $d.Devices}}
       <tr>
         <td>{{.Name}}</td>
-        <td class="dim">{{.Address}}</td>
+        <td class="mono dim">{{.Address}}</td>
         <td class="dim hide-narrow">{{ago .CreatedAt}} ago, by {{.CreatedBy}}</td>
-        <td class="actions"><form method="post" action="/access" class="inline"><input type="hidden" name="do" value="remove-device"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="small danger">remove</button></form></td>
+        <td class="end">
+          <details class="menu">
+            <summary aria-label="what to do with {{.Name}}">⋯</summary>
+            <div class="pop"><form method="post" action="/access" class="row"><input type="hidden" name="do" value="remove-device"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="danger">Remove {{.Name}}</button></form></div>
+          </details>
+        </td>
       </tr>
     {{else}}
-      <tr><td colspan="4" class="empty">no device yet</td></tr>
+      <tr><td colspan="4" class="empty">No device yet.</td></tr>
     {{end}}
     </tbody>
   </table>
-  <form method="post" action="/access" class="filter add">
-    <input type="hidden" name="do" value="add-device">
-    <input type="text" name="name" placeholder="device, such as anna-phone" aria-label="device name" required>
-    <button type="submit">add a device</button>
-  </form>
 </section>
 {{end}}

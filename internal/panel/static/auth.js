@@ -3,7 +3,7 @@
 (() => {
   const status = document.getElementById("status");
   const say = (text, bad) => {
-    status.textContent = "> " + text;
+    status.textContent = text.charAt(0).toUpperCase() + text.slice(1);
     status.classList.toggle("bad", !!bad);
   };
   const toBuffer = (b64url) => {
