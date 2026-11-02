@@ -31,7 +31,8 @@ Each stage is one PR, reviewed and tested before the next.
 
 1. **Read-only views** (this PR): the process, the design, the overview
    (nodes, tenants, their copies, recent events), a tenant's page and the
-   audit log. Loopback only, through an SSH tunnel, until accounts exist.
+   audit log. On a unix socket only root can use, through an SSH tunnel,
+   until accounts exist; it answers only as localhost.
 2. **Accounts:** passkeys, sessions, recovery codes, invitations
    (`murder admin invite NAME` for the first person, then from the panel).
 3. **The tunnel:** WireGuard in the panel process, devices and their QR

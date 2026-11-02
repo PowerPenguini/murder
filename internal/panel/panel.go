@@ -11,8 +11,11 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -59,11 +62,44 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(staticFiles, "static")
 	files := http.FileServerFS(static)
-	mux.Handle("GET /static/", http.StripPrefix("/static/", cacheFor(time.Hour, files)))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", noListing(cacheFor(time.Hour, files))))
 	mux.HandleFunc("GET /{$}", s.overview)
 	mux.HandleFunc("GET /tenants/{name}", s.tenant)
 	mux.HandleFunc("GET /events", s.events)
-	return secure(mux)
+	return localOnly(secure(mux))
+}
+
+// localOnly refuses requests not addressed to a loopback name, as a page
+// elsewhere would send after pointing its own name at 127.0.0.1 (DNS
+// rebinding) while an SSH tunnel to the panel is open.
+func localOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		host = strings.Trim(host, "[]")
+		local := host == "localhost"
+		if address, err := netip.ParseAddr(host); err == nil && address.IsLoopback() {
+			local = true
+		}
+		if !local {
+			http.Error(w, "the panel answers only as localhost", http.StatusMisdirectedRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// noListing serves files, never a directory's listing.
+func noListing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // secure sets the headers every answer carries: nothing is framed, sniffed
@@ -94,7 +130,10 @@ type cacheWriter struct {
 
 func (c *cacheWriter) WriteHeader(status int) {
 	if !c.done {
-		c.Header().Set("Cache-Control", c.value)
+		// Only what was found is kept: not a 404.
+		if status == http.StatusOK || status == http.StatusPartialContent || status == http.StatusNotModified {
+			c.Header().Set("Cache-Control", c.value)
+		}
 		c.done = true
 	}
 	c.ResponseWriter.WriteHeader(status)

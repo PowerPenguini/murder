@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -29,28 +30,39 @@ func runPanel(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("process", "panel")
-	client := api.NewClient(cfg.Socket)
-	client.Actor = "murder-panel"
-	server, err := panel.New(client, log)
+	server, err := panel.New(api.NewClient(cfg.Socket), log)
 	if err != nil {
 		return err
 	}
-	listener, err := net.Listen("tcp", cfg.Panel.Listen)
+	// Root only: the panel shows what the agent's socket protects.
+	if err := os.MkdirAll(filepath.Dir(cfg.Panel.Socket), 0o755); err != nil {
+		return err
+	}
+	if err := os.Remove(cfg.Panel.Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	old := syscall.Umask(0o077)
+	listener, err := net.Listen("unix", cfg.Panel.Socket)
+	syscall.Umask(old)
 	if err != nil {
 		return err
 	}
 	httpServer := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdown)
 	}()
-	log.Info("the panel serves", "address", listener.Addr().String())
+	log.Info("the panel serves", "socket", cfg.Panel.Socket)
 	if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	// Requests under way finish first.
+	<-stopped
 	return nil
 }

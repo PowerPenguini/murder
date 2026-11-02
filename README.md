@@ -528,11 +528,12 @@ one node, bootstrap there and join the others with new databases.
 (up, down, failed, the leader), every tenant with its state and its copy, a
 tenant's runtime, spec, limits and environment, and the audit log. It is
 being built in stages ([docs/panel.md](docs/panel.md)); for now it only
-shows, and listens on loopback (`panel.listen`, 127.0.0.1:7480 by default),
-since it has no accounts yet. Reach it through SSH:
+shows, and serves on a unix socket only root can use (`panel.socket`,
+/run/murder/panel.sock by default), since it has no accounts yet. Reach it
+through SSH, and open it as localhost (it answers no other name):
 
 ```bash
-ssh -L 7480:127.0.0.1:7480 root@node   # then open http://127.0.0.1:7480
+ssh -L 7480:/run/murder/panel.sock root@node   # then open http://localhost:7480
 ```
 
 To try it without a cluster: `go run ./internal/panel/demo`.

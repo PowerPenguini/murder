@@ -45,7 +45,9 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 	var wg sync.WaitGroup
 	for i, node := range members {
 		view.Nodes[i] = NodeState{Node: node, Answers: node.Name == view.Self}
-		if node.Name == view.Self || s.cluster == nil {
+		// A failed node shows as failed whether it answers or not; it is
+		// marked back once it answers the leader.
+		if node.Name == view.Self || s.cluster == nil || node.Failed() {
 			continue
 		}
 		wg.Add(1)

@@ -223,18 +223,13 @@ func TestDNSRecords(t *testing.T) {
 	}
 }
 
-// The panel serves on loopback until it has accounts of its own.
-func TestThePanelListensOnLoopback(t *testing.T) {
+// The panel serves on a unix socket until it has accounts of its own.
+func TestThePanelServesOnASocket(t *testing.T) {
 	agent, err := Parse([]byte("baseDomain: example.com\n"))
-	if err != nil || agent.Panel.Listen != "127.0.0.1:7480" {
-		t.Fatalf("default: %q, %v", agent.Panel.Listen, err)
+	if err != nil || agent.Panel.Socket != "/run/murder/panel.sock" {
+		t.Fatalf("default: %q, %v", agent.Panel.Socket, err)
 	}
-	if _, err := Parse([]byte("baseDomain: example.com\npanel: {listen: \"[::1]:9000\"}\n")); err != nil {
-		t.Fatalf("IPv6 loopback: %v", err)
-	}
-	for _, listen := range []string{"0.0.0.0:7480", "203.0.113.7:7480", "7480"} {
-		if _, err := Parse([]byte("baseDomain: example.com\npanel: {listen: \"" + listen + "\"}\n")); err == nil || !strings.Contains(err.Error(), "panel.listen") {
-			t.Errorf("listen %s: %v", listen, err)
-		}
+	if _, err := Parse([]byte("baseDomain: example.com\npanel: {socket: panel.sock}\n")); err == nil || !strings.Contains(err.Error(), "panel.socket") {
+		t.Errorf("a relative socket: %v", err)
 	}
 }

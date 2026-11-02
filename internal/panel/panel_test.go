@@ -153,3 +153,35 @@ func TestAgo(t *testing.T) {
 		t.Error("zero time or image")
 	}
 }
+
+// A page that points its own name at the panel's address is refused: only
+// loopback names are answered.
+func TestOnlyLocalNamesAreAnswered(t *testing.T) {
+	server := newTestServer(t, Demo{Now: demoNow})
+	for host, want := range map[string]int{
+		"localhost:7480": http.StatusOK, "127.0.0.1:7480": http.StatusOK, "[::1]:7480": http.StatusOK, "localhost": http.StatusOK,
+		"evil.example:7480": http.StatusMisdirectedRequest, "203.0.113.7": http.StatusMisdirectedRequest, "localhost.evil.example": http.StatusMisdirectedRequest,
+	} {
+		request, _ := http.NewRequest(http.MethodGet, server.URL+"/", nil)
+		request.Host = host
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != want {
+			t.Errorf("Host %s: %d, want %d", host, response.StatusCode, want)
+		}
+	}
+}
+
+// What is not found is not kept by caches, and no directory is listed.
+func TestStaticFiles(t *testing.T) {
+	server := newTestServer(t, Demo{Now: demoNow})
+	for _, path := range []string{"/static/nope.css", "/static/"} {
+		response, _ := get(t, server.URL+path)
+		if response.StatusCode != http.StatusNotFound || strings.HasPrefix(response.Header.Get("Cache-Control"), "public") {
+			t.Errorf("%s: %d, Cache-Control %q", path, response.StatusCode, response.Header.Get("Cache-Control"))
+		}
+	}
+}

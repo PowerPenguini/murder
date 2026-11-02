@@ -22,7 +22,7 @@
       {{with .Warning}}<dt>warning</dt><dd>{{.}}</dd>{{end}}
       <dt>checked</dt><dd>{{ago .CheckedAt}} ago</dd>
       {{else}}
-      <dt>status</dt><dd class="dim">its node does not answer</dd>
+      <dt>status</dt><dd class="dim">{{if $t.Archived}}archived: runs nowhere{{else}}its node did not answer{{end}}</dd>
       {{end}}
     </dl>
   </div>

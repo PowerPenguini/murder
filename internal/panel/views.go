@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -95,18 +96,15 @@ type overviewData struct {
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	nodes, err := s.backend.Nodes(ctx)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	tenants, err := s.backend.List(ctx)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	events, err := s.backend.Events(ctx, store.EventQuery{Limit: 12})
-	if err != nil {
+	// Asked at once: each may wait on a node that does not answer.
+	var nodes api.Nodes
+	var tenants []api.Tenant
+	var events []store.Event
+	if err := all(
+		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
+		func() (err error) { tenants, err = s.backend.List(ctx); return },
+		func() (err error) { events, err = s.backend.Events(ctx, store.EventQuery{Limit: 12}); return },
+	); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -159,18 +157,18 @@ type envVar struct{ Key, Value string }
 func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	t, err := s.backend.Get(ctx, r.PathValue("name"))
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	events, err := s.backend.Events(ctx, store.EventQuery{Tenant: t.Spec.Name, Limit: 30})
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	nodes, err := s.backend.Nodes(ctx)
-	if err != nil {
+	name := r.PathValue("name")
+	var t api.Tenant
+	var events []store.Event
+	var nodes api.Nodes
+	if err := all(
+		func() (err error) { t, err = s.backend.Get(ctx, name); return },
+		func() (err error) {
+			events, err = s.backend.Events(ctx, store.EventQuery{Tenant: name, Limit: 30})
+			return
+		},
+		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
+	); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -208,6 +206,26 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		data.Older = events[len(events)-1].ID
 	}
 	s.render(w, r, "events", "Events", "events", data)
+}
+
+// all runs calls at once and returns the first of their errors.
+func all(calls ...func() error) error {
+	errs := make([]error, len(calls))
+	var wg sync.WaitGroup
+	for i, call := range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = call()
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) funcs() template.FuncMap {

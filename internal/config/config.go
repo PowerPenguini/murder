@@ -163,9 +163,10 @@ type Cluster struct {
 
 // Panel is where the administration panel serves.
 type Panel struct {
-	// Listen is the panel's address: loopback only, reached through an
-	// SSH tunnel, until the panel has accounts of its own.
-	Listen string `yaml:"listen"`
+	// Socket is the unix socket the panel serves on, readable by root
+	// only, reached through an SSH tunnel until the panel has accounts of
+	// its own.
+	Socket string `yaml:"socket"`
 }
 
 // DNS reaches the provider of the base domain's zone.
@@ -292,8 +293,8 @@ func Parse(data []byte) (Agent, error) {
 	if err := strictyaml.Decode(data, &agent); err != nil && !errors.Is(err, io.EOF) {
 		return Agent{}, fmt.Errorf("parse config: %w", err)
 	}
-	if agent.Panel.Listen == "" {
-		agent.Panel.Listen = "127.0.0.1:7480"
+	if agent.Panel.Socket == "" {
+		agent.Panel.Socket = "/run/murder/panel.sock"
 	}
 	if agent.Cluster != nil {
 		if agent.Cluster.Dir == "" {
@@ -344,10 +345,8 @@ func (a Agent) Validate() error {
 	if a.Backups != nil {
 		problems = append(problems, a.Backups.problems(a.Volumes.Driver)...)
 	}
-	if host, _, err := net.SplitHostPort(a.Panel.Listen); err != nil {
-		problems = append(problems, "panel.listen must be an address and a port, such as 127.0.0.1:7480")
-	} else if address, err := netip.ParseAddr(host); err != nil || !address.IsLoopback() {
-		problems = append(problems, "panel.listen must be a loopback address: the panel has no accounts yet, so reach it through an SSH tunnel")
+	if !strings.HasPrefix(a.Panel.Socket, "/") {
+		problems = append(problems, "panel.socket must be an absolute path")
 	}
 	if d := a.Cluster; d != nil && d.DNS != nil && a.BaseDomain != "" {
 		if _, err := records.Wildcard(a.BaseDomain, d.DNS.Zone); err != nil {
