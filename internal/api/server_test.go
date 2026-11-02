@@ -725,3 +725,32 @@ func TestNodesSayWhichAnswer(t *testing.T) {
 		}
 	}
 }
+
+// catchUpCluster cannot catch up, as a node cut off from the leader.
+type catchUpCluster struct {
+	Cluster
+	err error
+}
+
+func (c catchUpCluster) CatchUp() error { return c.err }
+
+// The devices are listed as the cluster has them: a node that cannot
+// catch up says so, and its panel then lets no device in.
+func TestDevicesAreReadCaughtUp(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if err := f.store.PutNode(store.Node{Name: f.store.Node(), Address: "10.0.0.1:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.NameCluster("TESTCLUSTER", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.api.WithCluster(catchUpCluster{err: errors.New("no leader")})
+	if _, err := f.client.Devices(ctx); err == nil {
+		t.Fatal("devices listed by a node that cannot catch up")
+	}
+	f.api.WithCluster(catchUpCluster{})
+	if devices, err := f.client.Devices(ctx); err != nil || len(devices) != 0 {
+		t.Fatalf("devices %+v, %v", devices, err)
+	}
+}

@@ -15,6 +15,7 @@ Node commands:
   agent      run the agent (reconciler, local API and cluster)
   edge       serve the public listeners; SIGHUP replaces it without a gap
   panel      serve the administration panel
+  admin      the devices that reach the panel through its tunnel
   firewall   load the tenant firewall (murder-firewall.service runs it at boot)
   restore    put a backup in place of the node's database (agent stopped)
   cluster    show, start, join or leave a cluster of nodes
@@ -55,6 +56,8 @@ func run(args []string) error {
 		return runEdge(args[1:])
 	case "panel":
 		return runPanel(args[1:])
+	case "admin":
+		return runAdmin(args[1:])
 	case "firewall":
 		return runFirewall(args[1:])
 	case "app":

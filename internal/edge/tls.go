@@ -66,6 +66,17 @@ type Certificates struct {
 // NewTLS returns the TLS setup for the wildcard and apex names of
 // baseDomain, or nil when TLS is off.
 func NewTLS(ctx context.Context, config TLSConfig, baseDomain string, log *slog.Logger) (*Certificates, error) {
+	return newTLS(ctx, config, baseDomain, true, log)
+}
+
+// SharedTLS is NewTLS for a process beside the edge, such as the panel: it
+// serves the same certificate, and never creates the internal CA, which
+// the edge does; until then it fails.
+func SharedTLS(ctx context.Context, config TLSConfig, baseDomain string, log *slog.Logger) (*Certificates, error) {
+	return newTLS(ctx, config, baseDomain, false, log)
+}
+
+func newTLS(ctx context.Context, config TLSConfig, baseDomain string, createCA bool, log *slog.Logger) (*Certificates, error) {
 	names := []string{"*." + baseDomain, baseDomain}
 	switch config.Mode {
 	case TLSOff, "":
@@ -74,7 +85,7 @@ func NewTLS(ctx context.Context, config TLSConfig, baseDomain string, log *slog.
 		if config.Storage == "" {
 			return nil, errors.New("internal TLS needs storage")
 		}
-		issuer := &internalIssuer{dir: config.Storage, names: names, now: time.Now}
+		issuer := &internalIssuer{dir: config.Storage, names: names, now: time.Now, create: createCA}
 		if _, err := issuer.certificate(); err != nil {
 			return nil, err
 		}
@@ -173,6 +184,9 @@ type internalIssuer struct {
 	mu      sync.Mutex
 	current *tls.Certificate
 	expires time.Time
+	// create lets the first certificate create the CA; a process other
+	// than the edge never does, so two do not make two CAs at once.
+	create bool
 	// retryAt holds back the next renewal after one failed.
 	retryAt time.Time
 }
@@ -189,7 +203,7 @@ func (i *internalIssuer) certificate() (*tls.Certificate, error) {
 	}
 	// The CA is created on the first start only: a new one later would not
 	// be trusted by the clients that trust the first.
-	certificate, err := internalCertificate(i.dir, i.names, now, i.current == nil)
+	certificate, err := internalCertificate(i.dir, i.names, now, i.current == nil && i.create)
 	if err != nil {
 		i.retryAt = now.Add(renewRetry)
 		if i.current != nil && now.Before(i.expires) {

@@ -39,6 +39,18 @@ func Wildcard(baseDomain, zone string) (string, error) {
 	return "", fmt.Errorf("the base domain %s is not in the zone %s", baseDomain, zone)
 }
 
+// Relative is name relative to zone: "panel" for panel.example.com in
+// example.com.
+func Relative(name, zone string) (string, error) {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	zone = strings.ToLower(strings.TrimSuffix(zone, "."))
+	relative, ok := strings.CutSuffix(name, "."+zone)
+	if zone == "" || !ok || relative == "" {
+		return "", fmt.Errorf("the name %s is not in the zone %s", name, zone)
+	}
+	return relative, nil
+}
+
 // families splits addresses into the values of the A and of the AAAA
 // records, each sorted and without repeats.
 func families(addresses []netip.Addr) (v4, v6 []string) {

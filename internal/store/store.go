@@ -36,6 +36,9 @@ var ErrFrozen = errors.New("changes are frozen")
 // ErrInUse reports an app or a node that tenants still run.
 var ErrInUse = errors.New("in use")
 
+// ErrInvalid refuses input that is not well formed.
+var ErrInvalid = errors.New("invalid")
+
 // App is a spec shared by tenants: everything but the tenant's name. Its
 // image is pinned.
 type App struct {
@@ -170,6 +173,28 @@ type Node struct {
 	// Public are the node's public addresses, which the base domain's
 	// records name while it serves.
 	Public []netip.Addr `json:"public,omitempty"`
+	// Tunnel is the node's end of the panel's tunnel, once its panel ran.
+	Tunnel *Tunnel `json:"tunnel,omitempty"`
+}
+
+// Tunnel is a node's end of the panel's WireGuard tunnel.
+type Tunnel struct {
+	// Address is the node's address in the tunnel, where its panel is.
+	Address netip.Addr `json:"address"`
+	// Key is the node's WireGuard public key, in base64.
+	Key  string `json:"key"`
+	Port int    `json:"port"`
+}
+
+// Device may reach the panel through its tunnel.
+type Device struct {
+	Name string `json:"name"`
+	// Key is the device's WireGuard public key, in base64; its private key
+	// was shown once, when it was added, and kept nowhere.
+	Key       string     `json:"key"`
+	Address   netip.Addr `json:"address"`
+	CreatedAt time.Time  `json:"createdAt"`
+	CreatedBy string     `json:"createdBy"`
 }
 
 // Failed reports whether the node's tenants failed over and it has not
@@ -273,6 +298,14 @@ type Store interface {
 	Away(node string, until time.Time) error
 	// SetPublic records node's public addresses.
 	SetPublic(node string, addresses []netip.Addr) error
+	// SetTunnel records node's end of the panel's tunnel.
+	SetTunnel(node string, tunnel Tunnel) error
+	// Devices lists the devices that may reach the panel.
+	Devices() []Device
+	// AddDevice lets a device with WireGuard public key reach the panel,
+	// at the first free address of network from its 100th on.
+	AddDevice(name, key string, network netip.Prefix, actor string) (Device, error)
+	RemoveDevice(name, actor string) error
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error

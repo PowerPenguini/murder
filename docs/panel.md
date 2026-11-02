@@ -33,10 +33,15 @@ Each stage is one PR, reviewed and tested before the next.
    (nodes, tenants, their copies, recent events), a tenant's page and the
    audit log. On a unix socket only root can use, through an SSH tunnel,
    until accounts exist; it answers only as localhost.
-2. **Accounts:** passkeys, sessions, recovery codes, invitations
+2. **Accounts** (after the tunnel, see 3): passkeys, sessions, recovery codes, invitations
    (`murder admin invite NAME` for the first person, then from the panel).
-3. **The tunnel:** WireGuard in the panel process, devices and their QR
-   codes, the panel's name and certificate.
+3. **The tunnel:** WireGuard in the panel process (wireguard-go with a
+   userspace network stack), devices and their QR codes (`murder admin
+   device`), `murder admin connect` for computers without the app, HTTPS
+   with the wildcard certificate as `panel.<baseDomain>`, and the leader's
+   DNS records for that name (the tunnel addresses of the nodes that
+   serve). Done before accounts: passkeys are bound to the name they were
+   made for, so the panel has its final name first.
 4. **Live pages and tenant actions:** updates as they happen; create,
    suspend, resume, move, roll, archive, restore, purge; logs.
 5. **Cluster actions:** upgrades, drain and replace, a manual failover,

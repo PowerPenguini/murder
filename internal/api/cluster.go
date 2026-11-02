@@ -24,6 +24,8 @@ type Cluster interface {
 	StatusOn(ctx context.Context, node, tenant string, out any) error
 	// Ping reports whether node answers.
 	Ping(ctx context.Context, node string) error
+	// CatchUp applies here what the cluster has applied.
+	CatchUp() error
 }
 
 // JoinRequest asks the node to join the cluster of the node at Peer.

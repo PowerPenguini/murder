@@ -24,6 +24,7 @@ func newTestServer(t *testing.T, backend Backend) *httptest.Server {
 		t.Fatal(err)
 	}
 	s.now = func() time.Time { return demoNow }
+	s.Name = "panel.example.com"
 	server := httptest.NewServer(s.Handler())
 	t.Cleanup(server.Close)
 	return server
@@ -160,6 +161,7 @@ func TestOnlyLocalNamesAreAnswered(t *testing.T) {
 	server := newTestServer(t, Demo{Now: demoNow})
 	for host, want := range map[string]int{
 		"localhost:7480": http.StatusOK, "127.0.0.1:7480": http.StatusOK, "[::1]:7480": http.StatusOK, "localhost": http.StatusOK,
+		"panel.example.com": http.StatusOK, "PANEL.example.com.:443": http.StatusOK, "tenant.example.com": http.StatusMisdirectedRequest,
 		"evil.example:7480": http.StatusMisdirectedRequest, "203.0.113.7": http.StatusMisdirectedRequest, "localhost.evil.example": http.StatusMisdirectedRequest,
 	} {
 		request, _ := http.NewRequest(http.MethodGet, server.URL+"/", nil)

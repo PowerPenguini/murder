@@ -50,9 +50,11 @@ type Monitor struct {
 	// Interval is how often nodes are probed; 2 s if zero.
 	Interval time.Duration
 	// Records, if set, keeps the base domain's DNS records naming the
-	// public addresses of the nodes that serve.
-	Records records.Publisher
-	Now     func() time.Time
+	// public addresses of the nodes that serve; PanelRecords, the panel's
+	// name leading to their addresses in the panel's tunnel.
+	Records      records.Publisher
+	PanelRecords records.Publisher
+	Now          func() time.Time
 	// Wait waits d, or until ctx ends; a real wait if nil.
 	Wait func(ctx context.Context, d time.Duration) error
 
@@ -218,8 +220,8 @@ func (m *Monitor) Check(ctx context.Context) {
 	for i, node := range nodes {
 		heardNow[node.Name] = answered[i]
 	}
-	if addresses, term, write := m.serveLocked(now, self, all, heardNow, frozen, majority); write {
-		go m.publish(ctx, addresses, term)
+	if job, write := m.serveLocked(now, self, all, heardNow, frozen, majority); write {
+		go m.publish(ctx, job)
 	}
 	// A blocked failover ends once none of the tenants it would have
 	// promoted still runs on the node, as after an operator's failover.

@@ -527,16 +527,58 @@ one node, bootstrap there and join the others with new databases.
 `murder panel` serves a web panel over the agent's API: the cluster's nodes
 (up, down, failed, the leader), every tenant with its state and its copy, a
 tenant's runtime, spec, limits and environment, and the audit log. It is
-being built in stages ([docs/panel.md](docs/panel.md)); for now it only
-shows, and serves on a unix socket only root can use (`panel.socket`,
-/run/murder/panel.sock by default), since it has no accounts yet. Reach it
-through SSH, and open it as localhost (it answers no other name):
+built in stages ([docs/panel.md](docs/panel.md)); for now it only shows.
+Run it on every node (deploy/murder-panel.service).
 
-```bash
-ssh -L 7480:/run/murder/panel.sock root@node   # then open http://localhost:7480
+It is never on the internet. Every node serves it inside a WireGuard tunnel
+that runs in the panel process itself, so nothing changes on the host's
+network and tenants cannot reach it; only devices you add reach it:
+
+```yaml
+cluster:
+  publicAddresses: [203.0.113.10]   # the tunnel's endpoint
+panel:
+  tunnel:
+    address: 10.77.0.1              # this node's, different on every node, below .100
+    # network: 10.77.0.0/24         # the same on every node; devices get .100 and up
+    # port: 51820                   # UDP, open it in the provider's firewall
+  # name: panel.example.com         # panel.<baseDomain> by default
 ```
 
-To try it without a cluster: `go run ./internal/panel/demo`.
+The panel needs `edge.tls` (internal or acme): it serves HTTPS with the
+wildcard certificate, as `panel.<baseDomain>` (so no tenant may be named
+`panel`; rename one from before, or set `panel.name`). The nodes must be a
+cluster: the devices are kept in its state. Then, on any node:
+
+```bash
+sudo murder admin device add laptop          # a QR code for the WireGuard app
+sudo murder admin device add laptop -out laptop.conf
+sudo murder admin device list
+sudo murder admin device remove laptop       # shut out within seconds, during an upgrade too
+```
+
+The device's private key is in the QR code and the configuration, shown
+once and kept nowhere (`-out` only ever makes a new file, readable by you).
+A node that cannot read the devices as the cluster has them, cut off from
+it, lets no device in. Each node is a peer of its own, so the panel stays
+reachable through any node that is up. The panel's name must lead to the
+nodes' tunnel addresses: with `cluster.dns`, the leader keeps its records
+(of the nodes that serve), otherwise add them, or a hosts file entry. Some
+home routers drop DNS answers with private addresses; a hosts file entry
+works around that.
+
+On a computer without the WireGuard app:
+
+```bash
+murder admin connect -device laptop.conf     # then open https://panel.example.com:8443
+```
+
+It listens on 127.0.0.1:8443 and passes connections through the tunnel; add
+`127.0.0.1 panel.example.com` to the hosts file. As a last resort, root on a
+node reaches the panel on its unix socket (`panel.socket`) through SSH:
+`ssh -L 7480:/run/murder/panel.sock root@node`, then http://localhost:7480.
+
+To try the pages without a cluster: `go run ./internal/panel/demo`.
 
 ## Run tenants
 

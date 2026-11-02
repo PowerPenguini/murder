@@ -250,7 +250,7 @@ var (
 	tagRef      = regexp.MustCompile(`^` + repositoryName + `(?:` + imageTag + `)?$`)
 	placeholder = regexp.MustCompile(`\{\{[^}]*\}\}`)
 	knownHolder = map[string]bool{"{{name}}": true, "{{host}}": true, "{{url}}": true, "{{network}}": true}
-	reserved    = map[string]bool{"www": true, "api": true, "admin": true, "murder": true, "mail": true}
+	reserved    = map[string]bool{"www": true, "api": true, "admin": true, "murder": true, "mail": true, "panel": true}
 )
 
 // ValidLabel reports whether name has the shape of a tenant name: safe as a

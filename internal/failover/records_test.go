@@ -2,7 +2,9 @@ package failover
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/metrics"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // fakeRecords records what is published.
@@ -276,5 +279,32 @@ func TestAnOldLeadersWriteIsCancelled(t *testing.T) {
 			t.Fatal("the old leader's write was not cancelled")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The panel's name leads to the tunnel addresses of the nodes that serve
+// and run the panel; it is written with the base domain's records.
+func TestThePanelsNameFollowsTheNodes(t *testing.T) {
+	f := newFixture(t)
+	fake := withRecords(t, f)
+	panel := &fakeRecords{}
+	f.monitor.PanelRecords = panel
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	for i, name := range []string{"n1", "n2"} {
+		if err := f.store.SetTunnel(name, store.Tunnel{Address: netip.MustParseAddr(fmt.Sprintf("10.77.0.%d", i+1)), Key: key, Port: 51820}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.round(t)
+	f.advance(30 * time.Second)
+	f.round(t)
+	if !slices.Equal(panel.last(), []string{"10.77.0.1", "10.77.0.2"}) || !slices.Equal(fake.last(), all3) {
+		t.Fatalf("panel %v, base %v", panel.last(), fake.last())
+	}
+	f.down["n2"] = true
+	f.advance(30 * time.Second)
+	f.round(t)
+	if !slices.Equal(panel.last(), []string{"10.77.0.1"}) {
+		t.Fatalf("panel without n2: %v", panel.last())
 	}
 }

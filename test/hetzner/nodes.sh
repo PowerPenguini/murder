@@ -109,6 +109,9 @@ EOF
   if [[ -s $STATE/dns-zone ]]; then
     printf '  dns:\n    provider: hetzner\n    tokenFile: /etc/murder/hcloud.token\n'
   fi
+  # The panel, in its tunnel at 10.77.0.N for node nN.
+  local private; private=$(private_ip "$node")
+  printf 'panel:\n  tunnel:\n    address: 10.77.0.%s\n' "${private##*.}"
   cat <<EOF
 defaults: {memoryMB: 128, cpus: 1, pids: 256, diskGB: 2}
 reconcileInterval: 10s
@@ -191,7 +194,7 @@ cmd_deploy() {
 }
 
 start() {
-  on "$1" 'systemctl enable --now murder-firewall murder-agent murder-edge murder-backup.timer >/dev/null 2>&1
+  on "$1" 'systemctl enable --now murder-firewall murder-agent murder-edge murder-panel murder-backup.timer >/dev/null 2>&1
     for i in $(seq 60); do [ -S /run/murder/agent.sock ] && exit 0; sleep 1; done
     journalctl -u murder-agent -n 30 --no-pager; exit 1'
 }

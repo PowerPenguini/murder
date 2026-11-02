@@ -9,8 +9,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 10 in place.
-const schemaVersion = 11
+// versions 4 to 11 in place.
+const schemaVersion = 12
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -98,7 +98,20 @@ CREATE TABLE nodes (
 	copies_refused_until TEXT,
 	-- The node's public addresses, separated by spaces, which the
 	-- base domain's records name while it serves.
-	public     TEXT NOT NULL DEFAULT ''
+	public     TEXT NOT NULL DEFAULT '',
+	-- The node's end of the panel's WireGuard tunnel: its address in the
+	-- tunnel, its public key and its UDP port, separated by spaces.
+	tunnel     TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- The devices that may reach the panel through its tunnel: a WireGuard
+-- public key each, and its address in the tunnel.
+CREATE TABLE devices (
+	name       TEXT PRIMARY KEY,
+	key        TEXT NOT NULL UNIQUE,
+	address    TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL,
+	created_by TEXT NOT NULL
 ) STRICT;
 
 -- Sealed secret values, kept until a purge deletes the tenant.
@@ -248,6 +261,24 @@ func upgrade(db *sql.DB) error {
 	if version == 10 {
 		if _, err := tx.Exec(`ALTER TABLE nodes ADD COLUMN public TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
+		}
+		version = 11
+	}
+	// Version 12 keeps the panel's tunnel: each node's end and the devices.
+	if version == 11 {
+		for _, statement := range []string{
+			`ALTER TABLE nodes ADD COLUMN tunnel TEXT NOT NULL DEFAULT ''`,
+			`CREATE TABLE devices (
+				name       TEXT PRIMARY KEY,
+				key        TEXT NOT NULL UNIQUE,
+				address    TEXT NOT NULL UNIQUE,
+				created_at TEXT NOT NULL,
+				created_by TEXT NOT NULL
+			) STRICT`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

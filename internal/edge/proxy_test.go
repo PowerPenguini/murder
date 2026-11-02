@@ -350,7 +350,7 @@ func TestProxyCountsRequests(t *testing.T) {
 // is signed, by the same CA, once less than a third of its life is left.
 func TestInternalCertificateIsRenewed(t *testing.T) {
 	now := time.Now()
-	issuer := &internalIssuer{dir: t.TempDir(), names: []string{"*.example.com", "example.com"}, now: func() time.Time { return now }}
+	issuer := &internalIssuer{dir: t.TempDir(), names: []string{"*.example.com", "example.com"}, now: func() time.Time { return now }, create: true}
 	first, err := issuer.certificate()
 	if err != nil {
 		t.Fatal(err)
@@ -390,7 +390,7 @@ func TestCertmagicLogsGoToTheAgentLog(t *testing.T) {
 func TestInternalRenewalKeepsTheCA(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
-	issuer := &internalIssuer{dir: dir, names: []string{"*.example.com", "example.com"}, now: func() time.Time { return now }}
+	issuer := &internalIssuer{dir: dir, names: []string{"*.example.com", "example.com"}, now: func() time.Time { return now }, create: true}
 	first, err := issuer.certificate()
 	if err != nil {
 		t.Fatal(err)
@@ -465,5 +465,25 @@ func TestAHandoverWaitsForUpgradedConnections(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("still waiting after the connection closed")
+	}
+}
+
+// A process beside the edge serves the edge's internal certificate and
+// never creates the CA itself: two creating it at once could make two.
+func TestSharedTLSWaitsForTheEdgesCA(t *testing.T) {
+	dir := t.TempDir()
+	config := TLSConfig{Mode: TLSInternal, Storage: dir}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := SharedTLS(context.Background(), config, "example.com", log); err == nil {
+		t.Fatal("the CA was made beside the edge")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.pem")); err == nil {
+		t.Fatal("a CA file was written")
+	}
+	if _, err := NewTLS(context.Background(), config, "example.com", log); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SharedTLS(context.Background(), config, "example.com", log); err != nil {
+		t.Fatalf("with the edge's CA: %v", err)
 	}
 }
