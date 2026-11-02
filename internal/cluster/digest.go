@@ -15,8 +15,8 @@ import (
 const digestTimeout = 10 * time.Second
 
 // handleDigest answers this node's digest of the replicated state.
-func (c *Cluster) handleDigest(w http.ResponseWriter, _ *http.Request) {
-	digest, err := c.config.Store.Digest()
+func (c *Cluster) handleDigest(w http.ResponseWriter, r *http.Request) {
+	digest, err := c.config.Store.Digest(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -30,13 +30,13 @@ type Digests struct {
 	// diverged names each node compared, and whether its state differs from
 	// the leader's.
 	diverged map[string]bool
-	checked  time.Time
 }
 
-// Diverged returns, while this node leads the cluster, each node last
-// compared with it and whether that node's state differs; a node not
-// compared, as one of another release or one that did not answer, is not
-// named.
+// Diverged returns, while this node leads the cluster, each node compared
+// with it and whether that node's state differed when last compared: a
+// node not compared this time, as after a write in between, keeps what it
+// was found last. A node never compared, as one of another release, is
+// not named.
 func (d *Digests) Diverged() map[string]bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -56,7 +56,15 @@ func (c *Cluster) WatchDigests(ctx context.Context, interval time.Duration, d *D
 		}
 		found := c.CompareDigests(ctx)
 		d.mu.Lock()
-		d.diverged, d.checked = found, time.Now()
+		if found == nil {
+			// Only the leader compares: a node that does not lead says nothing.
+			d.diverged = nil
+		} else {
+			if d.diverged == nil {
+				d.diverged = map[string]bool{}
+			}
+			maps.Copy(d.diverged, found)
+		}
 		d.mu.Unlock()
 	}
 }
@@ -68,7 +76,7 @@ func (c *Cluster) CompareDigests(ctx context.Context) map[string]bool {
 	if !c.Leader() {
 		return nil
 	}
-	own, err := c.config.Store.Digest()
+	own, err := c.config.Store.Digest(ctx)
 	if err != nil {
 		c.config.Log.Warn("hash the replicated state", "error", err)
 		return nil
@@ -87,7 +95,8 @@ func (c *Cluster) CompareDigests(ctx context.Context) map[string]bool {
 		case errors.As(err, &peer) && peer.Status == http.StatusNotFound:
 			continue // a release that does not hash its state
 		case err != nil:
-			continue // asked again next time
+			c.config.Log.Warn("ask a node for the hash of its state", "node", node.Name, "error", err)
+			continue
 		case !own.Comparable(theirs):
 			continue // a write in between, or another schema
 		}

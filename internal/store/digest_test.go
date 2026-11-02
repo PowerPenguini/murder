@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -9,7 +10,7 @@ import (
 
 func digestOf(t *testing.T, st *SQLite) Digest {
 	t.Helper()
-	digest, err := st.Digest()
+	digest, err := st.Digest(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +63,32 @@ func TestDigestsOfTheSameStateAreTheSame(t *testing.T) {
 	if digestOf(t, replica).Hash != after.Hash {
 		t.Fatal("the replica's digest after the same write differs")
 	}
+	// The freeze is part of the state.
+	frozen := digestOf(t, origin)
+	if err := origin.Freeze("upgrade to x", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := origin.Thaw("alice"); err != nil {
+		t.Fatal(err)
+	}
+	after = digestOf(t, origin)
+	if digestOf(t, replica).Hash != after.Hash || after.Hash == frozen.Hash {
+		t.Fatal("a freeze and a thaw hash alike on both, and change the state")
+	}
+	db0, err := sql.Open("sqlite", dsn(originPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db0.Close()
+	if _, err := db0.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('cluster', 'drift')`); err != nil {
+		t.Fatal(err)
+	}
+	if digestOf(t, origin).Hash == after.Hash {
+		t.Fatal("the cluster's name is not hashed")
+	}
+	if _, err := db0.Exec(`DELETE FROM meta WHERE key = 'cluster'`); err != nil {
+		t.Fatal(err)
+	}
 	// A change no batch made shows, though the version is the same.
 	db, err := sql.Open("sqlite", dsn(originPath))
 	if err != nil {
@@ -78,13 +105,13 @@ func TestDigestsOfTheSameStateAreTheSame(t *testing.T) {
 }
 
 func TestDigestsOfOtherSchemasAreNotCompared(t *testing.T) {
-	a := Digest{Version: 3, Schema: 13, Hash: "x"}
-	for _, b := range []Digest{{Version: 3, Schema: 14, Hash: "x"}, {Version: 4, Schema: 13, Hash: "x"}, {Version: 3, Schema: 13}} {
+	a := Digest{Version: 3, Schema: 13, Format: 1, Hash: "x"}
+	for _, b := range []Digest{{Version: 3, Schema: 14, Format: 1, Hash: "x"}, {Version: 4, Schema: 13, Format: 1, Hash: "x"}, {Version: 3, Schema: 13, Format: 2, Hash: "x"}, {Version: 3, Schema: 13, Format: 1}} {
 		if a.Comparable(b) {
 			t.Fatalf("%+v compared with %+v", a, b)
 		}
 	}
-	if !a.Comparable(Digest{Version: 3, Schema: 13, Hash: "y"}) {
+	if !a.Comparable(Digest{Version: 3, Schema: 13, Format: 1, Hash: "y"}) {
 		t.Fatal("digests of one version and schema not compared")
 	}
 }
@@ -99,6 +126,13 @@ func TestNondeterministicStatementsAreRefused(t *testing.T) {
 		`UPDATE tenants SET generation = RANDOM ()`,
 		`INSERT INTO meta (key, value) VALUES ('x', last_insert_rowid())`,
 		`UPDATE meta SET value = sqlite_version() WHERE key = 'x'`,
+		`UPDATE tenants SET updated_at = date()`,
+		`UPDATE tenants SET updated_at = strftime('%s')`,
+		`UPDATE tenants SET updated_at = datetime(?, 'localtime')`,
+		`UPDATE tenants SET updated_at = datetime("now")`,
+		`UPDATE tenants SET generation = random/**/()`,
+		`DELETE FROM events WHERE id IN (SELECT id FROM events LIMIT 10)`,
+		`DELETE FROM tenants WHERE rowid = 1`,
 	} {
 		var tx recorder
 		if err := tx.Exec(query); !errors.Is(err, ErrNondeterministic) {
@@ -108,6 +142,10 @@ func TestNondeterministicStatementsAreRefused(t *testing.T) {
 		if err := batch.Check(); !errors.Is(err, ErrNondeterministic) {
 			t.Errorf("checked %s: %v", query, err)
 		}
+	}
+	// A LIMIT in a given order picks the same rows everywhere.
+	if err := (&recorder{}).Exec(`DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT 10)`); err != nil {
+		t.Fatal(err)
 	}
 	// A value that only names such a function is an argument, not SQL.
 	var tx recorder

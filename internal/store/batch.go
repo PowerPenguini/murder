@@ -18,17 +18,30 @@ var ErrSchema = errors.New("schema mismatch")
 // the nodes that apply it.
 var ErrNondeterministic = errors.New("nondeterministic statement")
 
-// nondeterministic matches what a statement of a batch may not use:
-// functions whose result differs between nodes, runs or releases, and the
-// current time. Every node applies a batch's statements itself, so each
-// must give every node the same result; a value such as the time is
-// computed once, by the writer, and passed as an argument.
-var nondeterministic = regexp.MustCompile(`(?i)\b(random|randomblob|changes|total_changes|last_insert_rowid|sqlite_version|sqlite_source_id|sqlite_offset)\s*\(|'now'|\bcurrent_(timestamp|date|time)\b`)
+// nondeterministic matches what a statement of a batch may not use, so
+// that every node that applies it gets the same result: functions whose
+// result differs between nodes, runs or releases; every date and time
+// function (with no time, 'now', or 'localtime', they read the node's
+// clock or zone; the writer computes times and passes them as arguments);
+// rowids, which differ once a node installed a snapshot; and comments,
+// which could hide a call. It is a lint for the store's own statements,
+// not a parser: a table or column named like such a function is refused
+// too, and none is.
+var nondeterministic = regexp.MustCompile(`(?i)\b(random|randomblob|changes|total_changes|last_insert_rowid|sqlite_version|sqlite_source_id|sqlite_offset|sqlite_compileoption_get|sqlite_compileoption_used|date|time|datetime|julianday|unixepoch|strftime|timediff)\s*\(|'now'|"now"|\bcurrent_(timestamp|date|time)\b|\b(rowid|_rowid_|oid)\b|/\*|--`)
+
+// limit and orderBy find a LIMIT that picks rows in no given order.
+var (
+	limit   = regexp.MustCompile(`(?i)\blimit\b`)
+	orderBy = regexp.MustCompile(`(?i)\border\s+by\b`)
+)
 
 // deterministic refuses a statement that may give nodes different results.
 func (s Statement) deterministic() error {
 	if use := nondeterministic.FindString(s.SQL); use != "" {
-		return fmt.Errorf("%w: it uses %s, which differs between nodes: %s", ErrNondeterministic, use, s.SQL)
+		return fmt.Errorf("%w: it uses %s, which may differ between nodes: %s", ErrNondeterministic, use, s.SQL)
+	}
+	if limit.MatchString(s.SQL) && !orderBy.MatchString(s.SQL) {
+		return fmt.Errorf("%w: it limits rows in no given order: %s", ErrNondeterministic, s.SQL)
 	}
 	return nil
 }
