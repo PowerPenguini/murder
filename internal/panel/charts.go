@@ -2,6 +2,9 @@ package panel
 
 import (
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/store"
@@ -228,3 +231,136 @@ func placementsOf(t tenantRow, nodes []nodeView) []placement {
 	}
 	return out
 }
+
+// lineChart is one measure over the kept day: a line per series (two at
+// most, the second the one to watch), a limit if it has one, and a hover
+// target per step.
+type lineChart struct {
+	Title string
+	// Now is the measure's last value, as text.
+	Now    string
+	Series []lineSeries
+	// Limit draws the limit's level, when it is within the chart.
+	Limit     *level
+	Top       string
+	Hover     []hoverStep
+	From, Mid string
+	Empty     bool
+}
+
+type lineSeries struct {
+	Label, Stroke string
+	// Line and Area are SVG paths: the line, broken where nothing was
+	// measured, and the wash under it.
+	Line, Area string
+}
+
+type level struct {
+	Y     float64
+	Label string
+}
+
+type hoverStep struct {
+	X, W  float64
+	Title string
+}
+
+const (
+	lineHeight = 150.0
+	lineTop    = 8.0 // room above the highest value
+)
+
+// sample is one step's value of each series, at a time.
+type sample struct {
+	At     time.Time
+	Values []float64
+}
+
+// newLineChart draws samples over the day ending with the step now runs
+// in. limit is drawn as a level when positive; format says a value, for
+// the axis, the hover and the last value.
+func newLineChart(title string, labels []string, samples []sample, limit float64, now time.Time, step time.Duration, format func(float64) string) lineChart {
+	chart := lineChart{Title: title, Empty: len(samples) == 0}
+	end := now.Truncate(step).Add(step)
+	start := end.Add(-24 * time.Hour)
+	chart.From, chart.Mid = hourLabel(start), hourLabel(start.Add(12*time.Hour))
+	top := limit
+	for _, s := range samples {
+		for _, v := range s.Values {
+			top = max(top, v)
+		}
+	}
+	if top <= 0 {
+		top = 1
+	}
+	top *= 1.08
+	y := func(v float64) float64 { return lineTop + (lineHeight-lineTop)*(1-v/top) }
+	x := func(t time.Time) float64 { return chartWidth * t.Sub(start).Seconds() / end.Sub(start).Seconds() }
+	strokes := []string{ink2, ink1}
+	for i, label := range labels {
+		series := lineSeries{Label: label, Stroke: strokes[min(i, len(strokes)-1)]}
+		var line, area strings.Builder
+		var run []string
+		flush := func() {
+			if len(run) == 0 {
+				return
+			}
+			line.WriteString("M" + strings.Join(run, "L"))
+			first, last := run[0], run[len(run)-1]
+			firstX, _, _ := strings.Cut(first, ",")
+			lastX, _, _ := strings.Cut(last, ",")
+			area.WriteString("M" + firstX + "," + f(lineHeight) + "L" + strings.Join(run, "L") + "L" + lastX + "," + f(lineHeight) + "Z")
+			run = run[:0]
+		}
+		var previous time.Time
+		for _, s := range samples {
+			if s.At.Before(start) {
+				continue
+			}
+			// A step not measured breaks the line.
+			if !previous.IsZero() && s.At.Sub(previous) > step {
+				flush()
+			}
+			// A point sits at the middle of its step.
+			run = append(run, f(x(s.At.Add(step/2)))+","+f(y(s.Values[i])))
+			previous = s.At
+		}
+		flush()
+		series.Line, series.Area = line.String(), area.String()
+		chart.Series = append(chart.Series, series)
+	}
+	if limit > 0 {
+		chart.Limit = &level{Y: y(limit), Label: "limit " + format(limit)}
+	}
+	// The highest value names the top of the scale, unless the limit is it.
+	if limit <= 0 || top/1.08 > limit*1.05 {
+		chart.Top = format(top / 1.08)
+	}
+	slot := chartWidth / float64(int(24*time.Hour/step))
+	for _, s := range samples {
+		if s.At.Before(start) {
+			continue
+		}
+		var parts []string
+		for i, label := range labels {
+			parts = append(parts, format(s.Values[i])+" "+label)
+		}
+		chart.Hover = append(chart.Hover, hoverStep{X: x(s.At), W: slot, Title: hourLabel(s.At) + ": " + strings.Join(parts, ", ")})
+	}
+	if len(samples) > 0 {
+		last := samples[len(samples)-1]
+		var parts []string
+		for i, label := range labels {
+			if len(labels) == 1 {
+				parts = append(parts, format(last.Values[i]))
+			} else {
+				parts = append(parts, format(last.Values[i])+" "+label)
+			}
+		}
+		chart.Now = strings.Join(parts, " · ")
+	}
+	return chart
+}
+
+// f writes a coordinate, to a tenth.
+func f(v float64) string { return strconv.FormatFloat(math.Round(v*10)/10, 'f', -1, 64) }

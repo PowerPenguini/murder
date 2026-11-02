@@ -30,7 +30,12 @@ the audit log as `<person> via murder-panel`.
   by state, each node's tenants, copies and reserved memory, where each
   tenant runs and keeps its copy (a column per node), the events of the
   last day by hour, a tenant's of the last fortnight by day, and each
-  app's tenants. A tooltip names every mark; the tables stay beside them. The mark is a crow's head
+  app's tenants. A tooltip names every mark; the tables stay beside them.
+  What tenants use (see the README's "Use") shows as each tenant's memory
+  and CPU against its limits and its requests a minute, each node's CPU
+  and memory, and on a tenant's page its last day: CPU and memory against
+  their limits, requests and errors, the 95th percentile of its response
+  time, network and disk, and its data against its disk limit. The mark is a crow's head
   with two copies behind it, in one colour (`static/crow.svg`; the head
   alone for the tab icon, `static/icon.svg`). No JavaScript frameworks and
   nothing loaded from elsewhere (a strict CSP, so no inline styles); pages

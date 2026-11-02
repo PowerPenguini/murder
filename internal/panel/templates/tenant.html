@@ -106,6 +106,13 @@
   </div>
 </section>
 
+{{with $d.Usage}}
+<section>
+  <div class="head"><h2>Use, last 24 hours</h2>{{with .DataText}}<span class="dim">data {{.}}</span>{{end}}</div>
+  <div class="charts">{{range .Charts}}{{template "line" .}}{{end}}</div>
+</section>
+{{end}}
+
 <section>
   <div class="head"><h2>Environment</h2></div>
   <table class="kv">
@@ -116,6 +123,7 @@
     </tbody>
   </table>
 </section>
+
 
 <section>
   <div class="head"><h2>Activity, last 14 days</h2><span class="dim">{{$d.Activity.Total}} events{{if $d.Activity.Partial}}, the oldest days not all read{{end}}</span></div>

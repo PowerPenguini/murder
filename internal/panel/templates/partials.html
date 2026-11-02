@@ -33,3 +33,23 @@
 {{end}}
 
 {{define "swatch"}}<svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><rect x="1" y="4" width="12" height="6" fill="{{.}}"/></svg>{{end}}
+
+{{define "line"}}
+<figure class="line">
+  <figcaption><span class="caps">{{.Title}}</span>{{with .Now}}<span class="now">{{.}}</span>{{end}}</figcaption>
+  {{if .Empty}}<p class="empty">Not measured yet: the agent measures every 15 seconds, and keeps the day since it started.</p>{{else}}
+  <svg class="linechart" viewBox="0 -14 1000 186" role="img" aria-label="{{.Title}}, the last 24 hours">
+    <line x1="0" y1="150" x2="1000" y2="150" stroke="#262626" stroke-width="1" vector-effect="non-scaling-stroke"/>
+    <line x1="0" y1="8" x2="1000" y2="8" stroke="#141414" stroke-width="1" vector-effect="non-scaling-stroke"/>
+    {{with .Top}}<text x="0" y="2" class="tick">{{.}}</text>{{end}}
+    {{with .Limit}}<line x1="0" y1="{{.Y}}" x2="1000" y2="{{.Y}}" stroke="#4a4a4a" stroke-width="1" vector-effect="non-scaling-stroke"/><text x="1000" y="2" class="tick" text-anchor="end">{{.Label}}</text>{{end}}
+    {{range .Series}}<path d="{{.Area}}" fill="{{.Stroke}}" fill-opacity="0.08"/><path d="{{.Line}}" fill="none" stroke="{{.Stroke}}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>{{end}}
+    {{range .Hover}}<rect x="{{.X}}" y="0" width="{{.W}}" height="150" fill="transparent"><title>{{.Title}}</title></rect>{{end}}
+    <text x="0" y="172" class="tick">{{.From}}</text>
+    <text x="500" y="172" class="tick" text-anchor="middle">{{.Mid}}</text>
+    <text x="1000" y="172" class="tick" text-anchor="end">now</text>
+  </svg>
+  {{if gt (len .Series) 1}}<div class="legend">{{range .Series}}<span>{{template "swatch" .Stroke}}{{.Label}}</span>{{end}}</div>{{end}}
+  {{end}}
+</figure>
+{{end}}
