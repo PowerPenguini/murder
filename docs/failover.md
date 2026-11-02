@@ -269,6 +269,36 @@ cluster:
      `cluster failover -powered-off`.
 - **Afterwards**, every test server is deleted.
 
+### Measured on Hetzner, 2 November 2026
+
+Three cpx02 nodes (1 vCPU, 1 GB) in fsn1, nbg1 and hel1 and a client in nbg1; the counter
+writes about 5 times a second, alternating between the nodes' edges.
+
+| Scenario | Clients cut off | Acknowledged writes lost |
+| --- | --- | --- |
+| Steady state | none; replica lag 1–13 s | none |
+| Hard power-off of a node | 56.7 s | 31 (about 6 s) |
+| Partition of a node that keeps serving | 34.9 s | 39 (acknowledged by the cut-off node until it was off) |
+| Power-off of the node running every tenant | 55.8 s | 3 |
+| Power-off of the leader | 64.1 s (new leader after 4 s) | 3 |
+| Partition of the leader | 27.1 s | 48 (as above) |
+| Move onto the replica's node | none | none |
+| No provider, then `cluster failover -powered-off` | until the operator acts | none |
+
+In every power-off the leader called Hetzner's API about 32 s after the
+node's last answer, had the power-off confirmed within 10 s, and promoted
+60 s after the last answer. A cut-off leader powered off no one. Nodes
+powered on again put their old data aside (it held the writes acknowledged
+in isolation), served nothing stale, and rejoined. Rolling upgrades with
+failover enabled powered off no one.
+
+The tests found, and these PRs fix: sends to an unreachable replica that
+held up all replication and placement for over two minutes (connections
+between nodes now time out); a node back from the dead that sent tenants
+from its old state before catching up; a replica refusing a copy it had
+just been given, before applying that; and the blocked-failover alert
+staying on after an operator's failover.
+
 ## Delivery
 
 1. **Replication:**
