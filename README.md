@@ -522,6 +522,22 @@ runs no tenant, archived ones included. A backup is restored into a cluster
 by rebuilding it: move the cluster directory aside on every node, restore on
 one node, bootstrap there and join the others with new databases.
 
+## The administration panel
+
+`murder panel` serves a web panel over the agent's API: the cluster's nodes
+(up, down, failed, the leader), every tenant with its state and its copy, a
+tenant's runtime, spec, limits and environment, and the audit log. It is
+being built in stages ([docs/panel.md](docs/panel.md)); for now it only
+shows, and serves on a unix socket only root can use (`panel.socket`,
+/run/murder/panel.sock by default), since it has no accounts yet. Reach it
+through SSH, and open it as localhost (it answers no other name):
+
+```bash
+ssh -L 7480:/run/murder/panel.sock root@node   # then open http://localhost:7480
+```
+
+To try it without a cluster: `go run ./internal/panel/demo`.
+
 ## Run tenants
 
 A tenant runs an **app**: a spec shared by every tenant of it, kept in git and

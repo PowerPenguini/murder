@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" shape-rendering="geometricPrecision">
+  <title>Murder</title>
+  <!-- A crow on a perch, cut from flat facets. -->
+  <polygon fill="#f4f4f4" points="62,17 49,12 44,8 37,10 33,18 24,24 8,40 1,52 10,50 22,44 34,41 42,33 47,22 50,18"/>
+  <polygon fill="#d9d9d9" points="24,24 33,18 40,23 26,30"/>
+  <polygon fill="#bdbdbd" points="26,30 40,23 37,35 18,41"/>
+  <polygon fill="#9a9a9a" points="18,41 37,35 34,41 22,44"/>
+  <polygon fill="#e8e8e8" points="49,12 62,17 50,18"/>
+  <polygon fill="#000" points="44,13 45.5,11.5 47,13 45.5,14.5"/>
+  <polygon fill="#f4f4f4" points="27,43 30,43 31,56 29,56"/>
+  <polygon fill="#f4f4f4" points="32,42 34,42 36,56 34,56"/>
+  <rect fill="#f4f4f4" x="14" y="56" width="36" height="1.6"/>
+</svg>

@@ -1,0 +1,77 @@
+{{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}
+<div class="title">
+  <h1>{{$t.Spec.Name}}</h1>
+  <span class="tag {{$d.State.Kind}}">{{$d.State.Label}}</span>
+  <span class="sub">app {{$t.App}} · on {{$t.Node}} · <a href="{{$t.URL}}">{{$t.Host}}</a></span>
+</div>
+
+<section>
+<div class="panes">
+  <div class="pane">
+    <div class="label">runtime</div>
+    <dl>
+      <dt>node</dt><dd>{{$t.Node}}</dd>
+      <dt>image</dt><dd title="{{$t.Spec.Image}}">{{short $t.Spec.Image}}</dd>
+      <dt>generation</dt><dd class="mono-num">{{$t.Generation}}</dd>
+      {{with $t.Status}}
+      <dt>phase</dt><dd>{{.Phase}}</dd>
+      <dt>healthy</dt><dd>{{if .Healthy}}yes{{else}}no{{end}}</dd>
+      <dt>restarts</dt><dd class="mono-num">{{.Restarts}}</dd>
+      {{with .LastExit}}<dt>last exit</dt><dd>{{.}}</dd>{{end}}
+      {{with .Message}}<dt>message</dt><dd>{{.}}</dd>{{end}}
+      {{with .Warning}}<dt>warning</dt><dd>{{.}}</dd>{{end}}
+      <dt>checked</dt><dd>{{ago .CheckedAt}} ago</dd>
+      {{else}}
+      <dt>status</dt><dd class="dim">{{if $t.Archived}}archived: runs nowhere{{else}}its node did not answer{{end}}</dd>
+      {{end}}
+    </dl>
+  </div>
+  <div class="pane">
+    <div class="label">copy</div>
+    <dl>
+      <dt>replica</dt><dd><span class="tag {{if eq $d.Replica.Kind "ok"}}plain{{else}}{{$d.Replica.Kind}}{{end}}">{{$d.Replica.Label}}</span></dd>
+      <dt>can take over</dt><dd>{{if $t.ReplicaReady}}yes{{else}}no{{end}}</dd>
+      {{with $t.ReplicaNext}}<dt>moving to</dt><dd>{{.}}</dd>{{end}}
+      <dt>last match</dt><dd>{{if $t.ReplicaSyncedAt.IsZero}}<span class="dim">ask its node</span>{{else}}{{ago $t.ReplicaSyncedAt}} ago{{end}}</dd>
+    </dl>
+  </div>
+  <div class="pane">
+    <div class="label">spec</div>
+    <dl>
+      <dt>port</dt><dd class="mono-num">{{limit $t.Spec.Port}}</dd>
+      <dt>health</dt><dd>{{if $t.Spec.HealthPath}}{{$t.Spec.HealthPath}}{{else}}—{{end}}</dd>
+      <dt>data</dt><dd>{{if $t.Spec.DataPath}}{{$t.Spec.DataPath}}{{else}}—{{end}}</dd>
+      <dt>user</dt><dd>{{$t.Spec.User}}</dd>
+      <dt>root fs</dt><dd>{{if $t.Spec.WritableRoot}}writable{{else}}read-only{{end}}</dd>
+    </dl>
+  </div>
+  <div class="pane">
+    <div class="label">limits</div>
+    <dl>
+      <dt>memory</dt><dd class="mono-num">{{limit $t.Spec.Limits.MemoryMB}} MB</dd>
+      <dt>cpus</dt><dd class="mono-num">{{limit $t.Spec.Limits.CPUs}}</dd>
+      <dt>pids</dt><dd class="mono-num">{{limit $t.Spec.Limits.PIDs}}</dd>
+      <dt>disk</dt><dd class="mono-num">{{limit $t.Spec.Limits.DiskGB}} GB</dd>
+    </dl>
+  </div>
+</div>
+</section>
+
+<section>
+  <h2>environment</h2>
+  <table>
+    <thead><tr><th>name</th><th>value</th></tr></thead>
+    <tbody>
+    {{range $d.Env}}<tr><td>{{.Key}}</td><td class="dim">{{.Value}}</td></tr>{{end}}
+    {{range $k, $v := $t.Spec.Secrets}}<tr><td>{{$k}}</td><td><span class="tag mute">secret · {{$v.Kind}}</span></td></tr>{{end}}
+    {{if and (not $d.Env) (not $t.Spec.Secrets)}}<tr><td colspan="2" class="empty">none</td></tr>{{end}}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>events</h2>
+  {{template "events" $d.Events}}
+  <div class="more"><a href="/events?tenant={{$t.Spec.Name}}">all events of {{$t.Spec.Name}} →</a></div>
+</section>
+{{end}}

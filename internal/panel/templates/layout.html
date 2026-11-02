@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>{{.Title}} · murder</title>
+<link rel="icon" href="/static/crow.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/panel.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="/"><img src="/static/crow.svg" alt=""><span class="word">MURDER</span><span class="cursor"></span></a>
+  <div class="meta">
+    {{with .Cluster.Cluster}}<span>cluster <b>{{.}}</b></span>{{end}}
+    <span>node <b>{{.Cluster.Self}}</b></span>
+    {{with .Cluster.Leader}}<span>leader <b>{{.}}</b></span>{{end}}
+    <span>{{.Now.UTC.Format "15:04:05"}} <b>utc</b></span>
+  </div>
+</header>
+<nav>
+  <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
+  <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
+</nav>
+{{with .Cluster.Frozen}}<div class="frozen">changes frozen — {{.}}</div>{{end}}
+<main>
+{{template "content" .}}
+</main>
+<footer>murder · a murder of crows keeps your tenants · rendered on {{.Cluster.Self}} at {{.Now.UTC.Format "2006-01-02 15:04:05"}}Z</footer>
+</body>
+</html>

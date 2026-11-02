@@ -177,6 +177,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tenants/{name}/move", s.move)
 	mux.HandleFunc("GET /v1/tenants/{name}/logs", s.logs)
 	mux.HandleFunc("GET /v1/events", s.events)
+	mux.HandleFunc("GET /v1/nodes", s.nodes)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
 	mux.HandleFunc("GET /v1/backup", s.backup)
 	mux.HandleFunc("POST /v1/backups/run", rootOnly(s.runBackups))

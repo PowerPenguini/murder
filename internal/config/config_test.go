@@ -222,3 +222,14 @@ func TestDNSRecords(t *testing.T) {
 		}
 	}
 }
+
+// The panel serves on a unix socket until it has accounts of its own.
+func TestThePanelServesOnASocket(t *testing.T) {
+	agent, err := Parse([]byte("baseDomain: example.com\n"))
+	if err != nil || agent.Panel.Socket != "/run/murder/panel.sock" {
+		t.Fatalf("default: %q, %v", agent.Panel.Socket, err)
+	}
+	if _, err := Parse([]byte("baseDomain: example.com\npanel: {socket: panel.sock}\n")); err == nil || !strings.Contains(err.Error(), "panel.socket") {
+		t.Errorf("a relative socket: %v", err)
+	}
+}

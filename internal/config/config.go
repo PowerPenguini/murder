@@ -65,6 +65,9 @@ type Agent struct {
 	// an S3 bucket.
 	Backups *Backups `yaml:"backups"`
 
+	// Panel configures "murder panel", the administration panel.
+	Panel Panel `yaml:"panel"`
+
 	// Defaults fill in tenant limits left at zero. Disk use is unlimited
 	// unless diskGB is set (with the zfs driver).
 	Defaults          spec.Limits `yaml:"defaults"`
@@ -156,6 +159,14 @@ type Cluster struct {
 	// DNS, if set, has the leader keep the base domain's wildcard records
 	// naming the public addresses of the nodes that serve.
 	DNS *DNS `yaml:"dns"`
+}
+
+// Panel is where the administration panel serves.
+type Panel struct {
+	// Socket is the unix socket the panel serves on, readable by root
+	// only, reached through an SSH tunnel until the panel has accounts of
+	// its own.
+	Socket string `yaml:"socket"`
 }
 
 // DNS reaches the provider of the base domain's zone.
@@ -282,6 +293,9 @@ func Parse(data []byte) (Agent, error) {
 	if err := strictyaml.Decode(data, &agent); err != nil && !errors.Is(err, io.EOF) {
 		return Agent{}, fmt.Errorf("parse config: %w", err)
 	}
+	if agent.Panel.Socket == "" {
+		agent.Panel.Socket = "/run/murder/panel.sock"
+	}
 	if agent.Cluster != nil {
 		if agent.Cluster.Dir == "" {
 			agent.Cluster.Dir = "/var/lib/murder/cluster"
@@ -330,6 +344,9 @@ func (a Agent) Validate() error {
 	}
 	if a.Backups != nil {
 		problems = append(problems, a.Backups.problems(a.Volumes.Driver)...)
+	}
+	if !strings.HasPrefix(a.Panel.Socket, "/") {
+		problems = append(problems, "panel.socket must be an absolute path")
 	}
 	if d := a.Cluster; d != nil && d.DNS != nil && a.BaseDomain != "" {
 		if _, err := records.Wildcard(a.BaseDomain, d.DNS.Zone); err != nil {

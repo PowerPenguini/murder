@@ -1,0 +1,58 @@
+{{define "content"}}{{$d := .Data}}
+<div class="stats">
+  <div class="stat"><div class="label">nodes up</div><div class="n mono-num">{{template "upcount" $d.Nodes}}<small>/{{len $d.Nodes}}</small></div></div>
+  <div class="stat"><div class="label">tenants</div><div class="n mono-num">{{$d.Live}}<small> live</small></div></div>
+  <div class="stat"><div class="label">healthy</div><div class="n mono-num">{{$d.Healthy}}<small>/{{$d.Serving}}</small></div></div>
+  <div class="stat {{if $d.Unprotected}}alert{{end}}"><div class="label">without a ready copy</div><div class="n mono-num">{{$d.Unprotected}}</div></div>
+</div>
+
+<section>
+  <h2>nodes</h2>
+  <div class="nodes">
+  {{range $d.Nodes}}
+    <div class="node {{if ne .State.Kind "ok"}}down{{end}}">
+      <div class="head">
+        <span class="name">{{.Name}}</span>
+        <span>{{if .Leader}}<span class="tag plain">leader</span> {{end}}<span class="tag {{.State.Kind}}">{{.State.Label}}</span></span>
+      </div>
+      <dl>
+        <dt>public</dt><dd>{{addrs .NodeState}}</dd>
+        <dt>private</dt><dd class="dim">{{if .Address}}{{.Address}}{{else}}—{{end}}</dd>
+        <dt>tenants</dt><dd class="mono-num">{{.Tenants}}</dd>
+        <dt>copies</dt><dd class="mono-num">{{.Copies}}</dd>
+        {{if not .FailedAt.IsZero}}<dt>failed</dt><dd>{{ago .FailedAt}} ago</dd>{{end}}
+        {{if .Self}}<dt>you</dt><dd class="dim">asking this node</dd>{{end}}
+      </dl>
+    </div>
+  {{end}}
+  </div>
+</section>
+
+<section>
+  <h2>tenants</h2>
+  <table>
+    <thead><tr><th>name</th><th>app</th><th>node</th><th>state</th><th>copy</th><th class="num hide-narrow">restarts</th><th class="hide-narrow">url</th></tr></thead>
+    <tbody>
+    {{range $d.Tenants}}
+      <tr>
+        <td><a href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
+        <td class="dim">{{.App}}</td>
+        <td>{{.Node}}</td>
+        <td><span class="tag {{.State.Kind}}">{{.State.Label}}</span></td>
+        <td><span class="tag {{if eq .Replica.Kind "ok"}}plain{{else}}{{.Replica.Kind}}{{end}}">{{.Replica.Label}}</span></td>
+        <td class="num hide-narrow">{{with .Status}}{{.Restarts}}{{else}}—{{end}}</td>
+        <td class="dim hide-narrow">{{.Host}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="7" class="empty">no tenants yet</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>recent events</h2>
+  {{template "events" $d.Events}}
+  <div class="more"><a href="/events">all events →</a></div>
+</section>
+{{end}}
