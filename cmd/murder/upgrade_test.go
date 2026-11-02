@@ -24,14 +24,13 @@ import (
 	"github.com/PowerPenguini/murder/internal/upgrade"
 )
 
-// upgradeAgent fakes a cluster of three nodes for "murder upgrade": refuse
-// names nodes that refuse the binary, stuck nodes that never come back.
+// upgradeAgent fakes a cluster of three nodes behind the agent's API, so
+// "murder upgrade" is tested over the wire; internal/clusterops tests what
+// an upgrade does. refuse names nodes that refuse the binary.
 type upgradeAgent struct {
 	mu        sync.Mutex
 	running   map[string]string
 	refuse    map[string]bool
-	stuck     map[string]bool
-	down      map[string]bool
 	installed []string
 	frozen    bool
 	thawed    int
@@ -54,9 +53,6 @@ func (a *upgradeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.frozen = false
 		a.thawed++
 		w.WriteHeader(http.StatusNoContent)
-	case a.down[node]:
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte(`{"error":"node does not answer"}`))
 	case r.Method == http.MethodGet:
 		now := time.Now()
 		_ = json.NewEncoder(w).Encode(upgrade.Info{Node: node, Version: upgrade.Version{Binary: a.running[node], Schema: 5}, Started: now.Add(-time.Second), LastPass: now})
@@ -69,9 +65,7 @@ func (a *upgradeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.installed = append(a.installed, node)
-		if !a.stuck[node] {
-			a.running[node] = r.Header.Get(api.ShaHeader)
-		}
+		a.running[node] = r.Header.Get(api.ShaHeader)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -115,63 +109,6 @@ func TestARefusalBeforeAnyNodeChangedThaws(t *testing.T) {
 	err := upgradeCluster(context.Background(), client, binary, 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "no node was upgraded; changes are taken again") || agent.frozen {
 		t.Fatalf("upgrade: %v, frozen %v", err, agent.frozen)
-	}
-}
-
-func TestChangesStayFrozenOnceNodesDiffer(t *testing.T) {
-	// n3 refuses after n2 took the binary: two releases run.
-	agent := &upgradeAgent{running: map[string]string{"n1": "old", "n2": "old", "n3": "old"}, refuse: map[string]bool{"n3": true}}
-	client, binary := startUpgradeAgent(t, agent)
-	capture(t)
-	err := upgradeCluster(context.Background(), client, binary, 5*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "changes stay frozen") || !agent.frozen {
-		t.Fatalf("upgrade: %v, frozen %v", err, agent.frozen)
-	}
-	// A node that does not come back keeps them frozen too.
-	agent = &upgradeAgent{running: map[string]string{"n1": "old", "n2": "old", "n3": "old"}, stuck: map[string]bool{"n2": true}}
-	client, binary = startUpgradeAgent(t, agent)
-	err = upgradeCluster(context.Background(), client, binary, 2*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "did not come back") || !strings.Contains(err.Error(), "murder.prev upgrade rollback") || !agent.frozen {
-		t.Fatalf("upgrade: %v, frozen %v", err, agent.frozen)
-	}
-}
-
-func TestAResumedUpgradeSkipsNodesThatRunTheBinary(t *testing.T) {
-	agent := &upgradeAgent{running: map[string]string{"n1": "old", "n2": "old", "n3": "old"}}
-	client, binary := startUpgradeAgent(t, agent)
-	sum, _ := upgrade.Hash(binary)
-	agent.running["n2"] = sum // upgraded before the upgrade stopped
-	agent.frozen = true
-	capture(t)
-	if err := upgradeCluster(context.Background(), client, binary, 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(agent.installed, []string{"n3", "n1"}) || agent.frozen {
-		t.Fatalf("installed %v, frozen %v", agent.installed, agent.frozen)
-	}
-}
-
-// A node that does not answer stops the upgrade before anything changed,
-// changes not frozen.
-func TestANodeThatDoesNotAnswerFreezesNothing(t *testing.T) {
-	agent := &upgradeAgent{running: map[string]string{"n1": "old", "n2": "old", "n3": "old"}, down: map[string]bool{"n3": true}}
-	client, binary := startUpgradeAgent(t, agent)
-	capture(t)
-	err := upgradeCluster(context.Background(), client, binary, 5*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "nothing was changed") || agent.frozen || len(agent.installed) != 0 {
-		t.Fatalf("upgrade: %v, frozen %v, installed %v", err, agent.frozen, agent.installed)
-	}
-}
-
-// An upgrade that took over a stopped one does not take changes again when
-// its first node refuses: the nodes ran different binaries before it.
-func TestARefusalLeavesNodesThatDifferFrozen(t *testing.T) {
-	agent := &upgradeAgent{running: map[string]string{"n1": "old", "n2": "x", "n3": "old"}, refuse: map[string]bool{"n2": true}, frozen: true}
-	client, binary := startUpgradeAgent(t, agent)
-	capture(t)
-	err := upgradeCluster(context.Background(), client, binary, 5*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "changes stay frozen") || !agent.frozen || agent.thawed != 0 {
-		t.Fatalf("upgrade: %v, frozen %v, thawed %d", err, agent.frozen, agent.thawed)
 	}
 }
 
