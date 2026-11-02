@@ -48,16 +48,18 @@ type Server struct {
 	// person signed in; TunnelNetwork is where devices get addresses.
 	Access        func(actor string) AccessAgent
 	TunnelNetwork netip.Prefix
-	backend       Backend
-	log           *slog.Logger
-	now           func() time.Time
-	pages         map[string]*template.Template
+	// Actions, if set, acts on tenants for the person signed in.
+	Actions func(actor string) ActionAgent
+	backend Backend
+	log     *slog.Logger
+	now     func() time.Time
+	pages   map[string]*template.Template
 }
 
 // New returns a panel asking backend.
 func New(backend Backend, log *slog.Logger) (*Server, error) {
 	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}}
-	for _, page := range []string{"overview", "tenant", "events", "error", "login", "enroll", "access"} {
+	for _, page := range []string{"overview", "tenant", "events", "error", "login", "enroll", "access", "logs"} {
 		t, err := template.New("layout.html").Funcs(s.funcs()).ParseFS(templateFiles, "templates/layout.html", "templates/partials.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("panel template %s: %w", page, err)
@@ -80,6 +82,11 @@ func (s *Server) Handler() http.Handler {
 	if s.Access != nil {
 		pages.HandleFunc("GET /access", s.access)
 		pages.HandleFunc("POST /access", s.access)
+	}
+	if s.Actions != nil {
+		pages.HandleFunc("POST /tenants", s.createTenant)
+		pages.HandleFunc("POST /tenants/{name}", s.tenantAction)
+		pages.HandleFunc("GET /tenants/{name}/logs", s.logs)
 	}
 	if s.Auth != nil {
 		mux.HandleFunc("GET /login", s.gate("login", "Sign in"))
@@ -243,7 +250,11 @@ type page struct {
 	User string
 	// Gate marks a page of signing in: no navigation.
 	Gate bool
-	Data any
+	// Acts says the person may act, not only look; Done and Problem are
+	// what their last action did.
+	Acts          bool
+	Done, Problem string
+	Data          any
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, section string, data any) {
@@ -254,7 +265,19 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, sec
 		s.fail(w, r, err)
 		return
 	}
-	s.write(w, name, page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Data: data}, http.StatusOK)
+	s.write(w, name, s.pageFor(w, r, title, section, nodes, data), http.StatusOK)
+}
+
+// pageFor is a page's layout data: who looks, whether they may act, and
+// what their last action did.
+func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section string, nodes api.Nodes, data any) page {
+	p := page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Data: data}
+	// A page following the cluster leaves what an action did to the page
+	// it was meant for.
+	if r.Header.Get("X-Murder-Live") == "" {
+		p.Done, p.Problem = takeFlash(w, r)
+	}
+	return p
 }
 
 func (s *Server) write(w http.ResponseWriter, name string, p page, status int) {

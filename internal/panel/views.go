@@ -91,6 +91,8 @@ type overviewData struct {
 	// suspended), those running healthy, and those without a copy that
 	// could take over.
 	Live, Serving, Healthy, Unprotected int
+	// Apps a tenant may be created of.
+	Apps []string
 }
 
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +144,14 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			n.Copies++
 		}
 	}
-	s.write(w, "overview", page{Title: "Overview", Section: "overview", Cluster: nodes, Now: now, User: userOf(r), Data: data}, http.StatusOK)
+	if s.Actions != nil {
+		if apps, err := s.Actions(s.actor(userOf(r))).Apps(ctx); err == nil {
+			for _, app := range apps {
+				data.Apps = append(data.Apps, app.Name)
+			}
+		}
+	}
+	s.write(w, "overview", s.pageFor(w, r, "Overview", "overview", nodes, data), http.StatusOK)
 }
 
 type tenantData struct {
@@ -150,6 +159,8 @@ type tenantData struct {
 	State, Replica tag
 	Events         []store.Event
 	Env            []envVar
+	// Targets are the nodes the tenant may move to.
+	Targets []string
 }
 
 type envVar struct{ Key, Value string }
@@ -177,7 +188,12 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		data.Env = append(data.Env, envVar{key, value})
 	}
 	slices.SortFunc(data.Env, func(a, b envVar) int { return strings.Compare(a.Key, b.Key) })
-	s.write(w, "tenant", page{Title: t.Spec.Name, Section: "overview", Cluster: nodes, Now: s.now(), User: userOf(r), Data: data}, http.StatusOK)
+	for _, node := range nodes.Nodes {
+		if node.Name != t.Node && !node.Failed() {
+			data.Targets = append(data.Targets, node.Name)
+		}
+	}
+	s.write(w, "tenant", s.pageFor(w, r, t.Spec.Name, "overview", nodes, data), http.StatusOK)
 }
 
 type eventsData struct {

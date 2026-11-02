@@ -527,8 +527,12 @@ one node, bootstrap there and join the others with new databases.
 `murder panel` serves a web panel over the agent's API: the cluster's nodes
 (up, down, failed, the leader), every tenant with its state and its copy, a
 tenant's runtime, spec, limits and environment, the audit log, and who may
-sign in. It is built in stages ([docs/panel.md](docs/panel.md)). Run it on
-every node (deploy/murder-panel.service).
+sign in. Its pages follow the cluster every few seconds. On a tenant's page
+you suspend or resume it, roll it (a new container), move it to another
+node, archive, restore or purge it (these last ones only with its name
+typed), and read its logs; the overview creates tenants. It is built in
+stages ([docs/panel.md](docs/panel.md)). Run it on every node
+(deploy/murder-panel.service).
 
 It is never on the internet. Every node serves it inside a WireGuard tunnel
 that runs in the panel process itself, so nothing changes on the host's

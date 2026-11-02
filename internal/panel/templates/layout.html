@@ -20,6 +20,7 @@
     {{with .Cluster.Cluster}}<span>cluster <b>{{.}}</b></span>{{end}}
     <span>node <b>{{.Cluster.Self}}</b></span>
     {{with .Cluster.Leader}}<span>leader <b>{{.}}</b></span>{{end}}
+    <span class="live" title="the page follows the cluster every few seconds">live</span>
     <span>{{.Now.UTC.Format "15:04:05"}} <b>utc</b></span>
     {{with .User}}<form class="whoami" method="post" action="/auth/logout"><span>{{.}}</span><button type="submit">sign out</button></form>{{end}}
   </div>
@@ -29,10 +30,13 @@
   <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
   <a href="/access" {{if eq .Section "access"}}class="on"{{end}}>Access</a>
 </nav>
+<main id="live">
 {{with .Cluster.Frozen}}<div class="frozen">changes frozen — {{.}}</div>{{end}}
-<main>
+{{with .Problem}}<div class="notice bad">&gt; {{.}}</div>{{end}}
+{{with .Done}}<div class="notice">&gt; {{.}}</div>{{end}}
 {{template "content" .}}
 </main>
+<script src="/static/live.js"></script>
 <footer>murder · a murder of crows keeps your tenants · rendered on {{.Cluster.Self}} at {{.Now.UTC.Format "2006-01-02 15:04:05"}}Z</footer>
 {{end}}
 </body>
