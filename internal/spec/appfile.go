@@ -31,6 +31,12 @@ func AppFile(app Tenant) ([]byte, error) {
 			break
 		}
 	}
+	// No scratch mounts at all is said as such: left out, /tmp is mounted.
+	if app.Tmpfs != nil && len(app.Tmpfs) == 0 {
+		doc.Content = append(doc.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "tmpfs"},
+			&yaml.Node{Kind: yaml.MappingNode, Style: yaml.FlowStyle})
+	}
 	var out bytes.Buffer
 	encoder := yaml.NewEncoder(&out)
 	encoder.SetIndent(2)

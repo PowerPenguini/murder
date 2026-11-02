@@ -299,7 +299,9 @@ type page struct {
 	// what their last action did.
 	Acts          bool
 	Done, Problem string
-	Data          any
+	// Edits says apps and tenants' settings may be edited.
+	Edits bool
+	Data  any
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, section string, data any) {
@@ -333,7 +335,7 @@ func (s *Server) renderWith(w http.ResponseWriter, r *http.Request, name, title,
 // pageFor is a page's layout data: who looks, whether they may act, and
 // what their last action did.
 func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section string, nodes api.Nodes, data any) page {
-	p := page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Data: data}
+	p := page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Edits: s.Apps != nil, Data: data}
 	// A page following the cluster leaves what an action did to the page
 	// it was meant for.
 	if r.Header.Get("X-Murder-Live") == "" {

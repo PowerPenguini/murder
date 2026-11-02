@@ -162,26 +162,29 @@ func TestATenantsSettings(t *testing.T) {
 	if !strings.Contains(body, "API_TOKEN has a new value") {
 		t.Fatalf("after rotating:\n%s", body)
 	}
-	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "iqtms", Limit: 1}); events[0].Action != "tenant.secret-rotated" || events[0].Detail != "API_TOKEN" {
+	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "iqtms", Limit: 1}); events[0].Action != "secret.rotated" || events[0].Detail != "API_TOKEN" {
 		t.Fatalf("the audit log: %+v", events[0])
 	}
 }
 
 func TestReadingSettings(t *testing.T) {
-	form := settingsForm{Env: "A=1\r\nB = two=2\n#C=3\n\n", Secrets: "X\nY password\nZ base64 16", MemoryMB: "512", CPUs: "0.5", PIDs: "", DiskGB: "20"}
+	form := settingsForm{Env: "A=1\r\nB = two=2\n#C=3\n\nD=\" padded \"\nE=\"line\\nbreak\"", Secrets: "X\nY password\nZ base64 16", MemoryMB: "512", CPUs: "0.5", PIDs: "", DiskGB: "20"}
 	got, err := form.overrides()
-	want := spec.Overrides{Env: map[string]string{"A": "1", "B": " two=2"}, Secrets: spec.Secrets{"X": {Kind: "hex"}, "Y": {Kind: "password"}, "Z": {Kind: "base64", Bytes: 16}},
+	want := spec.Overrides{Env: map[string]string{"A": "1", "B": "two=2", "D": " padded ", "E": "line\nbreak"}, Secrets: spec.Secrets{"X": {Kind: "hex"}, "Y": {Kind: "password"}, "Z": {Kind: "base64", Bytes: 16}},
 		Limits: spec.Limits{MemoryMB: 512, CPUs: 0.5, DiskGB: 20}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("overrides = %+v, %v", got, err)
 	}
-	// Read back, the form says the same.
-	if back, err := formOf(apiTenant(want)).overrides(); err != nil || !back.Equal(want) {
-		t.Fatalf("read back: %+v, %v", back, err)
+	// Read back, the form says the same, whatever the values hold.
+	want.Env["CERT"] = "-----BEGIN-----\nAAA=\nBBB=\n-----END-----\n"
+	want.Env["QUOTED"] = `"as typed"`
+	want.Env["CR"] = "value\r"
+	if back, err := formOf(apiTenant(want)).overrides(); err != nil || !reflect.DeepEqual(back, want) {
+		t.Fatalf("read back: %+v, %v\nfrom:\n%s", back, err, formOf(apiTenant(want)).Env)
 	}
 	for _, bad := range []settingsForm{
 		{Env: "A=1\nA=2"}, {Env: "=1"}, {Secrets: "X hex 0"}, {Secrets: "X hex 1 2"}, {Secrets: "X\nX"},
-		{MemoryMB: "lots"}, {CPUs: "-1"}, {PIDs: "1.5"},
+		{MemoryMB: "lots"}, {CPUs: "-1"}, {CPUs: "NaN"}, {CPUs: "+Inf"}, {PIDs: "1.5"}, {Env: `A="unclosed`},
 	} {
 		if _, err := bad.overrides(); err == nil {
 			t.Errorf("%+v was read", bad)
@@ -200,3 +203,20 @@ func between(page, before, after string) string {
 }
 
 func apiTenant(overrides spec.Overrides) api.Tenant { return api.Tenant{Overrides: overrides} }
+
+// An archived tenant's secrets are kept as they are, and an app that one
+// runs is not offered for deletion.
+func TestArchivedTenantsInSettings(t *testing.T) {
+	_, server, client := newAppsPanel(t)
+	if _, page := get(t, server.URL+"/tenants/old-demo/settings"); strings.Contains(page, `value="rotate"`) || !strings.Contains(page, "once restored") {
+		t.Fatalf("the settings of an archived tenant:\n%s", page)
+	}
+	if _, page := get(t, server.URL+"/apps/addhoc"); !strings.Contains(page, `href="/tenants/old-demo"`) || strings.Contains(page, `value="delete"`) {
+		t.Fatalf("the page of an app an archived tenant runs:\n%s", page)
+	}
+	// Too large a form is refused as such.
+	response, _ := submit(t, client, server, "/apps", url.Values{"name": {"big"}, "file": {strings.Repeat("#", formLimit)}}, server.URL)
+	if response.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("too large a form: %d", response.StatusCode)
+	}
+}

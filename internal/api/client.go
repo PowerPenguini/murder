@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -122,6 +123,20 @@ func (c *Client) App(ctx context.Context, name string) (App, error) {
 func (c *Client) PutApp(ctx context.Context, name string, app spec.Tenant) (AppApplied, error) {
 	var applied AppApplied
 	return applied, c.do(ctx, http.MethodPut, appPath(name), app, &applied)
+}
+
+// PutAppIf is PutApp only if the stored app is as cond expects; a 409
+// otherwise, with nothing changed.
+func (c *Client) PutAppIf(ctx context.Context, name string, app spec.Tenant, cond store.AppIf) (AppApplied, error) {
+	path := appPath(name)
+	switch {
+	case cond.Absent:
+		path += "?if=absent"
+	case !cond.UpdatedAt.IsZero():
+		path += "?if=" + url.QueryEscape(cond.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	}
+	var applied AppApplied
+	return applied, c.do(ctx, http.MethodPut, path, app, &applied)
 }
 
 // DeleteApp removes an app no tenant runs.

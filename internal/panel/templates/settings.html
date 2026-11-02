@@ -28,7 +28,7 @@
 
 <section>
   <h2>secrets</h2>
-  <p class="dim">Made once by murder and kept encrypted; the panel never shows them. A new value restarts {{$t.Spec.Name}}, and what it signed or set with the old one (sessions, a password) stops working.</p>
+  <p class="dim">Made once by murder and kept encrypted; the panel never shows them. A new value restarts {{$t.Spec.Name}}, and what it signed or set with the old one (sessions, a password) stops working{{if $t.Archived}}; an archived tenant's are kept as they are{{end}}. Save the overrides above first: a new value reloads this page.</p>
   <table>
     <thead><tr><th>name</th><th>kind</th><th>of</th><th></th></tr></thead>
     <tbody>
@@ -38,9 +38,11 @@
         <td class="dim">{{.Kind}}{{if .Bytes}} · {{.Bytes}}{{end}}</td>
         <td class="dim">{{if .Own}}{{$t.Spec.Name}}{{else}}app {{$t.App}}{{end}}</td>
         <td class="actions">
+          {{if not $t.Archived}}
           <form method="post" class="inline"><input type="hidden" name="do" value="rotate"><input type="hidden" name="key" value="{{.Name}}">
             <input type="text" name="confirm" placeholder="{{.Name}}" aria-label="the secret's name" autocomplete="off" required class="short">
             <button type="submit" class="small danger">new value</button></form>
+          {{end}}
         </td>
       </tr>
     {{else}}

@@ -25,7 +25,14 @@
   </table>
 </section>
 
-{{if not $a.Tenants}}
+{{if $d.Archived}}
+<section>
+  <h2>archived tenants</h2>
+  <p class="dim">{{range $i, $n := $d.Archived}}{{if $i}}, {{end}}<a href="/tenants/{{$n}}">{{$n}}</a>{{end}}: they run the app's spec once restored, and keep it from being deleted.</p>
+</section>
+{{end}}
+
+{{if and (not $a.Tenants) (not $d.Archived)}}
 <section class="actions">
   <h2>delete</h2>
   <form method="post" class="inline"><input type="hidden" name="do" value="delete">

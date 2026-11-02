@@ -756,6 +756,10 @@ func (s *SQLite) CheckApp(app App) error {
 }
 
 func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
+	return s.PutAppIf(app, AppIf{}, actor)
+}
+
+func (s *SQLite) PutAppIf(app App, cond AppIf, actor string) (AppChange, error) {
 	if err := spec.CheckApp(app.Name, app.Spec, spec.Tenant.Validate); err != nil {
 		return AppChange{}, err
 	}
@@ -764,6 +768,14 @@ func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
 	var unchanged App
 	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		existing, found := current.apps[app.Name]
+		switch {
+		case cond.Absent && found:
+			return fmt.Errorf("%w: app %s exists already", ErrConflict, app.Name)
+		case !cond.UpdatedAt.IsZero() && !found:
+			return fmt.Errorf("%w: app %s was deleted meanwhile", ErrConflict, app.Name)
+		case !cond.UpdatedAt.IsZero() && !existing.UpdatedAt.Equal(cond.UpdatedAt):
+			return fmt.Errorf("%w: app %s was changed at %s, after the version read; read it again", ErrConflict, app.Name, formatTime(existing.UpdatedAt))
+		}
 		// A stale attempt's result is discarded with its batch.
 		result = AppChange{Created: !found}
 		if found && existing.Spec.Equal(app.Spec) {

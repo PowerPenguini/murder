@@ -9,6 +9,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // AsApps is the cluster's apps and tenants' settings, edited by actor.
@@ -69,7 +70,7 @@ func (a *demoActor) App(_ context.Context, name string) (api.App, error) {
 	return app, nil
 }
 
-func (a *demoActor) PutApp(_ context.Context, name string, app spec.Tenant) (api.AppApplied, error) {
+func (a *demoActor) PutAppIf(_ context.Context, name string, app spec.Tenant, cond store.AppIf) (api.AppApplied, error) {
 	if err := spec.CheckApp(name, app, spec.Tenant.ValidateUnpinned); err != nil {
 		return api.AppApplied{}, &api.Error{Status: 422, Message: err.Error()}
 	}
@@ -77,7 +78,14 @@ func (a *demoActor) PutApp(_ context.Context, name string, app spec.Tenant) (api
 	defer a.mu.Unlock()
 	app = app.WithDefaults()
 	old, existed := a.apps[name]
-	applied := api.AppApplied{Created: !existed, Changed: !existed || !equalSpecs(old.Spec, app)}
+	switch {
+	case cond.Absent && existed:
+		return api.AppApplied{}, &api.Error{Status: 409, Message: "app " + name + " exists already"}
+	case !cond.UpdatedAt.IsZero() && (!existed || !old.UpdatedAt.Equal(cond.UpdatedAt)):
+		return api.AppApplied{}, &api.Error{Status: 409, Message: "app " + name + " was changed after the version read; read it again"}
+	}
+	// As the store compares them: with defaults filled in.
+	applied := api.AppApplied{Created: !existed, Changed: !existed || !old.Spec.WithDefaults().Equal(app)}
 	if !applied.Changed {
 		applied.App = old
 		return applied, nil
@@ -103,12 +111,6 @@ func (a *demoActor) PutApp(_ context.Context, name string, app spec.Tenant) (api
 	stored.Tenants = a.liveTenantsOf(name)
 	applied.App = stored
 	return applied, nil
-}
-
-func equalSpecs(a, b spec.Tenant) bool {
-	x, _ := spec.AppFile(a)
-	y, _ := spec.AppFile(b)
-	return string(x) == string(y)
 }
 
 func (a *demoActor) recordApp(action, app string) {
@@ -153,7 +155,7 @@ func (a *demoActor) Configure(_ context.Context, name string, request api.Tenant
 	if request.App == t.App && request.Overrides.Equal(t.Overrides) {
 		return api.Applied{Tenant: t}, nil
 	}
-	changed, err := a.change(name, "tenant.configured", "", func(t *api.Tenant) error {
+	changed, err := a.change(name, "tenant.updated", "", func(t *api.Tenant) error {
 		suspended := t.Spec.Suspended
 		t.App, t.Overrides, t.Spec = request.App, request.Overrides.Normalized(), composed
 		t.Spec.Suspended = suspended
@@ -163,7 +165,10 @@ func (a *demoActor) Configure(_ context.Context, name string, request api.Tenant
 }
 
 func (a *demoActor) Rotate(_ context.Context, name, key string) (api.Tenant, error) {
-	return a.change(name, "tenant.secret-rotated", key, func(t *api.Tenant) error {
+	return a.change(name, "secret.rotated", key, func(t *api.Tenant) error {
+		if t.Archived() {
+			return &api.Error{Status: 409, Message: "tenant " + name + " is archived"}
+		}
 		if _, ok := t.Spec.Secrets[key]; !ok {
 			return &api.Error{Status: 404, Message: "tenant " + name + " has no secret " + key}
 		}

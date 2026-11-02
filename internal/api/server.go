@@ -242,6 +242,18 @@ func (s *Server) getApp(w http.ResponseWriter, r *http.Request) {
 // pull runs on the request's context, so a client that gives up cancels it.
 func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	var cond store.AppIf
+	switch value := r.URL.Query().Get("if"); {
+	case value == "absent":
+		cond.Absent = true
+	case value != "":
+		updated, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			writeError(w, badRequest(errors.New(`if must be "absent" or the app's updatedAt`)))
+			return
+		}
+		cond.UpdatedAt = updated
+	}
 	var app spec.Tenant
 	if !readJSON(w, r, &app) {
 		return
@@ -260,7 +272,7 @@ func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
 		return
 	}
-	change, err := s.store.PutApp(store.App{Name: name, Spec: app}, actor(r))
+	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app}, cond, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return

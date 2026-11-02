@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
@@ -23,7 +25,7 @@ import (
 type AppAgent interface {
 	Apps(ctx context.Context) ([]api.App, error)
 	App(ctx context.Context, name string) (api.App, error)
-	PutApp(ctx context.Context, name string, app spec.Tenant) (api.AppApplied, error)
+	PutAppIf(ctx context.Context, name string, app spec.Tenant, cond store.AppIf) (api.AppApplied, error)
 	DeleteApp(ctx context.Context, name string) error
 	Get(ctx context.Context, name string) (api.Tenant, error)
 	Configure(ctx context.Context, name string, request api.TenantRequest) (api.Applied, error)
@@ -69,7 +71,9 @@ func (s *Server) appsPage(w http.ResponseWriter, r *http.Request, data appsData,
 // createApp stores a new app; one of the name stored meanwhile is not
 // replaced.
 func (s *Server) createApp(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, formLimit)
+	if !readForm(w, r) {
+		return
+	}
 	agent := s.Apps(s.actor(userOf(r)))
 	name, file := strings.TrimSpace(r.FormValue("name")), r.FormValue("file")
 	refuse := func(problem string) {
@@ -89,7 +93,8 @@ func (s *Server) createApp(w http.ResponseWriter, r *http.Request) {
 		refuse(err.Error())
 		return
 	}
-	applied, err := agent.PutApp(ctx, name, app)
+	// Checked again as it is stored: someone may create it meanwhile.
+	applied, err := agent.PutAppIf(ctx, name, app, store.AppIf{Absent: true})
 	if err != nil {
 		refuse(err.Error())
 		return
@@ -135,6 +140,8 @@ type appData struct {
 	// Updated is when the app read changed last, to refuse a save over
 	// someone else's change.
 	Updated string
+	// Archived are its archived tenants: they keep it from being deleted.
+	Archived []string
 }
 
 func (s *Server) app(w http.ResponseWriter, r *http.Request) {
@@ -150,13 +157,27 @@ func (s *Server) app(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.renderWith(w, r, "app", app.Name, "apps", appData{App: app, File: string(file), Updated: stampOf(app.UpdatedAt)}, "", http.StatusOK)
+	data := appData{App: app, File: string(file), Updated: stampOf(app.UpdatedAt)}
+	tenants, err := s.backend.List(ctx)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	for _, t := range tenants {
+		if t.App == app.Name && t.Archived() {
+			data.Archived = append(data.Archived, t.Spec.Name)
+		}
+	}
+	slices.Sort(data.Archived)
+	s.renderWith(w, r, "app", app.Name, "apps", data, "", http.StatusOK)
 }
 
 func stampOf(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, formLimit)
+	if !readForm(w, r) {
+		return
+	}
 	name := r.PathValue("name")
 	agent := s.Apps(s.actor(userOf(r)))
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
@@ -185,7 +206,8 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 			refuse(err.Error())
 			return
 		}
-		applied, err := agent.PutApp(ctx, name, app)
+		// Checked again as it is stored, after the image is pulled.
+		applied, err := agent.PutAppIf(ctx, name, app, store.AppIf{UpdatedAt: current.UpdatedAt})
 		if err != nil {
 			refuse(err.Error())
 			return
@@ -219,7 +241,7 @@ func formOf(t api.Tenant) settingsForm {
 	form := settingsForm{App: t.App, Image: o.Image, Generation: t.Generation}
 	var lines []string
 	for _, key := range slices.Sorted(maps.Keys(o.Env)) {
-		lines = append(lines, key+"="+o.Env[key])
+		lines = append(lines, key+"="+envValue(o.Env[key]))
 	}
 	form.Env = strings.Join(lines, "\n")
 	lines = nil
@@ -264,7 +286,15 @@ func (f settingsForm) overrides() (spec.Overrides, error) {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
-		key = strings.TrimSpace(key)
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if strings.HasPrefix(value, `"`) {
+			unquoted, err := strconv.Unquote(value)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf(`env line %d: a value beginning with " is quoted, as "a\nb"`, i+1))
+				continue
+			}
+			value = unquoted
+		}
 		switch {
 		case !ok || key == "":
 			problems = append(problems, fmt.Sprintf("env line %d: NAME=value", i+1))
@@ -323,7 +353,7 @@ func (f settingsForm) overrides() (spec.Overrides, error) {
 	whole("disk", f.DiskGB, &o.Limits.DiskGB)
 	if f.CPUs != "" {
 		cpus, err := strconv.ParseFloat(f.CPUs, 64)
-		if err != nil || cpus < 0 {
+		if err != nil || cpus < 0 || math.IsNaN(cpus) || math.IsInf(cpus, 0) {
 			problems = append(problems, "cpus: a number, or empty for the app's")
 		}
 		o.Limits.CPUs = cpus
@@ -332,6 +362,30 @@ func (f settingsForm) overrides() (spec.Overrides, error) {
 		return o, errors.New(strings.Join(problems, "; "))
 	}
 	return o, nil
+}
+
+// envValue is a value as an env line says it: quoted, as Go quotes, when
+// it would not read back as itself (a line break, a space at an end, a
+// quote first).
+func envValue(value string) string {
+	if strings.ContainsAny(value, "\r\n") || strings.TrimSpace(value) != value || strings.HasPrefix(value, `"`) {
+		return strconv.Quote(value)
+	}
+	return value
+}
+
+// readForm reads a form of at most formLimit, saying so if it is larger.
+func readForm(w http.ResponseWriter, r *http.Request) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, formLimit)
+	if err := r.ParseForm(); err != nil {
+		status := http.StatusBadRequest
+		if errors.As(err, new(*http.MaxBytesError)) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		http.Error(w, fmt.Sprintf("the form is not read: %v (at most %d KB)", err, formLimit>>10), status)
+		return false
+	}
+	return true
 }
 
 func hasKey(m map[string]string, key string) bool {
@@ -387,7 +441,9 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 }
 
 func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, formLimit)
+	if !readForm(w, r) {
+		return
+	}
 	name := r.PathValue("name")
 	agent := s.Apps(s.actor(userOf(r)))
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
