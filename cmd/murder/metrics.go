@@ -102,7 +102,7 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out.Sample("murder_backup_last_timestamp_seconds", metrics.Timestamp(at))
 	}
 	if m.backups != nil {
-		m.backups.writeMetrics(out)
+		m.backups.WriteMetrics(out)
 	}
 	if m.replicator != nil {
 		m.replicator.WriteMetrics(out)

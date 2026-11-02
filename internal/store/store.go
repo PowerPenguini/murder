@@ -26,6 +26,9 @@ var ErrArchived = errors.New("tenant is archived; restore it or purge it")
 // ErrNotArchived reports a live tenant where an archived one is required.
 var ErrNotArchived = errors.New("tenant is not archived")
 
+// ErrElsewhere refuses work on a tenant another node runs.
+var ErrElsewhere = errors.New("the tenant runs on another node")
+
 // ErrConflict reports a change based on an outdated read.
 var ErrConflict = errors.New("conflicting change")
 
