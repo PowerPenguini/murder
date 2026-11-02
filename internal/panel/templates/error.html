@@ -1,7 +1,8 @@
-{{define "content"}}
+{{define "content"}}{{$f := .Data}}
 <div class="fault">
-  <h1>The agent did not answer as expected</h1>
-  <p class="mono">{{.Data}}</p>
+  <h1>{{$f.Title}}</h1>
+  <p class="mono">{{$f.Detail}}</p>
+  {{with $f.Hint}}<p>{{.}}</p>{{end}}
   <p><a href="/">Back to the overview</a></p>
 </div>
 {{end}}

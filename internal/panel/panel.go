@@ -362,5 +362,22 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 	s.log.Warn("a panel page failed", "path", r.URL.Path, "error", err)
-	s.write(w, "error", page{Title: "Error", Now: s.now(), Data: err.Error()}, status)
+	fault := fault{Detail: err.Error(), Title: "The agent did not answer as expected", Hint: "It may be restarting: try again in a moment. If it lasts, see its log: journalctl -u murder-agent."}
+	var apiErr *api.Error
+	switch {
+	case status == http.StatusNotFound:
+		fault.Title, fault.Hint = "Not found", "It may have been purged, renamed or never made; the overview lists what there is."
+	case errors.As(err, &apiErr) && apiErr.Status < 500:
+		fault.Title, fault.Hint = "The agent refused this", ""
+		status = apiErr.Status
+	case errors.Is(err, context.DeadlineExceeded):
+		fault.Title, fault.Hint = "The agent took too long to answer", "A node it asked may be down. Try again in a moment."
+		status = http.StatusGatewayTimeout
+	}
+	p := page{Title: fault.Title, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Edits: s.Apps != nil, Data: fault}
+	s.write(w, "error", p, status)
 }
+
+// fault is what the error page says: what happened, the agent's words, and
+// what to do.
+type fault struct{ Title, Detail, Hint string }

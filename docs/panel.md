@@ -31,7 +31,11 @@ the audit log as `<person> via murder-panel`.
   without a copy; a tenant's page says what is wrong with it and where to
   fix it. A tenant's pages share a head: where it is, its state, and its
   Overview, Logs and Settings. A form sent once is not sent again while it
-  works; wide tables scroll on a phone. Charts are SVG drawn by
+  works; wide tables scroll on a phone. Events say their actions in words
+  (the code on hover) and can show only what people did; a tenant's logs
+  filter, with warnings and errors standing out; the cluster says whether
+  its nodes run one release; an error page says what happened and what to
+  do. Charts are SVG drawn by
   the server (`charts.go`) in one grey ramp, validated as an ordinal ramp on
   the page, the brightest step kept for what needs attention: live tenants
   by state, each node's tenants, copies and reserved memory, where each

@@ -276,3 +276,11 @@ button.small, .button.small { padding: 3px 9px; font-size: 12.5px; }
 details.menu-text { display: inline-block; }
 details.menu-text > summary.button::after { display: none; }
 :focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }
+form.filters { margin-top: 20px; align-items: end; gap: 16px; }
+label.check { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 13px; padding-bottom: 6px; }
+label.check input { accent-color: var(--fg); }
+div.logs { margin: 0; padding: 14px 18px; background: var(--raised); border: 1px solid var(--line); font-family: var(--mono); font-size: 12.5px; line-height: 1.6; max-height: 75vh; overflow: auto; }
+div.logs > div { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); }
+div.logs > div.warn { color: var(--fg); }
+div.logs > div.error { color: var(--fg); font-weight: 700; border-left: 2px solid var(--fg); padding-left: 8px; margin-left: -10px; }
+div.logs > div[hidden] { display: none; }

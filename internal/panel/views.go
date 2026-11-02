@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html/template"
+	"maps"
 	"math"
 	"net/http"
 	"slices"
@@ -273,6 +274,10 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 type eventsData struct {
 	Events      []store.Event
 	Tenant, App string
+	// People shows only what people did; Tenants and Apps are the names
+	// the filters offer.
+	People        bool
+	Tenants, Apps []string
 	// Older is the ID to page back from; zero when there are no more.
 	Older int64
 }
@@ -284,17 +289,43 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if before, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64); err == nil && before > 0 {
 		query.Before = before
 	}
+	people := r.URL.Query().Get("people") != ""
+	if people {
+		// What people did is found among more of the cluster's own.
+		query.Limit = activityEvents
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	events, err := s.backend.Events(ctx, query)
-	if err != nil {
+	var events []store.Event
+	var tenants []api.Tenant
+	if err := all(
+		func() (err error) { events, err = s.backend.Events(ctx, query); return },
+		// The filters' names: a list that fails leaves them to be typed.
+		func() error { tenants, _ = s.backend.List(ctx); return nil },
+	); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	data := eventsData{Events: events, Tenant: query.Tenant, App: query.App}
-	if len(events) == eventsPage {
-		data.Older = events[len(events)-1].ID
+	data := eventsData{Tenant: query.Tenant, App: query.App, People: people}
+	apps := map[string]bool{}
+	for _, t := range tenants {
+		data.Tenants = append(data.Tenants, t.Spec.Name)
+		apps[t.App] = true
 	}
+	slices.Sort(data.Tenants)
+	data.Apps = slices.Sorted(maps.Keys(apps))
+	read := events
+	if people {
+		events = slices.DeleteFunc(slices.Clone(events), func(e store.Event) bool { return !byPeople(e) })
+	}
+	switch {
+	case len(events) > eventsPage:
+		events = events[:eventsPage]
+		data.Older = events[len(events)-1].ID
+	case len(read) == query.Limit:
+		data.Older = read[len(read)-1].ID
+	}
+	data.Events = events
 	s.render(w, r, "events", "Events", "events", data)
 }
 
@@ -320,7 +351,9 @@ func all(calls ...func() error) error {
 
 func (s *Server) funcs() template.FuncMap {
 	return template.FuncMap{
-		"static": staticURL,
+		"static":   staticURL,
+		"action":   actionText,
+		"loglines": logLines,
 		"head": func(name string, state any, on string, logs, settings bool) tenantHead {
 			h := tenantHead{Name: name, On: on, Logs: logs, Settings: settings}
 			if t, ok := state.(tag); ok {

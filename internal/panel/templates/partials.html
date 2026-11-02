@@ -8,7 +8,7 @@
     <tr>
       <td class="when" title="{{stamp .At}}">{{ago .At}}</td>
       <td class="dim">{{.Actor}}</td>
-      <td>{{.Action}}</td>
+      <td title="{{.Action}}">{{action .Action}}</td>
       <td>{{with .Tenant}}<a href="/tenants/{{.}}">{{.}}</a>{{else}}<span class="faint">—</span>{{end}}</td>
       <td class="dim hide-narrow">{{.Detail}}</td>
     </tr>

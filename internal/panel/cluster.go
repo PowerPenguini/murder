@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -239,8 +240,11 @@ type nodeRow struct {
 }
 
 type clusterData struct {
-	Nodes  []nodeRow
-	Frozen string
+	// Release says what the nodes run; Mixed that they do not all run one.
+	Release string
+	Mixed   bool
+	Nodes   []nodeRow
+	Frozen  string
 	// Busy is the job that changes the cluster now, if one does;
 	// Upgrading the upgrade among them, which takes changes again.
 	Busy, Upgrading *Job
@@ -285,6 +289,7 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	wg.Wait()
+	data.Release, data.Mixed = releaseOf(data.Nodes)
 	data.Jobs, data.Busy = s.Jobs.all(), s.Jobs.Busy()
 	if data.Busy != nil && data.Busy.Kind == JobUpgrade {
 		data.Upgrading = data.Busy
@@ -504,4 +509,35 @@ func (s *Server) jobPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, r, "job", job.Title, "cluster", jobData{Job: job})
+}
+
+// releaseOf says which release the nodes that answered run: one, or that
+// they differ, and which runs what, as while an upgrade goes on.
+func releaseOf(nodes []nodeRow) (string, bool) {
+	runs := map[string][]string{}
+	var order []string
+	for _, n := range nodes {
+		if n.Version == "" {
+			continue
+		}
+		release := n.Version + " (schema " + strconv.Itoa(n.Schema) + ")"
+		if _, ok := runs[release]; !ok {
+			order = append(order, release)
+		}
+		runs[release] = append(runs[release], n.Name)
+	}
+	switch len(order) {
+	case 0:
+		return "", false
+	case 1:
+		if len(runs[order[0]]) == 1 {
+			return "It runs release " + order[0] + ".", false
+		}
+		return "Every node that answers runs release " + order[0] + ".", false
+	}
+	var parts []string
+	for _, release := range order {
+		parts = append(parts, strings.Join(runs[release], ", ")+" run "+release)
+	}
+	return "The nodes run different releases: " + strings.Join(parts, "; ") + ". An upgrade that stopped leaves them so: run it again to finish it.", true
 }

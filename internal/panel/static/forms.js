@@ -15,10 +15,11 @@
     const input = event.target;
     if (input.matches("input[data-confirm]")) confirmed(input);
     if (input.matches("input[data-filter]")) {
-      const table = document.getElementById(input.dataset.filter);
+      const list = document.getElementById(input.dataset.filter);
       const query = input.value.trim().toLowerCase();
-      if (!table) return;
-      for (const row of table.tBodies[0].rows) {
+      if (!list) return;
+      const rows = list.tBodies ? list.tBodies[0].rows : list.children;
+      for (const row of rows) {
         row.hidden = query !== "" && !row.textContent.toLowerCase().includes(query);
       }
     }

@@ -1,5 +1,6 @@
 {{define "content"}}{{$d := .Data}}
 <h1>Cluster</h1>
+{{with $d.Release}}<p class="{{if $d.Mixed}}problem bad{{else}}lead{{end}}">{{.}}</p>{{end}}
 
 <section class="near">
   <table>
@@ -7,7 +8,7 @@
     <tbody>
     {{range $d.Nodes}}{{$n := .}}
       <tr>
-        <td>{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}{{if eq .Name $d.Self}} <span class="dim">this</span>{{end}}</td>
+        <td>{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}{{if eq .Name $d.Self}} <span class="dim">· this node</span>{{end}}</td>
         <td><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         <td class="mono dim hide-narrow">{{if .Version}}{{.Version}} · {{.Schema}}{{else}}—{{end}}</td>
         <td class="dim hide-narrow">{{if .Started.IsZero}}—{{else}}{{ago .Started}}{{end}}</td>
