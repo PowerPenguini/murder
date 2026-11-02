@@ -143,10 +143,11 @@ The Raft leader probes every other node's cluster port every 2 s, with a 2 s
 timeout. A node that has not answered for `failover.after` (30 s) counts as
 dead. Then the leader:
 
-1. **Marks the node failed.** The copies it kept are reassigned to other
-   nodes, and it gets no new ones. Its tenants stay where they are. If none
-   of its tenants has a ready copy on a live node, nothing more is done, and
-   in particular the node is not powered off.
+1. **Checks there is something to run elsewhere.** If none of the node's
+   tenants has a ready copy on a node the leader hears, the node is not
+   powered off. After 5 minutes of silence it is marked failed: the copies
+   it keeps go to other nodes, and its tenants stay where they are. A
+   shorter pause keeps its copies.
 2. **Powers the node off** through the provider's API:
    - On Hetzner Cloud, it finds the server by the node's name (or a
      configured server name) and checks that the server has the node's

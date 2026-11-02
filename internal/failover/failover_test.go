@@ -409,6 +409,12 @@ func TestANodeAwayIsLeftAlone(t *testing.T) {
 	if len(f.fenced) != 0 {
 		t.Fatalf("a node away was powered off: %v", f.fenced)
 	}
+	// Left alone on purpose: no alert.
+	var page strings.Builder
+	f.monitor.WriteMetrics(metrics.NewWriter(&page))
+	if !strings.Contains(page.String(), `murder_failover_blocked{node="n2"} 0`) {
+		t.Fatalf("metrics:\n%s", page.String())
+	}
 	f.advance(6 * time.Minute)
 	f.check(t)
 	if len(f.fenced) != 1 {
@@ -440,25 +446,34 @@ func TestANodeBackInTimeKeepsItsTenants(t *testing.T) {
 	}
 }
 
-// A dead node whose tenants have no whole copy is marked failed, so its
-// copies go elsewhere, but not powered off: nothing could run instead.
-func TestADeadNodeWithNothingToPromoteIsNotPoweredOff(t *testing.T) {
+// A silent node whose tenants have no whole copy is not powered off:
+// nothing could run instead. A pause keeps its copies; only after five
+// minutes of silence are they given to other nodes.
+func TestASilentNodeWithNothingToPromoteIsNotPoweredOff(t *testing.T) {
 	f := newFixture(t)
 	f.check(t)
 	f.down["n3"] = true // runs nothing; keeps a's or b's copy
 	f.advance(31 * time.Second)
 	f.check(t)
-	if len(f.fenced) != 0 {
-		t.Fatalf("fenced %v", f.fenced)
-	}
-	for _, node := range f.store.Nodes() {
-		if node.Name == "n3" && !node.Failed() {
-			t.Fatal("n3 is not marked failed")
+	failed := func() bool {
+		for _, node := range f.store.Nodes() {
+			if node.Name == "n3" {
+				return node.Failed()
+			}
 		}
+		return false
+	}
+	if len(f.fenced) != 0 || failed() {
+		t.Fatalf("after 31 s: fenced %v, failed %v", f.fenced, failed())
+	}
+	f.advance(5 * time.Minute)
+	f.check(t)
+	if len(f.fenced) != 0 || !failed() {
+		t.Fatalf("after 5 min: fenced %v, failed %v", f.fenced, failed())
 	}
 	for _, record := range f.store.List() {
 		if record.Replica == "n3" {
-			t.Fatalf("tenant %s keeps its copy on a node that does not answer", record.Spec.Name)
+			t.Fatalf("tenant %s keeps its copy on a node silent for 5 min", record.Spec.Name)
 		}
 	}
 }

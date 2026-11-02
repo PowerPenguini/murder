@@ -59,6 +59,8 @@ type Monitor struct {
 	// time. blocked says why a node's failover waits.
 	fencing string
 	blocked map[string]string
+	// waits says why a silent node is left alone on purpose.
+	waits map[string]string
 	// retry is when a node whose failover failed is tried again.
 	retry   map[string]time.Time
 	leading bool
@@ -67,6 +69,12 @@ type Monitor struct {
 // retryAfter is how long a failover that failed waits before it is tried
 // again.
 const retryAfter = time.Minute
+
+// copiesAfter is how long a node goes unanswered before the copies it keeps
+// are given to other nodes, when it is not failed over sooner: long enough
+// that a pause of a node does not cost every tenant whose copy it keeps a
+// whole new one.
+const copiesAfter = 5 * time.Minute
 
 func (m *Monitor) now() time.Time {
 	if m.Now != nil {
@@ -153,14 +161,16 @@ func (m *Monitor) Check(ctx context.Context) {
 		}
 	}
 	heard := 1 // this node
-	var dead []store.Node
+	frozen := m.Store.Frozen()
+	var dead, silent []store.Node
 	for i, node := range nodes {
 		if answered[i] {
 			heard++
 			m.seen[node.Name] = now
 			delete(m.blocked, node.Name)
 			delete(m.retry, node.Name)
-			if node.Failed() {
+			delete(m.waits, node.Name)
+			if node.Failed() && frozen == "" {
 				// After the unlock: a write waits for the log.
 				defer m.back(node.Name)
 			}
@@ -169,27 +179,40 @@ func (m *Monitor) Check(ctx context.Context) {
 		if _, known := m.seen[node.Name]; !known {
 			m.seen[node.Name] = now // unanswered since this leader began
 		}
+		unanswered := now.Sub(m.seen[node.Name])
 		switch {
-		case now.Sub(m.seen[node.Name]) < m.after(), now.Before(m.retry[node.Name]):
+		case unanswered < m.after(), now.Before(m.retry[node.Name]):
+			continue
 		case now.Before(node.AwayUntil):
-			m.note(node.Name, "it restarts on purpose (its agent stopped cleanly) until "+node.AwayUntil.Format(time.RFC3339))
-		case node.Failed() && len(m.promotable(node.Name)) == 0:
-			// Failed, with nothing left to run elsewhere.
-		default:
+			m.leaveAlone(node.Name, "it restarts on purpose (its agent stopped cleanly) until "+node.AwayUntil.Format(time.RFC3339))
+			continue
+		case frozen != "":
+			m.leaveAlone(node.Name, "changes are frozen ("+frozen+"): nodes restart on purpose during an upgrade")
+			continue
+		}
+		if !node.Failed() && unanswered >= copiesAfter {
+			silent = append(silent, node)
+		}
+		if len(m.promotableLocked(node.Name)) > 0 {
 			dead = append(dead, node)
 		}
 	}
+	majority := heard >= len(all)/2+1
+	if !majority && (len(dead) > 0 || len(silent) > 0) {
+		for _, node := range append(dead, silent...) {
+			m.note(node.Name, fmt.Sprintf("this leader hears only %d of %d nodes: it may be the one cut off", heard, len(all)))
+		}
+		dead, silent = nil, nil
+	}
+	// The copies a node long silent keeps go to other nodes, failed over
+	// or not.
+	for _, node := range silent {
+		defer m.markFailed(node.Name)
+	}
 	start := store.Node{}
 	if m.fencing == "" && len(dead) > 0 {
-		switch frozen := m.Store.Frozen(); {
-		case frozen != "":
-			m.note(dead[0].Name, "changes are frozen ("+frozen+"): nodes restart on purpose during an upgrade")
-		case heard < len(all)/2+1:
-			m.note(dead[0].Name, fmt.Sprintf("this leader hears only %d of %d nodes: it may be the one cut off", heard, len(all)))
-		default:
-			start = dead[0]
-			m.fencing = start.Name
-		}
+		start = dead[0]
+		m.fencing = start.Name
 	}
 	lastSeen := m.seen[start.Name]
 	m.mu.Unlock()
@@ -198,20 +221,51 @@ func (m *Monitor) Check(ctx context.Context) {
 	}
 }
 
-// promotable names the tenants of node a copy that holds their whole data
-// could run elsewhere.
+// promotable names the tenants of node a copy that holds their whole data,
+// on a node this leader hears, could run elsewhere.
 func (m *Monitor) promotable(node string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.promotableLocked(node)
+}
+
+func (m *Monitor) promotableLocked(node string) []string {
 	failed := map[string]bool{}
 	for _, n := range m.Store.Nodes() {
 		failed[n.Name] = n.Failed()
 	}
+	self, now := m.Store.Node(), m.now()
+	hears := func(name string) bool {
+		seen, ok := m.seen[name]
+		return name == self || ok && now.Sub(seen) < m.after()
+	}
 	var names []string
 	for _, record := range m.Store.List() {
-		if record.Node == node && record.ReplicaReady && record.Replica != "" && record.Replica != node && !failed[record.Replica] {
+		if record.Node == node && record.ReplicaReady && record.Replica != "" && record.Replica != node && !failed[record.Replica] && hears(record.Replica) {
 			names = append(names, record.Spec.Name)
 		}
 	}
 	return names
+}
+
+func (m *Monitor) markFailed(node string) {
+	if marked, err := m.Store.MarkFailed(node, "murder (failover)"); err != nil {
+		m.Log.Warn("mark a silent node failed", "node", node, "error", err)
+	} else if marked {
+		m.Log.Warn("a node has not answered for long: the copies it keeps go to other nodes", "node", node)
+	}
+}
+
+// leaveAlone records, once per reason, why a silent node is left alone on
+// purpose: not a failure to alert on.
+func (m *Monitor) leaveAlone(node, why string) {
+	if m.waits == nil {
+		m.waits = map[string]string{}
+	}
+	if m.waits[node] != why {
+		m.Log.Info("a node does not answer, and is left alone", "node", node, "why", why)
+	}
+	m.waits[node] = why
 }
 
 func (m *Monitor) back(node string) {
@@ -260,15 +314,8 @@ func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.T
 		m.block(node.Name, why)
 		m.mu.Unlock()
 	}
-	if marked, err := m.Store.MarkFailed(node.Name, "murder (failover)"); err != nil {
-		blocked("it could not be marked failed: " + err.Error())
-		return
-	} else if marked {
-		log.Warn("a node does not answer: it keeps no copies until it does", "since", lastSeen)
-	}
 	tenants := m.promotable(node.Name)
 	if len(tenants) == 0 {
-		log.Warn("a node does not answer; none of its tenants has a copy to run from, so it is not powered off")
 		return
 	}
 	manual := "; once it is off, run: murder cluster failover " + node.Name + " -powered-off"

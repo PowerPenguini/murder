@@ -383,8 +383,9 @@ set, it handles a node that has not answered for 30 s as follows:
 3. It runs the node's tenants from their replicas: each replica's node
    mounts its copy and starts the tenant, and every edge routes to it.
 
-The tenants are away for about 70–90 s and lose at most the last ~30 s of
-writes.
+The tenants are away for about 70–90 s. They lose the writes of their last
+~15 s of replication, plus any taken until the power-off: up to about 60 s
+in the worst case.
 
 ```yaml
 cluster:
