@@ -234,11 +234,12 @@ func runAgent(args []string) error {
 	if cfg.Backups != nil {
 		// A key file missing or unreadable leaves the agent running without
 		// backups, saying why, until it is fixed: tenants keep running.
-		if backups, err = newAgentBackups(cfg, st, reconciler.Exclusive, log.With("component", "backups")); err != nil {
-			return err
-		}
+		var leader func() bool
 		if member != nil {
-			backups.leader = member.Leader
+			leader = member.Leader
+		}
+		if backups, err = newAgentBackups(cfg, st, reconciler.Exclusive, leader, log.With("component", "backups")); err != nil {
+			return err
 		}
 		apiHandler.WithBackups(backups)
 	}
@@ -256,7 +257,7 @@ func runAgent(args []string) error {
 		go recoverMoves(ctx, mover, log)
 	}
 	if backups != nil {
-		go backups.loop(ctx)
+		go backups.Run(ctx)
 	}
 	if replicator != nil {
 		go replicator.Run(ctx)

@@ -44,8 +44,9 @@ func (r *Reconciler) checkData(ctx context.Context, record store.Record) error {
 	return nil
 }
 
-// ErrElsewhere refuses work on a tenant another node runs.
-var ErrElsewhere = errors.New("the tenant runs on another node")
+// ErrElsewhere refuses work on a tenant another node runs: it is
+// store.ErrElsewhere, which other packages refuse with too.
+var ErrElsewhere = store.ErrElsewhere
 
 // DataExists reports whether a tenant name still has data on this node.
 func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error) {
