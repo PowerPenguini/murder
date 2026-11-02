@@ -128,7 +128,18 @@ func (s *Server) signedIn(next http.Handler) http.Handler {
 // from.
 func (s *Server) sameOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.Auth != nil && r.Method != http.MethodGet && r.Method != http.MethodHead && !s.Auth.sameOrigin(r) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The socket's panel, reached as localhost through SSH, takes
+		// changes from its own pages only too: a page elsewhere could
+		// post to the forwarded port.
+		ok := sameOrigin(r, []string{"http://" + r.Host, "https://" + r.Host})
+		if s.Auth != nil {
+			ok = s.Auth.sameOrigin(r)
+		}
+		if !ok {
 			http.Error(w, "the panel takes changes from its own pages only", http.StatusForbidden)
 			return
 		}

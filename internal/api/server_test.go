@@ -778,10 +778,10 @@ func TestThePanelsPeopleThroughTheAPI(t *testing.T) {
 		t.Fatalf("by handle: %+v, %v", u, err)
 	}
 	session := strings.Repeat("cd", 32)
-	if err := f.client.StartPanelSession(ctx, SessionRequest{Hash: session, User: "jan", Expires: time.Now().Add(time.Hour)}); err != nil {
+	if err := f.client.StartPanelSession(ctx, SessionRequest{Hash: session, User: "jan", Passkey: "k1", Challenge: "c1", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := f.client.PanelSession(ctx, session); err != nil || s.User != "jan" {
+	if s, err := f.client.PanelSession(ctx, session, true); err != nil || s.User != "jan" {
 		t.Fatalf("session %+v, %v", s, err)
 	}
 	secret, err := f.client.PanelSecret(ctx, "ceremonies")
@@ -791,7 +791,7 @@ func TestThePanelsPeopleThroughTheAPI(t *testing.T) {
 	if err := f.client.WithActor("anna (panel)").RemovePanelUser(ctx, "jan"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.PanelSession(ctx, session); !IsNotFound(err) {
+	if _, err := f.client.PanelSession(ctx, session, false); !IsNotFound(err) {
 		t.Fatalf("a removed person's session: %v", err)
 	}
 	events, _ := f.client.Events(ctx, store.EventQuery{Limit: 1})

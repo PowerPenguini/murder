@@ -52,7 +52,7 @@
         <td class="num">{{.Recovery}}</td>
         <td class="dim hide-narrow">{{ago .CreatedAt}} ago, by {{.CreatedBy}}</td>
         <td class="actions">
-          <form method="post" action="/access" class="inline"><input type="hidden" name="do" value="invite"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="small">{{if eq .Name $d.Me}}add a passkey{{else}}invite again{{end}}</button></form>
+          {{if or (eq .Name $d.Me) (not .Passkeys)}}<form method="post" action="/access" class="inline"><input type="hidden" name="do" value="invite"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="small">{{if eq .Name $d.Me}}add a passkey{{else}}invite again{{end}}</button></form>{{end}}
           {{if ne .Name $d.Me}}<form method="post" action="/access" class="inline"><input type="hidden" name="do" value="remove-person"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="small danger">remove</button></form>{{end}}
         </td>
       </tr>

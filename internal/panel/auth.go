@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -32,14 +33,16 @@ type AuthAgent interface {
 	UsePasskey(ctx context.Context, id, data string) error
 	SetRecoveryCodes(ctx context.Context, name string, hashes []string) error
 	StartPanelSession(ctx context.Context, request api.SessionRequest) error
-	PanelSession(ctx context.Context, hash string) (store.PanelSession, error)
+	PanelSession(ctx context.Context, hash string, fresh bool) (store.PanelSession, error)
 	EndPanelSession(ctx context.Context, hash string) error
 	PanelSecret(ctx context.Context, name string) (string, error)
 }
 
+// The cookies are __Host-: only the panel's own name sets them, not a
+// tenant's page under the same base domain.
 const (
-	sessionCookie  = "murder_session"
-	ceremonyCookie = "murder_ceremony"
+	sessionCookie  = "__Host-murder_session"
+	ceremonyCookie = "__Host-murder_ceremony"
 	// SessionLength is how long a sign-in lasts.
 	SessionLength  = 12 * time.Hour
 	ceremonyLength = 5 * time.Minute
@@ -56,29 +59,36 @@ const (
 type Auth struct {
 	agent AuthAgent
 	name  string
-	// origin is where the panel's pages are: https://name.
-	origin string
-	web    *webauthn.WebAuthn
-	log    *slog.Logger
-	now    func() time.Time
+	// origin is where the panel's pages are: https://name; origins are
+	// those taken too, as murder admin connect's port.
+	origin  string
+	origins []string
+	web     *webauthn.WebAuthn
+	log     *slog.Logger
+	now     func() time.Time
 
 	mu     sync.Mutex
 	secret []byte
 }
 
-// NewAuth signs people in to the panel served as name, over HTTPS.
+// ConnectPort is where murder admin connect serves the panel by default.
+const ConnectPort = 8443
+
+// NewAuth signs people in to the panel served as name, over HTTPS, and
+// through murder admin connect's local port.
 func NewAuth(agent AuthAgent, name string, log *slog.Logger) (*Auth, error) {
-	return NewAuthAt(agent, name, "https://"+name, log)
+	return NewAuthAt(agent, name, "https://"+name, log, fmt.Sprintf("https://%s:%d", name, ConnectPort))
 }
 
-// NewAuthAt is NewAuth with the pages at origin, such as
+// NewAuthAt is NewAuth with the pages at origin, and others, such as
 // http://localhost:7480 for the demo: browsers allow passkeys there too.
-func NewAuthAt(agent AuthAgent, name, origin string, log *slog.Logger) (*Auth, error) {
-	web, err := webauthn.New(&webauthn.Config{RPID: name, RPDisplayName: "Murder", RPOrigins: []string{origin}})
+func NewAuthAt(agent AuthAgent, name, origin string, log *slog.Logger, others ...string) (*Auth, error) {
+	origins := append([]string{origin}, others...)
+	web, err := webauthn.New(&webauthn.Config{RPID: name, RPDisplayName: "Murder", RPOrigins: origins})
 	if err != nil {
 		return nil, err
 	}
-	return &Auth{agent: agent, name: name, origin: origin, web: web, log: log, now: time.Now}, nil
+	return &Auth{agent: agent, name: name, origin: origin, origins: origins, web: web, log: log, now: time.Now}, nil
 }
 
 // person is a panel user as WebAuthn sees them.
@@ -224,16 +234,22 @@ func (a *Auth) User(r *http.Request) (string, bool) {
 	if err != nil || cookie.Value == "" {
 		return "", false
 	}
-	session, err := a.agent.PanelSession(r.Context(), TokenHash(cookie.Value))
+	// A change is checked against the cluster's sessions, not a lagging
+	// node's.
+	fresh := r.Method != http.MethodGet && r.Method != http.MethodHead
+	session, err := a.agent.PanelSession(r.Context(), TokenHash(cookie.Value), fresh)
 	if err != nil {
 		return "", false
 	}
 	return session.User, true
 }
 
-func (a *Auth) startSession(ctx context.Context, w http.ResponseWriter, user string) error {
+// startSession signs user in, by passkey, having answered challenge: the
+// state refuses a challenge answered before, so a sign-in replayed signs
+// no one in.
+func (a *Auth) startSession(ctx context.Context, w http.ResponseWriter, user, passkey, challenge string) error {
 	token := Token(32)
-	if err := a.agent.StartPanelSession(ctx, api.SessionRequest{Hash: TokenHash(token), User: user, Expires: a.now().Add(SessionLength)}); err != nil {
+	if err := a.agent.StartPanelSession(ctx, api.SessionRequest{Hash: TokenHash(token), User: user, Passkey: passkey, Challenge: challenge, ExpiresAt: a.now().Add(SessionLength)}); err != nil {
 		return err
 	}
 	a.setCookie(w, sessionCookie, token, SessionLength)
@@ -242,7 +258,9 @@ func (a *Auth) startSession(ctx context.Context, w http.ResponseWriter, user str
 }
 
 func (a *Auth) loginBegin(w http.ResponseWriter, r *http.Request) {
-	options, session, err := a.web.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationPreferred))
+	// The person is verified, by PIN or biometrics, not only present: a
+	// stolen key alone signs no one in.
+	options, session, err := a.web.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		a.fail(w, err, http.StatusInternalServerError)
 		return
@@ -287,13 +305,13 @@ func (a *Auth) loginFinish(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, err, http.StatusInternalServerError)
 		return
 	}
-	if err := a.agent.UsePasskey(r.Context(), base64.RawURLEncoding.EncodeToString(credential.ID), string(data)); err != nil {
-		a.fail(w, err, http.StatusBadGateway)
+	id := base64.RawURLEncoding.EncodeToString(credential.ID)
+	if err := a.startSession(r.Context(), w, signedIn.Name, id, c.Session.Challenge); err != nil {
+		a.fail(w, errors.New("this sign-in was not taken: begin again"), http.StatusUnauthorized)
 		return
 	}
-	if err := a.startSession(r.Context(), w, signedIn.Name); err != nil {
-		a.fail(w, err, http.StatusBadGateway)
-		return
+	if err := a.agent.UsePasskey(r.Context(), id, string(data)); err != nil {
+		a.log.Warn("record a passkey's use", "error", err)
 	}
 	writeJSON(w, map[string]string{"user": signedIn.Name})
 }
@@ -335,7 +353,7 @@ func (a *Auth) enrollBegin(w http.ResponseWriter, r *http.Request) {
 		exclude = append(exclude, credential.Descriptor())
 	}
 	options, session, err := a.web.BeginRegistration(p,
-		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{ResidentKey: protocol.ResidentKeyRequirementRequired, UserVerification: protocol.VerificationPreferred}),
+		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{ResidentKey: protocol.ResidentKeyRequirementRequired, UserVerification: protocol.VerificationRequired}),
 		webauthn.WithExclusions(exclude))
 	if err != nil {
 		a.fail(w, err, http.StatusInternalServerError)
@@ -397,7 +415,7 @@ func (a *Auth) enrollFinish(w http.ResponseWriter, r *http.Request) {
 		}
 		answer["codes"] = codes
 	}
-	if err := a.startSession(r.Context(), w, u.Name); err != nil {
+	if err := a.startSession(r.Context(), w, u.Name, key.ID, c.Session.Challenge); err != nil {
 		a.fail(w, err, http.StatusBadGateway)
 		return
 	}
@@ -442,8 +460,14 @@ func writeJSON(w http.ResponseWriter, value any) {
 // sameOrigin reports whether a request that changes something comes from
 // the panel's own pages: the browser says where it comes from.
 func (a *Auth) sameOrigin(r *http.Request) bool {
+	return sameOrigin(r, a.origins)
+}
+
+// sameOrigin reports whether r comes from one of origins, by the browser's
+// Origin header, or, when it sends "null", its Sec-Fetch-Site.
+func sameOrigin(r *http.Request, origins []string) bool {
 	if origin := r.Header.Get("Origin"); origin != "" && origin != "null" {
-		return origin == a.origin
+		return slices.Contains(origins, origin)
 	}
 	return r.Header.Get("Sec-Fetch-Site") == "same-origin"
 }

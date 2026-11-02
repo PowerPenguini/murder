@@ -23,12 +23,8 @@ type PasskeyRequest struct {
 	Passkey store.Passkey `json:"passkey"`
 }
 
-// SessionRequest signs a person in.
-type SessionRequest struct {
-	Hash    string    `json:"hash"`
-	User    string    `json:"user"`
-	Expires time.Time `json:"expires"`
-}
+// SessionRequest signs a person in: the session as the state keeps it.
+type SessionRequest = store.PanelSession
 
 func (s *Server) panelAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/panel/users", rootOnly(func(w http.ResponseWriter, r *http.Request) {
@@ -79,10 +75,18 @@ func (s *Server) panelAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/panel/sessions", rootOnly(func(w http.ResponseWriter, r *http.Request) {
 		var request SessionRequest
 		if readJSON(w, r, &request) {
-			s.panelDone(w, s.store.StartPanelSession(request.Hash, request.User, request.Expires))
+			s.panelDone(w, s.store.StartPanelSession(request))
 		}
 	}))
 	mux.HandleFunc("GET /v1/panel/sessions/{hash}", rootOnly(func(w http.ResponseWriter, r *http.Request) {
+		// Before a change, the session is checked as the cluster has it:
+		// one ended elsewhere must not act on a node behind.
+		if r.URL.Query().Get("fresh") == "1" && s.cluster != nil && s.store.Cluster() != "" {
+			if err := s.cluster.CatchUp(); err != nil {
+				writeError(w, err)
+				return
+			}
+		}
 		s.panelAnswer(w, r, func() (any, error) { return s.store.PanelSession(r.PathValue("hash")) })
 	}))
 	mux.HandleFunc("DELETE /v1/panel/sessions/{hash}", rootOnly(func(w http.ResponseWriter, r *http.Request) {
@@ -164,9 +168,15 @@ func (c *Client) StartPanelSession(ctx context.Context, request SessionRequest) 
 	return c.do(ctx, http.MethodPost, "/v1/panel/sessions", request, nil)
 }
 
-func (c *Client) PanelSession(ctx context.Context, hash string) (store.PanelSession, error) {
+// PanelSession is a session while it lasts; fresh checks it as the
+// cluster has it, not as this node last heard.
+func (c *Client) PanelSession(ctx context.Context, hash string, fresh bool) (store.PanelSession, error) {
 	var session store.PanelSession
-	err := c.do(ctx, http.MethodGet, "/v1/panel/sessions/"+url.PathEscape(hash), nil, &session)
+	path := "/v1/panel/sessions/" + url.PathEscape(hash)
+	if fresh {
+		path += "?fresh=1"
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &session)
 	return session, err
 }
 

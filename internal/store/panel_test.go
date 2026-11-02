@@ -68,13 +68,24 @@ func TestThePanelsPeople(t *testing.T) {
 	if u, _ := st.PanelUser("jan"); u.Passkeys[0].UsedAt.IsZero() || u.Passkeys[0].Data != `{"id":"x","counter":5}` {
 		t.Fatalf("used: %+v", u.Passkeys[0])
 	}
-	if err := st.StartPanelSession(hashOf("cookie"), "jan", time.Now().Add(time.Hour)); err != nil {
+	session := func(cookie, passkey, challenge string, expires time.Time) PanelSession {
+		return PanelSession{Hash: hashOf(cookie), User: "jan", Passkey: passkey, Challenge: challenge, ExpiresAt: expires}
+	}
+	if err := st.StartPanelSession(session("cookie", "cred-1", "ch-1", time.Now().Add(time.Hour))); err != nil {
 		t.Fatal(err)
+	}
+	// A challenge answered once signs no one in again.
+	if err := st.StartPanelSession(session("cookie-x", "cred-1", "ch-1", time.Now().Add(time.Hour))); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a sign-in replayed: %v", err)
+	}
+	// Nor with a passkey not jan's.
+	if err := st.StartPanelSession(session("cookie-y", "nobody's", "ch-y", time.Now().Add(time.Hour))); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a session by a stranger's passkey: %v", err)
 	}
 	if session, err := st.PanelSession(hashOf("cookie")); err != nil || session.User != "jan" {
 		t.Fatalf("session %+v, %v", session, err)
 	}
-	if err := st.StartPanelSession(hashOf("ended"), "jan", time.Now().Add(-time.Second)); err != nil {
+	if err := st.StartPanelSession(session("ended", "cred-1", "ch-2", time.Now().Add(-time.Second))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.PanelSession(hashOf("ended")); !errors.Is(err, ErrNotFound) {
@@ -91,7 +102,24 @@ func TestThePanelsPeople(t *testing.T) {
 	if again, _ := st.PanelSecret("ceremonies"); err != nil || len(first) != 64 || again != first {
 		t.Fatalf("secret %q then %q, %v", first, again, err)
 	}
-	if err := st.StartPanelSession(hashOf("cookie-2"), "jan", time.Now().Add(time.Hour)); err != nil {
+	// Removing a passkey ends the sessions it began.
+	if err := st.StartPanelSession(session("by-phone", "cred-4", "ch-3", time.Now().Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RemovePasskey("cred-4", "jan (panel)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PanelSession(hashOf("by-phone")); !errors.Is(err, ErrNotFound) {
+		t.Fatal("a removed passkey's session goes on")
+	}
+	// A new invitation is a person's only one.
+	if _, err := st.InvitePanelUser("anna", hashOf("invite-3"), expires, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Enrollment(hashOf("invite-2")); !errors.Is(err, ErrNotFound) {
+		t.Fatal("an older invitation still works")
+	}
+	if err := st.StartPanelSession(session("cookie-2", "cred-1", "ch-4", time.Now().Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.RemovePanelUser("jan", "anna (panel)"); err != nil {

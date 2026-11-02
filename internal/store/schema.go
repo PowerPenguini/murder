@@ -144,10 +144,14 @@ CREATE TABLE panel_enrollments (
 	created_by TEXT NOT NULL
 ) STRICT;
 
--- Signed-in sessions, by the SHA-256 of their cookie.
+-- Signed-in sessions, by the SHA-256 of their cookie: the passkey that
+-- began each, which takes them along when removed, and the challenge it
+-- answered, which signs no one in twice.
 CREATE TABLE panel_sessions (
 	hash       TEXT PRIMARY KEY,
 	user       TEXT NOT NULL REFERENCES panel_users (name) ON DELETE CASCADE,
+	passkey    TEXT NOT NULL,
+	challenge  TEXT NOT NULL UNIQUE,
 	created_at TEXT NOT NULL,
 	expires_at TEXT NOT NULL
 ) STRICT;
@@ -373,10 +377,14 @@ CREATE TABLE panel_enrollments (
 	created_by TEXT NOT NULL
 ) STRICT;
 
--- Signed-in sessions, by the SHA-256 of their cookie.
+-- Signed-in sessions, by the SHA-256 of their cookie: the passkey that
+-- began each, which takes them along when removed, and the challenge it
+-- answered, which signs no one in twice.
 CREATE TABLE panel_sessions (
 	hash       TEXT PRIMARY KEY,
 	user       TEXT NOT NULL REFERENCES panel_users (name) ON DELETE CASCADE,
+	passkey    TEXT NOT NULL,
+	challenge  TEXT NOT NULL UNIQUE,
 	created_at TEXT NOT NULL,
 	expires_at TEXT NOT NULL
 ) STRICT;

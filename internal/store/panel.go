@@ -48,10 +48,19 @@ type Enrollment struct {
 
 // PanelSession is a person signed in.
 type PanelSession struct {
-	Hash      string    `json:"hash"`
-	User      string    `json:"user"`
+	Hash string `json:"hash"`
+	User string `json:"user"`
+	// Passkey began the session; Challenge is the one it answered.
+	Passkey   string    `json:"passkey"`
+	Challenge string    `json:"challenge"`
 	ExpiresAt time.Time `json:"expiresAt"`
 }
+
+// panelSchema is the schema version that added the panel's people.
+// Signing in and out works the same in every release since, so it is
+// marked as of it and taken while an upgrade freezes changes: the panel
+// is most needed then.
+const panelSchema = 13
 
 // Enrollment kinds.
 const (
@@ -130,10 +139,10 @@ func loadPanel(q querier, state *snapshot) error {
 	}); err != nil {
 		return err
 	}
-	if err := scan(`SELECT hash, user, expires_at FROM panel_sessions`, func(rows *sql.Rows) error {
+	if err := scan(`SELECT hash, user, passkey, challenge, expires_at FROM panel_sessions`, func(rows *sql.Rows) error {
 		var s PanelSession
 		var expires string
-		if err := rows.Scan(&s.Hash, &s.User, &expires); err != nil {
+		if err := rows.Scan(&s.Hash, &s.User, &s.Passkey, &s.Challenge, &expires); err != nil {
 			return err
 		}
 		s.ExpiresAt = parseTime(expires)
@@ -227,8 +236,9 @@ func (s *SQLite) InvitePanelUser(name, hash string, expires time.Time, actor str
 				return err
 			}
 		}
-		// Invitations of the past expire as new ones are made.
-		if err := tx.Exec(`DELETE FROM panel_enrollments WHERE kind = 'invite' AND expires_at < ?`, formatTime(now)); err != nil {
+		// Invitations of the past expire as new ones are made; a person's
+		// newest invitation is their only one.
+		if err := tx.Exec(`DELETE FROM panel_enrollments WHERE kind = 'invite' AND (expires_at < ? OR user = ?)`, formatTime(now), name); err != nil {
 			return err
 		}
 		if err := tx.Exec(`INSERT INTO panel_enrollments (hash, user, kind, expires_at, created_at, created_by) VALUES (?, ?, 'invite', ?, ?, ?)`,
@@ -313,7 +323,7 @@ func (s *SQLite) SetRecoveryCodes(name string, hashes []string, actor string) er
 // UsePasskey records a sign-in with a passkey: its credential as it is
 // now (its counter), and when.
 func (s *SQLite) UsePasskey(id, data string) error {
-	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+	_, err := s.writeAs(panelSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
 		if _, ok := current.panel.passkeys[id]; !ok {
 			return fmt.Errorf("passkey: %w", ErrNotFound)
 		}
@@ -327,6 +337,10 @@ func (s *SQLite) RemovePasskey(id, actor string) error {
 		k, ok := current.panel.passkeys[id]
 		if !ok {
 			return fmt.Errorf("passkey: %w", ErrNotFound)
+		}
+		// The sessions it began end with it: it may have been copied.
+		if err := tx.Exec(`DELETE FROM panel_sessions WHERE passkey = ?`, id); err != nil {
+			return err
 		}
 		if err := tx.Exec(`DELETE FROM panel_passkeys WHERE id = ?`, id); err != nil {
 			return err
@@ -355,22 +369,34 @@ func (s *SQLite) RemovePanelUser(name, actor string) error {
 	return err
 }
 
-// StartPanelSession signs name in until expires, with the cookie whose
-// SHA-256 is hash; sessions that ended go.
-func (s *SQLite) StartPanelSession(hash, name string, expires time.Time) error {
-	if !tokenHash.MatchString(hash) {
-		return fmt.Errorf("%w: a session's hash is SHA-256 in hex", ErrInvalid)
+// StartPanelSession signs session.User in, with the cookie whose SHA-256
+// is session.Hash, by the passkey that answered session.Challenge; sessions
+// that ended go. A challenge answered once signs no one in again.
+func (s *SQLite) StartPanelSession(session PanelSession) error {
+	if !tokenHash.MatchString(session.Hash) || session.Challenge == "" || session.Passkey == "" {
+		return fmt.Errorf("%w: a session needs its hash, the passkey and the challenge", ErrInvalid)
 	}
-	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+	name := session.User
+	_, err := s.writeAs(panelSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
 		if _, ok := current.panel.users[name]; !ok {
 			return fmt.Errorf("person %s: %w", name, ErrNotFound)
+		}
+		if key, ok := current.panel.passkeys[session.Passkey]; !ok || key.User != name {
+			return fmt.Errorf("%s's passkey: %w", name, ErrNotFound)
+		}
+		for _, other := range current.panel.sessions {
+			if other.Challenge == session.Challenge {
+				return fmt.Errorf("%w: this sign-in was used already", ErrConflict)
+			}
 		}
 		if err := tx.Exec(`DELETE FROM panel_sessions WHERE expires_at < ?`, formatTime(now)); err != nil {
 			return err
 		}
-		if err := tx.Exec(`INSERT INTO panel_sessions (hash, user, created_at, expires_at) VALUES (?, ?, ?, ?)`, hash, name, formatTime(now), formatTime(expires)); err != nil {
+		if err := tx.Exec(`INSERT INTO panel_sessions (hash, user, passkey, challenge, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			session.Hash, name, session.Passkey, session.Challenge, formatTime(now), formatTime(session.ExpiresAt)); err != nil {
 			return err
 		}
+		expires := session.ExpiresAt
 		return event(tx, now, name+" (panel)", "panel.signed-in", "", "", "until "+formatTime(expires))
 	})
 	return err
@@ -387,7 +413,7 @@ func (s *SQLite) PanelSession(hash string) (PanelSession, error) {
 }
 
 func (s *SQLite) EndPanelSession(hash string) error {
-	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+	_, err := s.writeAs(panelSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
 		session, ok := current.panel.sessions[hash]
 		if !ok {
 			return errUnchanged
@@ -413,7 +439,7 @@ func (s *SQLite) PanelSecret(name string) (string, error) {
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
-	next, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+	next, err := s.writeAs(panelSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
 		if _, ok := current.panel.secrets[name]; ok {
 			return errUnchanged
 		}

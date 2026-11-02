@@ -94,6 +94,21 @@ func (s *Server) accessAction(ctx context.Context, r *http.Request, agent Access
 	name := strings.TrimSpace(r.FormValue("name"))
 	switch r.FormValue("do") {
 	case "invite":
+		// Another person who has passkeys adds the next one themselves:
+		// an invitation for them would let whoever uses it act as them.
+		if name != data.Me {
+			people, err := agent.PanelUsers(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			for _, person := range people {
+				if person.Name == name && len(person.Passkeys) > 0 {
+					fail(errors.New(name + " has passkeys: they add another themselves, signed in; root can invite them on a node (murder admin invite)"))
+					return
+				}
+			}
+		}
 		token := Token(32)
 		if _, err := agent.InvitePanelUser(ctx, name, api.InviteRequest{Hash: TokenHash(token), Expires: s.now().Add(InviteLength)}); err != nil {
 			fail(err)

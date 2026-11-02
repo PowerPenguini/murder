@@ -133,11 +133,16 @@ func (m *MemoryAuth) SetRecoveryCodes(_ context.Context, name string, hashes []s
 func (m *MemoryAuth) StartPanelSession(_ context.Context, request api.SessionRequest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sessions[request.Hash] = store.PanelSession{Hash: request.Hash, User: request.User, ExpiresAt: request.Expires}
+	for _, other := range m.sessions {
+		if other.Challenge == request.Challenge {
+			return store.ErrConflict
+		}
+	}
+	m.sessions[request.Hash] = request
 	return nil
 }
 
-func (m *MemoryAuth) PanelSession(_ context.Context, hash string) (store.PanelSession, error) {
+func (m *MemoryAuth) PanelSession(_ context.Context, hash string, _ bool) (store.PanelSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session, ok := m.sessions[hash]
@@ -211,6 +216,11 @@ func (d *DemoAccess) RemovePasskey(_ context.Context, id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.passkeys, id)
+	for hash, session := range d.sessions {
+		if session.Passkey == id {
+			delete(d.sessions, hash)
+		}
+	}
 	return nil
 }
 

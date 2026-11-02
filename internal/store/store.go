@@ -318,7 +318,7 @@ type Store interface {
 	UsePasskey(id, data string) error
 	RemovePasskey(id, actor string) error
 	RemovePanelUser(name, actor string) error
-	StartPanelSession(hash, name string, expires time.Time) error
+	StartPanelSession(session PanelSession) error
 	PanelSession(hash string) (PanelSession, error)
 	EndPanelSession(hash string) error
 	PanelSecret(name string) (string, error)

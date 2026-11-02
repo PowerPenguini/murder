@@ -187,3 +187,48 @@ func TestStaticFiles(t *testing.T) {
 		}
 	}
 }
+
+// The socket's panel, which root reaches through SSH, takes changes from
+// its own pages only: a page elsewhere could post to the forwarded port.
+func TestTheSocketsPanelTakesChangesFromItsOwnPages(t *testing.T) {
+	s, err := New(Demo{Now: demoNow}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := NewDemoAccess(NewMemoryAuth())
+	access.Invite("anna")
+	s.Access = func(string) AccessAgent { return access }
+	server := httptest.NewServer(s.Handler())
+	defer server.Close()
+	post := func(origin, site string) int {
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/access", strings.NewReader("do=remove-person&name=anna"))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if origin != "" {
+			request.Header.Set("Origin", origin)
+		}
+		if site != "" {
+			request.Header.Set("Sec-Fetch-Site", site)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return response.StatusCode
+	}
+	if status := post("https://evil.example", "cross-site"); status != http.StatusForbidden {
+		t.Fatalf("a change from elsewhere: %d", status)
+	}
+	if status := post("", ""); status != http.StatusForbidden {
+		t.Fatalf("a change from nowhere said: %d", status)
+	}
+	if users, _ := access.PanelUsers(context.Background()); len(users) != 1 {
+		t.Fatal("anna was removed from elsewhere")
+	}
+	if status := post(server.URL, ""); status != http.StatusOK {
+		t.Fatalf("a change from its own page: %d", status)
+	}
+	if users, _ := access.PanelUsers(context.Background()); len(users) != 0 {
+		t.Fatal("anna stays")
+	}
+}

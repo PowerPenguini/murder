@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -193,13 +194,25 @@ func TestSigningInWithPasskeys(t *testing.T) {
 
 	// Signing in: the passkey alone says who.
 	_, options := b.post("/auth/login/begin", nil)
+	serverURL, _ := url.Parse(server.URL)
+	var captured *http.Cookie
+	for _, cookie := range jar.Cookies(serverURL) {
+		if cookie.Name == ceremonyCookie {
+			captured = cookie
+		}
+	}
 	answer := laptop.get(t, options, "localhost", origin)
 	if status, signed := b.post("/auth/login/finish", answer); status != http.StatusOK || signed["user"] != "jan" {
 		t.Fatalf("sign in: %d %v", status, signed)
 	}
-	// The same answer again: its ceremony is spent.
-	if status, _ := b.post("/auth/login/finish", answer); status == http.StatusOK {
-		t.Fatal("a sign-in replayed")
+	// The same answer again, with the ceremony's cookie as captured: the
+	// state has its challenge answered already.
+	replay := &browser{t: t, client: &http.Client{}, base: server.URL, origin: origin}
+	replayJar, _ := cookiejar.New(nil)
+	replayJar.SetCookies(serverURL, []*http.Cookie{captured})
+	replay.client.Jar = replayJar
+	if status, _ := replay.post("/auth/login/finish", answer); status != http.StatusUnauthorized {
+		t.Fatalf("a sign-in replayed: %d", status)
 	}
 	b.post("/auth/logout", nil)
 	// A copied passkey, its counter behind, is refused.
