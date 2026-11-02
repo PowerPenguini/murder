@@ -142,7 +142,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			n.Copies++
 		}
 	}
-	s.write(w, "overview", page{Title: "Overview", Section: "overview", Cluster: nodes, Now: now, Data: data}, http.StatusOK)
+	s.write(w, "overview", page{Title: "Overview", Section: "overview", Cluster: nodes, Now: now, User: userOf(r), Data: data}, http.StatusOK)
 }
 
 type tenantData struct {
@@ -177,7 +177,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		data.Env = append(data.Env, envVar{key, value})
 	}
 	slices.SortFunc(data.Env, func(a, b envVar) int { return strings.Compare(a.Key, b.Key) })
-	s.write(w, "tenant", page{Title: t.Spec.Name, Section: "overview", Cluster: nodes, Now: s.now(), Data: data}, http.StatusOK)
+	s.write(w, "tenant", page{Title: t.Spec.Name, Section: "overview", Cluster: nodes, Now: s.now(), User: userOf(r), Data: data}, http.StatusOK)
 }
 
 type eventsData struct {

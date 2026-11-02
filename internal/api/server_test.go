@@ -754,3 +754,48 @@ func TestDevicesAreReadCaughtUp(t *testing.T) {
 		t.Fatalf("devices %+v, %v", devices, err)
 	}
 }
+
+// The panel's people through the agent's API: an invitation, a passkey
+// added with it, a session, and the secret every panel shares.
+func TestThePanelsPeopleThroughTheAPI(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	hash := strings.Repeat("ab", 32)
+	user, err := f.client.InvitePanelUser(ctx, "jan", InviteRequest{Hash: hash, Expires: time.Now().Add(time.Hour)})
+	if err != nil || user.Name != "jan" {
+		t.Fatalf("invite: %+v, %v", user, err)
+	}
+	if e, err := f.client.Enrollment(ctx, hash); err != nil || e.User != "jan" {
+		t.Fatalf("enrollment %+v, %v", e, err)
+	}
+	if err := f.client.AddPasskey(ctx, PasskeyRequest{Hash: hash, Passkey: store.Passkey{ID: "k1", User: "jan", Data: "{}", Label: "laptop"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Enrollment(ctx, hash); !IsNotFound(err) {
+		t.Fatalf("a used invitation: %v", err)
+	}
+	if u, err := f.client.PanelUserByHandle(ctx, user.Handle); err != nil || len(u.Passkeys) != 1 {
+		t.Fatalf("by handle: %+v, %v", u, err)
+	}
+	session := strings.Repeat("cd", 32)
+	if err := f.client.StartPanelSession(ctx, SessionRequest{Hash: session, User: "jan", Passkey: "k1", Challenge: "c1", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := f.client.PanelSession(ctx, session, true); err != nil || s.User != "jan" {
+		t.Fatalf("session %+v, %v", s, err)
+	}
+	secret, err := f.client.PanelSecret(ctx, "ceremonies")
+	if err != nil || len(secret) != 64 {
+		t.Fatalf("secret %q, %v", secret, err)
+	}
+	if err := f.client.WithActor("anna (panel)").RemovePanelUser(ctx, "jan"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.PanelSession(ctx, session, false); !IsNotFound(err) {
+		t.Fatalf("a removed person's session: %v", err)
+	}
+	events, _ := f.client.Events(ctx, store.EventQuery{Limit: 1})
+	if len(events) != 1 || !strings.HasPrefix(events[0].Actor, "anna (panel)") {
+		t.Fatalf("the removal's actor: %+v", events)
+	}
+}

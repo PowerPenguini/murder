@@ -437,10 +437,16 @@ func keepPublic(ctx context.Context, st *store.SQLite, node string, values []str
 				warned = true
 			}
 		}
+		// Soon while it is not recorded, as just after joining; then
+		// every half minute.
+		wait := 30 * time.Second
+		if !slices.ContainsFunc(st.Nodes(), func(n store.Node) bool { return n.Name == node && slices.Equal(n.Public, want) }) {
+			wait = 5 * time.Second
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(30 * time.Second):
+		case <-time.After(wait):
 		}
 	}
 }

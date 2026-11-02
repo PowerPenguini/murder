@@ -33,8 +33,17 @@ Each stage is one PR, reviewed and tested before the next.
    (nodes, tenants, their copies, recent events), a tenant's page and the
    audit log. On a unix socket only root can use, through an SSH tunnel,
    until accounts exist; it answers only as localhost.
-2. **Accounts** (after the tunnel, see 3): passkeys, sessions, recovery codes, invitations
-   (`murder admin invite NAME` for the first person, then from the panel).
+2. **Accounts** (after the tunnel, see 3): schema 13 keeps people (a random
+   WebAuthn user handle each), passkeys (the credential as JSON), one-time
+   enrollments by SHA-256 (invitations for 24 hours, ten recovery codes),
+   sessions by SHA-256 (12 hours) and a secret every panel shares. The
+   panel is the relying party as its name: sign-in is discoverable (no
+   name typed); ceremonies in flight are in a cookie signed with the shared
+   secret, so any node may finish what another began; a counter that went
+   back refuses the passkey; changes are taken only from the panel's own
+   origin (SameSite=Strict cookies and the Origin header). `murder admin
+   invite NAME` for the first person; the Access page for the rest, and
+   for devices. The socket's panel, root's through SSH, needs no sign-in.
 3. **The tunnel:** WireGuard in the panel process (wireguard-go with a
    userspace network stack), devices and their QR codes (`murder admin
    device`), `murder admin connect` for computers without the app, HTTPS

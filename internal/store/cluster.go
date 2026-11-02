@@ -21,11 +21,11 @@ import (
 // replicatedTables are the tables every node of a cluster holds the same,
 // in an order that inserts referenced rows first. The others (meta's node
 // name, images) belong to one node.
-var replicatedTables = []string{"apps", "tenants", "secrets", "nodes", "events", "devices"}
+var replicatedTables = []string{"apps", "tenants", "secrets", "nodes", "events", "devices", "panel_users", "panel_passkeys", "panel_enrollments", "panel_sessions", "panel_secrets"}
 
 // tableSince is the schema version that added a replicated table: a
 // snapshot of an older release has none.
-var tableSince = map[string]int{"devices": 12}
+var tableSince = map[string]int{"devices": 12, "panel_users": 13, "panel_passkeys": 13, "panel_enrollments": 13, "panel_sessions": 13, "panel_secrets": 13}
 
 // Refused reports whether a batch failed the same way on every node that
 // applies it: stale, malformed, or against the state (a constraint, a

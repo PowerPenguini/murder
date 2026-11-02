@@ -179,6 +179,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("GET /v1/nodes", s.nodes)
 	s.panelRoutes(mux)
+	s.panelAuthRoutes(mux)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
 	mux.HandleFunc("GET /v1/backup", s.backup)
 	mux.HandleFunc("POST /v1/backups/run", rootOnly(s.runBackups))

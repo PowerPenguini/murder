@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -26,7 +27,9 @@ func (d Demo) now() time.Time {
 func (d Demo) Nodes(context.Context) (api.Nodes, error) {
 	now := d.now()
 	node := func(name, private, public string, answers bool) api.NodeState {
-		return api.NodeState{Node: store.Node{Name: name, Address: private + ":7400", CreatedAt: now.Add(-40 * 24 * time.Hour), Public: []netip.Addr{netip.MustParseAddr(public)}}, Answers: answers}
+		host := private[strings.LastIndex(private, ".")+1:]
+		end := &store.Tunnel{Address: netip.MustParseAddr("10.77.0." + host), Key: "pnQ8Rn0r6k0yBqI3m3eH1vO8y7cWvCq1h8mJv0q3b2Y=", Port: 51820}
+		return api.NodeState{Node: store.Node{Name: name, Address: private + ":7400", CreatedAt: now.Add(-40 * 24 * time.Hour), Public: []netip.Addr{netip.MustParseAddr(public)}, Tunnel: end}, Answers: answers}
 	}
 	n3 := node("hel-1", "10.0.1.3", "204.168.230.236", false)
 	n3.FailedAt = now.Add(-6 * time.Minute)

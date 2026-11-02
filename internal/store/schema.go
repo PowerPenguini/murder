@@ -9,8 +9,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 11 in place.
-const schemaVersion = 12
+// versions 4 to 12 in place.
+const schemaVersion = 13
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -112,6 +112,55 @@ CREATE TABLE devices (
 	address    TEXT NOT NULL UNIQUE,
 	created_at TEXT NOT NULL,
 	created_by TEXT NOT NULL
+) STRICT;
+
+-- The panel's people, each signing in with passkeys; handle is the
+-- WebAuthn user handle, random.
+CREATE TABLE panel_users (
+	name       TEXT PRIMARY KEY,
+	handle     TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL,
+	created_by TEXT NOT NULL
+) STRICT;
+
+-- A person's passkeys: the WebAuthn credential as JSON, and a label.
+CREATE TABLE panel_passkeys (
+	id         TEXT PRIMARY KEY,
+	user       TEXT NOT NULL REFERENCES panel_users (name) ON DELETE CASCADE,
+	data       TEXT NOT NULL,
+	label      TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	used_at    TEXT
+) STRICT;
+
+-- One-time ways to add a passkey, by the SHA-256 of their token:
+-- invitations, which expire, and recovery codes, which do not.
+CREATE TABLE panel_enrollments (
+	hash       TEXT PRIMARY KEY,
+	user       TEXT NOT NULL REFERENCES panel_users (name) ON DELETE CASCADE,
+	kind       TEXT NOT NULL CHECK (kind IN ('invite', 'recovery')),
+	expires_at TEXT,
+	created_at TEXT NOT NULL,
+	created_by TEXT NOT NULL
+) STRICT;
+
+-- Signed-in sessions, by the SHA-256 of their cookie: the passkey that
+-- began each, which takes them along when removed, and the challenge it
+-- answered, which signs no one in twice.
+CREATE TABLE panel_sessions (
+	hash       TEXT PRIMARY KEY,
+	user       TEXT NOT NULL REFERENCES panel_users (name) ON DELETE CASCADE,
+	passkey    TEXT NOT NULL,
+	challenge  TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL
+) STRICT;
+
+-- Secrets every node's panel shares, such as the key its sign-in
+-- ceremonies are signed with.
+CREATE TABLE panel_secrets (
+	name  TEXT PRIMARY KEY,
+	value TEXT NOT NULL
 ) STRICT;
 
 -- Sealed secret values, kept until a purge deletes the tenant.
@@ -280,6 +329,13 @@ func upgrade(db *sql.DB) error {
 				return err
 			}
 		}
+		version = 12
+	}
+	// Version 13 keeps the panel's people, passkeys and sessions.
+	if version == 12 {
+		if _, err := tx.Exec(panelTables); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return err
@@ -289,3 +345,53 @@ func upgrade(db *sql.DB) error {
 
 // SchemaVersion is the schema version of this release's databases.
 const SchemaVersion = schemaVersion
+
+// panelTables are the tables schema 13 added, as one script.
+const panelTables = `-- The panel's people, each signing in with passkeys; handle is the
+-- WebAuthn user handle, random.
+CREATE TABLE panel_users (
+	name       TEXT PRIMARY KEY,
+	handle     TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL,
+	created_by TEXT NOT NULL
+) STRICT;
+
+-- A person's passkeys: the WebAuthn credential as JSON, and a label.
+CREATE TABLE panel_passkeys (
+	id         TEXT PRIMARY KEY,
+	user       TEXT NOT NULL REFERENCES panel_users (name) ON DELETE CASCADE,
+	data       TEXT NOT NULL,
+	label      TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	used_at    TEXT
+) STRICT;
+
+-- One-time ways to add a passkey, by the SHA-256 of their token:
+-- invitations, which expire, and recovery codes, which do not.
+CREATE TABLE panel_enrollments (
+	hash       TEXT PRIMARY KEY,
+	user       TEXT NOT NULL REFERENCES panel_users (name) ON DELETE CASCADE,
+	kind       TEXT NOT NULL CHECK (kind IN ('invite', 'recovery')),
+	expires_at TEXT,
+	created_at TEXT NOT NULL,
+	created_by TEXT NOT NULL
+) STRICT;
+
+-- Signed-in sessions, by the SHA-256 of their cookie: the passkey that
+-- began each, which takes them along when removed, and the challenge it
+-- answered, which signs no one in twice.
+CREATE TABLE panel_sessions (
+	hash       TEXT PRIMARY KEY,
+	user       TEXT NOT NULL REFERENCES panel_users (name) ON DELETE CASCADE,
+	passkey    TEXT NOT NULL,
+	challenge  TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL
+) STRICT;
+
+-- Secrets every node's panel shares, such as the key its sign-in
+-- ceremonies are signed with.
+CREATE TABLE panel_secrets (
+	name  TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+) STRICT;`

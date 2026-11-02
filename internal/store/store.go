@@ -306,6 +306,22 @@ type Store interface {
 	// at the first free address of network from its 100th on.
 	AddDevice(name, key string, network netip.Prefix, actor string) (Device, error)
 	RemoveDevice(name, actor string) error
+
+	// The panel's people, passkeys and sessions; see panel.go.
+	PanelUsers() []PanelUser
+	PanelUser(name string) (PanelUser, error)
+	PanelUserByHandle(handle string) (PanelUser, error)
+	InvitePanelUser(name, hash string, expires time.Time, actor string) (PanelUser, error)
+	Enrollment(hash string) (Enrollment, error)
+	AddPasskey(hash string, key Passkey) error
+	SetRecoveryCodes(name string, hashes []string, actor string) error
+	UsePasskey(id, data string) error
+	RemovePasskey(id, actor string) error
+	RemovePanelUser(name, actor string) error
+	StartPanelSession(session PanelSession) error
+	PanelSession(hash string) (PanelSession, error)
+	EndPanelSession(hash string) error
+	PanelSecret(name string) (string, error)
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error

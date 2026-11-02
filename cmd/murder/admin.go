@@ -20,6 +20,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/panel"
 	"github.com/PowerPenguini/murder/internal/tunnel"
 )
 
@@ -31,6 +32,11 @@ const adminUsage = `Usage: murder admin <command> [arguments]
                                 shown once and kept nowhere
   device list                   the devices that may reach the panel
   device remove NAME            stop a device reaching the panel
+  invite NAME                   let a person add a passkey: prints a link,
+                                valid 24 hours, once (a new person, or
+                                one who lost every passkey and code)
+  user list                     the people who sign in
+  user remove NAME              stop a person signing in
   connect -device FILE          on a computer without the WireGuard app:
                                 reach the panel through the tunnel at
                                 https://<panel name>:8443 (see -listen)
@@ -44,6 +50,8 @@ func runAdmin(args []string) error {
 	switch args[0] {
 	case "device":
 		return runDevice(args[1:])
+	case "invite", "user":
+		return runPeople(args)
 	case "connect":
 		return runConnect(args[1:])
 	}
@@ -99,6 +107,55 @@ func runDevice(args []string) error {
 	return flag.ErrHelp
 }
 
+func runPeople(args []string) error {
+	flags := flag.NewFlagSet("admin "+args[0], flag.ContinueOnError)
+	socket := socketPath(flags)
+	configPath := flags.String("config", defaultConfig, "agent configuration file, for the panel's name")
+	rest, err := parseInterspersed(flags, args[1:])
+	if err != nil {
+		return err
+	}
+	client := api.NewClient(*socket)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	switch {
+	case args[0] == "invite" && len(rest) == 1:
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			return err
+		}
+		token := panel.Token(32)
+		if _, err := client.InvitePanelUser(ctx, rest[0], api.InviteRequest{Hash: panel.TokenHash(token), Expires: time.Now().Add(panel.InviteLength)}); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s adds a passkey, once, within 24 hours, at:\n\n  https://%s/enroll#%s\n\nSend it through a channel you trust: it lets whoever has it sign in as %s.\n", rest[0], cfg.Panel.Name, token, rest[0])
+		return nil
+	case args[0] == "user" && len(rest) == 1 && rest[0] == "list":
+		users, err := client.PanelUsers(ctx)
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "NAME\tPASSKEYS\tRECOVERY CODES\tADDED BY")
+		for _, u := range users {
+			var labels []string
+			for _, k := range u.Passkeys {
+				labels = append(labels, k.Label)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", u.Name, strings.Join(labels, ", "), u.Recovery, u.CreatedBy)
+		}
+		return w.Flush()
+	case args[0] == "user" && len(rest) == 2 && rest[0] == "remove":
+		if err := client.RemovePanelUser(ctx, rest[1]); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s no longer signs in to the panel\n", rest[1])
+		return nil
+	}
+	fmt.Fprint(os.Stderr, adminUsage)
+	return flag.ErrHelp
+}
+
 // addDevice adds a device and prints, once, what it needs to connect.
 func addDevice(ctx context.Context, client *api.Client, name string, cfg config.Agent, out string) error {
 	network, err := netip.ParsePrefix(cfg.Panel.Tunnel.Network)
@@ -109,14 +166,9 @@ func addDevice(ctx context.Context, client *api.Client, name string, cfg config.
 	if err != nil {
 		return err
 	}
-	var ends []tunnel.Node
-	for _, node := range nodes.Nodes {
-		endpoint := firstIPv4(node.Public)
-		if node.Tunnel == nil || !endpoint.IsValid() {
-			fmt.Fprintf(os.Stderr, "murder: node %s is left out: its panel has not run, or it has no public address (cluster.publicAddresses)\n", node.Name)
-			continue
-		}
-		ends = append(ends, tunnel.Node{Name: node.Name, Key: node.Tunnel.Key, Address: node.Tunnel.Address, Endpoint: netip.AddrPortFrom(endpoint, uint16(node.Tunnel.Port))})
+	ends, left := panel.Ends(nodes.Nodes)
+	for _, name := range left {
+		fmt.Fprintf(os.Stderr, "murder: node %s is left out: its panel has not run, or it has no public address (cluster.publicAddresses)\n", name)
 	}
 	if len(ends) == 0 {
 		return errors.New("no node serves the panel in its tunnel yet: start murder-panel, with panel.tunnel and cluster.publicAddresses in its config")
@@ -164,15 +216,6 @@ func addDevice(ctx context.Context, client *api.Client, name string, cfg config.
 	}
 	fmt.Fprintf(stdout, "The name %s must lead to %s: the leader's DNS records do (cluster.dns), or a hosts file entry.\n", cfg.Panel.Name, nodeAddresses(ends))
 	return nil
-}
-
-func firstIPv4(addresses []netip.Addr) netip.Addr {
-	for _, address := range addresses {
-		if address.Unmap().Is4() {
-			return address.Unmap()
-		}
-	}
-	return netip.Addr{}
 }
 
 func nodeAddresses(nodes []tunnel.Node) string {

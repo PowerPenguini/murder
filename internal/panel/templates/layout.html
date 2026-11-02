@@ -9,6 +9,11 @@
 <link rel="stylesheet" href="/static/panel.css">
 </head>
 <body>
+{{if .Gate}}
+<main class="gate">
+{{template "content" .}}
+</main>
+{{else}}
 <header class="bar">
   <a class="brand" href="/"><img src="/static/crow.svg" alt=""><span class="word">MURDER</span><span class="cursor"></span></a>
   <div class="meta">
@@ -16,16 +21,19 @@
     <span>node <b>{{.Cluster.Self}}</b></span>
     {{with .Cluster.Leader}}<span>leader <b>{{.}}</b></span>{{end}}
     <span>{{.Now.UTC.Format "15:04:05"}} <b>utc</b></span>
+    {{with .User}}<form class="whoami" method="post" action="/auth/logout"><span>{{.}}</span><button type="submit">sign out</button></form>{{end}}
   </div>
 </header>
 <nav>
   <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
   <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
+  <a href="/access" {{if eq .Section "access"}}class="on"{{end}}>Access</a>
 </nav>
 {{with .Cluster.Frozen}}<div class="frozen">changes frozen — {{.}}</div>{{end}}
 <main>
 {{template "content" .}}
 </main>
 <footer>murder · a murder of crows keeps your tenants · rendered on {{.Cluster.Self}} at {{.Now.UTC.Format "2006-01-02 15:04:05"}}Z</footer>
+{{end}}
 </body>
 </html>
