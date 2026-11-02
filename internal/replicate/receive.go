@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-
-	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // Receiver keeps the copies of other nodes' tenants on this node.
 type Receiver struct {
-	Store   store.Store
+	Store   Owners
 	Volumes Volumes
 	// CatchUp applies here what the cluster has applied: a whole copy is
 	// taken only on a state no older than the cluster's.

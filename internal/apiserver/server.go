@@ -618,9 +618,18 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// RouteState is what routes are made from: the tenants, which node runs
+// each, and where the nodes are.
+type RouteState interface {
+	Node() string
+	Nodes() []store.Node
+	List() []store.Record
+	Live(name string) (store.Record, error)
+}
+
 // Routes adapts the store for the edge proxy.
 type Routes struct {
-	Store store.Store
+	Store RouteState
 	// RelayPort is where every node's edge takes requests other nodes pass
 	// on; 0 outside a cluster.
 	RelayPort int

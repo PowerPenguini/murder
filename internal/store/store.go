@@ -228,6 +228,10 @@ type Sealer func(tenant, name string, secret spec.Secret) (string, error)
 
 // Store is the desired state of a node. Reads come from memory and never
 // fail; every write is one transaction that also records who made it.
+//
+// Store is all of it, as the agent's API serves it. A package that needs
+// less, as the reconciler, moves, replication and failover do, declares an
+// interface of only what it uses, and *SQLite satisfies it.
 type Store interface {
 	Node() string
 
