@@ -9,8 +9,8 @@ import (
 
 // The charts are drawn by the server as SVG, with geometry computed here
 // so the templates only place it. One ramp of grey, validated as an
-// ordinal ramp against the page (each step at least 2:1 on it, steps
-// apart): the loudest step is kept for what needs attention.
+// ordinal ramp against the page's #000 (each step at least 2:1 on it,
+// steps apart): the loudest step is kept for what needs attention.
 const (
 	ink1 = "#ececec" // what the reader must see
 	ink2 = "#b0b0b0"
@@ -91,9 +91,9 @@ func stateBar(rows []tenantRow) segmentedBar {
 		}
 	}
 	return newSegmentedBar([]segment{
-		{Label: "needs attention", N: failing, Fill: ink1, Ink: "#0a0a0a"},
-		{Label: "changing", N: changing, Fill: ink2, Ink: "#0a0a0a"},
-		{Label: "running", N: running, Fill: ink3, Ink: "#0a0a0a"},
+		{Label: "needs attention", N: failing, Fill: ink1, Ink: "#000"},
+		{Label: "changing", N: changing, Fill: ink2, Ink: "#000"},
+		{Label: "running", N: running, Fill: ink3, Ink: "#000"},
 		{Label: "suspended", N: stopped, Fill: ink4, Ink: "#ececec"},
 	})
 }
