@@ -98,3 +98,8 @@ type SecretValue struct {
 type ErrorBody struct {
 	Error string `json:"error"`
 }
+
+// ActorHeader lets a trusted client, such as the panel, name the person it
+// acts for. It is recorded next to the socket user, never instead of it:
+// anyone who can use the socket controls every tenant anyway.
+const ActorHeader = "X-Murder-Actor"
