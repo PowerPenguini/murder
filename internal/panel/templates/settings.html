@@ -1,5 +1,5 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}{{$f := $d.Form}}
-{{template "tenant-head" (head $t.Spec.Name nil "settings" .Acts true)}}
+<header class="pagehead">{{template "tenant-head" (head $t.Spec.Name nil "settings" .Acts true)}}</header>
 <p class="lead">What is its own, over app <a href="/apps/{{$t.App}}">{{$t.App}}</a>. A field left empty takes the app's value. Saving gives it a new container{{if $t.Archived}} once it is restored{{end}}: a few seconds without it.</p>
 
 <section data-still class="near">

@@ -33,7 +33,7 @@ func demoPoint(tenant string, memoryLimitMB int, cpuLimit float64, t time.Time, 
 	memoryShare := 0.28 + 0.3*load
 	errorShare := 0.002
 	if tenant == "baltic-freight" {
-		memoryShare, errorShare = 0.82+0.17*load, 0.04
+		memoryShare, errorShare = 0.91+0.07*load, 0.04
 	}
 	rpm := 4 + 180*load
 	p := usage.Point{

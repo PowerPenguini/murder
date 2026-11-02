@@ -1,4 +1,5 @@
 {{define "content"}}{{$d := .Data}}
+<header class="pagehead"><h1>Overview</h1></header>
 <div class="figures">
   <div class="figure"><div class="n">{{template "upcount" $d.Nodes}}<small> / {{len $d.Nodes}}</small></div><div class="l">nodes up</div></div>
   <div class="figure"><div class="n">{{$d.Healthy}}<small> / {{$d.Serving}}</small></div><div class="l">tenants healthy</div></div>

@@ -1,5 +1,5 @@
 {{define "content"}}{{$d := .Data}}
-{{template "tenant-head" (head $d.Tenant nil "logs" true .Edits)}}
+<header class="pagehead">{{template "tenant-head" (head $d.Tenant nil "logs" true .Edits)}}</header>
 <p class="lead">Its container's last {{$d.Tail}} lines, as they were when this page was opened. {{if lt $d.Tail 2000}}<a href="?tail=2000">The last 2000</a> · {{end}}<a href="">Read again</a></p>
 <section data-still class="near">
   {{with loglines $d.Lines}}

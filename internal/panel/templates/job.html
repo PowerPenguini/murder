@@ -1,9 +1,10 @@
 {{define "content"}}{{$j := .Data.Job}}
-<nav class="crumbs" aria-label="where this is"><a href="/cluster">Cluster</a><span>/</span><span>Jobs</span></nav>
+<header class="pagehead">
 <div class="title">
-  <h1>{{$j.Title}}</h1>
+  <h1><a class="up" href="/cluster">Cluster</a><span class="up">/</span>{{$j.Title}}</h1>
   {{if not $j.Done}}<span class="st warn">running</span>{{else if $j.Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}
 </div>
+</header>
 <p class="lead">By {{$j.By}}, {{ago $j.Started}} ago · <a href="/cluster">Cluster</a></p>
 <section class="near">
   <pre class="logs">{{with $j.Output}}{{.}}{{else}}Under way…{{end}}</pre>

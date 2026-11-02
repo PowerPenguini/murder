@@ -1,6 +1,5 @@
 {{define "content"}}{{$d := .Data}}{{$a := $d.App}}
-<nav class="crumbs" aria-label="where this is"><a href="/apps">Apps</a><span>/</span><span>{{$a.Name}}</span></nav>
-<div class="title"><h1>{{$a.Name}}</h1></div>
+<header class="pagehead"><div class="title"><h1><a class="up" href="/apps">Apps</a><span class="up">/</span>{{$a.Name}}</h1></div></header>
 <p class="lead">{{len $a.Tenants}} live tenants · changed {{ago $a.UpdatedAt}} ago · <a href="/events?app={{$a.Name}}">Events</a></p>
 
 <section data-still class="near">
