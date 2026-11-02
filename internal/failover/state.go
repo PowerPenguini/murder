@@ -24,3 +24,8 @@ type State interface {
 	NodeBack(node, actor string) error
 	MarkFailed(node, actor string) (bool, error)
 }
+
+// The agent passes its store.
+var (
+	_ State = (*store.SQLite)(nil)
+)

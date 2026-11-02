@@ -28,9 +28,17 @@ type State interface {
 	GiveUpCopy(name, node, why string) (bool, error)
 }
 
-// Owners is what a node receiving copies reads of the desired state: who
-// owns a tenant, so only its owner sends a copy.
-type Owners interface {
+// Placements is what a node receiving copies reads of the desired state:
+// where a tenant runs, which node keeps its copy or is to, and whether it
+// moves here, so a copy is taken only from the tenant's node and only by
+// the node meant to keep it.
+type Placements interface {
 	Node() string
 	Get(name string) (store.Record, error)
 }
+
+// The agent passes its store.
+var (
+	_ State = (*store.SQLite)(nil)
+	_ Placements = (*store.SQLite)(nil)
+)

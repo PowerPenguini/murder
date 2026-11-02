@@ -15,7 +15,8 @@ type State interface {
 	// Frozen says why changes are refused, while an upgrade runs.
 	Frozen() string
 
-	// Observe records the image that now owns a tenant's data.
+	// Observe records the image that now owns a tenant's data; the one
+	// before becomes its PreviousImage.
 	Observe(name, dataImage string) error
 	// Images lists every image a tenant was given or ran; ForgetImage
 	// drops one that is gone from the node.
@@ -28,3 +29,8 @@ type State interface {
 	// are gone.
 	Forget(name, actor string) error
 }
+
+// The agent passes its store.
+var (
+	_ State = (*store.SQLite)(nil)
+)

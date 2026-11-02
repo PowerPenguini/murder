@@ -11,7 +11,8 @@ type State interface {
 	List() []store.Record
 	Get(name string) (store.Record, error)
 
-	// StartMove marks a tenant of this node as moving to another node;
+	// StartMove marks a tenant of this node, live or archived, as moving
+	// to another node;
 	// HoldMove has requests wait while it runs nowhere; FinishMove gives
 	// it to the target, requests still held until it serves there
 	// (ReleaseHold); CancelMove leaves it here, and reports whether there
@@ -23,3 +24,8 @@ type State interface {
 	ReleaseHold(name string) error
 	CancelMove(name, actor string) (bool, error)
 }
+
+// The agent passes its store.
+var (
+	_ State = (*store.SQLite)(nil)
+)

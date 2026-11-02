@@ -624,8 +624,12 @@ type RouteState interface {
 	Node() string
 	Nodes() []store.Node
 	List() []store.Record
+	// Live refuses an archived tenant with store.ErrArchived: it has no
+	// route.
 	Live(name string) (store.Record, error)
 }
+
+var _ RouteState = (*store.SQLite)(nil)
 
 // Routes adapts the store for the edge proxy.
 type Routes struct {
