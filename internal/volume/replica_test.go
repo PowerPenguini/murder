@@ -44,7 +44,8 @@ func (f *replicaZFS) pipe(_ context.Context, stdin io.Reader, stdout io.Writer, 
 	}
 	if args[0] == "receive" {
 		dataset := args[len(args)-1]
-		f.datasets[dataset] = &fakeDataset{owner: strings.TrimPrefix(dataset, "tank/murder/"), role: replicaRole, canmount: "noauto", mountpoint: "/srv/murder/tenants/" + strings.TrimPrefix(dataset, "tank/murder/")}
+		tenant := strings.TrimPrefix(strings.TrimPrefix(dataset, "tank/murder/"), incomingPrefix)
+		f.datasets[dataset] = &fakeDataset{owner: tenant, role: replicaRole, canmount: "noauto", mountpoint: "/srv/murder/tenants/" + tenant}
 	}
 	if args[0] == "send" {
 		_, _ = io.WriteString(stdout, "stream")
@@ -63,9 +64,10 @@ func TestACopyIsReceivedUnmountedAndMarked(t *testing.T) {
 	if err := z.ReceiveReplica(ctx, "acme", true, strings.NewReader("x"), 3); err != nil {
 		t.Fatal(err)
 	}
-	want := "zfs receive -u -o canmount=noauto -o io.murder:role=replica -o mountpoint=/srv/murder/tenants/acme tank/murder/acme"
-	if fake.piped[0] != want {
-		t.Fatalf("received with %q, want %q", fake.piped[0], want)
+	// Beside, then in place of, any copy there.
+	want := "zfs receive -u -o canmount=noauto -o io.murder:role=replica -o mountpoint=/srv/murder/tenants/acme tank/murder/murder-incoming-acme"
+	if fake.piped[0] != want || !fake.ran("zfs rename tank/murder/murder-incoming-acme tank/murder/acme") || fake.datasets["tank/murder/acme"] == nil {
+		t.Fatalf("received with %q, want %q; calls %v", fake.piped[0], want, fake.calls)
 	}
 	if err := z.ReceiveReplica(ctx, "acme", false, strings.NewReader("x"), 3); err != nil {
 		t.Fatal(err)
@@ -73,8 +75,16 @@ func TestACopyIsReceivedUnmountedAndMarked(t *testing.T) {
 	if !strings.HasSuffix(fake.piped[1], " -F tank/murder/acme") {
 		t.Fatalf("changes received with %q", fake.piped[1])
 	}
+	fake.calls = nil
 	if err := z.ReceiveReplica(ctx, "acme", true, strings.NewReader("x"), 3); err != nil || !fake.ran("zfs destroy -r tank/murder/acme") {
 		t.Fatalf("a whole copy over a copy: %v, %v", err, fake.calls)
+	}
+	// The old copy goes only once the new one is all there.
+	if destroyAt, receiveAt := slices.Index(fake.calls, "zfs destroy -r tank/murder/acme"), len(fake.piped)-1; destroyAt < 0 || receiveAt < 0 {
+		t.Fatalf("calls %v", fake.calls)
+	}
+	if replica, err := z.IsReplica(ctx, "acme"); err != nil || !replica {
+		t.Fatalf("is a replica: %v, %v", replica, err)
 	}
 	// Live data is never replaced, nor dropped as a copy.
 	fake.datasets["tank/murder/live"] = &fakeDataset{owner: "live", mountpoint: "/srv/murder/tenants/live", mounted: true}
@@ -84,6 +94,15 @@ func TestACopyIsReceivedUnmountedAndMarked(t *testing.T) {
 	if err := z.DropReplica(ctx, "live"); err == nil {
 		t.Fatal("live data dropped as a copy")
 	}
+	if replica, _ := z.IsReplica(ctx, "live"); replica {
+		t.Fatal("live data taken for a copy")
+	}
+	// Nor a copy that is mounted, as one taking over is.
+	fake.datasets["tank/murder/acme"].mounted = true
+	if err := z.ReceiveReplica(ctx, "acme", false, strings.NewReader("x"), 3); err == nil {
+		t.Fatal("changes received into a mounted copy")
+	}
+	fake.datasets["tank/murder/acme"].mounted = false
 	if err := z.DropReplica(ctx, "acme"); err != nil {
 		t.Fatal(err)
 	}

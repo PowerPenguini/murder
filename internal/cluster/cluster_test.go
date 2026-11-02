@@ -676,11 +676,11 @@ type recordedReplicas struct {
 	data    string
 }
 
-func (r *recordedReplicas) Newest(_ context.Context, sender, tenant string) (string, error) {
+func (r *recordedReplicas) Snapshots(_ context.Context, sender, tenant string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.senders = append(r.senders, sender+" asks for "+tenant)
-	return "murder-replica-1", nil
+	return []string{"murder-replica-1"}, nil
 }
 
 func (r *recordedReplicas) Receive(_ context.Context, sender, tenant string, whole bool, data io.Reader) error {
@@ -700,9 +700,9 @@ func TestCopiesKnowTheirSender(t *testing.T) {
 	nodes[1].stop()
 	nodes[1].replicas = replicas
 	nodes[1].start()
-	snapshot, err := nodes[0].cluster.NewestOn(ctx(t), "nbg-1", "acme")
-	if err != nil || snapshot != "murder-replica-1" {
-		t.Fatalf("newest: %q, %v", snapshot, err)
+	snapshots, err := nodes[0].cluster.SnapshotsOn(ctx(t), "nbg-1", "acme")
+	if err != nil || !slices.Equal(snapshots, []string{"murder-replica-1"}) {
+		t.Fatalf("snapshots: %q, %v", snapshots, err)
 	}
 	if err := nodes[0].cluster.ReplicateOn(ctx(t), "nbg-1", "acme", true, strings.NewReader("stream")); err != nil {
 		t.Fatal(err)
@@ -713,7 +713,7 @@ func TestCopiesKnowTheirSender(t *testing.T) {
 	if !slices.Equal(senders, []string{"fsn-1 asks for acme", "fsn-1 sends acme whole=true"}) || data != "stream" {
 		t.Fatalf("senders %v, data %q", senders, data)
 	}
-	if _, err := nodes[0].cluster.NewestOn(ctx(t), "hel-1", "acme"); err == nil {
+	if _, err := nodes[0].cluster.SnapshotsOn(ctx(t), "hel-1", "acme"); err == nil {
 		t.Fatal("a node that keeps no copies answered for one")
 	}
 }

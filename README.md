@@ -30,8 +30,8 @@ the state replicated between nodes.
   `pulling` while its old container keeps serving, and a failed pull is
   retried after 10 s, doubling up to 10 minutes (`murder reconcile` retries
   at once, say after fixing credentials, and waits for the pulls to report
-  how they went). Health checks run side by side. A tenant whose app keeps
-  exiting shows `restarting` while the engine restarts it; `tenant list`
+  how they went). Health checks run side by side. A tenant whose app exits
+  is started again at the next pass and shows `restarting`; `tenant list`
   counts its restarts and `tenant show` says when it last exited and why,
   such as going over its memory limit (containers get no swap beyond it;
   ones created before this release from their next replacement). Stopping
@@ -337,7 +337,11 @@ that keeps a copy of its data, never mounted, to run it from if its node
 fails. The cluster's leader picks the replicas and spreads them over the
 nodes. Every 15 s, the node that runs a tenant snapshots its data and sends
 the replica what changed since the copy's newest snapshot; when nothing
-changed, nothing is sent. So the copy is at most about 30 s behind. A node
+changed, nothing is sent. So the copy is at most about 15 s behind, plus
+the time a send takes. A whole copy goes in beside the old one, so the node
+keeps a copy throughout, and only a copy that holds the whole data may take
+over (`replicaReady`). A move onto the replica's node sends only what
+changed since that copy. A node
 takes a copy only from the node that runs the tenant, so a node that lost
 its tenants never writes over the copies that took over.
 
@@ -352,11 +356,13 @@ its tenants never writes over the copies that took over.
   it may hold writes the cluster lost. Murder never destroys such data;
   check it, then run `zfs destroy -r`.
 
-**Containers no longer start with the server.** The engine restarts a
-container whose app fails, but starts none when the server or Docker
-starts; the agent starts them once it has applied what the cluster decided
-while the node was down. A node that cannot reach a majority starts none.
-Containers made by older releases change in place, without a restart.
+**Containers no longer start with the server.** The engine starts no
+tenant container by itself (restart policy `no`). With `on-failure` it
+would, at boot, every container a power-off cut off. The agent starts a
+container whose app exited at its next pass (`reconcileInterval`), and at
+boot only once it has applied what the cluster decided while the node was
+down. A node that cannot reach a majority starts none. Containers made by
+older releases change in place, without a restart.
 
 How a dead node's tenants then run from their replicas is described in
 [docs/failover.md](docs/failover.md).

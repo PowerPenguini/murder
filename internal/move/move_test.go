@@ -20,6 +20,8 @@ import (
 
 // target is the other node: it receives into a directory of its own.
 type target struct {
+	// snapshots are those of the copy the target keeps as replica.
+	snapshots   []string
 	volumes     volume.Dir
 	received    []bool
 	discarded   bool
@@ -45,6 +47,10 @@ func (p *target) Discard(ctx context.Context, node, tenant string) error {
 
 func (p *target) Status(_ context.Context, node, tenant string) (reconcile.Status, error) {
 	return p.status, nil
+}
+
+func (p *target) Snapshots(context.Context, string, string) ([]string, error) {
+	return p.snapshots, nil
 }
 
 type releaser struct {
@@ -289,5 +295,42 @@ func TestATargetThatHangsDoesNotKeepTheTenantDown(t *testing.T) {
 	}
 	if exists, _ := f.source.Exists(context.Background(), "acme"); !exists {
 		t.Fatal("the data is gone")
+	}
+}
+
+// listedDir is a directory driver that lists snapshots, as ZFS does.
+type listedDir struct {
+	volume.Dir
+	snapshots []string
+}
+
+func (d listedDir) Snapshots(context.Context, string, string) ([]string, error) {
+	return d.snapshots, nil
+}
+
+// A move onto the node that keeps the tenant's copy starts from the newest
+// snapshot both have; onto another node, it sends everything.
+func TestAMoveOntoTheReplicaStartsFromItsCopy(t *testing.T) {
+	f := newFixture(t)
+	if err := f.st.PutNode(store.Node{Name: "n1", Address: "10.0.0.1:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.st.PlaceReplicas("test"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := f.st.Get("acme"); record.Replica != "n2" {
+		t.Fatalf("replica %q", record.Replica)
+	}
+	f.target.snapshots = []string{"murder-replica-1", "murder-replica-2"}
+	f.mover.Volumes = listedDir{Dir: f.source, snapshots: []string{"murder-replica-1", "murder-replica-2", "murder-replica-3"}}
+	if base := f.mover.replicaBase(context.Background(), "acme", "n2"); base != "@murder-replica-2" {
+		t.Fatalf("base %q", base)
+	}
+	if base := f.mover.replicaBase(context.Background(), "acme", "n3"); base != "" {
+		t.Fatalf("base onto a node without the copy: %q", base)
+	}
+	f.target.snapshots = []string{"murder-replica-0"}
+	if base := f.mover.replicaBase(context.Background(), "acme", "n2"); base != "" {
+		t.Fatalf("base without one in common: %q", base)
 	}
 }

@@ -541,7 +541,7 @@ func TestTheRestartPolicyIsReadAndChanged(t *testing.T) {
 	if err != nil || state.RestartPolicy != "unless-stopped" {
 		t.Fatalf("Inspect = %+v, %v", state, err)
 	}
-	if err := docker.SetRestartPolicy(context.Background(), "old", RestartPolicy); err != nil || update["RestartPolicy"]["Name"] != "on-failure" {
+	if err := docker.SetRestartPolicy(context.Background(), "old", RestartPolicy); err != nil || update["RestartPolicy"]["Name"] != "no" {
 		t.Fatalf("update = %v, %v", update, err)
 	}
 }

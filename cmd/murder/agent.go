@@ -321,8 +321,8 @@ func waitCaughtUp(ctx context.Context, member *cluster.Cluster, log *slog.Logger
 // replicaPeer reaches the nodes that keep tenants' copies.
 type replicaPeer struct{ cluster *cluster.Cluster }
 
-func (p replicaPeer) Newest(ctx context.Context, node, tenant string) (string, error) {
-	return p.cluster.NewestOn(ctx, node, tenant)
+func (p replicaPeer) Snapshots(ctx context.Context, node, tenant string) ([]string, error) {
+	return p.cluster.SnapshotsOn(ctx, node, tenant)
 }
 
 func (p replicaPeer) Send(ctx context.Context, node, tenant string, whole bool, data io.Reader) error {

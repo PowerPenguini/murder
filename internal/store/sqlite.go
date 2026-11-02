@@ -396,7 +396,7 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica FROM tenants`)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready FROM tenants`)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +405,7 @@ func load(q querier) (state *snapshot, err error) {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady); err != nil {
 			rows.Close()
 			return nil, err
 		}

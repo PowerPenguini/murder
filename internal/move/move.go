@@ -28,6 +28,14 @@ type Peer interface {
 	Discard(ctx context.Context, node, tenant string) error
 	// Status is the tenant's status on node.
 	Status(ctx context.Context, node, tenant string) (reconcile.Status, error)
+	// Snapshots lists the snapshots of the copy of the tenant node keeps
+	// as its replica; none if it keeps none.
+	Snapshots(ctx context.Context, node, tenant string) ([]string, error)
+}
+
+// snapshotLister lists a tenant's snapshots taken for a reason (ZFS).
+type snapshotLister interface {
+	Snapshots(ctx context.Context, tenant, reason string) ([]string, error)
 }
 
 // Releaser stops a tenant's container between reconcile passes.
@@ -67,6 +75,10 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 		return fmt.Errorf("%w: tenant %s is moving already", store.ErrConflict, tenant)
 	}
 	defer m.end(tenant)
+	// A target that keeps the tenant's copy takes only what changed since
+	// it: its copy, which may still take over, is never dropped. Asked
+	// before the move begins: the target takes no more changes after.
+	base := m.replicaBase(ctx, tenant, target)
 	record, err := m.Store.StartMove(tenant, target, actor)
 	if err != nil {
 		return err
@@ -86,7 +98,7 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 	since := ""
 	if hasData {
 		start := time.Now()
-		if since, err = m.send(ctx, tenant, target, ""); err != nil {
+		if since, err = m.send(ctx, tenant, target, base); err != nil {
 			return fmt.Errorf("copy the data: %w", err)
 		}
 		log.Info("copied the tenant's data to its new node", "took", time.Since(start).Round(time.Millisecond))
@@ -152,6 +164,34 @@ func (m *Mover) Moving(tenant string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.active[tenant]
+}
+
+// replicaBase is the snapshot, as "@name", the copy of tenant that target
+// keeps as its replica shares with this node's data, the newest such; ""
+// if target is not its replica or they share none.
+func (m *Mover) replicaBase(ctx context.Context, tenant, target string) string {
+	record, err := m.Store.Get(tenant)
+	lister, ok := m.Volumes.(snapshotLister)
+	if err != nil || record.Replica != target || !ok {
+		return ""
+	}
+	theirs, err := m.Peer.Snapshots(ctx, target, tenant)
+	if err != nil {
+		m.Log.Warn("the target's copy cannot be read; the move sends the whole data", "tenant", tenant, "error", err)
+		return ""
+	}
+	ours, err := lister.Snapshots(ctx, tenant, "replica")
+	if err != nil {
+		return ""
+	}
+	for i := len(theirs) - 1; i >= 0; i-- {
+		for _, name := range ours {
+			if name == theirs[i] {
+				return "@" + name
+			}
+		}
+	}
+	return ""
 }
 
 func (m *Mover) begin(tenant string) bool {

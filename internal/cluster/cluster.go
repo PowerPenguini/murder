@@ -576,21 +576,21 @@ func (c *Cluster) MoveOn(ctx context.Context, node, tenant, to, actor string) er
 // run. sender is the node a request comes from, as its cluster certificate
 // proves.
 type Replicas interface {
-	// Newest is the newest snapshot of the copy of tenant this node keeps
-	// for sender; "" if it keeps none yet.
-	Newest(ctx context.Context, sender, tenant string) (string, error)
+	// Snapshots lists the snapshots of the copy of tenant this node keeps
+	// for sender, oldest first; none if it keeps none yet.
+	Snapshots(ctx context.Context, sender, tenant string) ([]string, error)
 	// Receive takes a stream of tenant's data from sender into the copy:
 	// whole, or the changes since its newest snapshot.
 	Receive(ctx context.Context, sender, tenant string, whole bool, data io.Reader) error
 }
 
-// NewestOn is the newest snapshot of the copy of tenant node keeps.
-func (c *Cluster) NewestOn(ctx context.Context, node, tenant string) (string, error) {
+// SnapshotsOn lists the snapshots of the copy of tenant node keeps.
+func (c *Cluster) SnapshotsOn(ctx context.Context, node, tenant string) ([]string, error) {
 	var answer struct {
-		Snapshot string `json:"snapshot"`
+		Snapshots []string `json:"snapshots"`
 	}
 	err := c.stream(ctx, node, http.MethodGet, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/replica", nil, &answer)
-	return answer.Snapshot, err
+	return answer.Snapshots, err
 }
 
 // ReplicateOn streams tenant's data to the copy node keeps.

@@ -118,6 +118,10 @@ func (p clusterPeer) Receive(ctx context.Context, node, tenant string, increment
 	return p.cluster.ReceiveOn(ctx, node, tenant, incremental, data)
 }
 
+func (p clusterPeer) Snapshots(ctx context.Context, node, tenant string) ([]string, error) {
+	return p.cluster.SnapshotsOn(ctx, node, tenant)
+}
+
 func (p clusterPeer) Discard(ctx context.Context, node, tenant string) error {
 	return p.cluster.DiscardOn(ctx, node, tenant)
 }

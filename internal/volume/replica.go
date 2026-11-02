@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Replicas keep a copy of each tenant's data on a second node, sent as ZFS
@@ -35,6 +36,8 @@ type Replicas interface {
 	// DropReplica destroys the tenant's copy on this node; live data, one
 	// not marked as a copy, is refused.
 	DropReplica(ctx context.Context, tenant string) error
+	// IsReplica reports whether the tenant's data here is a copy.
+	IsReplica(ctx context.Context, tenant string) (bool, error)
 	// PutAside renames the data of a tenant this node no longer runs out of
 	// the way, unmounted and kept, and returns its new name.
 	PutAside(ctx context.Context, tenant, why string) (string, error)
@@ -58,6 +61,21 @@ const ReplicaReason = replicaReason
 // asidePrefix begins the names of datasets put aside: kept, never mounted,
 // never a tenant's (tenant names cannot begin with "murder-").
 const asidePrefix = "murder-failed-"
+
+// incomingPrefix begins the name of a whole copy while it is received: the
+// copy it replaces stays until it is all there.
+const incomingPrefix = "murder-incoming-"
+
+// datasetLocks serializes, per dataset, receiving a copy and making a copy
+// the tenant's data: a copy never takes over half received, nor is a copy
+// that took over written to.
+var datasetLocks sync.Map
+
+func lockDataset(dataset string) func() {
+	lock, _ := datasetLocks.LoadOrStore(dataset, &sync.Mutex{})
+	lock.(*sync.Mutex).Lock()
+	return lock.(*sync.Mutex).Unlock
+}
 
 func (z ZFS) Snapshots(ctx context.Context, tenant, reason string) ([]string, error) {
 	if err := checkTenant(tenant); err != nil {
@@ -149,30 +167,52 @@ func (z ZFS) ReceiveReplica(ctx context.Context, tenant string, whole bool, r io
 		return err
 	}
 	dataset := z.dataset(tenant)
+	defer lockDataset(dataset)()
 	current, exists, err := z.properties(ctx, dataset)
 	if err != nil {
 		return err
 	}
-	if exists && (current.owner != tenant || current.role != replicaRole) {
+	if exists && (current.owner != tenant || current.role != replicaRole || current.mounted == "yes") {
 		return fmt.Errorf("dataset %s is not a copy of tenant %s: it is not replaced", dataset, tenant)
 	}
-	switch {
-	case whole && exists:
-		if _, err := z.Run(ctx, "zfs", "destroy", "-r", dataset); err != nil {
-			return err
-		}
-	case !whole && !exists:
+	if !whole && !exists {
 		return fmt.Errorf("tenant %s has no copy here to add changes to", tenant)
 	}
 	args := []string{"receive", "-u", "-o", "canmount=noauto", "-o", roleProperty + "=" + replicaRole,
 		"-o", "mountpoint=" + filepath.Join(z.MountRoot, tenant)}
 	if !whole {
-		args = append(args, "-F")
+		if err := z.pipe()(ctx, r, io.Discard, "zfs", append(args, "-F", dataset)...); err != nil {
+			return err
+		}
+		return z.Prune(ctx, tenant, replicaReason, keep)
 	}
-	if err := z.pipe()(ctx, r, io.Discard, "zfs", append(args, dataset)...); err != nil {
+	// A whole copy goes in beside the old one, which it replaces once all
+	// of it is there: the node keeps a copy all along.
+	incoming := z.Parent + "/" + incomingPrefix + tenant
+	if _, err := z.Run(ctx, "zfs", "destroy", "-r", incoming); err != nil && !strings.Contains(err.Error(), "does not exist") {
+		return err
+	}
+	if err := z.pipe()(ctx, r, io.Discard, "zfs", append(args, incoming)...); err != nil {
+		_, _ = z.Run(context.WithoutCancel(ctx), "zfs", "destroy", "-r", incoming)
+		return err
+	}
+	if exists {
+		if _, err := z.Run(ctx, "zfs", "destroy", "-r", dataset); err != nil {
+			return err
+		}
+	}
+	if _, err := z.Run(ctx, "zfs", "rename", incoming, dataset); err != nil {
 		return err
 	}
 	return z.Prune(ctx, tenant, replicaReason, keep)
+}
+
+func (z ZFS) IsReplica(ctx context.Context, tenant string) (bool, error) {
+	if err := checkTenant(tenant); err != nil {
+		return false, err
+	}
+	current, exists, err := z.properties(ctx, z.dataset(tenant))
+	return exists && current.owner == tenant && current.role == replicaRole, err
 }
 
 func (z ZFS) Datasets(ctx context.Context) ([]Dataset, error) {

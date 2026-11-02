@@ -63,8 +63,10 @@ CREATE TABLE tenants (
 	move_to     TEXT NOT NULL DEFAULT '',
 	move_held   INTEGER NOT NULL DEFAULT 0 CHECK (move_held IN (0, 1)),
 	-- The node that keeps a copy of the tenant's data, to run it from if
-	-- its node fails; never the tenant's own node.
-	replica     TEXT NOT NULL DEFAULT ''
+	-- its node fails; never the tenant's own node. replica_ready is set
+	-- once the copy holds the whole data: only then may it take over.
+	replica     TEXT NOT NULL DEFAULT '',
+	replica_ready INTEGER NOT NULL DEFAULT 0 CHECK (replica_ready IN (0, 1))
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -193,8 +195,13 @@ func upgrade(db *sql.DB) error {
 	}
 	// Version 8 keeps a copy of every tenant's data on a second node.
 	if version == 7 {
-		if _, err := tx.Exec(`ALTER TABLE tenants ADD COLUMN replica TEXT NOT NULL DEFAULT ''`); err != nil {
-			return err
+		for _, statement := range []string{
+			`ALTER TABLE tenants ADD COLUMN replica TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE tenants ADD COLUMN replica_ready INTEGER NOT NULL DEFAULT 0 CHECK (replica_ready IN (0, 1))`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

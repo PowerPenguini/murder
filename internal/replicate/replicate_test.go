@@ -198,6 +198,13 @@ func (v *memoryVolumes) DropReplica(_ context.Context, tenant string) error {
 	return nil
 }
 
+func (v *memoryVolumes) IsReplica(_ context.Context, tenant string) (bool, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	d := v.data[tenant]
+	return d != nil && d.replica, nil
+}
+
 func (v *memoryVolumes) PutAside(_ context.Context, tenant, why string) (string, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -222,8 +229,8 @@ type peer struct {
 	sends []string
 }
 
-func (p *peer) Newest(ctx context.Context, to, tenant string) (string, error) {
-	return p.nodes[to].receiver.Newest(ctx, p.from, tenant)
+func (p *peer) Snapshots(ctx context.Context, to, tenant string) ([]string, error) {
+	return p.nodes[to].receiver.Snapshots(ctx, p.from, tenant)
 }
 
 func (p *peer) Send(ctx context.Context, to, tenant string, whole bool, data io.Reader) error {
@@ -319,6 +326,10 @@ func TestACopyFollowsTheData(t *testing.T) {
 	if len(copy.snapshots) > 3 || len(n1.volumes.data["acme"].snapshots) > 3 {
 		t.Fatalf("snapshots kept: copy %d, data %d", len(copy.snapshots), len(n1.volumes.data["acme"].snapshots))
 	}
+	// Ready once the whole copy is there, as every node learns from the log.
+	if record, _ := n1.store.Get("acme"); !record.ReplicaReady {
+		t.Fatal("the copy is not ready")
+	}
 	if synced := r.Synced("acme"); !synced.Equal(f.clock) {
 		t.Fatalf("synced at %v, want %v", synced, f.clock)
 	}
@@ -345,7 +356,8 @@ func TestACopyWithoutABaseIsSentWhole(t *testing.T) {
 		n1.volumes.write("acme")
 		r.Pass(ctx)
 	}
-	base, _ := n2.receiver.Newest(ctx, "n1", "acme")
+	theirs, _ := n2.receiver.Snapshots(ctx, "n1", "acme")
+	base := theirs[len(theirs)-1]
 	if _, ok := n1.volumes.data["acme"].snapshots[base]; !ok {
 		t.Fatalf("the copy's base %s is gone from the data", base)
 	}
@@ -390,26 +402,34 @@ func TestACopyIsTakenOnlyFromTheTenantsNode(t *testing.T) {
 	if err := f.nodes["n1"].receiver.Receive(ctx, "n1", "acme", true, stream()); err == nil {
 		t.Fatal("a node took a copy of its own tenant")
 	}
-	if _, err := n2.receiver.Newest(ctx, "n3", "acme"); err == nil {
+	if _, err := n2.receiver.Snapshots(ctx, "n3", "acme"); err == nil {
 		t.Fatal("a node that does not run the tenant was told of its copy")
 	}
 	if err := n2.receiver.Receive(ctx, "n1", "acme", true, stream()); err != nil {
 		t.Fatal(err)
 	}
-	f.change(t, func(st *store.SQLite) {
-		if _, err := st.StartMove("acme", "n3", "test"); err != nil && !strings.Contains(err.Error(), "runs on node") {
-			t.Fatal(err)
-		}
-	})
-	// StartMove is the owner's to write: only n1's state has it; the
-	// others learn it from the log.
-	if record, _ := f.nodes["n1"].store.Get("acme"); record.MoveTo != "n3" {
-		t.Fatalf("not moving: %+v", record)
-	}
+	// StartMove is the owner's to write; the others learn it from the log.
+	n1 := f.nodes["n1"]
+	n1.volumes.write("acme")
 	r, p := f.replicator("n1")
+	if _, err := n1.store.StartMove("acme", "n2", "test"); err != nil {
+		t.Fatal(err)
+	}
 	r.Pass(ctx)
 	if len(p.sends) != 0 {
-		t.Fatalf("a moving tenant was sent: %v", p.sends)
+		t.Fatalf("a tenant moving onto its replica's node was sent: %v", p.sends)
+	}
+	if _, err := n1.store.CancelMove("acme", "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Moving elsewhere, its copy keeps up: it may yet take over.
+	if _, err := n1.store.StartMove("acme", "n3", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.clock = f.clock.Add(15 * time.Second)
+	r.Pass(ctx)
+	if len(p.sends) != 1 {
+		t.Fatalf("a tenant moving elsewhere was not sent: %v", p.sends)
 	}
 }
 

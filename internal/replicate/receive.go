@@ -35,21 +35,17 @@ func (r *Receiver) check(sender, tenant string) error {
 		return fmt.Errorf("tenant %s runs on node %s, not %s: its copy is not taken from %s", tenant, record.Node, sender, sender)
 	case record.Replica != self:
 		return fmt.Errorf("node %s does not keep the copy of tenant %s (node %q does)", self, tenant, record.Replica)
-	case record.MoveTo != "":
-		return fmt.Errorf("tenant %s is moving to node %s: its copy waits", tenant, record.MoveTo)
+	case record.MoveTo == self:
+		return fmt.Errorf("tenant %s is moving here: the move brings its copy up to date", tenant)
 	}
 	return nil
 }
 
-func (r *Receiver) Newest(ctx context.Context, sender, tenant string) (string, error) {
+func (r *Receiver) Snapshots(ctx context.Context, sender, tenant string) ([]string, error) {
 	if err := r.check(sender, tenant); err != nil {
-		return "", err
+		return nil, err
 	}
-	snapshots, err := r.Volumes.Snapshots(ctx, tenant, ReplicaReason)
-	if err != nil || len(snapshots) == 0 {
-		return "", err
-	}
-	return snapshots[len(snapshots)-1], nil
+	return r.Volumes.Snapshots(ctx, tenant, ReplicaReason)
 }
 
 func (r *Receiver) Receive(ctx context.Context, sender, tenant string, whole bool, data io.Reader) error {

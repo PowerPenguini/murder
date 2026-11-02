@@ -32,7 +32,7 @@ func (c *Cluster) handler() http.Handler {
 	members("GET /cluster/v1/tenants/{name}/status", c.handleTenantStatus)
 	members("POST /cluster/v1/tenants/{name}/move", c.handleMove)
 	members("PUT /cluster/v1/node/binary", c.handleInstall)
-	members("GET /cluster/v1/tenants/{name}/replica", c.handleNewest)
+	members("GET /cluster/v1/tenants/{name}/replica", c.handleSnapshots)
 	members("PUT /cluster/v1/tenants/{name}/replica", c.handleReplicate)
 	return mux
 }
@@ -367,20 +367,23 @@ func (c *Cluster) replicaSender(w http.ResponseWriter, r *http.Request) (string,
 	return sender, true
 }
 
-// handleNewest reports the newest snapshot of a copy this node keeps.
-func (c *Cluster) handleNewest(w http.ResponseWriter, r *http.Request) {
+// handleSnapshots lists the snapshots of a copy this node keeps.
+func (c *Cluster) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 	sender, ok := c.replicaSender(w, r)
 	if !ok {
 		return
 	}
-	snapshot, err := c.config.Replicas.Newest(r.Context(), sender, r.PathValue("name"))
+	snapshots, err := c.config.Replicas.Snapshots(r.Context(), sender, r.PathValue("name"))
 	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
+	if snapshots == nil {
+		snapshots = []string{}
+	}
 	writeJSON(w, http.StatusOK, struct {
-		Snapshot string `json:"snapshot"`
-	}{snapshot})
+		Snapshots []string `json:"snapshots"`
+	}{snapshots})
 }
 
 // handleReplicate takes a tenant's data into the copy this node keeps.

@@ -37,8 +37,8 @@ const (
 	// PhasePulling waits for the tenant's image; a container already
 	// running keeps serving meanwhile.
 	PhasePulling = "pulling"
-	// PhaseRestarting is a container whose process exited and that the
-	// engine is about to start again; LastExit says why it exited.
+	// PhaseRestarting is a container whose process exited and that is
+	// being started again; LastExit says why it exited.
 	PhaseRestarting = "restarting"
 	// PhaseMoving is a tenant moving to another node: the move, not the
 	// reconciler, handles it meanwhile.
@@ -63,9 +63,9 @@ type Status struct {
 	// Warning reports a problem that does not stop the tenant, such as a
 	// disk limit below what it already stores.
 	Warning string `json:"warning,omitempty"`
-	// Restarts counts how often the engine restarted the container after
-	// its process exited; LastExit says when it last exited and, if known,
-	// why. Both start again with a new container.
+	// Restarts counts how often the container was started again after its
+	// app exited; LastExit says when it last exited and, if known, why.
+	// Both start again with a new container.
 	Restarts    int       `json:"restarts,omitempty"`
 	LastExit    string    `json:"lastExit,omitempty"`
 	ContainerID string    `json:"containerID,omitempty"`
@@ -122,6 +122,20 @@ type Reconciler struct {
 	// replaceNotice and replacedWait are replaceNotice and heldHealthWait;
 	// tests shorten them.
 	replaceNotice, replacedWait time.Duration
+	// started is when the reconciler began: exits before it are the
+	// server's or the engine's doing, or happened while the agent was
+	// down, not the app's.
+	started time.Time
+	// exits counts, per tenant, the app's exits its container was started
+	// again after; passes alone use it.
+	exits map[string]appExits
+}
+
+// appExits are the exits of one container's app.
+type appExits struct {
+	container string
+	count     int
+	last      string
 }
 
 // replaceNotice is how long a replacement waits, once requests for the
@@ -203,6 +217,7 @@ func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secret
 		imageRetryAt:  map[string]time.Time{},
 		replacing:     &replacing{tenants: map[string]bool{}, changed: make(chan struct{})},
 		replaceNotice: replaceNotice, replacedWait: heldHealthWait,
+		started: time.Now(), exits: map[string]appExits{},
 		backend: Backend,
 		pulls:   newPulls(life, rt.PullImage),
 		life:    life,
@@ -508,6 +523,9 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err := tenant.Validate(); err != nil {
 		return Status{}, fmt.Errorf("stored spec no longer valid; correct the app or the tenant: %w", err)
 	}
+	if err := r.checkData(ctx, record); err != nil {
+		return Status{}, err
+	}
 	uid, gid := tenant.Owner()
 	dataPath, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid, tenant.Limits.Or(r.config.DefaultLimits).DiskGB)
 	if errors.Is(err, volume.ErrDiskLimit) {
@@ -610,27 +628,46 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		if err := r.removeContainers(ctx, outdated); err != nil {
 			return Status{}, err
 		}
-		// One the engine is restarting is left to it.
+		// The engine starts no container by itself (runtime.RestartPolicy):
+		// a stopped one is started here. One an older release's policy has
+		// the engine restarting is left to it.
+		exits := r.exits[tenant.Name]
+		if exits.container != current.ID {
+			exits = appExits{container: current.ID}
+		}
+		restarted := false
 		if state.Pid == 0 && !state.Restarting {
+			// The app's exit, while the agent ran, and not a stop (SIGTERM,
+			// as the engine or the server sends): it is reported.
+			if state.ExitKnown && state.ExitCode != 143 && state.ExitedAt.After(r.started) {
+				exits.count++
+				exits.last = lastExit(state, tenant.Limits.Or(r.config.DefaultLimits).MemoryMB)
+				restarted = true
+			}
 			if err := r.runtime.Start(ctx, current.ID); err != nil {
+				r.exits[tenant.Name] = exits
 				return Status{}, fmt.Errorf("start: %w", err)
 			}
-			r.log.Info("restarted stopped tenant container", "tenant", tenant.Name, "container", current.ID)
-			// The engine counts restarts again from here; the exit was not
-			// the app's to report.
+			r.log.Info("started a stopped tenant container", "tenant", tenant.Name, "container", current.ID, "exit", exits.last, "app_exited", restarted)
 			state = runtime.ContainerState{}
 		}
+		r.exits[tenant.Name] = exits
+		status = Status{Phase: PhaseRunning, ContainerID: current.ID, Restarts: state.Restarts + exits.count}
+		switch {
+		case exits.count > 0:
+			status.LastExit = exits.last
+		// An older release's policy had the engine restart the container.
+		case state.Restarts > 0:
+			status.LastExit = lastExit(state, tenant.Limits.Or(r.config.DefaultLimits).MemoryMB)
+		}
+		if state.Restarting {
+			status.Phase, status.Message = PhaseRestarting, "the app keeps exiting; the engine restarts it"
+		} else if restarted {
+			status.Phase, status.Message = PhaseRestarting, "the app exited; it was started again"
+		}
+		return status, nil
 	}
-	status = Status{Phase: PhaseRunning, ContainerID: current.ID, Restarts: state.Restarts}
-	// An exit the container was not restarted after was Murder's or the
-	// host's doing, not the app's.
-	if state.Restarts > 0 {
-		status.LastExit = lastExit(state, tenant.Limits.Or(r.config.DefaultLimits).MemoryMB)
-	}
-	if state.Restarting {
-		status.Phase, status.Message = PhaseRestarting, "the app keeps exiting; the engine restarts it"
-	}
-	return status, nil
+	return Status{Phase: PhaseRunning, ContainerID: current.ID}, nil
 }
 
 // lastExit describes the last exit of a container's process.
@@ -1040,6 +1077,41 @@ func (r *Reconciler) own() []store.Record {
 		}
 	}
 	return records
+}
+
+// replicaVolumes are volumes that keep copies of other nodes' tenants.
+type replicaVolumes interface {
+	IsReplica(ctx context.Context, tenant string) (bool, error)
+	DropReplica(ctx context.Context, tenant string) error
+}
+
+// ErrDataMissing refuses to run a tenant that ran before on new, empty
+// data: its data should be here, and is not.
+var ErrDataMissing = errors.New("the tenant ran before, but its data is not on this node")
+
+// checkData refuses a tenant that ran before (its data has an image) whose
+// data is not here, rather than run it on an empty data directory: a copy
+// that should have taken over, but holds nothing. A copy here of a tenant
+// that never ran is of an earlier tenant of the same name, purged: it goes.
+func (r *Reconciler) checkData(ctx context.Context, record store.Record) error {
+	exists, err := r.volumes.Exists(ctx, record.Spec.Name)
+	if err != nil {
+		return fmt.Errorf("data volume: %w", err)
+	}
+	if !exists && record.DataImage != "" {
+		return fmt.Errorf("%w: restore it (murder backups restore %s), or purge the tenant", ErrDataMissing, record.Spec.Name)
+	}
+	replicas, ok := r.volumes.(replicaVolumes)
+	if !exists || record.DataImage != "" || !ok {
+		return nil
+	}
+	if replica, err := replicas.IsReplica(ctx, record.Spec.Name); err != nil {
+		return fmt.Errorf("data volume: %w", err)
+	} else if replica {
+		r.log.Warn("dropping a copy of an earlier tenant of the same name", "tenant", record.Spec.Name)
+		return replicas.DropReplica(ctx, record.Spec.Name)
+	}
+	return nil
 }
 
 // ErrElsewhere refuses work on a tenant another node runs.

@@ -33,8 +33,8 @@ type Volumes interface {
 
 // Peer reaches the node that keeps a tenant's copy.
 type Peer interface {
-	// Newest is the newest snapshot of the copy node keeps; "" if none.
-	Newest(ctx context.Context, node, tenant string) (string, error)
+	// Snapshots lists the snapshots of the copy node keeps, oldest first.
+	Snapshots(ctx context.Context, node, tenant string) ([]string, error)
 	// Send streams the tenant's data to the copy node keeps: whole, or
 	// what changed since the copy's newest snapshot.
 	Send(ctx context.Context, node, tenant string, whole bool, data io.Reader) error
@@ -115,14 +115,31 @@ func (r *Replicator) Run(ctx context.Context) {
 }
 
 // Pass sends every tenant of this node with a replica what changed since
-// its copy's newest snapshot; tenants that are moving wait.
+// its copy's newest snapshot. A tenant moving to its replica's node waits:
+// the move brings that copy up to date.
 func (r *Replicator) Pass(ctx context.Context) {
 	var tenants []store.Record
+	current := map[string]bool{}
 	for _, record := range r.Store.List() {
-		if record.Node == r.Store.Node() && record.Replica != "" && record.Replica != record.Node && record.MoveTo == "" {
+		if record.Node == r.Store.Node() && record.Replica != "" && record.Replica != record.Node && record.MoveTo != record.Replica {
 			tenants = append(tenants, record)
+			current[record.Spec.Name] = true
 		}
 	}
+	// Tenants that went, or whose copy is elsewhere's to report, leave
+	// the metrics.
+	r.mu.Lock()
+	for name := range r.synced {
+		if !current[name] {
+			delete(r.synced, name)
+		}
+	}
+	for name := range r.failing {
+		if !current[name] {
+			delete(r.failing, name)
+		}
+	}
+	r.mu.Unlock()
 	parallel := r.Parallel
 	if parallel <= 0 {
 		parallel = 4
@@ -135,6 +152,10 @@ func (r *Replicator) Pass(ctx context.Context) {
 		go func() {
 			defer func() { <-slots; wg.Done() }()
 			err := r.Replicate(ctx, record.Spec.Name, record.Replica)
+			// Once the copy holds the whole data, it may take over.
+			if err == nil && !record.ReplicaReady {
+				err = r.Store.ReplicaReady(record.Spec.Name, record.Replica)
+			}
 			r.mu.Lock()
 			if r.failing == nil {
 				r.failing = map[string]string{}
@@ -154,20 +175,19 @@ func (r *Replicator) Pass(ctx context.Context) {
 }
 
 // Replicate brings the copy of tenant on node up to date with its data:
-// the changes since the copy's newest snapshot, or the whole data if this
-// node no longer has that snapshot. Nothing is sent when nothing changed.
+// the changes since the newest snapshot both have, or the whole data if
+// they have none in common. Nothing is sent when nothing changed.
 func (r *Replicator) Replicate(ctx context.Context, tenant, node string) error {
 	snapshots, err := r.Volumes.Snapshots(ctx, tenant, ReplicaReason)
 	if err != nil {
 		return err
 	}
-	newest, err := r.Peer.Newest(ctx, node, tenant)
+	theirs, err := r.Peer.Snapshots(ctx, node, tenant)
 	if err != nil {
 		return fmt.Errorf("ask node %s for its copy: %w", node, err)
 	}
-	base := ""
-	if newest != "" && slices.Contains(snapshots, newest) {
-		base = newest
+	base := NewestCommon(snapshots, theirs)
+	if base != "" {
 		written, err := r.Volumes.Written(ctx, tenant, base)
 		if err != nil {
 			return err
@@ -196,6 +216,17 @@ func (r *Replicator) Replicate(ctx context.Context, tenant, node string) error {
 		r.Log.Warn("prune replica snapshots", "tenant", tenant, "error", err)
 	}
 	return nil
+}
+
+// NewestCommon is the newest of the snapshots ours and theirs both list,
+// oldest first; "" if none.
+func NewestCommon(ours, theirs []string) string {
+	for i := len(theirs) - 1; i >= 0; i-- {
+		if slices.Contains(ours, theirs[i]) {
+			return theirs[i]
+		}
+	}
+	return ""
 }
 
 func (r *Replicator) send(ctx context.Context, tenant, node, base, snapshot string) error {
@@ -259,6 +290,11 @@ func (r *Replicator) Sweep(ctx context.Context) error {
 			continue // this node's data, or a copy taking over
 		}
 		if r.Moving != nil && r.Moving(name) {
+			continue
+		}
+		// Data a move left unmounted here, which it removes itself if the
+		// move is undone.
+		if !dataset.Replica && !dataset.Mounted {
 			continue
 		}
 		if dataset.Replica {

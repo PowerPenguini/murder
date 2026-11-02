@@ -87,11 +87,12 @@ type Runtime interface {
 }
 
 // RestartPolicy is the restart policy of tenant containers: the engine
-// restarts a container whose process failed, but starts none when the
-// engine or the server starts. The agent starts them then, once it knows
-// they are still this node's: a node that was down may have lost its
-// tenants to their replicas meanwhile.
-const RestartPolicy = "on-failure"
+// starts none by itself, not when the server or the engine starts either
+// (with on-failure it would: a container cut off by a power-off counts as
+// failed). The agent starts them, a crashed one at its next pass, and at
+// boot only once it knows they are still this node's: a node that was down
+// may have lost its tenants to their replicas meanwhile.
+const RestartPolicy = "no"
 
 // ContainerState is the state of a container's process.
 type ContainerState struct {

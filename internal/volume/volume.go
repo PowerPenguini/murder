@@ -239,6 +239,7 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (s
 	}
 	dataset := z.dataset(tenant)
 	mountpoint := filepath.Join(z.MountRoot, tenant)
+	defer lockDataset(dataset)()
 	current, exists, err := z.properties(ctx, dataset)
 	if err != nil {
 		return "", err

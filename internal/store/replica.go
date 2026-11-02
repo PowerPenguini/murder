@@ -19,7 +19,7 @@ func (s *SQLite) PlaceReplicas(actor string) (int, error) {
 			record := current.tenants[name]
 			// Only as the tenant is now: a batch computed against another
 			// state is refused as stale anyway.
-			if err := tx.Exec(`UPDATE tenants SET replica = ? WHERE name = ? AND node = ? AND replica = ?`, changes[name], name, record.Node, record.Replica); err != nil {
+			if err := tx.Exec(`UPDATE tenants SET replica = ?, replica_ready = 0 WHERE name = ? AND node = ? AND replica = ?`, changes[name], name, record.Node, record.Replica); err != nil {
 				return err
 			}
 			detail := "copy kept on " + changes[name]
@@ -37,6 +37,23 @@ func (s *SQLite) PlaceReplicas(actor string) (int, error) {
 		return 0, nil
 	}
 	return placed, err
+}
+
+func (s *SQLite) ReplicaReady(name, replica string) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[name]
+		if !ok || record.Replica != replica || replica == "" || record.ReplicaReady {
+			return errUnchanged
+		}
+		if err := tx.Exec(`UPDATE tenants SET replica_ready = 1 WHERE name = ? AND replica = ?`, name, replica); err != nil {
+			return err
+		}
+		return event(tx, now, "murder", "tenant.replica-ready", name, record.App, "the copy on "+replica+" holds the whole data")
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
 }
 
 // placeReplicas returns the tenants whose replica must change, and the node

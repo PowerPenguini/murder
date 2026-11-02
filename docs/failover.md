@@ -8,8 +8,12 @@ dies without warning.
 
 ## Goals and limits
 
-- **Recovery point (RPO):** at most ~30 s of a tenant's writes are lost when
-  its node dies: replication sends what changed every 15 s.
+- **Recovery point (RPO):** the writes a tenant took in the last 15 s
+  before its node stopped being reachable, plus those it took until it was
+  powered off. Replication sends what changed every 15 s, and the node keeps
+  taking writes over its public edge until the power-off, about 30–45 s
+  later. So up to about 60 s of writes in the worst case. A node that just
+  crashed takes none after its death.
 - **Recovery time (RTO):** about 70–90 s from the node's death until its
   tenants serve again from their replicas:
   - 30 s until the node counts as dead;
@@ -47,38 +51,49 @@ checking adds no Raft writes.
 
 ## Model
 
-Each tenant record gets one new field:
+Each tenant record gets two new fields:
 
 - **`Replica`:** the node that keeps a copy of the tenant's data, never the
   node that runs it.
+- **`ReplicaReady`:** set once the copy holds the whole data, after its
+  first whole send succeeds. Only a ready copy takes over. The field is
+  cleared whenever `Replica` changes.
 
 These changes go together in one schema version:
 
 - **Placement:** the leader gives every tenant without a replica, or with a
   replica on a node that left the cluster, the member node (other than its
-  own) holding the fewest replicas. It reassigns as nodes join and leave.
+  own) holding the fewest replicas. It does not rebalance tenants that
+  already have a replica when a node joins.
 - **`FinishMove`:** it clears `Replica` when the tenant moves onto its replica
   node, so placement picks another.
-- **`FailOver(node)`:** in one batch, every tenant of the dead node that has a
-  replica gets `Node = Replica` and `Replica = ""`, and any move it was in is
-  cancelled. The audit log records each one.
+- **`FailOver(node)`:** in one batch, every tenant of the dead node with a
+  ready replica gets `Node = Replica` and `Replica = ""`, and any move it was
+  in is cancelled. The audit log records each one.
 
 ## Replication (owner → replica)
 
 The owner node's agent runs a replication loop. Every 15 s, for each tenant
-it owns that has a replica and is not moving, it does the following:
+it owns that has a replica, it does the following. A tenant moving onto its
+replica's node is skipped, because the move updates that copy. Tenants
+moving elsewhere keep being replicated.
 
 1. It skips the tenant if nothing was written since the last replica
    snapshot (ZFS `written@<snapshot>` is 0).
 2. It takes the snapshot `@murder-replica-<time>`.
-3. It asks the replica node for its newest snapshot. If the owner still has
-   that snapshot, it sends the changes since then (`zfs send -i`). Otherwise
-   it sends the whole dataset, and the replica first drops what it had.
-4. The replica node receives with `zfs receive -u -F -o canmount=noauto
-   -o mountpoint=<tenants>/<name>`:
-   - `canmount=noauto`: a replica is never mounted, not at boot either.
-   - `-F`: it rolls back anything written to the copy since the last
-     snapshot.
+3. It asks the replica node for its snapshots and sends the changes since
+   the newest one both have (`zfs send -i`). If they have none in common,
+   it sends the whole dataset.
+4. The replica node receives with `zfs receive -u -o canmount=noauto
+   -o io.murder:role=replica -o mountpoint=<tenants>/<name>`:
+   - `canmount=noauto` and the role property: a replica is never mounted,
+     not at boot either, and is never taken for live data.
+   - Changes are received with `-F`, which rolls back anything written to
+     the copy since its newest snapshot.
+   - A whole dataset is received beside the old copy
+     (`murder-incoming-<name>`) and renamed over it once it is all there,
+     so the node keeps a copy throughout.
+   - Receiving and promotion share a per-dataset lock.
 5. The replica node prunes its received snapshots to the newest 3. The owner
    prunes its own `replica` snapshots to the newest 3.
 
@@ -92,21 +107,30 @@ state:
 - data from a node that does not run the tenant (the sender is known from
   its cluster certificate);
 - data for a tenant whose replica it is not;
-- data for a tenant that is moving.
+- data for a tenant that is moving to this node.
 
 So an old owner coming back can never overwrite the copy that took over.
 
 **Cleanup:** a node destroys its replica copy of a tenant when the tenant is
 purged, or when its replica moves to another node. That is always a copy; the
-owner holds the data. A move onto the replica node discards the replica
-before the move's whole send.
+owner holds the data. A move onto the replica node sends only the changes
+since the newest snapshot it shares with the copy, so the copy is never
+dropped.
+
+**Safeguards in the reconciler:**
+
+- A tenant that has run before (its data has an image) is not started on
+  new, empty data when its data is missing. It reports that the data is
+  missing instead.
+- A copy found for a tenant that never ran belongs to an earlier tenant of
+  the same name that was purged. It is dropped, never adopted.
 
 **Measured:**
 
 - On the owner: `murder_tenant_replica_lag_seconds{tenant}`, the age of the
-  newest snapshot the replica has.
-- On the replica: `murder_tenant_replica_received_timestamp_seconds{tenant}`.
-- `tenant show`: the replica node and its lag.
+  newest snapshot the replica has, and `murder_tenant_replica_failing`.
+- `tenant show`: the replica node, whether its copy is ready, and when it
+  last matched the data.
 
 ## Failure detection and fencing (leader)
 
@@ -150,12 +174,14 @@ up) are not promoted. The audit log and metrics name them.
 
 The operator powers the node on again. To keep it from serving stale data:
 
-- **Containers use Docker's `on-failure` restart policy, not
-  `unless-stopped`.**
-  - Docker still restarts a container that crashes, as now.
-  - It no longer starts containers when the server boots. The agent starts
-    them once it knows they are its own.
-  - The reconciler moves existing containers to the new policy in place
+- **Containers use Docker's restart policy `no`.** The engine starts none
+  by itself, at boot either.
+  - `on-failure` would not do: after a power-off, Docker finds the
+    containers that were running without a process, gives them exit code
+    255, and so starts them all at boot, on the stale data.
+  - The reconciler starts a container whose app exited at its next pass,
+    and counts and reports the exit as the engine did.
+  - The reconciler moves existing containers to `no` in place
     (`POST /containers/{id}/update`), with no restart.
 - **In a cluster, the reconciler's first pass waits for the agent to catch
   up with the cluster's log.** Until then it starts nothing. A node that
@@ -218,7 +244,7 @@ cluster:
    - cleanup;
    - moves;
    - metrics and `tenant show`;
-   - the `on-failure` restart policy and the first pass waiting for catch-up;
+   - the restart policy `no` and the first pass waiting for catch-up;
    - renaming stale datasets aside.
 2. **Failover:**
    - `FailOver`;
