@@ -83,7 +83,8 @@ Each stage is one PR, reviewed and tested before the next.
    app apply` reads, checked the same way; an app with no scratch mounts
    says `tmpfs: {}`), refusing a save over a change made since the page
    was read (the agent checks it as it stores: `PUT /v1/apps/NAME?if=`
-   the app's updatedAt, or `absent` to create only), and deletes an app no
+   the app's updatedAt, or `absent` to create only; `murder app apply`
+   stores unconditionally, as the files in git are what counts), and deletes an app no
    tenant, live or archived, runs (its name typed). A tenant's settings page changes its app, image, env,
    own secrets and limits (one form, refused if the tenant changed since
    it was read; an env value that would not read back as itself, such as

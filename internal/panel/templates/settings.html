@@ -12,7 +12,7 @@
     <input type="hidden" name="generation" value="{{$f.Generation}}">
     <label>app <select name="app">{{range $d.Apps}}<option {{if eq . $f.App}}selected{{end}}>{{.}}</option>{{end}}</select></label>
     <label>image <input type="text" name="image" value="{{$f.Image}}" placeholder="the app's: {{short $t.Spec.Image}}" autocomplete="off"></label>
-    <label>env <span class="hint">NAME=value, a line each; adds to the app's, or replaces</span>
+    <label>env <span class="hint">NAME=value, a line each; adds to the app's, or replaces. Spaces around a value go; to keep them, or for several lines, quote it: "a\nb"</span>
       <textarea name="env" rows="5" spellcheck="false">{{$f.Env}}</textarea></label>
     <label>secrets <span class="hint">NAME [kind [length]], a line each: hex, base64 or password; adds to the app's</span>
       <textarea name="secrets" rows="3" spellcheck="false">{{$f.Secrets}}</textarea></label>

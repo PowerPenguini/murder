@@ -123,7 +123,6 @@ type NewTenant struct {
 	Node string
 }
 
-// AppChange is the outcome of storing an app.
 // AppIf conditions storing an app, so that a change made meanwhile is not
 // overwritten: the zero value stores whatever is stored.
 type AppIf struct {
@@ -134,6 +133,7 @@ type AppIf struct {
 	UpdatedAt time.Time
 }
 
+// AppChange is the outcome of storing an app.
 type AppChange struct {
 	App     App
 	Created bool

@@ -157,19 +157,25 @@ func (s *Server) app(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	data := appData{App: app, File: string(file), Updated: stampOf(app.UpdatedAt)}
+	s.appPage(w, r, appData{App: app, File: string(file), Updated: stampOf(app.UpdatedAt)}, "", http.StatusOK)
+}
+
+// appPage shows an app, with the archived tenants that keep it.
+func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, problem string, status int) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
 	tenants, err := s.backend.List(ctx)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	for _, t := range tenants {
-		if t.App == app.Name && t.Archived() {
+		if t.App == data.App.Name && t.Archived() {
 			data.Archived = append(data.Archived, t.Spec.Name)
 		}
 	}
 	slices.Sort(data.Archived)
-	s.renderWith(w, r, "app", app.Name, "apps", data, "", http.StatusOK)
+	s.renderWith(w, r, "app", data.App.Name, "apps", data, problem, status)
 }
 
 func stampOf(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
@@ -195,9 +201,10 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 	case "save":
 		file := r.FormValue("file")
 		refuse := func(problem string) {
-			s.renderWith(w, r, "app", name, "apps", appData{App: current, File: file, Updated: r.FormValue("updated")}, problem, http.StatusUnprocessableEntity)
+			s.appPage(w, r, appData{App: current, File: file, Updated: r.FormValue("updated")}, problem, http.StatusUnprocessableEntity)
 		}
-		if r.FormValue("updated") != stampOf(current.UpdatedAt) {
+		// Without its time, the store could not refuse a change made meanwhile.
+		if current.UpdatedAt.IsZero() || r.FormValue("updated") != stampOf(current.UpdatedAt) {
 			refuse("someone changed the app since you opened it: your text is below; reload the page for theirs")
 			return
 		}

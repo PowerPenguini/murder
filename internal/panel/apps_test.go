@@ -83,7 +83,7 @@ func TestEditingAnApp(t *testing.T) {
 	// A save over a change made since the page was read is refused, the
 	// text kept.
 	_, body := submit(t, client, server, "/apps/addhoc", url.Values{"do": {"save"}, "updated": {"2001-01-01T00:00:00Z"}, "file": {changed}}, server.URL)
-	if !strings.Contains(body, "someone changed the app since") || !strings.Contains(body, "Europe/Paris") {
+	if !strings.Contains(body, "someone changed the app since") || !strings.Contains(body, "Europe/Paris") || !strings.Contains(body, `href="/tenants/old-demo"`) || strings.Contains(body, `value="delete"`) {
 		t.Fatalf("a stale save:\n%s", body)
 	}
 	_, body = submit(t, client, server, "/apps/addhoc", url.Values{"do": {"save"}, "updated": {updated}, "file": {changed}}, server.URL)
