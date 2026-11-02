@@ -293,6 +293,38 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	return r.reconcile(ctx)
 }
 
+// SetRestartPolicies gives every container of this node's tenants the
+// restart policy that has the engine start none by itself
+// (runtime.RestartPolicy), whatever state its tenant is in: the agent runs
+// it at start, before it may wait for the cluster, and once in a while. A
+// container left with an older release's policy would be started at boot
+// on data a failover may have made stale.
+func (r *Reconciler) SetRestartPolicies(ctx context.Context) error {
+	containers, err := r.runtime.List(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, container := range containers {
+		state, err := r.runtime.Inspect(ctx, container.ID)
+		if errors.Is(err, runtime.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if state.RestartPolicy != "" && state.RestartPolicy != runtime.RestartPolicy {
+			if err := r.runtime.SetRestartPolicy(ctx, container.ID, runtime.RestartPolicy); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			r.log.Info("changed a container's restart policy", "container", container.Name, "policy", runtime.RestartPolicy)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // interrupted reports why a pass must not go on to its next tenant: ctx
 // ended, or the reconciler is stopping (which ends ctx too, but not at
 // once).
@@ -1099,7 +1131,7 @@ func (r *Reconciler) checkData(ctx context.Context, record store.Record) error {
 		return fmt.Errorf("data volume: %w", err)
 	}
 	if !exists && record.DataImage != "" {
-		return fmt.Errorf("%w: restore it (murder backups restore %s), or purge the tenant", ErrDataMissing, record.Spec.Name)
+		return fmt.Errorf("%w: a restore that failed half way may have put it aside (zfs list | grep murder-replaced-%s); otherwise restore it (murder backups restore %s), or purge the tenant", ErrDataMissing, record.Spec.Name, record.Spec.Name)
 	}
 	replicas, ok := r.volumes.(replicaVolumes)
 	if !exists || record.DataImage != "" || !ok {

@@ -86,6 +86,8 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 	case "unmount":
 		f.datasets[dataset].mounted = false
 		return nil, nil
+	case "rollback":
+		return nil, nil
 	case "get":
 		d, ok := f.datasets[dataset]
 		if !ok {

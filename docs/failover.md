@@ -55,9 +55,14 @@ Each tenant record gets two new fields:
 
 - **`Replica`:** the node that keeps a copy of the tenant's data, never the
   node that runs it.
-- **`ReplicaReady`:** set once the copy holds the whole data, after its
-  first whole send succeeds. Only a ready copy takes over. The field is
-  cleared whenever `Replica` changes.
+- **`ReplicaReady`:** set by the owner once a send to the copy succeeds.
+  Only a ready copy takes over. It is cleared:
+  - whenever `Replica` changes;
+  - when a move onto the replica's node starts, because the move writes
+    over the copy (a failed move rolls the copy back to its newest replica
+    snapshot, and the next send makes it ready again);
+  - when any move finishes, because the new node's first send has to reach
+    the copy first. A moved tenant cannot fail over until then.
 
 These changes go together in one schema version:
 

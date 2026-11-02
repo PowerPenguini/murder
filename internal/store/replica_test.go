@@ -86,3 +86,53 @@ func TestReplicasAreSpreadOverTheOtherNodes(t *testing.T) {
 		}
 	}
 }
+
+// A copy is not whole again once a move writes over it, or once the
+// tenant moved and its new node has not yet sent it anything.
+func TestMovesClearACopysReadiness(t *testing.T) {
+	st, _ := withApp(t, options())
+	for _, node := range []Node{{Name: "node-1", Address: "10.0.0.1:7400"}, {Name: "nbg-1", Address: "10.0.0.2:7400"}, {Name: "hel-1", Address: "10.0.0.3:7400"}} {
+		if err := st.PutNode(node, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.Create(NewTenant{Name: "a", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PlaceReplicas("murder"); err != nil {
+		t.Fatal(err)
+	}
+	ready := func() Record {
+		t.Helper()
+		record, _ := st.Get("a")
+		if err := st.ReplicaReady("a", record.Replica); err != nil {
+			t.Fatal(err)
+		}
+		record, _ = st.Get("a")
+		if !record.ReplicaReady {
+			t.Fatal("not ready")
+		}
+		return record
+	}
+	record := ready()
+	// Onto the replica's node: not whole while the move writes over it.
+	if moving, err := st.StartMove("a", record.Replica, "alice"); err != nil || moving.ReplicaReady {
+		t.Fatalf("moving onto the replica: %+v, %v", moving, err)
+	}
+	if _, err := st.CancelMove("a", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	record = ready()
+	// Elsewhere: whole until the move ends, then not until the new node
+	// has sent it.
+	other := "nbg-1"
+	if record.Replica == other {
+		other = "hel-1"
+	}
+	if moving, err := st.StartMove("a", other, "alice"); err != nil || !moving.ReplicaReady {
+		t.Fatalf("moving elsewhere: %+v, %v", moving, err)
+	}
+	if moved, err := st.FinishMove("a", "alice"); err != nil || moved.ReplicaReady || moved.Replica != record.Replica {
+		t.Fatalf("moved elsewhere: %+v, %v", moved, err)
+	}
+}

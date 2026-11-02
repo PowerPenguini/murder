@@ -361,8 +361,10 @@ tenant container by itself (restart policy `no`). With `on-failure` it
 would, at boot, every container a power-off cut off. The agent starts a
 container whose app exited at its next pass (`reconcileInterval`), and at
 boot only once it has applied what the cluster decided while the node was
-down. A node that cannot reach a majority starts none. Containers made by
-older releases change in place, without a restart.
+down. A node that cannot reach a majority starts none. The agent changes
+the policy of every container made by an older release in place, without
+a restart, when it starts. This applies to a node outside a cluster too:
+its tenants start with its agent after a reboot.
 
 How a dead node's tenants then run from their replicas is described in
 [docs/failover.md](docs/failover.md).

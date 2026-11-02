@@ -38,6 +38,9 @@ type Replicas interface {
 	DropReplica(ctx context.Context, tenant string) error
 	// IsReplica reports whether the tenant's data here is a copy.
 	IsReplica(ctx context.Context, tenant string) (bool, error)
+	// RollbackReplica takes the tenant's copy back to its newest replica
+	// snapshot, dropping what a move added since; a copy without one goes.
+	RollbackReplica(ctx context.Context, tenant string) error
 	// PutAside renames the data of a tenant this node no longer runs out of
 	// the way, unmounted and kept, and returns its new name.
 	PutAside(ctx context.Context, tenant, why string) (string, error)
@@ -196,15 +199,53 @@ func (z ZFS) ReceiveReplica(ctx context.Context, tenant string, whole bool, r io
 		_, _ = z.Run(context.WithoutCancel(ctx), "zfs", "destroy", "-r", incoming)
 		return err
 	}
+	// The old copy goes aside first and only then away: at every moment one
+	// of the two holds a whole copy.
+	old := z.Parent + "/" + incomingPrefix + tenant + "-old"
 	if exists {
-		if _, err := z.Run(ctx, "zfs", "destroy", "-r", dataset); err != nil {
+		if _, err := z.Run(ctx, "zfs", "destroy", "-r", old); err != nil && !strings.Contains(err.Error(), "does not exist") {
+			return err
+		}
+		if _, err := z.Run(ctx, "zfs", "rename", dataset, old); err != nil {
 			return err
 		}
 	}
 	if _, err := z.Run(ctx, "zfs", "rename", incoming, dataset); err != nil {
+		if exists {
+			_, _ = z.Run(context.WithoutCancel(ctx), "zfs", "rename", old, dataset)
+		}
 		return err
 	}
+	if exists {
+		if _, err := z.Run(ctx, "zfs", "destroy", "-r", old); err != nil {
+			return err
+		}
+	}
 	return z.Prune(ctx, tenant, replicaReason, keep)
+}
+
+func (z ZFS) RollbackReplica(ctx context.Context, tenant string) error {
+	if err := checkTenant(tenant); err != nil {
+		return err
+	}
+	dataset := z.dataset(tenant)
+	snapshots, err := z.Snapshots(ctx, tenant, replicaReason)
+	if err != nil {
+		return err
+	}
+	if len(snapshots) == 0 {
+		return z.DropReplica(ctx, tenant)
+	}
+	defer lockDataset(dataset)()
+	current, exists, err := z.properties(ctx, dataset)
+	if err != nil || !exists {
+		return err
+	}
+	if current.owner != tenant || current.role != replicaRole || current.mounted == "yes" {
+		return fmt.Errorf("dataset %s is not a copy of tenant %s: it is not rolled back", dataset, tenant)
+	}
+	_, err = z.Run(ctx, "zfs", "rollback", "-r", dataset+"@"+snapshots[len(snapshots)-1])
+	return err
 }
 
 func (z ZFS) IsReplica(ctx context.Context, tenant string) (bool, error) {

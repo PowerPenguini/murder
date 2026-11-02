@@ -571,7 +571,9 @@ func (s *SQLite) StartMove(name, target, actor string) (Record, error) {
 		if _, member := current.nodes[target]; !member {
 			return fmt.Errorf("node %s: %w", target, ErrNotFound)
 		}
-		if err := tx.Exec(`UPDATE tenants SET move_to = ?, updated_at = ? WHERE name = ?`, target, formatTime(now), name); err != nil {
+		// A move onto the replica's node writes over its copy: it is not
+		// whole again until replication says so.
+		if err := tx.Exec(`UPDATE tenants SET move_to = ?, replica_ready = CASE WHEN replica = ? THEN 0 ELSE replica_ready END, updated_at = ? WHERE name = ?`, target, target, formatTime(now), name); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "tenant.moving", name, record.App, record.Node+" → "+target)
@@ -606,7 +608,7 @@ func (s *SQLite) FinishMove(name, actor string) (Record, error) {
 			return err
 		}
 		// A tenant moved onto its replica's node needs another replica.
-		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', replica = CASE WHEN replica = move_to THEN '' ELSE replica END, replica_ready = CASE WHEN replica = move_to THEN 0 ELSE replica_ready END, generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
+		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', replica = CASE WHEN replica = move_to THEN '' ELSE replica END, replica_ready = 0, generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "tenant.moved", name, record.App, record.Node+" → "+record.MoveTo)

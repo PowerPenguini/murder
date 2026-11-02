@@ -254,6 +254,13 @@ func runAgent(args []string) error {
 	reconciled := make(chan struct{})
 	go func() {
 		defer close(reconciled)
+		// No container may start by itself while the agent waits, nor at a
+		// later boot: an older release's policy would let the engine start
+		// them on data a failover made stale.
+		if err := reconciler.SetRestartPolicies(ctx); err != nil {
+			log.Warn("change the containers' restart policy", "error", err)
+		}
+		go keepRestartPolicies(ctx, reconciler, log)
 		// A node that was down may have lost its tenants to their replicas
 		// meanwhile: it starts nothing until it knows what the cluster
 		// decided. A node that cannot reach a majority starts nothing.
@@ -296,6 +303,21 @@ func runAgent(args []string) error {
 	<-reconciled
 	log.Info("murder agent stopped")
 	return runErr
+}
+
+// keepRestartPolicies changes the restart policy of any container that
+// has another, every 10 minutes, as one Docker failed to change at start.
+func keepRestartPolicies(ctx context.Context, reconciler *reconcile.Reconciler, log *slog.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Minute):
+		}
+		if err := reconciler.SetRestartPolicies(ctx); err != nil {
+			log.Warn("change the containers' restart policy", "error", err)
+		}
+	}
 }
 
 // waitCaughtUp returns once this node has applied what the cluster has, or

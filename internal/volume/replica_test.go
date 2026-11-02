@@ -75,12 +75,21 @@ func TestACopyIsReceivedUnmountedAndMarked(t *testing.T) {
 	if !strings.HasSuffix(fake.piped[1], " -F tank/murder/acme") {
 		t.Fatalf("changes received with %q", fake.piped[1])
 	}
-	fake.calls = nil
-	if err := z.ReceiveReplica(ctx, "acme", true, strings.NewReader("x"), 3); err != nil || !fake.ran("zfs destroy -r tank/murder/acme") {
-		t.Fatalf("a whole copy over a copy: %v, %v", err, fake.calls)
+	// A whole copy over a copy: the old one goes aside once the new one is
+	// all there, and away only once the new one is in its place.
+	fake.calls, fake.piped = nil, nil
+	if err := z.ReceiveReplica(ctx, "acme", true, strings.NewReader("x"), 3); err != nil {
+		t.Fatal(err)
 	}
-	// The old copy goes only once the new one is all there.
-	if destroyAt, receiveAt := slices.Index(fake.calls, "zfs destroy -r tank/murder/acme"), len(fake.piped)-1; destroyAt < 0 || receiveAt < 0 {
+	aside := slices.Index(fake.calls, "zfs rename tank/murder/acme tank/murder/murder-incoming-acme-old")
+	inPlace := slices.Index(fake.calls, "zfs rename tank/murder/murder-incoming-acme tank/murder/acme")
+	gone := -1
+	for i, call := range fake.calls {
+		if call == "zfs destroy -r tank/murder/murder-incoming-acme-old" {
+			gone = i
+		}
+	}
+	if len(fake.piped) != 1 || aside < 0 || inPlace < aside || gone < inPlace || fake.datasets["tank/murder/acme"] == nil {
 		t.Fatalf("calls %v", fake.calls)
 	}
 	if replica, err := z.IsReplica(ctx, "acme"); err != nil || !replica {
@@ -193,5 +202,25 @@ func TestDataIsPutAside(t *testing.T) {
 	}
 	if _, err := z.PutAside(context.Background(), "acme", "Bad Reason"); err == nil {
 		t.Fatal("a reason that could change the name's shape")
+	}
+}
+
+// A copy a failed move added to goes back to its newest replica snapshot;
+// live data is not rolled back.
+func TestACopyIsRolledBackAfterAFailedMove(t *testing.T) {
+	fake, z := newReplicaZFS()
+	ctx := context.Background()
+	fake.datasets["tank/murder/acme"] = &fakeDataset{owner: "acme", role: replicaRole, canmount: "noauto", mountpoint: "/srv/murder/tenants/acme"}
+	fake.snapshots = []string{"tank/murder/acme@murder-replica-1", "tank/murder/acme@murder-replica-2", "tank/murder/acme@murder-move-3"}
+	if err := z.RollbackReplica(ctx, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if !fake.ran("zfs rollback -r tank/murder/acme@murder-replica-2") {
+		t.Fatalf("calls %v", fake.calls)
+	}
+	fake.datasets["tank/murder/live"] = &fakeDataset{owner: "live", mountpoint: "/srv/murder/tenants/live", mounted: true}
+	fake.snapshots = []string{"tank/murder/live@murder-replica-1"}
+	if err := z.RollbackReplica(ctx, "live"); err == nil {
+		t.Fatal("live data rolled back")
 	}
 }

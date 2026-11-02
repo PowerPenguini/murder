@@ -205,6 +205,8 @@ func (v *memoryVolumes) IsReplica(_ context.Context, tenant string) (bool, error
 	return d != nil && d.replica, nil
 }
 
+func (v *memoryVolumes) RollbackReplica(context.Context, string) error { return nil }
+
 func (v *memoryVolumes) PutAside(_ context.Context, tenant, why string) (string, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
