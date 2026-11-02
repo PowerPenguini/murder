@@ -2,6 +2,7 @@ package failover
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
@@ -62,7 +63,7 @@ func (m *Monitor) startRecords(now time.Time, all []store.Node) {
 
 // serveLocked updates which nodes serve from this round's probes, and
 // returns the addresses to write, if they are to be written now.
-func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answered map[string]bool, frozen string, majority bool) ([]netip.Addr, int, bool) {
+func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answered map[string]bool, frozen string, majority bool) (recordsWrite, bool) {
 	r := &m.records
 	if m.Records == nil {
 		// Only the leader writes the records: one without cluster.dns
@@ -71,7 +72,7 @@ func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answ
 			m.Log.Warn("this leader keeps no DNS records, though nodes have public addresses: give every node the same cluster.dns")
 			r.unkept = true
 		}
-		return nil, 0, false
+		return recordsWrite{}, false
 	}
 	for _, node := range all {
 		name := node.Name
@@ -102,7 +103,7 @@ func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answ
 		}
 	}
 	if !majority || now.Sub(r.since) < m.after() || m.writing || now.Before(r.retry) {
-		return nil, 0, false
+		return recordsWrite{}, false
 	}
 	// While a node that serves has not recorded its public addresses, as
 	// before its agent runs a release that does, nothing is written: the
@@ -124,15 +125,36 @@ func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answ
 		r.missing = key
 	}
 	if len(missing) > 0 || len(addresses) == 0 {
-		return nil, 0, false
+		return recordsWrite{}, false
 	}
 	slices.SortFunc(addresses, func(a, b netip.Addr) int { return a.Compare(b) })
-	addresses = slices.Compact(addresses)
-	if key := addressKey(addresses); key == r.published && now.Sub(r.publishedAt) < recordsRefresh {
-		return nil, 0, false
+	write := recordsWrite{addresses: slices.Compact(addresses), term: r.term}
+	// The panel's name leads to the tunnel addresses of the nodes that
+	// serve and run the panel.
+	if m.PanelRecords != nil {
+		for _, node := range all {
+			if r.serving[node.Name] && node.Tunnel != nil {
+				write.panel = append(write.panel, node.Tunnel.Address)
+			}
+		}
+		slices.SortFunc(write.panel, func(a, b netip.Addr) int { return a.Compare(b) })
+	}
+	if write.key() == r.published && now.Sub(r.publishedAt) < recordsRefresh {
+		return recordsWrite{}, false
 	}
 	m.writing = true
-	return addresses, r.term, true
+	return write, true
+}
+
+// recordsWrite is one write of the records: the base domain's, and the
+// panel's.
+type recordsWrite struct {
+	addresses, panel []netip.Addr
+	term             int
+}
+
+func (w recordsWrite) key() string {
+	return addressKey(w.addresses) + " | panel " + addressKey(w.panel)
 }
 
 func addressKey(addresses []netip.Addr) string {
@@ -146,7 +168,7 @@ func addressKey(addresses []netip.Addr) string {
 // publish writes the records, stopping as soon as this node no longer
 // leads: a write of an old leader landing after the new leader's would
 // name the nodes as it last saw them.
-func (m *Monitor) publish(ctx context.Context, addresses []netip.Addr, term int) {
+func (m *Monitor) publish(ctx context.Context, job recordsWrite) {
 	write, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordsTimeout)
 	defer cancel()
 	go func() {
@@ -166,7 +188,13 @@ func (m *Monitor) publish(ctx context.Context, addresses []netip.Addr, term int)
 	}()
 	err := context.Canceled
 	if m.Leader() {
-		err = m.Records.Publish(write, addresses)
+		err = m.Records.Publish(write, job.addresses)
+		// Nothing to name is left as it is, as for the base domain.
+		if err == nil && m.PanelRecords != nil && len(job.panel) > 0 {
+			if panelErr := m.PanelRecords.Publish(write, job.panel); panelErr != nil {
+				err = fmt.Errorf("the panel's records: %w", panelErr)
+			}
+		}
 	}
 	leads := m.Leader()
 	m.mu.Lock()
@@ -174,10 +202,10 @@ func (m *Monitor) publish(ctx context.Context, addresses []netip.Addr, term int)
 	m.writing = false
 	r := &m.records
 	// A write stopped because this node no longer leads is no failure.
-	if !leads || !m.leading || r.term != term {
+	if !leads || !m.leading || r.term != job.term {
 		return
 	}
-	key := addressKey(addresses)
+	key := job.key()
 	if err != nil {
 		r.retry = m.now().Add(recordsRetry)
 		if !r.failing {
@@ -189,7 +217,7 @@ func (m *Monitor) publish(ctx context.Context, addresses []netip.Addr, term int)
 	if r.failing || key != r.published {
 		m.Log.Info("the DNS records name the nodes that serve", "addresses", key)
 	}
-	r.published, r.publishedAt, r.count, r.failing = key, m.now(), len(addresses), false
+	r.published, r.publishedAt, r.count, r.failing = key, m.now(), len(job.addresses), false
 }
 
 func (m *Monitor) writeRecordMetrics(out *metrics.Writer) {

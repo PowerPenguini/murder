@@ -178,6 +178,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tenants/{name}/logs", s.logs)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("GET /v1/nodes", s.nodes)
+	s.panelRoutes(mux)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
 	mux.HandleFunc("GET /v1/backup", s.backup)
 	mux.HandleFunc("POST /v1/backups/run", rootOnly(s.runBackups))
@@ -770,7 +771,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrNotArchived), errors.Is(err, store.ErrInUse), errors.Is(err, store.ErrConflict):
 		status = http.StatusConflict
-	case errors.As(err, new(*spec.ValidationError)):
+	case errors.As(err, new(*spec.ValidationError)), errors.Is(err, store.ErrInvalid):
 		status = http.StatusBadRequest
 	case errors.Is(err, reconcile.ErrElsewhere):
 		status = http.StatusConflict

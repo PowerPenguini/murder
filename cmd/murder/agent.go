@@ -181,7 +181,7 @@ func runAgent(args []string) error {
 				CatchUp: member.CatchUp, Moving: mover.Moving, Leader: member.Leader,
 			}
 		}
-		monitor = newMonitor(cfg.Cluster, cfg.BaseDomain, st, member, log.With("component", "failover"))
+		monitor = newMonitor(cfg.Cluster, cfg.BaseDomain, cfg.Panel.Name, st, member, log.With("component", "failover"))
 	}
 	// murder-firewall.service loads the rules before Docker starts the
 	// tenants at boot; loading them here covers a node without that unit
@@ -352,14 +352,22 @@ func keepRestartPolicies(ctx context.Context, reconciler *reconcile.Reconciler, 
 // up it powers a dead node off and fails it over; a token that cannot be
 // read leaves failover to an operator, which the log and metrics say when
 // a node dies, rather than stopping the agent.
-func newMonitor(cfg *config.Cluster, baseDomain string, st *store.SQLite, member *cluster.Cluster, log *slog.Logger) *failover.Monitor {
+func newMonitor(cfg *config.Cluster, baseDomain, panelName string, st *store.SQLite, member *cluster.Cluster, log *slog.Logger) *failover.Monitor {
 	monitor := &failover.Monitor{Store: st, Probe: member.Ping, Leader: member.Leader, Log: log}
 	if cfg.DNS != nil {
-		publisher, err := newPublisher(cfg.DNS, baseDomain, cfg.PublicAddresses)
+		wildcard, err := records.Wildcard(baseDomain, cfg.DNS.Zone)
+		var publisher records.Publisher
+		if err == nil {
+			publisher, err = newPublisher(cfg.DNS, wildcard, cfg.PublicAddresses)
+		}
 		if err != nil {
-			log.Error("the DNS records are not kept: the token cannot be read", "error", err)
+			log.Error("the DNS records are not kept", "error", err)
 		} else {
 			monitor.Records = publisher
+			// The panel's name, for the devices in its tunnel.
+			if relative, err := records.Relative(panelName, cfg.DNS.Zone); err == nil {
+				monitor.PanelRecords, _ = newPublisher(cfg.DNS, relative, cfg.PublicAddresses)
+			}
 		}
 	}
 	if cfg.Failover == nil {
@@ -377,12 +385,9 @@ func newMonitor(cfg *config.Cluster, baseDomain string, st *store.SQLite, member
 	return monitor
 }
 
-// newPublisher writes the base domain's records through the provider.
-func newPublisher(cfg *config.DNS, baseDomain string, public []string) (records.Publisher, error) {
-	name, err := records.Wildcard(baseDomain, cfg.Zone)
-	if err != nil {
-		return nil, err
-	}
+// newPublisher writes the records of name, relative to the zone, through
+// the provider.
+func newPublisher(cfg *config.DNS, name string, public []string) (records.Publisher, error) {
 	token, err := readSecret(cfg.TokenFile)
 	if err != nil {
 		return nil, err

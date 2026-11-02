@@ -233,3 +233,29 @@ func TestThePanelServesOnASocket(t *testing.T) {
 		t.Errorf("a relative socket: %v", err)
 	}
 }
+
+// The panel's tunnel: an address of this node's in its network, below the
+// devices', and HTTPS for passkeys.
+func TestThePanelsTunnel(t *testing.T) {
+	base := "baseDomain: example.com\nedge: {tls: {mode: internal, storage: /var/lib/murder/certs}}\n"
+	agent, err := Parse([]byte(base + "panel: {tunnel: {address: 10.77.0.2}}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tunnel := agent.Panel.Tunnel; agent.Panel.Name != "panel.example.com" || tunnel.Network != "10.77.0.0/24" || tunnel.Port != 51820 || tunnel.KeyFile != "/var/lib/murder/panel/tunnel.key" {
+		t.Fatalf("panel = %+v, tunnel %+v", agent.Panel, tunnel)
+	}
+	for name, config := range map[string]string{
+		"outside the network": base + "panel: {tunnel: {address: 10.78.0.2}}\n",
+		"among the devices":   base + "panel: {tunnel: {address: 10.77.0.150}}\n",
+		"the network itself":  base + "panel: {tunnel: {address: 10.77.0.0}}\n",
+		"a small network":     base + "panel: {tunnel: {address: 10.77.0.2, network: 10.77.0.0/28}}\n",
+		"no HTTPS":            "baseDomain: example.com\npanel: {tunnel: {address: 10.77.0.2}}\n",
+		"a name elsewhere":    base + "panel: {name: panel.other.com}\n",
+		"a deeper name":       base + "panel: {name: a.panel.example.com}\n",
+	} {
+		if _, err := Parse([]byte(config)); err == nil || !strings.Contains(err.Error(), "panel.") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

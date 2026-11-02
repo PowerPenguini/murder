@@ -21,7 +21,11 @@ import (
 // replicatedTables are the tables every node of a cluster holds the same,
 // in an order that inserts referenced rows first. The others (meta's node
 // name, images) belong to one node.
-var replicatedTables = []string{"apps", "tenants", "secrets", "nodes", "events"}
+var replicatedTables = []string{"apps", "tenants", "secrets", "nodes", "events", "devices"}
+
+// tableSince is the schema version that added a replicated table: a
+// snapshot of an older release has none.
+var tableSince = map[string]int{"devices": 12}
 
 // Refused reports whether a batch failed the same way on every node that
 // applies it: stale, malformed, or against the state (a constraint, a
@@ -343,6 +347,9 @@ func (s *SQLite) InstallSnapshot(from io.Reader) (bool, error) {
 			}
 		}
 		for _, table := range replicatedTables {
+			if version < tableSince[table] {
+				continue
+			}
 			columns, err := columnsOf(tx, "snapshot", table)
 			if err != nil {
 				return err

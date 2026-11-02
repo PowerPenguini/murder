@@ -119,6 +119,13 @@ resource "hcloud_firewall" "test" {
     port       = "443"
     source_ips = ["0.0.0.0/0", "::/0"]
   }
+  # The panel's WireGuard tunnel.
+  rule {
+    direction  = "in"
+    protocol   = "udp"
+    port       = "51820"
+    source_ips = ["0.0.0.0/0", "::/0"]
+  }
   rule {
     direction  = "in"
     protocol   = "icmp"

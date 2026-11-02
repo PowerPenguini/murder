@@ -70,6 +70,7 @@ type snapshot struct {
 	apps    map[string]App
 	tenants map[string]Record
 	nodes   map[string]Node
+	devices map[string]Device
 	images  map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
@@ -339,7 +340,7 @@ type querier interface {
 
 // load reads the whole state. It is small: one row per app and tenant.
 func load(q querier) (state *snapshot, err error) {
-	state = &snapshot{apps: map[string]App{}, tenants: map[string]Record{}, nodes: map[string]Node{}, images: map[string]bool{}}
+	state = &snapshot{apps: map[string]App{}, tenants: map[string]Record{}, nodes: map[string]Node{}, devices: map[string]Device{}, images: map[string]bool{}}
 	if err := q.QueryRow(`SELECT value FROM meta WHERE key = 'node'`).Scan(&state.node); err != nil {
 		return nil, fmt.Errorf("read the node name: %w", err)
 	}
@@ -425,7 +426,7 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until, public FROM nodes`)
+	rows, err = q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until, public, tunnel FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
@@ -433,11 +434,12 @@ func load(q querier) (state *snapshot, err error) {
 		var node Node
 		var created string
 		var failed, away, refused sql.NullString
-		var public string
-		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away, &refused, &public); err != nil {
+		var public, tunnel string
+		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away, &refused, &public, &tunnel); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		node.Tunnel = parseTunnel(tunnel)
 		if refused.Valid {
 			node.CopiesRefusedUntil = parseTime(refused.String)
 		}
@@ -454,6 +456,24 @@ func load(q querier) (state *snapshot, err error) {
 			node.AwayUntil = parseTime(away.String)
 		}
 		state.nodes[node.Name] = node
+	}
+	if err := closeRows(rows); err != nil {
+		return nil, err
+	}
+	rows, err = q.Query(`SELECT name, key, address, created_at, created_by FROM devices`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var device Device
+		var address, created string
+		if err := rows.Scan(&device.Name, &device.Key, &address, &created, &device.CreatedBy); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		device.Address, _ = netip.ParseAddr(address)
+		device.CreatedAt = parseTime(created)
+		state.devices[device.Name] = device
 	}
 	if err := closeRows(rows); err != nil {
 		return nil, err

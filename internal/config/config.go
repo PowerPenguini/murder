@@ -164,9 +164,28 @@ type Cluster struct {
 // Panel is where the administration panel serves.
 type Panel struct {
 	// Socket is the unix socket the panel serves on, readable by root
-	// only, reached through an SSH tunnel until the panel has accounts of
-	// its own.
+	// only, reached through an SSH tunnel.
 	Socket string `yaml:"socket"`
+	// Name is the panel's host name inside the tunnel; panel.<baseDomain>
+	// by default, which the wildcard certificate covers.
+	Name string `yaml:"name"`
+	// Tunnel, if set, serves the panel inside a WireGuard tunnel that
+	// only the devices added with "murder admin device add" reach.
+	Tunnel *Tunnel `yaml:"tunnel"`
+}
+
+// Tunnel is this node's end of the panel's WireGuard tunnel.
+type Tunnel struct {
+	// Address is this node's address in the tunnel, different on every
+	// node and below the network's 100th address, where devices begin.
+	Address string `yaml:"address"`
+	// Network is the tunnel's network, the same on every node;
+	// 10.77.0.0/24 by default.
+	Network string `yaml:"network"`
+	// Port is the UDP port, open on the public addresses; 51820 by default.
+	Port int `yaml:"port"`
+	// KeyFile holds this node's WireGuard private key, made at first start.
+	KeyFile string `yaml:"keyFile"`
 }
 
 // DNS reaches the provider of the base domain's zone.
@@ -296,6 +315,20 @@ func Parse(data []byte) (Agent, error) {
 	if agent.Panel.Socket == "" {
 		agent.Panel.Socket = "/run/murder/panel.sock"
 	}
+	if agent.Panel.Name == "" && agent.BaseDomain != "" {
+		agent.Panel.Name = "panel." + agent.BaseDomain
+	}
+	if t := agent.Panel.Tunnel; t != nil {
+		if t.Network == "" {
+			t.Network = "10.77.0.0/24"
+		}
+		if t.Port == 0 {
+			t.Port = 51820
+		}
+		if t.KeyFile == "" {
+			t.KeyFile = "/var/lib/murder/panel/tunnel.key"
+		}
+	}
 	if agent.Cluster != nil {
 		if agent.Cluster.Dir == "" {
 			agent.Cluster.Dir = "/var/lib/murder/cluster"
@@ -347,6 +380,30 @@ func (a Agent) Validate() error {
 	}
 	if !strings.HasPrefix(a.Panel.Socket, "/") {
 		problems = append(problems, "panel.socket must be an absolute path")
+	}
+	if label, rest, _ := strings.Cut(a.Panel.Name, "."); a.BaseDomain != "" && (rest != a.BaseDomain || label == "" || label == "*") {
+		problems = append(problems, "panel.name must be a name right under the base domain, such as panel."+a.BaseDomain+", which the wildcard certificate covers")
+	}
+	if t := a.Panel.Tunnel; t != nil {
+		network, err := netip.ParsePrefix(t.Network)
+		address, addressErr := netip.ParseAddr(t.Address)
+		switch {
+		case err != nil || !network.Addr().Is4() || network.Bits() > 24:
+			problems = append(problems, "panel.tunnel.network must be an IPv4 network, a /24 or larger, such as 10.77.0.0/24")
+		case addressErr != nil || !network.Contains(address) || address == network.Masked().Addr():
+			problems = append(problems, "panel.tunnel.address must be this node's address in panel.tunnel.network")
+		case int(address.As4()[3])-int(network.Masked().Addr().As4()[3]) >= 100 && network.Bits() == 24:
+			problems = append(problems, "panel.tunnel.address must be below the network's 100th address, where devices begin")
+		}
+		if t.Port < 1 || t.Port > 65535 {
+			problems = append(problems, "panel.tunnel.port must be a UDP port")
+		}
+		if !strings.HasPrefix(t.KeyFile, "/") {
+			problems = append(problems, "panel.tunnel.keyFile must be an absolute path")
+		}
+		if a.Edge.TLS.Mode != edge.TLSInternal && a.Edge.TLS.Mode != edge.TLSACME {
+			problems = append(problems, "panel.tunnel needs edge.tls (internal or acme): passkeys need HTTPS, with the wildcard certificate")
+		}
 	}
 	if d := a.Cluster; d != nil && d.DNS != nil && a.BaseDomain != "" {
 		if _, err := records.Wildcard(a.BaseDomain, d.DNS.Zone); err != nil {

@@ -241,3 +241,14 @@ func TestNamecheapEndsWithItsContext(t *testing.T) {
 		t.Fatalf("a stuck call: %v", err)
 	}
 }
+
+func TestRelative(t *testing.T) {
+	if got, err := Relative("panel.apps.example.com", "example.com."); err != nil || got != "panel.apps" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	for _, bad := range [][2]string{{"example.com", "example.com"}, {"panel.other.com", "example.com"}, {"panel.example.com", ""}} {
+		if _, err := Relative(bad[0], bad[1]); err == nil {
+			t.Errorf("Relative(%q, %q) took it", bad[0], bad[1])
+		}
+	}
+}

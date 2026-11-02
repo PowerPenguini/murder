@@ -1,0 +1,18 @@
+[Unit]
+Description=Murder administration panel
+Documentation=https://github.com/PowerPenguini/murder
+After=network-online.target murder-agent.service
+Wants=network-online.target
+
+[Service]
+# The panel asks the local agent over its socket, and serves on a socket
+# only root can use and, with panel.tunnel, inside its WireGuard tunnel.
+# Replaced by an upgrade, the binary is noticed and the panel restarts.
+ExecStart=/usr/local/bin/murder panel -config /etc/murder/agent.yaml
+Restart=always
+RestartSec=2
+StateDirectory=murder
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

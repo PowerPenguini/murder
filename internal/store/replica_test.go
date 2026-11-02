@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/netip"
 	"slices"
@@ -502,5 +503,57 @@ func TestPublicAddressesOfANode(t *testing.T) {
 	}
 	if err := st.SetPublic("node-1", nil); err != nil || len(st.Nodes()[0].Public) != 0 {
 		t.Fatalf("cleared: %v, %v", err, st.Nodes()[0].Public)
+	}
+}
+
+// Devices get the panel tunnel's addresses from the 100th on, past the
+// nodes' own; names and keys are unique.
+func TestDevicesOfThePanelsTunnel(t *testing.T) {
+	st, _ := withApp(t, options())
+	if err := st.PutNode(Node{Name: "node-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	key := func(b byte) string {
+		raw := make([]byte, 32)
+		raw[0] = b
+		return base64.StdEncoding.EncodeToString(raw)
+	}
+	network := netip.MustParsePrefix("10.77.0.0/24")
+	if err := st.SetTunnel("node-1", Tunnel{Address: netip.MustParseAddr("10.77.0.100"), Key: key(1), Port: 51820}); err != nil {
+		t.Fatal(err)
+	}
+	laptop, err := st.AddDevice("laptop", key(2), network, "alice")
+	if err != nil || laptop.Address != netip.MustParseAddr("10.77.0.101") {
+		t.Fatalf("laptop: %+v, %v", laptop, err)
+	}
+	phone, err := st.AddDevice("phone", key(3), network, "alice")
+	if err != nil || phone.Address != netip.MustParseAddr("10.77.0.102") {
+		t.Fatalf("phone: %+v, %v", phone, err)
+	}
+	for _, bad := range []struct{ name, key string }{{"laptop", key(9)}, {"other", key(2)}, {"Bad Name", key(9)}, {"short", "c2hvcnQ="}} {
+		if _, err := st.AddDevice(bad.name, bad.key, network, "alice"); err == nil {
+			t.Errorf("added %s with %s", bad.name, bad.key)
+		}
+	}
+	if err := st.RemoveDevice("laptop", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// Its address is given again.
+	tablet, _ := st.AddDevice("tablet", key(4), network, "alice")
+	if tablet.Address != laptop.Address || len(st.Devices()) != 2 {
+		t.Fatalf("tablet %+v, devices %+v", tablet, st.Devices())
+	}
+	// A node's tunnel is kept, and no two have one address.
+	if node := st.Nodes()[0]; node.Tunnel == nil || node.Tunnel.Key != key(1) {
+		t.Fatalf("node: %+v", node)
+	}
+	if err := st.PutNode(Node{Name: "node-2", Address: "10.0.0.2:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetTunnel("node-2", Tunnel{Address: netip.MustParseAddr("10.77.0.100"), Key: key(5), Port: 51820}); err == nil {
+		t.Fatal("two nodes with one tunnel address")
+	}
+	if err := st.SetTunnel("node-2", Tunnel{Address: tablet.Address, Key: key(5), Port: 51820}); err == nil {
+		t.Fatal("a node with a device's address")
 	}
 }
