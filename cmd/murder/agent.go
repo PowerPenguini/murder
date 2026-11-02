@@ -398,8 +398,9 @@ func newPublisher(cfg *config.DNS, baseDomain string) (records.Publisher, error)
 	return &records.Hetzner{Token: token, Zone: zone, Name: name, TTL: cfg.TTL.Duration, Endpoint: cfg.Endpoint}, nil
 }
 
-// keepPublic records this node's public addresses, as its config has them,
-// for the DNS records; a freeze or a lost leader only delays it.
+// keepPublic keeps this node's public addresses, as its config has them,
+// recorded for the DNS records, as after the node left the cluster and
+// joined it again; a freeze or a lost leader only delays it.
 func keepPublic(ctx context.Context, st *store.SQLite, node string, values []string, log *slog.Logger) {
 	var want []netip.Addr
 	for _, value := range values {
@@ -411,15 +412,13 @@ func keepPublic(ctx context.Context, st *store.SQLite, node string, values []str
 	want = slices.Compact(want)
 	warned := false
 	for {
-		current := slices.IndexFunc(st.Nodes(), func(n store.Node) bool { return n.Name == node && slices.Equal(n.Public, want) })
-		if current >= 0 {
-			return
-		}
-		if err := st.SetPublic(node, want); err == nil {
-			return
-		} else if !errors.Is(err, store.ErrFrozen) && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, cluster.ErrNotJoined) && !warned {
-			log.Warn("record this node's public addresses", "error", err)
-			warned = true
+		if !slices.ContainsFunc(st.Nodes(), func(n store.Node) bool { return n.Name == node && slices.Equal(n.Public, want) }) {
+			if err := st.SetPublic(node, want); err == nil {
+				warned = false
+			} else if !errors.Is(err, store.ErrFrozen) && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, cluster.ErrNotJoined) && !warned {
+				log.Warn("record this node's public addresses", "error", err)
+				warned = true
+			}
 		}
 		select {
 		case <-ctx.Done():

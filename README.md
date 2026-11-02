@@ -467,10 +467,17 @@ cluster:
 - **When unsure:** a leader that hears too few nodes writes nothing, a new
   leader writes nothing for its first 30 s, and a family (A or AAAA) is
   never left empty.
-- **One write:** Hetzner replaces a name's records in one action, and
-  Namecheap sets a domain's host list in one call, so the name never
-  resolves to nothing. Namecheap answers only allowed addresses: allow
-  every node's public address for its API.
+- **Every node:** give every node the same `cluster.dns` and its own
+  `publicAddresses`. Only the leader writes, and leadership moves; a
+  leader without `cluster.dns` writes nothing and says so, and while a
+  node that serves has no public addresses nothing is written.
+- **One write:** Hetzner replaces a name's records in one action, so the
+  name never resolves to nothing.
+- **Namecheap:** not yet tried on a real domain. Its API sets a domain's
+  whole host list in one call, which Murder does only when the records
+  differ; try it on a spare domain first, as the libdns provider may not
+  keep every host setting (such as mail) as it was. Namecheap answers only
+  allowed addresses: allow every node's public address for its API.
 - **Drift:** the records are written again every 5 minutes, so a change by
   hand is undone. Leave the wildcard records to Murder.
 - **Metrics:** `murder_dns_records_failing` and

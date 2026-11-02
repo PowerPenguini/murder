@@ -66,8 +66,14 @@ func (h *Hetzner) set(ctx context.Context, kind string, values []string) error {
 	var current struct {
 		RRSet struct {
 			Records []hetznerRecord `json:"records"`
+			TTL     *int            `json:"ttl"`
 		} `json:"rrset"`
 	}
+	ttl := h.TTL
+	if ttl == 0 {
+		ttl = TTL
+	}
+	seconds := int(ttl.Seconds())
 	status, err := h.call(ctx, http.MethodGet, path, nil, &current)
 	records := make([]hetznerRecord, len(values))
 	for i, value := range values {
@@ -78,11 +84,7 @@ func (h *Hetzner) set(ctx context.Context, kind string, values []string) error {
 	}
 	switch {
 	case status == http.StatusNotFound:
-		ttl := h.TTL
-		if ttl == 0 {
-			ttl = TTL
-		}
-		body := map[string]any{"name": h.Name, "type": kind, "ttl": int(ttl.Seconds()), "records": records}
+		body := map[string]any{"name": h.Name, "type": kind, "ttl": seconds, "records": records}
 		if _, err := h.call(ctx, http.MethodPost, "/zones/"+h.Zone+"/rrsets", body, &action); err != nil {
 			return err
 		}
@@ -94,6 +96,17 @@ func (h *Hetzner) set(ctx context.Context, kind string, values []string) error {
 			have = append(have, record.Value)
 		}
 		slices.Sort(have)
+		if current.RRSet.TTL == nil || *current.RRSet.TTL != seconds {
+			var changed struct {
+				Action hetznerAction `json:"action"`
+			}
+			if _, err := h.call(ctx, http.MethodPost, path+"/actions/change_ttl", map[string]any{"ttl": seconds}, &changed); err != nil {
+				return err
+			}
+			if err := h.wait(ctx, changed.Action); err != nil {
+				return err
+			}
+		}
 		if slices.Equal(have, values) {
 			return nil
 		}

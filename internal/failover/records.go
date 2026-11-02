@@ -38,17 +38,21 @@ type recordsView struct {
 	published   string
 	publishedAt time.Time
 	count       int
-	writing     bool
 	failing     bool
 	retry       time.Time
 	// missing names the serving nodes without public addresses, while
 	// nothing is written for want of them.
 	missing string
+	// term counts the leaderships: a write begun in an earlier one does
+	// not count for this one.
+	term int
+	// unkept is set once this leader, without cluster.dns, said so.
+	unkept bool
 }
 
 // startRecords begins a leader's view: every node not failed serves.
 func (m *Monitor) startRecords(now time.Time, all []store.Node) {
-	m.records = recordsView{serving: map[string]bool{}, upSince: map[string]time.Time{}, since: now}
+	m.records = recordsView{serving: map[string]bool{}, upSince: map[string]time.Time{}, since: now, term: m.records.term + 1}
 	for _, node := range all {
 		if !node.Failed() {
 			m.records.serving[node.Name] = true
@@ -58,11 +62,17 @@ func (m *Monitor) startRecords(now time.Time, all []store.Node) {
 
 // serveLocked updates which nodes serve from this round's probes, and
 // returns the addresses to write, if they are to be written now.
-func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answered map[string]bool, frozen string, majority bool) ([]netip.Addr, bool) {
-	if m.Records == nil {
-		return nil, false
-	}
+func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answered map[string]bool, frozen string, majority bool) ([]netip.Addr, int, bool) {
 	r := &m.records
+	if m.Records == nil {
+		// Only the leader writes the records: one without cluster.dns
+		// leaves them as they are, dead nodes included.
+		if !r.unkept && slices.ContainsFunc(all, func(node store.Node) bool { return len(node.Public) > 0 }) {
+			m.Log.Warn("this leader keeps no DNS records, though nodes have public addresses: give every node the same cluster.dns")
+			r.unkept = true
+		}
+		return nil, 0, false
+	}
 	for _, node := range all {
 		name := node.Name
 		switch {
@@ -91,8 +101,8 @@ func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answ
 			delete(r.upSince, name)
 		}
 	}
-	if !majority || now.Sub(r.since) < m.after() || r.writing || now.Before(r.retry) {
-		return nil, false
+	if !majority || now.Sub(r.since) < m.after() || m.writing || now.Before(r.retry) {
+		return nil, 0, false
 	}
 	// While a node that serves has not recorded its public addresses, as
 	// before its agent runs a release that does, nothing is written: the
@@ -114,15 +124,15 @@ func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answ
 		r.missing = key
 	}
 	if len(missing) > 0 || len(addresses) == 0 {
-		return nil, false
+		return nil, 0, false
 	}
 	slices.SortFunc(addresses, func(a, b netip.Addr) int { return a.Compare(b) })
 	addresses = slices.Compact(addresses)
 	if key := addressKey(addresses); key == r.published && now.Sub(r.publishedAt) < recordsRefresh {
-		return nil, false
+		return nil, 0, false
 	}
-	r.writing = true
-	return addresses, true
+	m.writing = true
+	return addresses, r.term, true
 }
 
 func addressKey(addresses []netip.Addr) string {
@@ -133,19 +143,36 @@ func addressKey(addresses []netip.Addr) string {
 	return strings.Join(fields, " ")
 }
 
-// publish writes the records, unless this node no longer leads.
-func (m *Monitor) publish(ctx context.Context, addresses []netip.Addr) {
-	var err error
+// publish writes the records, stopping as soon as this node no longer
+// leads: a write of an old leader landing after the new leader's would
+// name the nodes as it last saw them.
+func (m *Monitor) publish(ctx context.Context, addresses []netip.Addr, term int) {
+	write, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordsTimeout)
+	defer cancel()
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-write.Done():
+				return
+			case <-ticker.C:
+				if !m.Leader() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err := context.Canceled
 	if m.Leader() {
-		write, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordsTimeout)
 		err = m.Records.Publish(write, addresses)
-		cancel()
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.writing = false
 	r := &m.records
-	r.writing = false
-	if !m.leading {
+	if !m.leading || r.term != term {
 		return
 	}
 	key := addressKey(addresses)

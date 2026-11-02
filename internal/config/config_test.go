@@ -214,6 +214,7 @@ func TestDNSRecords(t *testing.T) {
 		"a relative token": "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: t}\n",
 		"another zone":     "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: /t, zone: other.com}\n",
 		"a short ttl":      "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: /t, ttl: 10s}\n",
+		"a long ttl":       "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: /t, ttl: 48h}\n",
 	} {
 		if _, err := Parse([]byte(base + extra)); err == nil || !strings.Contains(err.Error(), "cluster.") {
 			t.Errorf("%s: %v", name, err)

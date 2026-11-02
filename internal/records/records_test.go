@@ -98,10 +98,17 @@ func (f *fakeDNS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, value := range current {
 			records = append(records, map[string]string{"value": value})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"rrset": map[string]any{"records": records}})
+		ttl := any(nil)
+		if value, ok := f.ttl[key]; ok {
+			ttl = value
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"rrset": map[string]any{"records": records, "ttl": ttl}})
 	case r.Method == http.MethodPost && path == "":
 		f.rrsets[body.Name+"/"+body.Type] = values()
 		f.ttl[body.Name+"/"+body.Type] = body.TTL
+		action()
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/actions/change_ttl"):
+		f.ttl[strings.TrimSuffix(strings.TrimPrefix(path, "/"), "/actions/change_ttl")] = body.TTL
 		action()
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/actions/set_records"):
 		key := strings.TrimSuffix(strings.TrimPrefix(path, "/"), "/actions/set_records")
@@ -123,7 +130,7 @@ func addrs(values ...string) []netip.Addr {
 // The records are created, replaced in one action when they differ, and
 // left alone when they match; a family without addresses is not touched.
 func TestHetznerPublishes(t *testing.T) {
-	fake := &fakeDNS{rrsets: map[string][]string{"*/AAAA": {"2001:db8::9"}}, ttl: map[string]int{}, actions: map[string]int{}}
+	fake := &fakeDNS{rrsets: map[string][]string{"*/AAAA": {"2001:db8::9"}}, ttl: map[string]int{"*/AAAA": 300}, actions: map[string]int{}}
 	server := httptest.NewServer(fake)
 	defer server.Close()
 	h := &Hetzner{Token: "secret", Zone: "example.com", Name: "*", Endpoint: server.URL, Poll: time.Millisecond}
@@ -149,6 +156,10 @@ func TestHetznerPublishes(t *testing.T) {
 	if !slices.Equal(fake.rrsets["*/A"], []string{"203.0.113.1"}) || !slices.Equal(fake.rrsets["*/AAAA"], []string{"2001:db8::1"}) {
 		t.Fatalf("records %v", fake.rrsets)
 	}
+	// The TTL of records already there follows the config too.
+	if fake.ttl["*/AAAA"] != 60 {
+		t.Fatalf("AAAA ttl %d", fake.ttl["*/AAAA"])
+	}
 	if !slices.Contains(fake.calls, "POST /zones/example.com/rrsets/*/A/actions/set_records") || !slices.Contains(fake.calls, "GET /actions/7") {
 		t.Fatalf("calls %v", fake.calls)
 	}
@@ -172,16 +183,23 @@ func TestHetznerPublishes(t *testing.T) {
 type fakeSetter struct {
 	zone    string
 	records []libdns.Record
+	zoneNow []libdns.Record
+	sets    int
+}
+
+func (f *fakeSetter) GetRecords(context.Context, string) ([]libdns.Record, error) {
+	return f.zoneNow, nil
 }
 
 func (f *fakeSetter) SetRecords(_ context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	f.zone, f.records = zone, records
+	f.sets++
 	return records, nil
 }
 
 func TestNamecheapSetsTheRecordsOfTheName(t *testing.T) {
-	fake := &fakeSetter{}
-	n := &Namecheap{Zone: "example.com", Name: "*.apps", setter: fake}
+	fake := &fakeSetter{zoneNow: []libdns.Record{libdns.Address{Name: "www", TTL: time.Hour, IP: netip.MustParseAddr("198.51.100.1")}}}
+	n := &Namecheap{Zone: "example.com", Name: "*.apps", api: fake}
 	if err := n.Publish(context.Background(), addrs("2001:db8::1", "203.0.113.1")); err != nil {
 		t.Fatal(err)
 	}
@@ -193,5 +211,11 @@ func TestNamecheapSetsTheRecordsOfTheName(t *testing.T) {
 	want := []string{"*.apps A 203.0.113.1 1m0s", "*.apps AAAA 2001:db8::1 1m0s"}
 	if fake.zone != "example.com" || !slices.Equal(got, want) {
 		t.Fatalf("set %s %v, want %v", fake.zone, got, want)
+	}
+	// Records already as wanted are not written again: a write sets the
+	// domain's whole host list.
+	fake.zoneNow = append(fake.zoneNow, fake.records...)
+	if err := n.Publish(context.Background(), addrs("203.0.113.1", "2001:db8::1")); err != nil || fake.sets != 1 {
+		t.Fatalf("written again: %d sets, %v", fake.sets, err)
 	}
 }

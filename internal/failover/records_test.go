@@ -18,9 +18,18 @@ type fakeRecords struct {
 	mu     sync.Mutex
 	writes [][]string
 	err    error
+	// block, if set, holds a write until its context ends.
+	block bool
 }
 
-func (r *fakeRecords) Publish(_ context.Context, addresses []netip.Addr) error {
+func (r *fakeRecords) Publish(ctx context.Context, addresses []netip.Addr) error {
+	r.mu.Lock()
+	block := r.block
+	r.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []string
@@ -71,7 +80,7 @@ func (f *fixture) round(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		f.monitor.mu.Lock()
-		writing := f.monitor.records.writing
+		writing := f.monitor.writing
 		f.monitor.mu.Unlock()
 		if !writing {
 			return
@@ -229,5 +238,43 @@ func TestANewLeaderLeavesOutFailedNodes(t *testing.T) {
 	f.round(t)
 	if want := []string{"192.0.2.1", "192.0.2.2", "2001:db8::1"}; !slices.Equal(fake.last(), want) {
 		t.Fatalf("records %v, want %v", fake.last(), want)
+	}
+}
+
+// A write still under way when this node stops leading is cancelled, and
+// counts for nothing.
+func TestAnOldLeadersWriteIsCancelled(t *testing.T) {
+	f := newFixture(t)
+	fake := withRecords(t, f)
+	f.round(t)
+	f.advance(30 * time.Second)
+	fake.mu.Lock()
+	fake.block = true
+	fake.mu.Unlock()
+	f.check(t)
+	f.monitor.mu.Lock()
+	writing := f.monitor.writing
+	f.monitor.mu.Unlock()
+	if !writing {
+		t.Fatal("no write began")
+	}
+	f.mu.Lock()
+	f.leader = false
+	f.mu.Unlock()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.monitor.mu.Lock()
+		writing, published := f.monitor.writing, f.monitor.records.published
+		f.monitor.mu.Unlock()
+		if !writing {
+			if published != "" {
+				t.Fatalf("a cancelled write counted: %q", published)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the old leader's write was not cancelled")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

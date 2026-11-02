@@ -71,6 +71,9 @@ type Monitor struct {
 	retry   map[string]time.Time
 	leading bool
 	records recordsView
+	// writing is set while the records are being written, across
+	// leaderships: one write at a time.
+	writing bool
 }
 
 // retryAfter is how long a failover that failed waits before it is tried
@@ -215,8 +218,8 @@ func (m *Monitor) Check(ctx context.Context) {
 	for i, node := range nodes {
 		heardNow[node.Name] = answered[i]
 	}
-	if addresses, write := m.serveLocked(now, self, all, heardNow, frozen, majority); write {
-		go m.publish(ctx, addresses)
+	if addresses, term, write := m.serveLocked(now, self, all, heardNow, frozen, majority); write {
+		go m.publish(ctx, addresses, term)
 	}
 	// A blocked failover ends once none of the tenants it would have
 	// promoted still runs on the node, as after an operator's failover.

@@ -491,8 +491,8 @@ func (c Cluster) problems() []string {
 		if !strings.HasPrefix(d.TokenFile, "/") {
 			problems = append(problems, "cluster.dns.tokenFile must be an absolute path")
 		}
-		if d.TTL.Duration < time.Minute {
-			problems = append(problems, "cluster.dns.ttl must be at least 60s, which providers require")
+		if d.TTL.Duration < time.Minute || d.TTL.Duration > 24*time.Hour {
+			problems = append(problems, "cluster.dns.ttl must be from 60s, which providers require, to 24h")
 		}
 		if len(c.PublicAddresses) == 0 {
 			problems = append(problems, "cluster.dns needs cluster.publicAddresses: without them the records never name this node")
