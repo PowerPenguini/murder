@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
@@ -677,5 +678,50 @@ func TestEventsNameTheSocketUser(t *testing.T) {
 	}
 	if latest, _ := client.Events(ctx, store.EventQuery{Limit: 1}); latest[0].Actor != "unknown" {
 		t.Errorf("TCP event = %+v", latest[0])
+	}
+}
+
+// pingCluster answers pings from the nodes listed.
+type pingCluster struct {
+	Cluster
+	up     map[string]bool
+	leader string
+}
+
+func (c pingCluster) Ping(_ context.Context, node string) error {
+	if c.up[node] {
+		return nil
+	}
+	return errors.New("no answer")
+}
+
+func (c pingCluster) Status() (cluster.Status, error) {
+	return cluster.Status{Leader: c.leader}, nil
+}
+
+// The panel's view of the nodes: each with whether it answers now.
+func TestNodesSayWhichAnswer(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	// A node in no cluster sees itself alone.
+	view, err := f.client.Nodes(ctx)
+	if err != nil || len(view.Nodes) != 1 || view.Nodes[0].Name != view.Self || !view.Nodes[0].Answers {
+		t.Fatalf("alone: %+v, %v", view, err)
+	}
+	self := view.Self
+	for i, node := range []string{self, "n2", "n3"} {
+		if err := f.store.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.api.WithCluster(pingCluster{up: map[string]bool{"n2": true}, leader: "n2"})
+	view, err = f.client.Nodes(ctx)
+	if err != nil || view.Leader != "n2" || len(view.Nodes) != 3 {
+		t.Fatalf("view: %+v, %v", view, err)
+	}
+	for _, node := range view.Nodes {
+		if want := node.Name != "n3"; node.Answers != want {
+			t.Errorf("node %s answers %v, want %v", node.Name, node.Answers, want)
+		}
 	}
 }

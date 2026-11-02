@@ -65,6 +65,9 @@ type Agent struct {
 	// an S3 bucket.
 	Backups *Backups `yaml:"backups"`
 
+	// Panel configures "murder panel", the administration panel.
+	Panel Panel `yaml:"panel"`
+
 	// Defaults fill in tenant limits left at zero. Disk use is unlimited
 	// unless diskGB is set (with the zfs driver).
 	Defaults          spec.Limits `yaml:"defaults"`
@@ -156,6 +159,13 @@ type Cluster struct {
 	// DNS, if set, has the leader keep the base domain's wildcard records
 	// naming the public addresses of the nodes that serve.
 	DNS *DNS `yaml:"dns"`
+}
+
+// Panel is where the administration panel serves.
+type Panel struct {
+	// Listen is the panel's address: loopback only, reached through an
+	// SSH tunnel, until the panel has accounts of its own.
+	Listen string `yaml:"listen"`
 }
 
 // DNS reaches the provider of the base domain's zone.
@@ -282,6 +292,9 @@ func Parse(data []byte) (Agent, error) {
 	if err := strictyaml.Decode(data, &agent); err != nil && !errors.Is(err, io.EOF) {
 		return Agent{}, fmt.Errorf("parse config: %w", err)
 	}
+	if agent.Panel.Listen == "" {
+		agent.Panel.Listen = "127.0.0.1:7480"
+	}
 	if agent.Cluster != nil {
 		if agent.Cluster.Dir == "" {
 			agent.Cluster.Dir = "/var/lib/murder/cluster"
@@ -330,6 +343,11 @@ func (a Agent) Validate() error {
 	}
 	if a.Backups != nil {
 		problems = append(problems, a.Backups.problems(a.Volumes.Driver)...)
+	}
+	if host, _, err := net.SplitHostPort(a.Panel.Listen); err != nil {
+		problems = append(problems, "panel.listen must be an address and a port, such as 127.0.0.1:7480")
+	} else if address, err := netip.ParseAddr(host); err != nil || !address.IsLoopback() {
+		problems = append(problems, "panel.listen must be a loopback address: the panel has no accounts yet, so reach it through an SSH tunnel")
 	}
 	if d := a.Cluster; d != nil && d.DNS != nil && a.BaseDomain != "" {
 		if _, err := records.Wildcard(a.BaseDomain, d.DNS.Zone); err != nil {

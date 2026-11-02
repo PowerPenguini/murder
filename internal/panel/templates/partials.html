@@ -1,0 +1,20 @@
+{{define "upcount"}}{{$n := 0}}{{range .}}{{if eq .State.Kind "ok"}}{{$n = add1 $n}}{{end}}{{end}}{{$n}}{{end}}
+
+{{define "events"}}
+<table>
+  <thead><tr><th>when</th><th>who</th><th>what</th><th>tenant</th><th class="hide-narrow">detail</th></tr></thead>
+  <tbody>
+  {{range .}}
+    <tr>
+      <td class="when" title="{{stamp .At}}">{{ago .At}}</td>
+      <td class="actor">{{.Actor}}</td>
+      <td class="action">{{.Action}}</td>
+      <td>{{with .Tenant}}<a href="/tenants/{{.}}">{{.}}</a>{{else}}<span class="faint">—</span>{{end}}</td>
+      <td class="dim hide-narrow">{{.Detail}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="empty">nothing happened yet</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

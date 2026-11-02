@@ -1,0 +1,12 @@
+{{define "content"}}{{$d := .Data}}
+<div class="title"><h1>Events</h1><span class="sub">the audit log: who changed what, newest first</span></div>
+<section>
+  <form class="filter" method="get" action="/events">
+    <input type="text" name="tenant" value="{{$d.Tenant}}" placeholder="tenant" aria-label="tenant">
+    <button type="submit">filter</button>
+    {{if $d.Tenant}}<a class="button" href="/events">clear</a>{{end}}
+  </form>
+  {{template "events" $d.Events}}
+  {{if $d.Older}}<div class="more"><a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}before={{$d.Older}}">older →</a></div>{{end}}
+</section>
+{{end}}
