@@ -40,6 +40,11 @@ func runPanel(args []string) error {
 		return err
 	}
 	server.Name = cfg.Panel.Name
+	// Root reaches the socket's panel through SSH: no one signs in there.
+	server.Access = func(actor string) panel.AccessAgent { return client.WithActor(actor) }
+	if t := cfg.Panel.Tunnel; t != nil {
+		server.TunnelNetwork, _ = netip.ParsePrefix(t.Network)
+	}
 	// Root only: the panel shows what the agent's socket protects.
 	if err := os.MkdirAll(filepath.Dir(cfg.Panel.Socket), 0o755); err != nil {
 		return err
@@ -67,8 +72,16 @@ func runPanel(args []string) error {
 	go restartOnUpgrade(ctx, stop, log)
 	tunnelDone := make(chan error, 1)
 	if t := cfg.Panel.Tunnel; t != nil {
+		inTunnel, err := panel.New(client, log)
+		if err != nil {
+			return err
+		}
+		inTunnel.Name, inTunnel.Access, inTunnel.TunnelNetwork = server.Name, server.Access, server.TunnelNetwork
+		if inTunnel.Auth, err = panel.NewAuth(client, cfg.Panel.Name, log); err != nil {
+			return err
+		}
 		go func() {
-			err := serveTunnel(ctx, cfg, client, server.Handler(), log)
+			err := serveTunnel(ctx, cfg, client, inTunnel.Handler(), log)
 			// The panel stops, so the failure is in the log and systemd
 			// starts it again.
 			if err != nil && ctx.Err() == nil {

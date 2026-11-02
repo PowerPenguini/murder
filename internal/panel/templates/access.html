@@ -1,0 +1,95 @@
+{{define "content"}}{{$d := .Data}}
+<div class="title"><h1>Access</h1><span class="sub">who signs in, and which devices reach the panel</span></div>
+
+{{with $d.Problem}}<div class="notice bad">&gt; {{.}}</div>{{end}}
+{{with $d.Done}}<div class="notice">&gt; {{.}}</div>{{end}}
+
+{{with $d.Invite}}
+<section class="once">
+  <h2>the invitation — shown once</h2>
+  <p>Send it to the person through a channel you trust; it adds one passkey, within 24 hours.</p>
+  <code class="secret">{{.}}</code>
+</section>
+{{end}}
+
+{{with $d.Codes}}
+<section class="once">
+  <h2>your new recovery codes — shown once</h2>
+  <ol class="codes">{{range .}}<li>{{.}}</li>{{end}}</ol>
+</section>
+{{end}}
+
+{{with $d.Device}}
+<section class="once">
+  <h2>device {{.Name}} — shown once</h2>
+  <div class="device">
+    {{if .QR}}<div class="qr">{{.QR}}</div>{{end}}
+    <div>
+      <p>Scan the code with the WireGuard app, or import this configuration on a computer. It holds the device's private key, kept nowhere else.</p>
+      <pre class="secret">{{.Config}}</pre>
+    </div>
+  </div>
+</section>
+{{end}}
+
+<section>
+  <h2>people</h2>
+  <table>
+    <thead><tr><th>name</th><th>passkeys</th><th class="num">recovery codes</th><th class="hide-narrow">added</th><th></th></tr></thead>
+    <tbody>
+    {{range $d.People}}{{$person := .}}
+      <tr>
+        <td>{{.Name}}{{if eq .Name $d.Me}} <span class="tag plain">you</span>{{end}}</td>
+        <td>
+          {{range .Passkeys}}
+            <form method="post" action="/access" class="inline">
+              <span class="tag mute">{{.Label}}</span> <span class="dim">{{if .UsedAt.IsZero}}never used{{else}}used {{ago .UsedAt}} ago{{end}}</span>
+              <input type="hidden" name="do" value="remove-passkey"><input type="hidden" name="id" value="{{.ID}}">
+              <button type="submit" class="small" title="remove this passkey">×</button>
+            </form>
+          {{else}}<span class="dim">none yet: invited</span>{{end}}
+        </td>
+        <td class="num">{{.Recovery}}</td>
+        <td class="dim hide-narrow">{{ago .CreatedAt}} ago, by {{.CreatedBy}}</td>
+        <td class="actions">
+          <form method="post" action="/access" class="inline"><input type="hidden" name="do" value="invite"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="small">{{if eq .Name $d.Me}}add a passkey{{else}}invite again{{end}}</button></form>
+          {{if ne .Name $d.Me}}<form method="post" action="/access" class="inline"><input type="hidden" name="do" value="remove-person"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="small danger">remove</button></form>{{end}}
+        </td>
+      </tr>
+    {{else}}
+      <tr><td colspan="5" class="empty">no one signs in yet</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  <form method="post" action="/access" class="filter add">
+    <input type="hidden" name="do" value="invite">
+    <input type="text" name="name" placeholder="name, such as anna" aria-label="name" required>
+    <button type="submit">invite a person</button>
+  </form>
+  {{if $d.Me}}<form method="post" action="/access" class="filter"><input type="hidden" name="do" value="codes"><button type="submit" class="ghost">new recovery codes for me</button></form>{{end}}
+</section>
+
+<section>
+  <h2>devices in the tunnel</h2>
+  <table>
+    <thead><tr><th>name</th><th>address</th><th class="hide-narrow">added</th><th></th></tr></thead>
+    <tbody>
+    {{range $d.Devices}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td class="dim">{{.Address}}</td>
+        <td class="dim hide-narrow">{{ago .CreatedAt}} ago, by {{.CreatedBy}}</td>
+        <td class="actions"><form method="post" action="/access" class="inline"><input type="hidden" name="do" value="remove-device"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="small danger">remove</button></form></td>
+      </tr>
+    {{else}}
+      <tr><td colspan="4" class="empty">no device yet</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  <form method="post" action="/access" class="filter add">
+    <input type="hidden" name="do" value="add-device">
+    <input type="text" name="name" placeholder="device, such as anna-phone" aria-label="device name" required>
+    <button type="submit">add a device</button>
+  </form>
+</section>
+{{end}}

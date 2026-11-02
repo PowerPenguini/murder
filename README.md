@@ -526,9 +526,9 @@ one node, bootstrap there and join the others with new databases.
 
 `murder panel` serves a web panel over the agent's API: the cluster's nodes
 (up, down, failed, the leader), every tenant with its state and its copy, a
-tenant's runtime, spec, limits and environment, and the audit log. It is
-built in stages ([docs/panel.md](docs/panel.md)); for now it only shows.
-Run it on every node (deploy/murder-panel.service).
+tenant's runtime, spec, limits and environment, the audit log, and who may
+sign in. It is built in stages ([docs/panel.md](docs/panel.md)). Run it on
+every node (deploy/murder-panel.service).
 
 It is never on the internet. Every node serves it inside a WireGuard tunnel
 that runs in the panel process itself, so nothing changes on the host's
@@ -566,6 +566,25 @@ nodes' tunnel addresses: with `cluster.dns`, the leader keeps its records
 (of the nodes that serve), otherwise add them, or a hosts file entry. Some
 home routers drop DNS answers with private addresses; a hosts file entry
 works around that.
+
+People sign in with passkeys only: no passwords. Every person has the same
+rights, and the audit log names who did what (`jan (panel)`). The first
+person is invited from a node:
+
+```bash
+sudo murder admin invite jan        # a link, valid 24 hours, once
+sudo murder admin user list
+sudo murder admin user remove jan
+```
+
+Opened on a device in the tunnel, the link adds a passkey (on the device, or
+a phone near it) and shows ten recovery codes, once: each adds one passkey,
+should every passkey be lost, at the same page (`/enroll`, "an invitation,
+or a lost passkey?"). Signed in, the Access page invites others, removes
+people and passkeys, makes new recovery codes, and adds or removes devices
+(a QR code, shown once). Sessions last 12 hours; signing in and out is in
+the audit log. Should everyone lose everything, `murder admin invite` on a
+node starts over.
 
 On a computer without the WireGuard app:
 

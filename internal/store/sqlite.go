@@ -71,6 +71,7 @@ type snapshot struct {
 	tenants map[string]Record
 	nodes   map[string]Node
 	devices map[string]Device
+	panel   panelState
 	images  map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
@@ -476,6 +477,9 @@ func load(q querier) (state *snapshot, err error) {
 		state.devices[device.Name] = device
 	}
 	if err := closeRows(rows); err != nil {
+		return nil, err
+	}
+	if err := loadPanel(q, state); err != nil {
 		return nil, err
 	}
 	rows, err = q.Query(`SELECT ref FROM images`)
