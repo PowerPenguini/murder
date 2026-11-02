@@ -163,6 +163,7 @@ func (m *Monitor) Check(ctx context.Context) {
 	heard := 1 // this node
 	frozen := m.Store.Frozen()
 	var dead, silent []store.Node
+	var settled []string
 	for i, node := range nodes {
 		if answered[i] {
 			heard++
@@ -195,9 +196,18 @@ func (m *Monitor) Check(ctx context.Context) {
 		}
 		if len(m.promotableLocked(node.Name)) > 0 {
 			dead = append(dead, node)
+		} else {
+			settled = append(settled, node.Name)
 		}
 	}
 	majority := heard >= len(all)/2+1
+	// A silent node with nothing left to promote, as after an operator's
+	// failover, no longer waits on anything.
+	if majority {
+		for _, name := range settled {
+			delete(m.blocked, name)
+		}
+	}
 	if !majority && (len(dead) > 0 || len(silent) > 0) {
 		for _, node := range append(dead, silent...) {
 			m.note(node.Name, fmt.Sprintf("this leader hears only %d of %d nodes: it may be the one cut off", heard, len(all)))

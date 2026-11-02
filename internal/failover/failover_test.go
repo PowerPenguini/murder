@@ -240,6 +240,17 @@ func TestNoConfirmedPowerOffNoFailover(t *testing.T) {
 	if f.nodeOf(t, "a") != "n2" {
 		t.Fatal("failed over without a provider")
 	}
+	// Once an operator failed it over, the alert ends: nothing waits.
+	if _, err := ManualFailOver(context.Background(), f.store, f.monitor.Probe, "n2", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.advance(2 * time.Minute)
+	f.check(t)
+	page.Reset()
+	f.monitor.WriteMetrics(metrics.NewWriter(&page))
+	if !strings.Contains(page.String(), `murder_failover_blocked{node="n2"} 0`) {
+		t.Fatalf("metrics after the operator's failover:\n%s", page.String())
+	}
 }
 
 // Nothing fails over while changes are frozen for an upgrade, which
