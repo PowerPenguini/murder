@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -394,6 +396,45 @@ func (s *SQLite) MarkFailed(node, actor string) (bool, error) {
 		return false, nil
 	}
 	return err == nil, err
+}
+
+func (s *SQLite) SetPublic(node string, addresses []netip.Addr) error {
+	sorted := slices.Clone(addresses)
+	slices.SortFunc(sorted, func(a, b netip.Addr) int { return a.Compare(b) })
+	sorted = slices.Compact(sorted)
+	fields := make([]string, 0, len(sorted))
+	for _, address := range sorted {
+		if !address.IsValid() {
+			return fmt.Errorf("an invalid public address of node %s", node)
+		}
+		fields = append(fields, address.Unmap().String())
+	}
+	public := strings.Join(fields, " ")
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		existing, member := current.nodes[node]
+		if !member {
+			return fmt.Errorf("node %s: %w", node, ErrNotFound)
+		}
+		if publicField(existing.Public) == public {
+			return errUnchanged
+		}
+		if err := tx.Exec(`UPDATE nodes SET public = ? WHERE name = ?`, public, node); err != nil {
+			return err
+		}
+		return event(tx, now, "murder", "node.public", "", "", node+" serves at "+public)
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
+}
+
+func publicField(addresses []netip.Addr) string {
+	fields := make([]string, len(addresses))
+	for i, address := range addresses {
+		fields[i] = address.String()
+	}
+	return strings.Join(fields, " ")
 }
 
 func (s *SQLite) Away(node string, until time.Time) error {

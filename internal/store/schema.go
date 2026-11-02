@@ -9,8 +9,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 9 in place.
-const schemaVersion = 10
+// versions 4 to 10 in place.
+const schemaVersion = 11
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -95,7 +95,10 @@ CREATE TABLE nodes (
 	-- it is not failed over for not answering.
 	away_until TEXT,
 	-- Until then no copy moves to the node: one failed to get there.
-	copies_refused_until TEXT
+	copies_refused_until TEXT,
+	-- The node's public addresses, separated by spaces, which the
+	-- base domain's records name while it serves.
+	public     TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 -- Sealed secret values, kept until a purge deletes the tenant.
@@ -238,6 +241,13 @@ func upgrade(db *sql.DB) error {
 			if _, err := tx.Exec(statement); err != nil {
 				return err
 			}
+		}
+		version = 10
+	}
+	// Version 11 keeps the nodes' public addresses, for DNS.
+	if version == 10 {
+		if _, err := tx.Exec(`ALTER TABLE nodes ADD COLUMN public TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

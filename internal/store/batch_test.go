@@ -276,6 +276,7 @@ func TestOpenUpgradesSchemaVersion5(t *testing.T) {
 		`ALTER TABLE nodes DROP COLUMN failed_at`,
 		`ALTER TABLE nodes DROP COLUMN away_until`,
 		`ALTER TABLE nodes DROP COLUMN copies_refused_until`,
+		`ALTER TABLE nodes DROP COLUMN public`,
 		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '2'), ('applied', '7')`,
 		`INSERT INTO apps (name, spec, created_at, updated_at) VALUES ('web', '` + marshal(normalizeApp(appSpec())) + `', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')`,
 		`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, node)

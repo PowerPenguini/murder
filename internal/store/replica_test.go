@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"net/netip"
 	"slices"
 	"testing"
 	"time"
@@ -475,5 +476,31 @@ func TestAFailoverPromotesTheWholeCopyNotTheMovingOne(t *testing.T) {
 	}
 	if record, _ := st.Get("x"); record.Node != "node-1" || record.ReplicaNext != "" || record.Replica != "" {
 		t.Fatalf("x after the failover: %+v", record)
+	}
+}
+
+// A node's public addresses are kept sorted, written only when they change.
+func TestPublicAddressesOfANode(t *testing.T) {
+	st, _ := withApp(t, options())
+	if err := st.PutNode(Node{Name: "node-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	addresses := []netip.Addr{netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.1")}
+	if err := st.SetPublic("node-1", addresses); err != nil {
+		t.Fatal(err)
+	}
+	version := st.state.Load().version
+	if err := st.SetPublic("node-1", addresses[:2]); err != nil || st.state.Load().version != version {
+		t.Fatalf("written again: %v", err)
+	}
+	node := st.Nodes()[0]
+	if want := []netip.Addr{netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("2001:db8::1")}; !slices.Equal(node.Public, want) {
+		t.Fatalf("public %v, want %v", node.Public, want)
+	}
+	if err := st.SetPublic("nobody", addresses); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an unknown node: %v", err)
+	}
+	if err := st.SetPublic("node-1", nil); err != nil || len(st.Nodes()[0].Public) != 0 {
+		t.Fatalf("cleared: %v, %v", err, st.Nodes()[0].Public)
 	}
 }

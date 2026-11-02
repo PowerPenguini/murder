@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -96,7 +97,7 @@ func TestParseCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *agent.Cluster != (Cluster{Address: "10.0.0.2:7400", Dir: "/var/lib/murder/cluster"}) {
+	if !reflect.DeepEqual(*agent.Cluster, Cluster{Address: "10.0.0.2:7400", Dir: "/var/lib/murder/cluster"}) {
 		t.Fatalf("cluster = %+v", agent.Cluster)
 	}
 	if _, err := Parse([]byte("baseDomain: example.com\ncluster: {address: 100.101.102.103:7400}\n")); err != nil {
@@ -188,5 +189,34 @@ func TestFailoverNeedsAProvider(t *testing.T) {
 	dir := strings.Replace(base, "{driver: zfs, parent: tank/murder/tenants}", "{driver: dir}", 1)
 	if _, err := Parse([]byte(dir + "    hetzner: {tokenFile: /etc/murder/hcloud.token}\n")); err == nil || !strings.Contains(err.Error(), "zfs") {
 		t.Errorf("failover with the dir driver: %v", err)
+	}
+}
+
+// The DNS records need the node's public addresses, a known provider and a
+// zone the base domain is in, the base domain by default.
+func TestDNSRecords(t *testing.T) {
+	base := "baseDomain: apps.example.com\ncluster:\n  address: 10.0.0.2:7400\n"
+	agent, err := Parse([]byte(base + "  publicAddresses: [203.0.113.7, \"2001:db8::7\"]\n  dns: {provider: hetzner, tokenFile: /etc/murder/dns.token}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := agent.Cluster.DNS; d.Zone != "apps.example.com" || d.TTL.Duration != time.Minute {
+		t.Fatalf("dns = %+v", d)
+	}
+	if _, err := Parse([]byte(base + "  publicAddresses: [203.0.113.7]\n  dns: {provider: namecheap, tokenFile: /t, zone: example.com, ttl: 5m}\n")); err != nil {
+		t.Fatalf("a zone above the base domain: %v", err)
+	}
+	for name, extra := range map[string]string{
+		"no addresses":     "  dns: {provider: hetzner, tokenFile: /t}\n",
+		"a private one":    "  publicAddresses: [10.0.0.2]\n",
+		"not an address":   "  publicAddresses: [example.com]\n",
+		"no provider":      "  publicAddresses: [203.0.113.7]\n  dns: {tokenFile: /t}\n",
+		"a relative token": "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: t}\n",
+		"another zone":     "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: /t, zone: other.com}\n",
+		"a short ttl":      "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: /t, ttl: 10s}\n",
+	} {
+		if _, err := Parse([]byte(base + extra)); err == nil || !strings.Contains(err.Error(), "cluster.") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

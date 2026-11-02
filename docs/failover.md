@@ -27,9 +27,6 @@ dies without warning.
 - **Scope:** ZFS nodes only (the dir driver has no snapshots). One node fails
   at a time: three nodes keep a majority with one down.
 - **Out of scope here:**
-  - **DNS:** the wildcard name keeps pointing at the dead node's address too,
-    so new connections to that address fail until a client tries another one.
-    A load balancer, or DNS records updated on failover, is a later step.
   - **Restarting a dead node:** that is the operator's call.
 
 ## Change from docs/design.md: no self-stop after 20 s
@@ -333,3 +330,21 @@ staying on after an operator's failover.
    - the failover config on the test nodes;
    - a counter-writing client;
    - the scenarios above, with their evidence in the PR.
+
+## DNS records (later addition)
+
+With `cluster.dns`, the leader keeps the base domain's wildcard A and AAAA
+records naming the public addresses (`cluster.publicAddresses`, which each
+node records in the state, schema 11) of the nodes that serve:
+
+- A node leaves the records once it has not answered for 30 s, unless it is
+  away after a clean stop or changes are frozen: its edge keeps serving.
+- It comes back once it has answered for 30 s without a break.
+- A leader that hears too few nodes writes nothing; a new leader starts
+  from every node not failed and writes nothing for its first 30 s.
+- An address family is never left empty.
+- Hetzner: `set_records` replaces a name's records in one action (libdns'
+  Hetzner provider deletes the set and creates it again, which leaves the
+  name empty for a moment, so it is not used). Namecheap: libdns, which
+  sets the domain's whole host list in one call.
+- The records are written on a change, and every 5 minutes to undo drift.
