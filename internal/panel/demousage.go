@@ -44,6 +44,7 @@ func demoPoint(tenant string, memoryLimitMB int, cpuLimit float64, t time.Time, 
 		Errors:   int64(math.Round(rpm * minutes * errorShare * (0.5 + load))),
 		P95:      0.04 + 0.22*load*load,
 	}
+	p.Minutes, p.Read, p.CPURead = int(minutes), int(minutes), int(minutes)
 	p.NetRx = p.Requests * 2200
 	p.NetTx = p.Requests * 18000
 	p.DiskRead = int64(load * 40000 * step.Seconds())
@@ -88,6 +89,9 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	if err != nil {
 		return usage.Series{}, err
 	}
+	if t.Archived() {
+		return usage.Series{}, &api.Error{Status: 404, Message: "tenant " + name + " has not been measured yet"}
+	}
 	now := time.Now()
 	end := now.Truncate(step)
 	limits := t.Spec.Limits
@@ -97,6 +101,6 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	}
 	last := series.Points[len(series.Points)-1]
 	series.Now = usage.Now{At: last.At, CPU: last.CPU, Memory: last.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
-		DiskUsed: int64(limits.DiskGB) << 30 / 7, Requests: last.Requests / int64(step.Minutes()), Errors: last.Errors, P95: last.P95}
+		DiskUsed: int64(limits.DiskGB) << 30 / 7, DiskLimit: int64(limits.DiskGB) << 30, Requests: last.Requests / int64(step.Minutes()), Errors: last.Errors, P95: last.P95}
 	return series, nil
 }

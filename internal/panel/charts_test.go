@@ -108,3 +108,13 @@ func TestUnits(t *testing.T) {
 		}
 	}
 }
+
+// A step alone between gaps is drawn across its width.
+func TestALoneStepIsDrawn(t *testing.T) {
+	now := time.Date(2026, 11, 2, 17, 23, 0, 0, time.UTC)
+	step := 5 * time.Minute
+	chart := newLineChart("CPU", []string{"cores"}, []sample{{At: now.Truncate(step).Add(-step), Values: []float64{1}}}, 0, now, step, cores)
+	if line := chart.Series[0].Line; strings.Count(line, "M") != 1 || strings.Count(line, "L") != 1 {
+		t.Fatalf("a lone step: %q", line)
+	}
+}

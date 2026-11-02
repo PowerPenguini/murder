@@ -226,12 +226,8 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	var nodes api.Nodes
 	var use *tenantUsage
 	if err := all(
-		func() error {
-			if record, err := s.backend.Get(ctx, name); err == nil && !record.Archived() {
-				use = s.tenantUsage(ctx, name, record.Spec.Limits.DiskGB)
-			}
-			return nil
-		},
+		// An archived tenant is measured no more: it has no day to show.
+		func() error { use = s.tenantUsage(ctx, name); return nil },
 		func() (err error) { t, err = s.backend.Get(ctx, name); return },
 		func() (err error) {
 			events, err = s.backend.Events(ctx, store.EventQuery{Tenant: name, Limit: activityEvents})

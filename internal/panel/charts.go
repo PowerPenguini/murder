@@ -300,16 +300,25 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 	for i, label := range labels {
 		series := lineSeries{Label: label, Stroke: strokes[min(i, len(strokes)-1)]}
 		var line, area strings.Builder
-		var run []string
+		type pt struct{ x, y float64 }
+		var run []pt
+		half := x(start.Add(step/2)) - x(start)
 		flush := func() {
 			if len(run) == 0 {
 				return
 			}
-			line.WriteString("M" + strings.Join(run, "L"))
-			first, last := run[0], run[len(run)-1]
-			firstX, _, _ := strings.Cut(first, ",")
-			lastX, _, _ := strings.Cut(last, ",")
-			area.WriteString("M" + firstX + "," + f(lineHeight) + "L" + strings.Join(run, "L") + "L" + lastX + "," + f(lineHeight) + "Z")
+			// A step alone between gaps is drawn across its width: a lone
+			// point would draw nothing.
+			if len(run) == 1 {
+				run = []pt{{run[0].x - half, run[0].y}, {run[0].x + half, run[0].y}}
+			}
+			coords := make([]string, len(run))
+			for i, p := range run {
+				coords[i] = f(p.x) + "," + f(p.y)
+			}
+			joined := strings.Join(coords, "L")
+			line.WriteString("M" + joined)
+			area.WriteString("M" + f(run[0].x) + "," + f(lineHeight) + "L" + joined + "L" + f(run[len(run)-1].x) + "," + f(lineHeight) + "Z")
 			run = run[:0]
 		}
 		var previous time.Time
@@ -322,7 +331,7 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 				flush()
 			}
 			// A point sits at the middle of its step.
-			run = append(run, f(x(s.At.Add(step/2)))+","+f(y(s.Values[i])))
+			run = append(run, pt{x(s.At.Add(step / 2)), y(s.Values[i])})
 			previous = s.At
 		}
 		flush()

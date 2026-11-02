@@ -41,8 +41,12 @@ type UsageReport struct {
 	Missing []string       `json:"missing,omitempty"`
 }
 
-// remoteUsageTimeout bounds how long the report waits for a node.
-const remoteUsageTimeout = 2 * time.Second
+// remoteUsageTimeout bounds how long the report waits for a node, and
+// remoteSeriesTimeout a tenant's day from the node it runs on.
+const (
+	remoteUsageTimeout  = 2 * time.Second
+	remoteSeriesTimeout = 5 * time.Second
+)
 
 func (s *Server) usageRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/edge/usage", s.edgeUsage)
@@ -60,7 +64,10 @@ func (s *Server) edgeUsage(w http.ResponseWriter, r *http.Request) {
 	if s.usage != nil {
 		now := time.Now()
 		for tenant, c := range counts {
-			s.usage.Edge(tenant, c, now)
+			// Only this node's tenants are measured here.
+			if record, err := s.store.Live(tenant); err == nil && record.Node == s.store.Node() {
+				s.usage.Edge(tenant, c, now)
+			}
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -123,8 +130,10 @@ func (s *Server) tenantUsage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, notFound(fmt.Errorf("tenant %s runs on node %s, which this node cannot ask", name, record.Node)))
 			return
 		}
+		ctx, cancel := context.WithTimeout(r.Context(), remoteSeriesTimeout)
+		defer cancel()
 		var series usage.Series
-		if err := remote.TenantUsageOn(r.Context(), record.Node, name, step, &series); err != nil {
+		if err := remote.TenantUsageOn(ctx, record.Node, name, step, &series); err != nil {
 			writeError(w, err)
 			return
 		}

@@ -79,8 +79,9 @@ func TestRequestsFromTheEdge(t *testing.T) {
 	}
 	first, second := series.Points[0], series.Points[1]
 	// The first counts are only where counting starts: everything since
-	// the edge started.
-	if first.Requests != 100 || first.Errors != 12 || second.Requests != 5 || second.Errors != 0 {
+	// the edge started. The 2 it could not pass on were answered 502:
+	// among the 10 errors, not counted again.
+	if first.Requests != 100 || first.Errors != 10 || second.Requests != 5 || second.Errors != 0 || first.Minutes != 1 || first.Read != 0 {
 		t.Fatalf("requests: %+v %+v", first, second)
 	}
 	// 80 of 100 within 5 ms, 20 at 100-250 ms: the 95th is three quarters
@@ -154,6 +155,8 @@ func TestReadingTheKernel(t *testing.T) {
 		}
 	}
 	scope := "/system.slice/docker-abc123.scope"
+	write(filepath.Join(cgroup, "cgroup.controllers"), "cpu io memory pids\n")
+	write(filepath.Join(cgroup, scope, "memory.stat"), "anon 60000000\nfile 13400320\ninactive_file 3400320\n")
 	write(filepath.Join(proc, "42", "cgroup"), "0::"+scope+"\n")
 	write(filepath.Join(cgroup, scope, "cpu.stat"), "usage_usec 1500000\nuser_usec 1000000\nsystem_usec 500000\n")
 	write(filepath.Join(cgroup, scope, "memory.current"), "73400320\n")
@@ -168,7 +171,8 @@ func TestReadingTheKernel(t *testing.T) {
 		t.Fatalf("cgroup of 42: %q, %v", path, err)
 	}
 	raw, err := reader.Container(42, path, t0)
-	if err != nil || raw.CPU != 1_500_000 || raw.Memory != 70<<20 || raw.MemoryLimit != 512<<20 || raw.DiskRead != 4196 || raw.DiskWrite != 8192 || raw.NetRx != 12345 || raw.NetTx != 6789 {
+	// Memory leaves out the files it no longer uses: 70 MB less 3.4 MB.
+	if err != nil || raw.CPU != 1_500_000 || raw.Memory != 70000000 || raw.MemoryLimit != 512<<20 || raw.DiskRead != 4196 || raw.DiskWrite != 8192 || raw.NetRx != 12345 || raw.NetTx != 6789 {
 		t.Fatalf("raw = %+v, %v", raw, err)
 	}
 	if _, err := reader.CgroupOf(7); err != ErrNoCgroup2 {
@@ -192,19 +196,67 @@ func TestReadingTheKernel(t *testing.T) {
 	recorder := NewRecorder("n1")
 	pids := 0
 	collector := &Collector{Recorder: recorder, Reader: reader, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return t0 },
-		Tenants: func() []Tenant { return []Tenant{{Name: "web", Container: "abc123", CPULimit: 2}, {Name: "idle"}} },
-		Pid:     func(context.Context, string) (int, error) { pids++; return 42, nil },
-		Disk:    func(_ context.Context, tenant string) (int64, bool, error) { return 1 << 30, tenant == "web", nil }}
+		Tenants: func() []Tenant {
+			return []Tenant{{Name: "web", Container: "abc123", CPULimit: 2, DiskLimit: 10 << 30}, {Name: "idle"}}
+		},
+		Pid:  func(context.Context, string) (int, error) { pids++; return 42, nil },
+		Disk: func(_ context.Context, tenant string) (int64, bool, error) { return 1 << 30, tenant == "web", nil }}
 	collector.Collect(context.Background())
 	collector.Now = func() time.Time { return t0.Add(time.Minute) }
 	collector.Collect(context.Background())
 	report := recorder.Report(t0.Add(time.Minute))
-	if web := report.Tenants["web"]; web.Memory != 70<<20 || web.DiskUsed != 1<<30 || web.CPULimit != 2 || pids != 1 || report.Host.CPUs != 2 {
+	if web := report.Tenants["web"]; web.Memory != 70000000 || web.DiskUsed != 1<<30 || web.DiskLimit != 10<<30 || web.CPULimit != 2 || pids != 1 || report.Host.CPUs != 2 || web.Counters.Container != "abc123/42" {
 		t.Fatalf("report: %+v, %d lookups", report, pids)
 	}
 	write(filepath.Join(proc, "42", "cgroup"), "0:"+":/system.slice/other.scope\n")
 	collector.Collect(context.Background())
 	if pids != 2 {
 		t.Fatalf("a PID given to another process was trusted: %d lookups", pids)
+	}
+}
+
+// A stopped container uses nothing; one started again with the same ID
+// starts its counters again; a minute its CPU was not read in does not
+// count as idle.
+func TestStoppedRestartedAndUnread(t *testing.T) {
+	r := NewRecorder("n1")
+	r.Sample("web", Raw{At: t0, Container: "c/1", CPU: 0, Memory: 100}, 0)
+	r.Sample("web", Raw{At: t0.Add(30 * time.Second), Container: "c/1", CPU: 30_000_000, Memory: 100}, 0)
+	// Started again: a new process, its counters from zero.
+	r.Sample("web", Raw{At: t0.Add(60 * time.Second), Container: "c/2", CPU: 1_000_000, Memory: 50}, 0)
+	r.Sample("web", Raw{At: t0.Add(150 * time.Second), Container: "c/2", CPU: 91_000_000, Memory: 50}, 0)
+	series, _ := r.Series("web", 5*time.Minute, t0.Add(3*time.Minute))
+	p := series.Points[0]
+	// Minute 1 had one reading only: no CPU. Minutes 0 and 2 a core each.
+	if p.Minutes != 3 || p.Read != 3 || p.CPURead != 2 || !near(p.CPU, 1) {
+		t.Fatalf("the step: %+v", p)
+	}
+	if now := r.Report(t0.Add(3 * time.Minute)).Tenants["web"]; now.Memory != 50 || !near(now.CPU, 1) {
+		t.Fatalf("now: %+v", now)
+	}
+	r.Disk("web", 7, 0, t0.Add(3*time.Minute))
+	r.Stopped("web")
+	if now, ok := r.Report(t0.Add(3 * time.Minute)).Tenants["web"]; ok {
+		t.Fatalf("a stopped tenant uses %+v", now)
+	}
+	if series, _ := r.Series("web", time.Minute, t0.Add(3*time.Minute)); series.Now.DiskUsed != 7 {
+		t.Fatalf("a stopped tenant's data was forgotten: %+v", series.Now)
+	}
+}
+
+// Without a cgroup v2 hierarchy, containers are not read, and it is said
+// once.
+func TestAHostWithoutCgroup2(t *testing.T) {
+	root := t.TempDir()
+	recorder := NewRecorder("n1")
+	looked := 0
+	collector := &Collector{Recorder: recorder, Reader: Reader{Proc: filepath.Join(root, "proc"), Cgroup: filepath.Join(root, "cgroup")},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return t0 },
+		Tenants: func() []Tenant { return []Tenant{{Name: "web", Container: "abc"}} },
+		Pid:     func(context.Context, string) (int, error) { looked++; return 1, nil }}
+	collector.Collect(context.Background())
+	collector.Collect(context.Background())
+	if looked != 0 || collector.cgroup2 {
+		t.Fatalf("containers were read on a host without cgroup v2: %d", looked)
 	}
 }

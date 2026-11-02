@@ -26,7 +26,8 @@ func newCollector(st store.Store, reconciler *reconcile.Reconciler, rt runtime.R
 				if record.Node != node || record.Archived() {
 					continue
 				}
-				t := measure.Tenant{Name: record.Spec.Name, CPULimit: record.Spec.Limits.Or(defaults).CPUs}
+				limits := record.Spec.Limits.Or(defaults)
+				t := measure.Tenant{Name: record.Spec.Name, CPULimit: limits.CPUs, DiskLimit: int64(limits.DiskGB) << 30}
 				if status, ok := reconciler.Status(record.Spec.Name); ok && status.Phase == reconcile.PhaseRunning {
 					t.Container = status.ContainerID
 				}

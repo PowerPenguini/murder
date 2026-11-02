@@ -92,6 +92,10 @@ the state replicated between nodes.
   draws both. `/metrics` has `murder_tenant_cpu_seconds_total`,
   `murder_tenant_memory_bytes` and `_limit_bytes`, network and disk byte
   counters and `murder_tenant_data_bytes`, for a Prometheus to keep longer.
+  Memory leaves out the files a container no longer uses (as `docker
+  stats` does). On the zfs driver the cgroup counts few of a container's
+  disk writes, as ZFS writes them later on its own: the disk chart reads
+  low there; the data's size is exact.
 - **Secrets.** Generated per tenant and sealed with the node's master key
   (AES-256-GCM, bound to tenant and name). The database never holds them in
   the clear.

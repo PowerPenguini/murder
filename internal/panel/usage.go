@@ -29,7 +29,7 @@ type tenantUsage struct {
 	DataText string
 }
 
-func (s *Server) tenantUsage(ctx context.Context, name string, diskGB int) *tenantUsage {
+func (s *Server) tenantUsage(ctx context.Context, name string) *tenantUsage {
 	measured, ok := s.backend.(Usage)
 	if !ok {
 		return nil
@@ -39,35 +39,43 @@ func (s *Server) tenantUsage(ctx context.Context, name string, diskGB int) *tena
 		return nil
 	}
 	now := s.now()
-	minutes := float64(series.Step) / 60
-	seconds := float64(series.Step)
-	pick := func(values func(usage.Point) []float64) []sample {
-		out := make([]sample, len(series.Points))
-		for i, p := range series.Points {
-			out[i] = sample{At: p.At, Values: values(p)}
+	// Each chart draws the steps its measure was taken in: a rate is per
+	// minute, or second, measured.
+	pick := func(taken func(usage.Point) bool, values func(usage.Point) []float64) []sample {
+		var out []sample
+		for _, p := range series.Points {
+			if taken(p) {
+				out = append(out, sample{At: p.At, Values: values(p)})
+			}
 		}
 		return out
 	}
+	read := func(p usage.Point) bool { return p.Read > 0 }
+	cpuRead := func(p usage.Point) bool { return p.CPURead > 0 }
+	counted := func(p usage.Point) bool { return p.Minutes > 0 }
+	answered := func(p usage.Point) bool { return p.Requests > 0 }
+	perSecond := func(n int64, p usage.Point) float64 { return float64(n) / float64(p.CPURead*60) }
 	u := &tenantUsage{Charts: []lineChart{
-		newLineChart("CPU", []string{"cores"}, pick(func(p usage.Point) []float64 { return []float64{p.CPU} }), series.Now.CPULimit, now, usageStep, cores),
-		newLineChart("Memory", []string{"used"}, pick(func(p usage.Point) []float64 { return []float64{float64(p.Memory)} }), float64(series.Now.MemoryLimit), now, usageStep, size),
-		newLineChart("Requests", []string{"a minute", "errors"}, pick(func(p usage.Point) []float64 {
+		newLineChart("CPU", []string{"cores"}, pick(cpuRead, func(p usage.Point) []float64 { return []float64{p.CPU} }), series.Now.CPULimit, now, usageStep, cores),
+		newLineChart("Memory", []string{"used"}, pick(read, func(p usage.Point) []float64 { return []float64{float64(p.Memory)} }), float64(series.Now.MemoryLimit), now, usageStep, size),
+		newLineChart("Requests", []string{"a minute", "errors"}, pick(counted, func(p usage.Point) []float64 {
+			minutes := float64(p.Minutes)
 			return []float64{float64(p.Requests) / minutes, float64(p.Errors) / minutes}
 		}), 0, now, usageStep, rate),
-		newLineChart("Response time, 95th percentile", []string{"p95"}, pick(func(p usage.Point) []float64 { return []float64{p.P95} }), 0, now, usageStep, wait),
-		newLineChart("Network", []string{"in", "out"}, pick(func(p usage.Point) []float64 {
-			return []float64{float64(p.NetRx) / seconds, float64(p.NetTx) / seconds}
+		newLineChart("Response time, 95th percentile", []string{"p95"}, pick(answered, func(p usage.Point) []float64 { return []float64{p.P95} }), 0, now, usageStep, wait),
+		newLineChart("Network", []string{"in", "out"}, pick(cpuRead, func(p usage.Point) []float64 {
+			return []float64{perSecond(p.NetRx, p), perSecond(p.NetTx, p)}
 		}), 0, now, usageStep, throughput),
-		newLineChart("Disk", []string{"read", "written"}, pick(func(p usage.Point) []float64 {
-			return []float64{float64(p.DiskRead) / seconds, float64(p.DiskWrite) / seconds}
+		newLineChart("Disk", []string{"read", "written"}, pick(cpuRead, func(p usage.Point) []float64 {
+			return []float64{perSecond(p.DiskRead, p), perSecond(p.DiskWrite, p)}
 		}), 0, now, usageStep, throughput),
 	}}
 	if used := series.Now.DiskUsed; used >= 0 {
 		u.DataText = size(float64(used))
-		if diskGB > 0 {
-			m := meterOf(int(used>>20), diskGB<<10)
+		if limit := series.Now.DiskLimit; limit > 0 {
+			m := meterOf(int(used>>20), int(limit>>20))
 			u.Data = &m
-			u.DataText += " of " + size(float64(int64(diskGB)<<30))
+			u.DataText += " of " + size(float64(limit))
 		}
 	}
 	return u
@@ -166,6 +174,9 @@ func wait(v float64) string {
 		return "—"
 	case v < 1:
 		return strconv.FormatFloat(math.Round(v*1000), 'f', -1, 64) + " ms"
+	case v >= 30:
+		// The edge's histogram ends there.
+		return "> 30 s"
 	}
 	return strconv.FormatFloat(math.Round(v*100)/100, 'f', -1, 64) + " s"
 }

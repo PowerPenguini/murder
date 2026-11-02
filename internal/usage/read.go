@@ -66,6 +66,11 @@ func (r Reader) Container(pid int, path string, at time.Time) (Raw, error) {
 	if raw.Memory, err = number(filepath.Join(dir, "memory.current")); err != nil {
 		return raw, err
 	}
+	// What it holds of files it no longer uses the kernel takes back when
+	// it needs to: not counted, as docker stats does not.
+	if memory, err := keyed(filepath.Join(dir, "memory.stat")); err == nil {
+		raw.Memory = max(0, raw.Memory-memory["inactive_file"])
+	}
 	// "max" when unlimited.
 	raw.MemoryLimit, _ = number(filepath.Join(dir, "memory.max"))
 	if io, err := os.ReadFile(filepath.Join(dir, "io.stat")); err == nil {

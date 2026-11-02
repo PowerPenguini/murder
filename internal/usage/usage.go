@@ -52,14 +52,21 @@ type Point struct {
 	NetTx     int64 `json:"netTx"`
 	DiskRead  int64 `json:"diskRead"`
 	DiskWrite int64 `json:"diskWrite"`
-	// Requests answered, and of them errors: 5xx answers and requests
-	// the edge could not pass on.
+	// Requests answered, and of them errors: 5xx answers, among them
+	// those for requests the edge could not pass on.
 	Requests int64 `json:"requests"`
 	Errors   int64 `json:"errors"`
 	// P95 is the time to the response headers that 95% of requests did
 	// better than, in seconds; 0 without requests. Summed, it is the
 	// highest minute's.
 	P95 float64 `json:"p95"`
+	// Minutes are how many minutes the point sums anything was measured
+	// in, Read how many its container was read in, and CPURead how many
+	// its CPU was: rates are per minute measured, and CPU the mean of the
+	// minutes it was read in.
+	Minutes int `json:"minutes"`
+	Read    int `json:"read"`
+	CPURead int `json:"cpuRead"`
 }
 
 // Now is a tenant's use as last measured: its last whole minute, with
@@ -76,10 +83,12 @@ type Now struct {
 	DiskWrite   int64     `json:"diskWrite"`
 	// DiskUsed is its data's size in bytes; -1 when the volume driver
 	// cannot tell.
-	DiskUsed int64   `json:"diskUsed"`
-	Requests int64   `json:"requests"`
-	Errors   int64   `json:"errors"`
-	P95      float64 `json:"p95"`
+	DiskUsed int64 `json:"diskUsed"`
+	// DiskLimit is the most its data may take, in bytes; 0 if unlimited.
+	DiskLimit int64   `json:"diskLimit,omitempty"`
+	Requests  int64   `json:"requests"`
+	Errors    int64   `json:"errors"`
+	P95       float64 `json:"p95"`
 	// Counters are its container's counters as last read, since it
 	// started: for Prometheus, whose rate() takes a restart in its stride.
 	Counters Raw `json:"counters"`
@@ -132,9 +141,11 @@ func NewRecorder(node string) *Recorder {
 type history struct {
 	points []Point // oldest first, at most minutes
 	cur    Point
-	// samples and cpuSum measure cur's CPU mean.
+	// samples and cpuSum measure cur's CPU mean; read says its
+	// container was read at all.
 	samples int
 	cpuSum  float64
+	read    bool
 	last    Raw
 	// edge is the edge's counts as last told; requests and waits are
 	// cur's.
@@ -162,15 +173,29 @@ func (r *Recorder) Sample(tenant string, raw Raw, cpuLimit float64) {
 		h.cur.DiskWrite += delta(h.last.DiskWrite, raw.DiskWrite)
 	}
 	h.cur.Memory = max(h.cur.Memory, raw.Memory)
+	h.read = true
 	h.now.Memory, h.now.MemoryLimit = raw.Memory, raw.MemoryLimit
 	h.last = raw
 }
 
-// Disk records the size of tenant's data; -1 when it cannot be told.
-func (r *Recorder) Disk(tenant string, used int64, at time.Time) {
+// Stopped says tenant's container does not run: what it used is no longer
+// what it uses.
+func (r *Recorder) Stopped(tenant string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.history(tenant, at).now.DiskUsed = used
+	if h := r.tenants[tenant]; h != nil {
+		h.now = Now{DiskUsed: h.now.DiskUsed, DiskLimit: h.now.DiskLimit}
+		h.last = Raw{}
+	}
+}
+
+// Disk records the size of tenant's data, -1 when it cannot be told, and
+// its limit, 0 if none.
+func (r *Recorder) Disk(tenant string, used, limit int64, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	h := r.history(tenant, at)
+	h.now.DiskUsed, h.now.DiskLimit = used, limit
 }
 
 // Edge records the edge's counts of tenant's requests, as they stand.
@@ -193,11 +218,12 @@ func (r *Recorder) Edge(tenant string, counts metrics.Counts, at time.Time) {
 	for class := range counts.ByClass {
 		n := int64(delta(int64(before.ByClass[class]), int64(counts.ByClass[class])))
 		h.cur.Requests += n
+		// A request the edge could not pass on is answered 502: counted
+		// here, not again as a backend error.
 		if class == 4 {
 			h.cur.Errors += n
 		}
 	}
-	h.cur.Errors += delta(int64(before.BackendErrors), int64(counts.BackendErrors))
 	for i := range counts.Waits {
 		var was uint64
 		if i < len(before.Waits) {
@@ -255,21 +281,29 @@ func (h *history) roll(at time.Time) {
 	if !minute.After(h.cur.At) {
 		return
 	}
-	if h.samples > 0 || h.cur.Requests > 0 || h.cur.Memory > 0 {
-		if h.samples > 0 {
-			h.cur.CPU = h.cpuSum / float64(h.samples)
-		}
+	if h.read || h.cur.Requests > 0 {
+		h.cur.Minutes = 1
 		h.cur.P95 = percentile(h.waits[:], 0.95)
+		next := h.now
+		next.At, next.CPULimit = h.cur.At, h.limitCPU
+		next.Requests, next.Errors, next.P95 = h.cur.Requests, h.cur.Errors, h.cur.P95
+		if h.read {
+			h.cur.Read = 1
+		}
+		// What only a second reading tells, a minute with one reading does
+		// not: the minutes before say it.
+		if h.samples > 0 {
+			h.cur.CPU, h.cur.CPURead = h.cpuSum/float64(h.samples), 1
+			next.CPU, next.NetRx, next.NetTx = h.cur.CPU, h.cur.NetRx, h.cur.NetTx
+			next.DiskRead, next.DiskWrite = h.cur.DiskRead, h.cur.DiskWrite
+		}
 		h.points = append(h.points, h.cur)
 		if len(h.points) > minutes {
 			h.points = slices.Delete(h.points, 0, len(h.points)-minutes)
 		}
-		disk, memory, limit := h.now.DiskUsed, h.now.Memory, h.now.MemoryLimit
-		h.now = Now{At: h.cur.At, CPU: h.cur.CPU, Memory: memory, MemoryLimit: limit, CPULimit: h.limitCPU,
-			NetRx: h.cur.NetRx, NetTx: h.cur.NetTx, DiskRead: h.cur.DiskRead, DiskWrite: h.cur.DiskWrite,
-			DiskUsed: disk, Requests: h.cur.Requests, Errors: h.cur.Errors, P95: h.cur.P95}
+		h.now = next
 	}
-	h.cur, h.samples, h.cpuSum, h.waits = Point{At: minute}, 0, 0, [len(metrics.Buckets) + 1]uint64{}
+	h.cur, h.samples, h.cpuSum, h.read, h.waits = Point{At: minute}, 0, 0, false, [len(metrics.Buckets) + 1]uint64{}
 }
 
 // Report is the node's use now.
@@ -300,18 +334,18 @@ func (r *Recorder) Series(tenant string, step time.Duration, at time.Time) (Seri
 	h.roll(at)
 	step = max(time.Minute, step.Truncate(time.Minute))
 	series := Series{Tenant: tenant, Node: r.node, Step: int(step / time.Second), Now: h.now, Points: []Point{}}
-	// CPU is the mean of the minutes measured in each step.
-	var measured []int
+	series.Now.Counters = h.last
 	for _, p := range h.points {
 		start := p.At.Truncate(step)
 		n := len(series.Points)
 		if n == 0 || !series.Points[n-1].At.Equal(start) {
 			series.Points = append(series.Points, Point{At: start})
-			measured = append(measured, 0)
 			n++
 		}
 		sum := &series.Points[n-1]
-		measured[n-1]++
+		sum.Minutes += p.Minutes
+		sum.Read += p.Read
+		sum.CPURead += p.CPURead
 		sum.CPU += p.CPU
 		sum.Memory = max(sum.Memory, p.Memory)
 		sum.NetRx += p.NetRx
@@ -323,7 +357,9 @@ func (r *Recorder) Series(tenant string, step time.Duration, at time.Time) (Seri
 		sum.P95 = max(sum.P95, p.P95)
 	}
 	for i := range series.Points {
-		series.Points[i].CPU /= float64(measured[i])
+		if read := series.Points[i].CPURead; read > 0 {
+			series.Points[i].CPU /= float64(read)
+		}
 	}
 	return series, true
 }
