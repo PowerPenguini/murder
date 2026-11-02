@@ -1,24 +1,23 @@
 {{define "content"}}
 <div class="gatebox">
   <img class="crow" src="{{static "crow.svg"}}" alt="">
-  <div class="wordmark">MURDER<span class="cursor"></span></div>
-  <div class="frame" id="enroll">
-    <div class="label">// add a passkey</div>
+  <div id="enroll">
+    <h1>Add a passkey</h1>
     <p class="dim">With an invitation, or one of your recovery codes.</p>
-    <label class="field" id="tokenfield"><span>invitation or recovery code</span>
+    <label class="field" id="tokenfield">Invitation or recovery code
       <input type="text" id="token" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX"></label>
-    <label class="field"><span>this passkey's name</span>
+    <label class="field">This passkey's name
       <input type="text" id="label" maxlength="40" autocomplete="off" placeholder="laptop, phone…"></label>
-    <button type="button" class="wide" id="add">add a passkey</button>
-    <p class="status" id="status" role="status" aria-live="polite">&gt; ready</p>
+    <button type="button" class="primary wide" id="add">Add a passkey</button>
+    <p class="status" id="status" role="status" aria-live="polite"></p>
   </div>
-  <div class="frame" id="codes" hidden>
-    <div class="label">// your recovery codes</div>
-    <p>Each adds one passkey, once, should you lose yours. They are shown <b>now only</b>: keep them offline.</p>
+  <div id="codes" hidden>
+    <h1>Your recovery codes</h1>
+    <p class="dim">Each adds one passkey, once, should you lose yours. They are shown now only: keep them offline.</p>
     <ol class="codes" id="codelist"></ol>
-    <a class="button wide" href="/">i kept them — open the panel</a>
+    <a class="button primary wide" href="/">I kept them — open the panel</a>
   </div>
-  <p class="aside"><a href="/login">← sign in</a></p>
+  <p class="aside"><a href="/login">Sign in instead</a></p>
 </div>
 <script src="{{static "auth.js"}}"></script>
 {{end}}

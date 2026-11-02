@@ -39,7 +39,7 @@ const testAppFile = "image: ghcr.io/example/web:1.0\nuser: \"10001:10001\"\nenv:
 func TestCreatingAnApp(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
-	if _, page := get(t, server.URL+"/apps"); !strings.Contains(page, `href="/apps/addhoc"`) || !strings.Contains(page, "create the app") {
+	if _, page := get(t, server.URL+"/apps"); !strings.Contains(page, `href="/apps/addhoc"`) || !strings.Contains(page, "Create the app") {
 		t.Fatalf("the apps page:\n%s", page)
 	}
 

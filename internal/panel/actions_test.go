@@ -50,7 +50,7 @@ func TestActingOnTenants(t *testing.T) {
 	cluster, server, client := newActingPanel(t)
 	ctx := context.Background()
 	_, body := submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"suspend"}}, server.URL)
-	if !strings.Contains(body, "iqtms is suspended") || !strings.Contains(body, ">SUSPENDED<") {
+	if !strings.Contains(body, "iqtms is suspended") || !strings.Contains(body, ">suspended<") {
 		t.Fatalf("after suspending:\n%s", body)
 	}
 	// Said once: a reload does not say it again.
@@ -107,14 +107,14 @@ func TestActingOnTenants(t *testing.T) {
 	if response, err := client.Do(live); err == nil {
 		page, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		if strings.Contains(string(page), "&gt; moved") {
+		if strings.Contains(string(page), `class="notice">moved<`) {
 			t.Fatal("a live fetch took the notice")
 		}
 	}
 	if response, err := client.Get(server.URL + "/"); err == nil {
 		page, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		if !strings.Contains(string(page), "&gt; moved") {
+		if !strings.Contains(string(page), `class="notice">moved<`) {
 			t.Fatal("the notice was lost")
 		}
 	}

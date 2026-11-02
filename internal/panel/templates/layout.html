@@ -14,32 +14,30 @@
 {{template "content" .}}
 </main>
 {{else}}
-<header class="bar">
-  <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt=""><span class="word">MURDER</span><span class="cursor"></span></a>
-  <div class="meta">
-    {{with .Cluster.Cluster}}<span>cluster <b>{{.}}</b></span>{{end}}
-    <span>node <b>{{.Cluster.Self}}</b></span>
-    {{with .Cluster.Leader}}<span>leader <b>{{.}}</b></span>{{end}}
-    <span class="live" title="the page follows the cluster every few seconds">live</span>
-    <span>{{.Now.UTC.Format "15:04:05"}} <b>utc</b></span>
-    {{with .User}}<form class="whoami" method="post" action="/auth/logout"><span>{{.}}</span><button type="submit">sign out</button></form>{{end}}
+<header class="top">
+  <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt="">murder</a>
+  <nav>
+    <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
+    {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on"{{end}}>Apps</a>{{end}}
+    <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
+    <a href="/cluster" {{if eq .Section "cluster"}}class="on"{{end}}>Cluster</a>
+    <a href="/access" {{if eq .Section "access"}}class="on"{{end}}>Access</a>
+  </nav>
+  <div class="who">
+    <span class="live" title="following the cluster, every few seconds"></span>
+    <span title="the node this panel asks{{with .Cluster.Leader}}; {{.}} leads{{end}}">{{.Cluster.Self}}</span>
+    {{with .User}}<span>{{.}}</span><form method="post" action="/auth/logout"><button type="submit">Sign out</button></form>{{end}}
   </div>
 </header>
-<nav>
-  <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
-  <a href="/apps" {{if eq .Section "apps"}}class="on"{{end}}>Apps</a>
-  <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
-  <a href="/cluster" {{if eq .Section "cluster"}}class="on"{{end}}>Cluster</a>
-  <a href="/access" {{if eq .Section "access"}}class="on"{{end}}>Access</a>
-</nav>
-<main id="live">
-{{with .Cluster.Frozen}}<div class="frozen">changes frozen — {{.}}</div>{{end}}
-{{with .Problem}}<div class="notice bad">&gt; {{.}}</div>{{end}}
-{{with .Done}}<div class="notice">&gt; {{.}}</div>{{end}}
+<div id="live">
+{{with .Cluster.Frozen}}<div class="frozen">Changes are frozen: {{.}}</div>{{end}}
+<main>
+{{with .Problem}}<div class="notice bad">{{.}}</div>{{end}}
+{{with .Done}}<div class="notice">{{.}}</div>{{end}}
 {{template "content" .}}
 </main>
+</div>
 <script src="{{static "live.js"}}"></script>
-<footer>murder · a murder of crows keeps your tenants · rendered on {{.Cluster.Self}} at {{.Now.UTC.Format "2006-01-02 15:04:05"}}Z</footer>
 {{end}}
 </body>
 </html>

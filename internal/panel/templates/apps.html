@@ -1,32 +1,38 @@
 {{define "content"}}{{$d := .Data}}
-<div class="title"><h1>Apps</h1><span class="sub">specs shared by their tenants; a change rolls out to every one</span></div>
+<div class="head">
+  <h1>Apps</h1>
+</div>
+<p class="lead">Specs their tenants share; a change rolls out to every one.</p>
 
-<section>
-  <h2>apps</h2>
+<section class="near">
   <table>
-    <thead><tr><th>app</th><th class="hide-narrow">image</th><th>tenants</th><th class="hide-narrow">changed</th></tr></thead>
+    <thead><tr><th>App</th><th class="hide-narrow">Image</th><th class="num">Tenants</th><th class="hide-narrow">Changed</th></tr></thead>
     <tbody>
     {{range $d.Apps}}
       <tr>
-        <td><a href="/apps/{{.Name}}"><b>{{.Name}}</b></a></td>
-        <td class="dim hide-narrow" title="{{.Spec.Image}}">{{short .Spec.Image}}</td>
-        <td class="mono-num">{{len .Tenants}}</td>
+        <td><a href="/apps/{{.Name}}">{{.Name}}</a></td>
+        <td class="mono dim hide-narrow" title="{{.Spec.Image}}">{{short .Spec.Image}}</td>
+        <td class="num">{{len .Tenants}}</td>
         <td class="when hide-narrow">{{ago .UpdatedAt}} ago</td>
       </tr>
     {{else}}
-      <tr><td colspan="4" class="empty">no app yet</td></tr>
+      <tr><td colspan="4" class="empty">No app yet.</td></tr>
     {{end}}
     </tbody>
   </table>
 </section>
 
-<section class="actions" data-still>
-  <h2>new app</h2>
-  <p class="dim">As an app file of <code>murder app apply</code>: checked the same way before anything is stored.</p>
-  <form method="post" action="/apps" class="editor">
-    <input type="text" name="name" value="{{$d.Name}}" placeholder="name" aria-label="the app's name" autocomplete="off" required class="short">
-    <textarea name="file" rows="12" spellcheck="false" aria-label="the app's spec">{{$d.File}}</textarea>
-    <div><button type="submit">create the app</button></div>
-  </form>
+<section>
+  <details {{if $d.Name}}open{{end}}>
+    <summary class="button">New app</summary>
+    <div class="panel">
+      <form method="post" action="/apps" class="stack">
+        <label class="field">Name <input type="text" name="name" value="{{$d.Name}}" placeholder="web" aria-label="the app's name" autocomplete="off" required class="short"></label>
+        <label class="field"><span>Spec, as an app file of <code>murder app apply</code></span>
+          <textarea name="file" rows="10" spellcheck="false" aria-label="the app's spec">{{$d.File}}</textarea></label>
+        <div><button type="submit" class="primary">Create the app</button></div>
+      </form>
+    </div>
+  </details>
 </section>
 {{end}}

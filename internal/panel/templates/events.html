@@ -1,13 +1,15 @@
 {{define "content"}}{{$d := .Data}}
-<div class="title"><h1>Events</h1><span class="sub">the audit log: who changed what, newest first</span></div>
-<section>
-  <form class="filter" method="get" action="/events">
-    <input type="text" name="tenant" value="{{$d.Tenant}}" placeholder="tenant" aria-label="tenant">
+<div class="head">
+  <h1>Events</h1>
+  <form class="row" method="get" action="/events">
+    <input type="text" name="tenant" value="{{$d.Tenant}}" placeholder="tenant" aria-label="tenant" class="short">
     <input type="text" name="app" value="{{$d.App}}" placeholder="app" aria-label="app" class="short">
-    <button type="submit">filter</button>
-    {{if or $d.Tenant $d.App}}<a class="button" href="/events">clear</a>{{end}}
+    <button type="submit">Filter</button>
+    {{if or $d.Tenant $d.App}}<a href="/events" class="dim">Clear</a>{{end}}
   </form>
+</div>
+<section class="near">
   {{template "events" $d.Events}}
-  {{if $d.Older}}<div class="more"><a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}before={{$d.Older}}">older →</a></div>{{end}}
+  {{if $d.Older}}<div class="more"><a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}before={{$d.Older}}">Older</a></div>{{end}}
 </section>
 {{end}}

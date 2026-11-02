@@ -34,32 +34,32 @@ type nodeView struct {
 func nodeState(node api.NodeState, now time.Time) tag {
 	switch {
 	case node.Failed():
-		return tag{"FAILED", "bad"}
+		return tag{"failed", "bad"}
 	case node.Answers:
-		return tag{"UP", "ok"}
+		return tag{"up", "ok"}
 	case now.Before(node.AwayUntil):
-		return tag{"RESTARTING", "warn"}
+		return tag{"restarting", "warn"}
 	}
-	return tag{"DOWN", "bad"}
+	return tag{"down", "bad"}
 }
 
 // tenantState is a tenant's state as one tag.
 func tenantState(t api.Tenant) tag {
 	switch {
 	case t.Archived():
-		return tag{"ARCHIVED", "mute"}
+		return tag{"archived", "mute"}
 	case t.Spec.Suspended:
-		return tag{"SUSPENDED", "mute"}
+		return tag{"suspended", "mute"}
 	case t.Status == nil:
-		return tag{"UNKNOWN", "warn"}
+		return tag{"unknown", "warn"}
 	case t.Status.Phase == "running" && t.Status.Healthy:
-		return tag{"RUNNING", "ok"}
+		return tag{"running", "ok"}
 	case t.Status.Phase == "running":
-		return tag{"UNHEALTHY", "warn"}
+		return tag{"unhealthy", "warn"}
 	case t.Status.Phase == "failed":
-		return tag{"FAILED", "bad"}
+		return tag{"failed", "bad"}
 	}
-	return tag{strings.ToUpper(t.Status.Phase), "warn"}
+	return tag{t.Status.Phase, "warn"}
 }
 
 // replicaState says where the tenant's copy is, and whether it could take
@@ -67,7 +67,7 @@ func tenantState(t api.Tenant) tag {
 func replicaState(t api.Tenant, cluster bool) tag {
 	switch {
 	case t.ReplicaNext != "":
-		return tag{t.Replica + " -> " + t.ReplicaNext, "warn"}
+		return tag{t.Replica + " → " + t.ReplicaNext, "warn"}
 	case t.Replica != "" && t.ReplicaReady:
 		return tag{t.Replica, "ok"}
 	case t.Replica != "":
@@ -105,7 +105,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	if err := all(
 		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
 		func() (err error) { tenants, err = s.backend.List(ctx); return },
-		func() (err error) { events, err = s.backend.Events(ctx, store.EventQuery{Limit: 12}); return },
+		func() (err error) { events, err = s.backend.Events(ctx, store.EventQuery{Limit: 8}); return },
 	); err != nil {
 		s.fail(w, r, err)
 		return

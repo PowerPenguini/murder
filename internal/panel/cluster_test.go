@@ -58,7 +58,7 @@ func TestActingOnTheCluster(t *testing.T) {
 	cluster, s, server, client := newClusterPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/cluster")
-	for _, want := range []string{"fsn-1", "nbg-1", "hel-1", "schema 13", `placeholder="hel-1"`, "none yet"} {
+	for _, want := range []string{"fsn-1", "nbg-1", "hel-1", "· 13", `placeholder="hel-1"`, "None yet."} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the cluster page lacks %q:\n%s", want, page)
 		}

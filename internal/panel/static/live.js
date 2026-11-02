@@ -1,7 +1,8 @@
 // Murder panel: the page follows the cluster. Every few seconds it asks
 // for itself again and puts in the new content, unless someone is at
-// work on it (typing, a choice made, a file chosen, text selected), or it shows
-// something once (a secret), or it holds still (logs), or is hidden.
+// work on it (typing, a choice made, a file chosen, a menu open, text
+// selected), or it shows something once (a secret), or it holds still
+// (logs), or is hidden.
 "use strict";
 (() => {
   const main = document.getElementById("live");
@@ -9,7 +10,7 @@
   const indicator = document.querySelector(".live");
   const busy = () =>
     document.hidden ||
-    document.querySelector(".once, [data-still]") ||
+    document.querySelector(".once, [data-still], details[open]") ||
     (document.activeElement && document.activeElement.closest("form")) ||
     [...document.querySelectorAll("input[type=text]")].some((input) => input.value !== "") ||
     [...document.querySelectorAll("input[type=file]")].some((input) => input.files.length > 0) ||
@@ -34,13 +35,20 @@
       if (!fresh || busy()) return;
       // What an action did is shown once, not again.
       for (const notice of fresh.querySelectorAll(".notice")) notice.remove();
-      for (const notice of [...main.querySelectorAll(".notice")].reverse()) fresh.prepend(notice);
+      const into = fresh.querySelector("main") || fresh;
+      for (const notice of [...main.querySelectorAll(".notice")].reverse()) into.prepend(notice);
       main.replaceChildren(...fresh.childNodes);
-      const meta = page.querySelector(".meta");
-      if (meta) document.querySelector(".meta").replaceWith(meta);
     } catch {
       // The next tick tries again.
     }
   };
   timer = setInterval(tick, 5000);
+  // A menu closes on a click elsewhere, or Escape, as menus do.
+  const menus = () => document.querySelectorAll("details[open]:has(> .pop)");
+  document.addEventListener("click", (event) => {
+    for (const menu of menus()) if (!menu.contains(event.target)) menu.open = false;
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") for (const menu of menus()) menu.open = false;
+  });
 })();

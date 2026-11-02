@@ -21,9 +21,12 @@ the audit log as `<person> via murder-panel`.
   offline. No passwords.
 - **Where state lives:** accounts, passkeys, sessions and devices are in the
   replicated state, so every node's panel knows them.
-- **Look:** black and white, sharp edges, monospace, a crow. No JavaScript
-  frameworks and nothing loaded from elsewhere (a strict CSP); htmx and
-  server-sent events for live pages and actions.
+- **Look:** black and white, quiet and sharp: lines instead of boxes, a
+  state as a dot and a word, monospace only for data, row actions in a
+  "⋯" menu and dangerous ones behind a typed name. The mark is three crows'
+  heads, one before the other, in one colour. No JavaScript frameworks and
+  nothing loaded from elsewhere (a strict CSP, so no inline styles); pages
+  fetch themselves every 5 s (`live.js`) and actions are plain forms.
 
 ## Stages
 

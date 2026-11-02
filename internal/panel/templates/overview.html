@@ -1,66 +1,66 @@
 {{define "content"}}{{$d := .Data}}
-<div class="stats">
-  <div class="stat"><div class="label">nodes up</div><div class="n mono-num">{{template "upcount" $d.Nodes}}<small>/{{len $d.Nodes}}</small></div></div>
-  <div class="stat"><div class="label">tenants</div><div class="n mono-num">{{$d.Live}}<small> live</small></div></div>
-  <div class="stat"><div class="label">healthy</div><div class="n mono-num">{{$d.Healthy}}<small>/{{$d.Serving}}</small></div></div>
-  <div class="stat {{if $d.Unprotected}}alert{{end}}"><div class="label">without a ready copy</div><div class="n mono-num">{{$d.Unprotected}}</div></div>
+<div class="figures">
+  <div class="figure"><div class="n">{{template "upcount" $d.Nodes}}<small> / {{len $d.Nodes}}</small></div><div class="l">nodes up</div></div>
+  <div class="figure"><div class="n">{{$d.Live}}</div><div class="l">tenants</div></div>
+  <div class="figure"><div class="n">{{$d.Healthy}}<small> / {{$d.Serving}}</small></div><div class="l">healthy</div></div>
+  <div class="figure"><div class="n">{{$d.Unprotected}}</div><div class="l">without a ready copy</div></div>
 </div>
 
 <section>
-  <h2>nodes</h2>
-  <div class="nodes">
-  {{range $d.Nodes}}
-    <div class="node {{if ne .State.Kind "ok"}}down{{end}}">
-      <div class="head">
-        <span class="name">{{.Name}}</span>
-        <span>{{if .Leader}}<span class="tag plain">leader</span> {{end}}<span class="tag {{.State.Kind}}">{{.State.Label}}</span></span>
-      </div>
-      <dl>
-        <dt>public</dt><dd>{{addrs .NodeState}}</dd>
-        <dt>private</dt><dd class="dim">{{if .Address}}{{.Address}}{{else}}—{{end}}</dd>
-        <dt>tenants</dt><dd class="mono-num">{{.Tenants}}</dd>
-        <dt>copies</dt><dd class="mono-num">{{.Copies}}</dd>
-        {{if not .FailedAt.IsZero}}<dt>failed</dt><dd>{{ago .FailedAt}} ago</dd>{{end}}
-        {{if .Self}}<dt>you</dt><dd class="dim">asking this node</dd>{{end}}
-      </dl>
-    </div>
-  {{end}}
-  </div>
-</section>
-
-<section>
-  <h2>tenants</h2>
-  {{if and .Acts $d.Apps}}
-  <form method="post" action="/tenants" class="filter add">
-    <input type="text" name="name" placeholder="new tenant, such as acme" aria-label="tenant name" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?">
-    <select name="app" aria-label="app">{{range $d.Apps}}<option>{{.}}</option>{{end}}</select>
-    <button type="submit">create a tenant</button>
-    <span class="dim">on {{.Cluster.Self}}, the node you ask; move it after</span>
-  </form>
-  {{end}}
+  <div class="head"><h2>Nodes</h2></div>
   <table>
-    <thead><tr><th>name</th><th>app</th><th>node</th><th>state</th><th>copy</th><th class="num hide-narrow">restarts</th><th class="hide-narrow">url</th></tr></thead>
+    <thead><tr><th>Node</th><th>State</th><th class="num">Tenants</th><th class="num">Copies</th><th class="hide-narrow">Address</th></tr></thead>
     <tbody>
-    {{range $d.Tenants}}
+    {{range $d.Nodes}}
       <tr>
-        <td><a href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
-        <td class="dim">{{.App}}</td>
-        <td>{{.Node}}</td>
-        <td><span class="tag {{.State.Kind}}">{{.State.Label}}</span></td>
-        <td><span class="tag {{if eq .Replica.Kind "ok"}}plain{{else}}{{.Replica.Kind}}{{end}}">{{.Replica.Label}}</span></td>
-        <td class="num hide-narrow">{{with .Status}}{{.Restarts}}{{else}}—{{end}}</td>
-        <td class="dim hide-narrow">{{.Host}}</td>
+        <td>{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}</td>
+        <td><span class="st {{.State.Kind}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
+        <td class="num">{{.Tenants}}</td>
+        <td class="num">{{.Copies}}</td>
+        <td class="mono dim hide-narrow">{{addrs .NodeState}}</td>
       </tr>
-    {{else}}
-      <tr><td colspan="7" class="empty">no tenants yet</td></tr>
     {{end}}
     </tbody>
   </table>
 </section>
 
 <section>
-  <h2>recent events</h2>
+  <div class="head">
+    <h2>Tenants</h2>
+    {{if and .Acts $d.Apps}}
+    <details>
+      <summary class="button">New tenant</summary>
+      <div class="pop">
+        <form method="post" action="/tenants" class="stack">
+          <label class="field">Name <input type="text" name="name" placeholder="acme" aria-label="tenant name" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" autocomplete="off"></label>
+          <label class="field">App <select name="app" aria-label="app">{{range $d.Apps}}<option>{{.}}</option>{{end}}</select></label>
+          <span class="hint">It starts on {{.Cluster.Self}}; move it after.</span>
+          <div><button type="submit" class="primary">Create</button></div>
+        </form>
+      </div>
+    </details>
+    {{end}}
+  </div>
+  <table>
+    <thead><tr><th>Tenant</th><th>State</th><th>Node</th><th>Copy</th><th class="hide-narrow">App</th></tr></thead>
+    <tbody>
+    {{range $d.Tenants}}
+      <tr>
+        <td><a href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
+        <td><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
+        <td>{{.Node}}</td>
+        <td>{{if eq .Replica.Kind "ok"}}{{.Replica.Label}}{{else if eq .Replica.Kind "mute"}}<span class="faint">{{.Replica.Label}}</span>{{else}}<span class="st {{.Replica.Kind}}">{{.Replica.Label}}</span>{{end}}</td>
+        <td class="dim hide-narrow">{{.App}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="5" class="empty">No tenants yet.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <div class="head"><h2>Recent events</h2><a href="/events" class="dim">All events</a></div>
   {{template "events" $d.Events}}
-  <div class="more"><a href="/events">all events →</a></div>
 </section>
 {{end}}

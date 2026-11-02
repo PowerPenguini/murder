@@ -1,54 +1,60 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}{{$f := $d.Form}}
-<div class="title">
-  <h1>{{$t.Spec.Name}}</h1>
-  <span class="sub">settings · its app's spec, with what is its own · <a href="/tenants/{{$t.Spec.Name}}">back to {{$t.Spec.Name}}</a></span>
-</div>
+<div class="title"><h1>{{$t.Spec.Name}}</h1><span class="sub">settings</span></div>
+<p class="lead">What is its own, over app {{$t.App}}; empty takes the app's. Saved, it gets a new container{{if $t.Archived}} once restored{{end}}.</p>
+<p class="lead"><a href="/tenants/{{$t.Spec.Name}}">Back to {{$t.Spec.Name}}</a></p>
 
-<section class="actions" data-still>
-  <h2>overrides</h2>
-  <p class="dim">Empty takes the app's. Saved, {{$t.Spec.Name}} gets a new container{{if $t.Archived}} once restored{{end}}.</p>
-  <form method="post" class="settings">
+<section data-still class="near">
+  <form method="post" class="stack">
     <input type="hidden" name="do" value="save">
     <input type="hidden" name="generation" value="{{$f.Generation}}">
-    <label>app <select name="app">{{range $d.Apps}}<option {{if eq . $f.App}}selected{{end}}>{{.}}</option>{{end}}</select></label>
-    <label>image <input type="text" name="image" value="{{$f.Image}}" placeholder="the app's: {{short $t.Spec.Image}}" autocomplete="off"></label>
-    <label>env <span class="hint">NAME=value, a line each; adds to the app's, or replaces. Spaces around a value go; to keep them, or for several lines, quote it: "a\nb"</span>
-      <textarea name="env" rows="5" spellcheck="false">{{$f.Env}}</textarea></label>
-    <label>secrets <span class="hint">NAME [kind [length]], a line each: hex, base64 or password; adds to the app's</span>
-      <textarea name="secrets" rows="3" spellcheck="false">{{$f.Secrets}}</textarea></label>
-    <div class="limits">
-      <label>memory MB <input type="text" name="memoryMB" value="{{$f.MemoryMB}}" class="short" inputmode="numeric"></label>
-      <label>cpus <input type="text" name="cpus" value="{{$f.CPUs}}" class="short" inputmode="decimal"></label>
-      <label>pids <input type="text" name="pids" value="{{$f.PIDs}}" class="short" inputmode="numeric"></label>
-      <label>disk GB <input type="text" name="diskGB" value="{{$f.DiskGB}}" class="short" inputmode="numeric"></label>
+    <label class="field">App <select name="app">{{range $d.Apps}}<option {{if eq . $f.App}}selected{{end}}>{{.}}</option>{{end}}</select></label>
+    <label class="field">Image <input type="text" name="image" value="{{$f.Image}}" placeholder="the app's: {{short $t.Spec.Image}}" autocomplete="off"></label>
+    <label class="field">Environment
+      <textarea name="env" rows="5" spellcheck="false">{{$f.Env}}</textarea>
+      <span class="hint">NAME=value, a line each; adds to the app's, or replaces it. Spaces around a value go; to keep them, or for several lines, quote it: "a\nb".</span></label>
+    <label class="field">Secrets
+      <textarea name="secrets" rows="3" spellcheck="false">{{$f.Secrets}}</textarea>
+      <span class="hint">NAME [kind [length]], a line each; kind is hex, base64 or password. Adds to the app's.</span></label>
+    <div class="row">
+      <label class="field">Memory, MB <input type="text" name="memoryMB" value="{{$f.MemoryMB}}" class="short" inputmode="numeric"></label>
+      <label class="field">CPUs <input type="text" name="cpus" value="{{$f.CPUs}}" class="short" inputmode="decimal"></label>
+      <label class="field">Processes <input type="text" name="pids" value="{{$f.PIDs}}" class="short" inputmode="numeric"></label>
+      <label class="field">Disk, GB <input type="text" name="diskGB" value="{{$f.DiskGB}}" class="short" inputmode="numeric"></label>
     </div>
-    <div><button type="submit">save</button></div>
+    <div><button type="submit" class="primary">Save</button></div>
   </form>
 </section>
 
 <section>
-  <h2>secrets</h2>
-  <p class="dim">Made once by murder and kept encrypted; the panel never shows them. A new value restarts {{$t.Spec.Name}}, and what it signed or set with the old one (sessions, a password) stops working{{if $t.Archived}}; an archived tenant's are kept as they are{{end}}. Save the overrides above first: a new value reloads this page.</p>
+  <div class="head"><h2>Secrets</h2></div>
   <table>
-    <thead><tr><th>name</th><th>kind</th><th>of</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Kind</th><th>Of</th><th class="end"></th></tr></thead>
     <tbody>
     {{range $d.Secrets}}
       <tr>
-        <td><b>{{.Name}}</b></td>
+        <td class="mono">{{.Name}}</td>
         <td class="dim">{{.Kind}}{{if .Bytes}} · {{.Bytes}}{{end}}</td>
         <td class="dim">{{if .Own}}{{$t.Spec.Name}}{{else}}app {{$t.App}}{{end}}</td>
-        <td class="actions">
+        <td class="end">
           {{if not $t.Archived}}
-          <form method="post" class="inline"><input type="hidden" name="do" value="rotate"><input type="hidden" name="key" value="{{.Name}}">
-            <input type="text" name="confirm" placeholder="{{.Name}}" aria-label="the secret's name" autocomplete="off" required class="short">
-            <button type="submit" class="small danger">new value</button></form>
+          <details class="menu">
+            <summary aria-label="what to do with {{.Name}}">⋯</summary>
+            <div class="pop">
+              <form method="post" class="stack"><input type="hidden" name="do" value="rotate"><input type="hidden" name="key" value="{{.Name}}">
+                <span class="hint">A new value restarts {{$t.Spec.Name}}; what it signed or set with the old one (sessions, a password) stops working. Save the settings above first. Type its name.</span>
+                <input type="text" name="confirm" placeholder="{{.Name}}" aria-label="the secret's name" autocomplete="off" required>
+                <div><button type="submit" class="danger">Give it a new value</button></div>
+              </form>
+            </div>
+          </details>
           {{end}}
         </td>
       </tr>
     {{else}}
-      <tr><td colspan="4" class="empty">none</td></tr>
+      <tr><td colspan="4" class="empty">None.</td></tr>
     {{end}}
     </tbody>
   </table>
+  <p class="hint spaced">Made once by murder and kept encrypted; the panel never shows them.{{if $t.Archived}} An archived tenant's are kept as they are.{{end}}</p>
 </section>
 {{end}}
