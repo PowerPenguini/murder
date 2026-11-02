@@ -23,9 +23,9 @@ the audit log as `<person> via murder-panel`.
   replicated state, so every node's panel knows them.
 - **Look:** black and white, quiet and sharp: lines instead of boxes, a
   state as a dot and a word, monospace throughout, row actions in a
-  "⋯" menu and dangerous ones behind a typed name. The mark is three crows'
-  heads packed in a row, each a little lower and before the last, in one
-  colour (`static/crow.svg`; one head for the tab icon, `static/icon.svg`). No JavaScript frameworks and
+  "⋯" menu and dangerous ones behind a typed name. The mark is a crow's head
+  with two copies behind it, in one colour (`static/crow.svg`; the head
+  alone for the tab icon, `static/icon.svg`). No JavaScript frameworks and
   nothing loaded from elsewhere (a strict CSP, so no inline styles); pages
   fetch themselves every 5 s (`live.js`) and actions are plain forms.
 
