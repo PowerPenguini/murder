@@ -22,7 +22,7 @@ the audit log as `<person> via murder-panel`.
 - **Where state lives:** accounts, passkeys, sessions and devices are in the
   replicated state, so every node's panel knows them.
 - **Look:** black and white, quiet and sharp: lines instead of boxes, a
-  state as a dot and a word, monospace only for data, row actions in a
+  state as a dot and a word, monospace throughout, row actions in a
   "⋯" menu and dangerous ones behind a typed name. The mark is three crows'
   heads in a row, in one colour (`static/crow.svg`; one head for the tab
   icon, `static/icon.svg`). No JavaScript frameworks and

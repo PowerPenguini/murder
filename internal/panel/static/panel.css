@@ -1,5 +1,5 @@
-/* Murder panel: black and white, quiet, sharp. Lines instead of boxes;
-   monospace only for what is data. */
+/* Murder panel: black and white, quiet, sharp, monospace. Lines instead
+   of boxes. */
 :root {
   --bg: #0a0a0a;
   --raised: #111;
@@ -8,19 +8,18 @@
   --faint: #555;
   --line: #1d1d1d;
   --line-strong: #333;
-  --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 * { box-sizing: border-box; border-radius: 0; }
 html { background: var(--bg); color-scheme: dark; }
-body { margin: 0; color: var(--fg); font: 14px/1.55 var(--sans); -webkit-font-smoothing: antialiased; min-height: 100vh; }
+body { margin: 0; color: var(--fg); font: 13px/1.6 var(--mono); font-feature-settings: "zero" 1; -webkit-font-smoothing: antialiased; min-height: 100vh; }
 [hidden] { display: none !important; }
 
 a { color: inherit; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
 a:hover { text-decoration-color: var(--fg); }
 
-.mono, code, pre, textarea { font-family: var(--mono); font-size: 12.5px; font-feature-settings: "zero" 1; }
+pre, textarea { font-size: 12.5px; }
 .dim { color: var(--dim); }
 .faint { color: var(--faint); }
 .num, .mono-num { font-variant-numeric: tabular-nums; }
@@ -30,7 +29,7 @@ a:hover { text-decoration-color: var(--fg); }
   display: flex; align-items: center; gap: 36px; height: 56px; padding: 0 32px;
   border-bottom: 1px solid var(--line);
 }
-.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; font-weight: 600; letter-spacing: 0.01em; }
+.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; font-weight: 700; }
 .brand img { height: 18px; width: auto; display: block; }
 .top nav { display: flex; gap: 24px; }
 .top nav a { text-decoration: none; color: var(--dim); }
@@ -47,7 +46,7 @@ a:hover { text-decoration-color: var(--fg); }
 main { max-width: 1120px; margin: 0 auto; padding: 40px 32px 80px; }
 
 /* ── type ──────────────────────────────────────────── */
-h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+h1 { font-size: 20px; font-weight: 700; margin: 0; }
 h2 { font-size: 13px; font-weight: 500; color: var(--dim); margin: 0; }
 h3 { font-size: 12px; font-weight: 500; color: var(--dim); margin: 0 0 8px; }
 .title { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -68,8 +67,8 @@ section { margin-top: 48px; }
 
 /* ── figures ───────────────────────────────────────── */
 .figures { display: flex; flex-wrap: wrap; gap: 16px 56px; }
-.figure .n { font-size: 28px; font-weight: 500; letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
-.figure .n small { font-size: 15px; color: var(--dim); font-weight: 400; }
+.figure .n { font-size: 26px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.figure .n small { font-size: 14px; color: var(--dim); font-weight: 400; }
 .figure .l { color: var(--dim); font-size: 13px; margin-top: 2px; }
 
 /* ── tables ────────────────────────────────────────── */
@@ -113,13 +112,13 @@ select option { background: var(--raised); }
 input[type=text]:focus, select:focus, textarea:focus { outline: none; border-color: var(--fg); }
 input::placeholder, textarea::placeholder { color: var(--faint); }
 input.short { width: 10em; }
-textarea { display: block; width: 100%; padding: 12px 14px; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; resize: vertical; tab-size: 2; }
+textarea { display: block; width: 100%; padding: 12px 14px; line-height: 1.6; resize: vertical; tab-size: 2; }
 input[type=file] { color: var(--dim); font: inherit; font-size: 13px; }
 input[type=file]::file-selector-button { background: transparent; color: var(--fg); border: 1px solid var(--line-strong); padding: 6px 12px; font: inherit; font-size: 13px; margin-right: 10px; cursor: pointer; }
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
 .row:has(> label.field) { align-items: end; gap: 16px; }
 form.stack { display: grid; gap: 14px; }
-.hint { color: var(--dim); font-size: 12.5px; }
+.hint { color: var(--dim); font-size: 12px; }
 label.field { display: grid; gap: 6px; font-size: 13px; color: var(--dim); }
 label.field > input, label.field > select { justify-self: start; }
 label.field > input:not(.short) { width: min(100%, 420px); }
@@ -156,7 +155,7 @@ code { color: var(--fg); }
 section.once { padding: 18px 20px; border: 1px solid var(--fg); }
 section.once p { color: var(--dim); margin: 4px 0 14px; }
 .secret { display: block; margin: 0; padding: 12px 14px; background: #000; border: 1px solid var(--line-strong); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
-.codes { list-style: none; padding: 0; margin: 12px 0 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; counter-reset: code; font-family: var(--mono); font-size: 13px; }
+.codes { list-style: none; padding: 0; margin: 12px 0 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; counter-reset: code; }
 .codes li { counter-increment: code; }
 .codes li::before { content: counter(code, decimal-leading-zero) "  "; color: var(--faint); }
 .device { display: grid; grid-template-columns: 200px 1fr; gap: 20px; align-items: start; }
