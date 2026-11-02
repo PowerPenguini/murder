@@ -476,3 +476,64 @@ func TestTheSweepDropsCopiesAndPutsStaleDataAside(t *testing.T) {
 		t.Fatalf("left %v, aside %v", left, n2.volumes.aside)
 	}
 }
+
+// A node sends nothing before it has caught up with the cluster: back from
+// the dead, its old state names it the node of tenants that moved away.
+func TestNothingIsSentBeforeCatchingUp(t *testing.T) {
+	f := newFixture(t)
+	f.nodes["n1"].volumes.write("acme")
+	r, p := f.replicator("n1")
+	behind := errors.New("no leader")
+	r.CatchUp = func() error { return behind }
+	r.step(context.Background())
+	if len(p.sends) != 0 {
+		t.Fatalf("sent before catching up: %v", p.sends)
+	}
+	r.CatchUp = func() error { return nil }
+	r.step(context.Background())
+	if !slices.Equal(p.sends, []string{"acme→n2 whole=true"}) {
+		t.Fatalf("sends = %v", p.sends)
+	}
+	// Once caught up, a later lag does not stop the sends; the sweep checks
+	// for itself.
+	r.CatchUp = func() error { return behind }
+	f.nodes["n1"].volumes.write("acme")
+	r.step(context.Background())
+	if len(p.sends) != 2 {
+		t.Fatalf("sends = %v", p.sends)
+	}
+}
+
+// A replica that has not yet applied the leader's choice of it catches up
+// before it refuses a copy.
+func TestAReplicaCatchesUpBeforeRefusing(t *testing.T) {
+	f := newFixture(t)
+	f.change(t, func(st *store.SQLite) {
+		if _, err := st.Create(store.NewTenant{Name: "late", App: "web", Node: "n1"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	n1, n3 := f.nodes["n1"], f.nodes["n3"]
+	// The leader gives it its replica; n3 has not applied that yet.
+	if _, err := n1.store.PlaceReplicas("test"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := n1.store.Get("late"); record.Replica != "n3" {
+		t.Fatalf("late's replica: %q", record.Replica)
+	}
+	n1.volumes.write("late")
+	r, _ := f.replicator("n1")
+	if err := r.Replicate(context.Background(), "late", "n3"); err == nil {
+		t.Fatal("a replica took a copy its state does not give it")
+	}
+	n3.receiver.CatchUp = func() error {
+		_, err := n3.store.PlaceReplicas("test")
+		return err
+	}
+	if err := r.Replicate(context.Background(), "late", "n3"); err != nil {
+		t.Fatal(err)
+	}
+	if copy := n3.volumes.data["late"]; copy == nil || !copy.replica {
+		t.Fatalf("the copy on n3: %+v", copy)
+	}
+}

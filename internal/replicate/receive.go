@@ -21,8 +21,22 @@ type Receiver struct {
 
 // check refuses a copy of tenant from sender unless, as this node's state
 // has it, sender runs the tenant, this node keeps its copy, and it is not
-// moving: a node that lost its tenants never writes over their copies.
+// moving: a node that lost its tenants never writes over their copies. A
+// refusal is decided on a state caught up with the cluster's: the owner
+// may send as soon as the leader gave the tenant this replica, before this
+// node applied it.
 func (r *Receiver) check(sender, tenant string) error {
+	err := r.checkState(sender, tenant)
+	if err == nil || r.CatchUp == nil {
+		return err
+	}
+	if catchUpErr := r.CatchUp(); catchUpErr != nil {
+		return err
+	}
+	return r.checkState(sender, tenant)
+}
+
+func (r *Receiver) checkState(sender, tenant string) error {
 	record, err := r.Store.Get(tenant)
 	if err != nil {
 		return err

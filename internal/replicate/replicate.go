@@ -69,6 +69,8 @@ type Replicator struct {
 	// why its last send failed.
 	synced  map[string]time.Time
 	failing map[string]string
+	// caughtUp is set, by Run only, once this node first caught up.
+	caughtUp bool
 }
 
 // ReplicaReason names the snapshots replication takes.
@@ -95,22 +97,38 @@ func (r *Replicator) Run(ctx context.Context) {
 		every = 15 * time.Second
 	}
 	for {
-		if r.Leader != nil && r.Leader() {
-			if placed, err := r.Store.PlaceReplicas("murder"); err != nil {
-				r.Log.Warn("give tenants their replicas", "error", err)
-			} else if placed > 0 {
-				r.Log.Info("gave tenants their replicas", "tenants", placed)
-			}
-		}
-		r.Pass(ctx)
-		if err := r.Sweep(ctx); err != nil {
-			r.Log.Warn("tidy the copies on this node", "error", err)
-		}
+		r.step(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(every):
 		}
+	}
+}
+
+// step is one round of Run. Nothing is done before this node has once
+// caught up with the cluster: a node back from the dead would otherwise
+// send, from its old state, tenants that have since run elsewhere.
+func (r *Replicator) step(ctx context.Context) {
+	if !r.caughtUp {
+		if r.CatchUp != nil {
+			if err := r.CatchUp(); err != nil {
+				r.Log.Debug("wait for the cluster before replicating", "error", err)
+				return
+			}
+		}
+		r.caughtUp = true
+	}
+	if r.Leader != nil && r.Leader() {
+		if placed, err := r.Store.PlaceReplicas("murder"); err != nil {
+			r.Log.Warn("give tenants their replicas", "error", err)
+		} else if placed > 0 {
+			r.Log.Info("gave tenants their replicas", "tenants", placed)
+		}
+	}
+	r.Pass(ctx)
+	if err := r.Sweep(ctx); err != nil {
+		r.Log.Warn("tidy the copies on this node", "error", err)
 	}
 }
 

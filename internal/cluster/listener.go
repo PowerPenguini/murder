@@ -38,7 +38,7 @@ type listener struct {
 }
 
 func listen(address string, credentials *Credentials, cluster func() string, log *slog.Logger) (*listener, error) {
-	inner, err := net.Listen("tcp", address)
+	inner, err := listenConfig().Listen(context.Background(), "tcp", address)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +186,7 @@ func readClusterHeader(conn net.Conn) (string, error) {
 // dial connects to a node of the cluster for protocol; ctx bounds the
 // connection and the handshake.
 func dial(ctx context.Context, credentials *Credentials, protocol, address string) (net.Conn, error) {
-	dialer := &tls.Dialer{Config: credentials.client(protocol)}
+	dialer := &tls.Dialer{NetDialer: netDialer(), Config: credentials.client(protocol)}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, err
