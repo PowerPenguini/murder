@@ -15,6 +15,11 @@
 #   nodes.sh poweroff NODE      power a node off through Hetzner's API, as if it died
 #   nodes.sh poweron NODE       power it on again
 #   nodes.sh partition NODE     cut a node off the private network; it keeps running
+#   nodes.sh dns                the wildcard records as Hetzner's name servers answer
+#
+# With .state/dns-zone naming a zone of the project's Hetzner Cloud DNS (any
+# name: Hetzner's name servers answer for it undelegated), the base domain is
+# that zone and the leader keeps its wildcard records; `dns` reads them.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -22,6 +27,7 @@ REPO=$(cd "$HERE/../.." && pwd)
 STATE=$HERE/.state
 KEY=$STATE/id_ed25519
 DOMAIN=murder.test
+if [[ -s $STATE/dns-zone ]]; then DOMAIN=$(cat "$STATE/dns-zone"); fi
 
 die() { echo "nodes.sh: $*" >&2; exit 1; }
 log() { echo "==> $*" >&2; }
@@ -97,6 +103,11 @@ EOF
   if [[ ${FAILOVER:-1} == 1 ]]; then
     printf '  failover:\n    hetzner:\n      tokenFile: /etc/murder/hcloud.token\n      servers:\n'
     for name in $(names); do printf '        %s: murder-test-%s\n' "$name" "$name"; done
+  fi
+  # The public address, and the DNS records with a zone set up.
+  printf '  publicAddresses: [%s]\n' "$(public_ip "$node")"
+  if [[ -s $STATE/dns-zone ]]; then
+    printf '  dns:\n    provider: hetzner\n    tokenFile: /etc/murder/hcloud.token\n'
   fi
   cat <<EOF
 defaults: {memoryMB: 128, cpus: 1, pids: 256, diskGB: 2}
@@ -332,6 +343,13 @@ cmd_counter() {
   ssh "${SSH_OPTS[@]}" "root@$client" /root/counter.sh "$seconds" "$DOMAIN" "$tenant" "'$pairs'"
 }
 
+# Asks one of Hetzner's name servers directly, so no resolver's cache
+# stands between the records and the answer.
+cmd_dns() {
+  python3 -I "$HERE/dnsquery.py" "probe.$DOMAIN" hydrogen.ns.hetzner.com A
+  python3 -I "$HERE/dnsquery.py" "probe.$DOMAIN" hydrogen.ns.hetzner.com AAAA
+}
+
 cmd_status() {
   on "${STATUS_FROM:-n2}" 'murder cluster status; echo; murder tenant list'
 }
@@ -351,6 +369,7 @@ case $cmd in
   poweroff) cmd_power poweroff "${1:?node}" ;;
   poweron) cmd_power poweron "${1:?node}" ;;
   partition) cmd_partition "${1:?node}" ;;
+  dns) cmd_dns ;;
   ssh) node=${1:?node}; shift; on "$node" "$@" ;;
   *) sed -n 2,18p "$0" >&2; exit 2 ;;
 esac

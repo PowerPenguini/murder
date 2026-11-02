@@ -434,14 +434,57 @@ Other rules:
   aside; then copies move back to it, one at a time, until no node keeps
   two more than another. Each tenant keeps its whole copy on the old node
   until the new one is whole.
-- **Clients:** the wildcard DNS name still points at the dead node too.
-  Browsers that try its address first wait for it before trying another,
-  until it is removed from DNS.
+- **Clients:** with `cluster.dns` (below), the leader takes a node that
+  does not answer out of the wildcard DNS records after 30 s. Without it,
+  the records keep naming the dead node, and browsers that try its address
+  first wait for it before trying another.
 - **The token:** it can power off and delete every server of its project,
   so keep the cluster in a project of its own.
 
 The design, and why nodes do not stop their own tenants when cut off, is
 in [docs/failover.md](docs/failover.md).
+
+### DNS records that follow the nodes
+
+The leader can keep the base domain's wildcard records (`*.<baseDomain>`,
+A and AAAA) naming the public addresses of the nodes that serve:
+
+```yaml
+cluster:
+  publicAddresses: [203.0.113.10, "2001:db8::10"]   # this node's
+  dns:
+    provider: hetzner                 # Hetzner Cloud DNS, or namecheap
+    tokenFile: /etc/murder/dns.token  # namecheap: "user:apikey"
+    zone: example.com                 # the base domain's zone; default: baseDomain
+    ttl: 60s                          # the default, and the least allowed
+```
+
+- **Leaving:** a node that has not answered for 30 s leaves the records,
+  unless its agent stopped cleanly (a reboot) or an upgrade freezes
+  changes: its edge keeps serving meanwhile.
+- **Coming back:** a node is named again once it has answered for 30 s
+  without a break.
+- **When unsure:** a leader that hears too few nodes writes nothing, a new
+  leader writes nothing for its first 30 s, and a family (A or AAAA) is
+  never left empty.
+- **Every node:** give every node the same `cluster.dns` and its own
+  `publicAddresses`. Only the leader writes, and leadership moves; a
+  leader without `cluster.dns` writes nothing and says so, and while a
+  node that serves has no public addresses nothing is written.
+- **One write:** Hetzner replaces a name's records in one action, so the
+  name never resolves to nothing.
+- **Namecheap:** not yet tried on a real domain. Its API sets a domain's
+  whole host list in one call, which Murder does only when the records
+  differ; try it on a spare domain first, as the libdns provider may not
+  keep every host setting (such as mail) as it was. Namecheap answers only
+  allowed addresses: allow every node's public address for its API.
+- **Drift:** the records are written again every 5 minutes, so a change by
+  hand is undone. Leave the wildcard records to Murder.
+- **Metrics:** `murder_dns_records_failing` and
+  `murder_dns_records_addresses`, on the leader.
+
+Resolvers keep a removed address for up to the TTL, and some clients
+longer: a minute or two after a node dies, new clients no longer try it.
 
 Nodes talk over one TLS port on the private network. A node proves it
 belongs to the cluster with a certificate of an authority derived from the

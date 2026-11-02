@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/metrics"
+	"github.com/PowerPenguini/murder/internal/records"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -48,7 +49,10 @@ type Monitor struct {
 	Settle time.Duration
 	// Interval is how often nodes are probed; 2 s if zero.
 	Interval time.Duration
-	Now      func() time.Time
+	// Records, if set, keeps the base domain's DNS records naming the
+	// public addresses of the nodes that serve.
+	Records records.Publisher
+	Now     func() time.Time
 	// Wait waits d, or until ctx ends; a real wait if nil.
 	Wait func(ctx context.Context, d time.Duration) error
 
@@ -66,6 +70,10 @@ type Monitor struct {
 	// retry is when a node whose failover failed is tried again.
 	retry   map[string]time.Time
 	leading bool
+	records recordsView
+	// writing is set while the records are being written, across
+	// leaderships: one write at a time.
+	writing bool
 }
 
 // retryAfter is how long a failover that failed waits before it is tried
@@ -153,6 +161,7 @@ func (m *Monitor) Check(ctx context.Context) {
 	if !m.leading {
 		m.leading = true
 		m.Log.Info("leading the cluster: watching the other nodes")
+		m.startRecords(now, all)
 	}
 	// Nodes no longer in the cluster leave the metrics.
 	for name := range m.seen {
@@ -205,6 +214,13 @@ func (m *Monitor) Check(ctx context.Context) {
 		}
 	}
 	majority := heard >= len(all)/2+1
+	heardNow := map[string]bool{}
+	for i, node := range nodes {
+		heardNow[node.Name] = answered[i]
+	}
+	if addresses, term, write := m.serveLocked(now, self, all, heardNow, frozen, majority); write {
+		go m.publish(ctx, addresses, term)
+	}
 	// A blocked failover ends once none of the tenants it would have
 	// promoted still runs on the node, as after an operator's failover.
 	// Tenants merely no longer promotable, their replica gone silent too,
@@ -442,4 +458,5 @@ func (m *Monitor) WriteMetrics(out *metrics.Writer) {
 		_, blocked := m.blocked[name]
 		out.Sample("murder_failover_blocked", metrics.Bool(blocked), "node", name)
 	}
+	m.writeRecordMetrics(out)
 }

@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/records"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
@@ -149,7 +150,31 @@ type Cluster struct {
 	// Failover, if set, has the leader power a dead node off through its
 	// provider and run its tenants from their replicas.
 	Failover *Failover `yaml:"failover"`
+	// PublicAddresses are the node's public IP addresses, where clients
+	// reach its edge; the DNS records name them while the node serves.
+	PublicAddresses []string `yaml:"publicAddresses"`
+	// DNS, if set, has the leader keep the base domain's wildcard records
+	// naming the public addresses of the nodes that serve.
+	DNS *DNS `yaml:"dns"`
 }
+
+// DNS reaches the provider of the base domain's zone.
+type DNS struct {
+	// Provider is "hetzner" (Hetzner Cloud DNS) or "namecheap".
+	Provider string `yaml:"provider"`
+	// TokenFile holds the provider's API token; for Namecheap it holds
+	// "user:apikey".
+	TokenFile string `yaml:"tokenFile"`
+	// Zone is the zone the base domain is in; the base domain if empty.
+	Zone string `yaml:"zone"`
+	// TTL is how long resolvers keep the records; 60 s by default.
+	TTL Duration `yaml:"ttl"`
+	// Endpoint is the Hetzner API's base URL, for tests.
+	Endpoint string `yaml:"endpoint"`
+}
+
+// DNSProviders are the providers cluster.dns supports.
+var DNSProviders = []string{"hetzner", "namecheap"}
 
 // Failover runs a dead node's tenants from their replicas.
 type Failover struct {
@@ -264,6 +289,14 @@ func Parse(data []byte) (Agent, error) {
 		if f := agent.Cluster.Failover; f != nil && f.After.Duration == 0 {
 			f.After.Duration = 30 * time.Second
 		}
+		if d := agent.Cluster.DNS; d != nil {
+			if d.Zone == "" {
+				d.Zone = agent.BaseDomain
+			}
+			if d.TTL.Duration == 0 {
+				d.TTL.Duration = time.Minute
+			}
+		}
 	}
 	if b := agent.Backups; b != nil {
 		day := 24 * time.Hour
@@ -297,6 +330,11 @@ func (a Agent) Validate() error {
 	}
 	if a.Backups != nil {
 		problems = append(problems, a.Backups.problems(a.Volumes.Driver)...)
+	}
+	if d := a.Cluster; d != nil && d.DNS != nil && a.BaseDomain != "" {
+		if _, err := records.Wildcard(a.BaseDomain, d.DNS.Zone); err != nil {
+			problems = append(problems, "cluster.dns.zone: "+err.Error())
+		}
 	}
 	if a.Cluster != nil && a.Cluster.Failover != nil && a.Volumes.Driver != "zfs" {
 		problems = append(problems, "cluster.failover needs the zfs volume driver: only ZFS nodes keep copies of tenants to run them from")
@@ -437,6 +475,29 @@ func (c Cluster) problems() []string {
 			problems = append(problems, "cluster.failover needs a provider to power nodes off (hetzner); without one, fail a node over by hand: murder cluster failover NODE -powered-off")
 		} else if !strings.HasPrefix(f.Hetzner.TokenFile, "/") {
 			problems = append(problems, "cluster.failover.hetzner.tokenFile must be an absolute path")
+		}
+	}
+	for _, value := range c.PublicAddresses {
+		if address, err := netip.ParseAddr(value); err != nil || address.Zone() != "" {
+			problems = append(problems, fmt.Sprintf("cluster.publicAddresses: %q is not an IP address", value))
+		} else if address.IsPrivate() || address.IsLoopback() || address.IsUnspecified() || address.IsLinkLocalUnicast() || address.IsMulticast() {
+			problems = append(problems, fmt.Sprintf("cluster.publicAddresses: %s is not a public address", value))
+		}
+	}
+	if d := c.DNS; d != nil {
+		if !slices.Contains(DNSProviders, d.Provider) {
+			problems = append(problems, fmt.Sprintf("cluster.dns.provider must be one of %v", DNSProviders))
+		}
+		if !strings.HasPrefix(d.TokenFile, "/") {
+			problems = append(problems, "cluster.dns.tokenFile must be an absolute path")
+		}
+		if d.TTL.Duration < time.Minute || d.TTL.Duration > 24*time.Hour {
+			problems = append(problems, "cluster.dns.ttl must be from 60s, which providers require, to 24h")
+		} else if d.Provider == "namecheap" && d.TTL.Duration > records.MaxNamecheapTTL {
+			problems = append(problems, "cluster.dns.ttl must be at most 60000s with namecheap")
+		}
+		if len(c.PublicAddresses) == 0 {
+			problems = append(problems, "cluster.dns needs cluster.publicAddresses: without them the records never name this node")
 		}
 	}
 	return problems

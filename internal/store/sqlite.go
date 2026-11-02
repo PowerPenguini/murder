@@ -425,7 +425,7 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until FROM nodes`)
+	rows, err = q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until, public FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
@@ -433,12 +433,18 @@ func load(q querier) (state *snapshot, err error) {
 		var node Node
 		var created string
 		var failed, away, refused sql.NullString
-		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away, &refused); err != nil {
+		var public string
+		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away, &refused, &public); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		if refused.Valid {
 			node.CopiesRefusedUntil = parseTime(refused.String)
+		}
+		for _, field := range strings.Fields(public) {
+			if address, err := netip.ParseAddr(field); err == nil {
+				node.Public = append(node.Public, address)
+			}
 		}
 		node.CreatedAt = parseTime(created)
 		if failed.Valid {

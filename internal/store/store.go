@@ -167,6 +167,9 @@ type Node struct {
 	// CopiesRefusedUntil is set when a copy failed to move to the node:
 	// until then no copy moves there.
 	CopiesRefusedUntil time.Time `json:"copiesRefusedUntil,omitzero"`
+	// Public are the node's public addresses, which the base domain's
+	// records name while it serves.
+	Public []netip.Addr `json:"public,omitempty"`
 }
 
 // Failed reports whether the node's tenants failed over and it has not
@@ -268,6 +271,8 @@ type Store interface {
 	// Away marks node as restarting on purpose until until; a zero until
 	// clears it.
 	Away(node string, until time.Time) error
+	// SetPublic records node's public addresses.
+	SetPublic(node string, addresses []netip.Addr) error
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error

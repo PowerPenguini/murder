@@ -14,7 +14,9 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -26,6 +28,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/move"
 	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/records"
 	"github.com/PowerPenguini/murder/internal/replicate"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
@@ -178,7 +181,7 @@ func runAgent(args []string) error {
 				CatchUp: member.CatchUp, Moving: mover.Moving, Leader: member.Leader,
 			}
 		}
-		monitor = newMonitor(cfg.Cluster, st, member, log.With("component", "failover"))
+		monitor = newMonitor(cfg.Cluster, cfg.BaseDomain, st, member, log.With("component", "failover"))
 	}
 	// murder-firewall.service loads the rules before Docker starts the
 	// tenants at boot; loading them here covers a node without that unit
@@ -279,6 +282,7 @@ func runAgent(args []string) error {
 			} else if err != nil {
 				log.Warn("mark this node back from a restart", "error", err)
 			}
+			go keepPublic(ctx, st, node, cfg.Cluster.PublicAddresses, log)
 		}
 		reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
 	}()
@@ -348,8 +352,16 @@ func keepRestartPolicies(ctx context.Context, reconciler *reconcile.Reconciler, 
 // up it powers a dead node off and fails it over; a token that cannot be
 // read leaves failover to an operator, which the log and metrics say when
 // a node dies, rather than stopping the agent.
-func newMonitor(cfg *config.Cluster, st *store.SQLite, member *cluster.Cluster, log *slog.Logger) *failover.Monitor {
+func newMonitor(cfg *config.Cluster, baseDomain string, st *store.SQLite, member *cluster.Cluster, log *slog.Logger) *failover.Monitor {
 	monitor := &failover.Monitor{Store: st, Probe: member.Ping, Leader: member.Leader, Log: log}
+	if cfg.DNS != nil {
+		publisher, err := newPublisher(cfg.DNS, baseDomain, cfg.PublicAddresses)
+		if err != nil {
+			log.Error("the DNS records are not kept: the token cannot be read", "error", err)
+		} else {
+			monitor.Records = publisher
+		}
+	}
 	if cfg.Failover == nil {
 		return monitor
 	}
@@ -363,6 +375,65 @@ func newMonitor(cfg *config.Cluster, st *store.SQLite, member *cluster.Cluster, 
 		monitor.Fence = &failover.Hetzner{Token: token, Servers: h.Servers, Endpoint: h.Endpoint}
 	}
 	return monitor
+}
+
+// newPublisher writes the base domain's records through the provider.
+func newPublisher(cfg *config.DNS, baseDomain string, public []string) (records.Publisher, error) {
+	name, err := records.Wildcard(baseDomain, cfg.Zone)
+	if err != nil {
+		return nil, err
+	}
+	token, err := readSecret(cfg.TokenFile)
+	if err != nil {
+		return nil, err
+	}
+	zone := strings.TrimSuffix(cfg.Zone, ".")
+	if cfg.Provider == "namecheap" {
+		user, key, ok := strings.Cut(token, ":")
+		if !ok {
+			return nil, errors.New("the namecheap token file must hold user:apikey")
+		}
+		// Namecheap needs the address it is asked from; IPv4 only.
+		clientIP := ""
+		for _, value := range public {
+			if address, err := netip.ParseAddr(value); err == nil && address.Unmap().Is4() {
+				clientIP = address.Unmap().String()
+				break
+			}
+		}
+		return &records.Namecheap{User: user, APIKey: key, ClientIP: clientIP, Zone: zone, Name: name, TTL: cfg.TTL.Duration}, nil
+	}
+	return &records.Hetzner{Token: token, Zone: zone, Name: name, TTL: cfg.TTL.Duration, Endpoint: cfg.Endpoint}, nil
+}
+
+// keepPublic keeps this node's public addresses, as its config has them,
+// recorded for the DNS records, as after the node left the cluster and
+// joined it again; a freeze or a lost leader only delays it.
+func keepPublic(ctx context.Context, st *store.SQLite, node string, values []string, log *slog.Logger) {
+	var want []netip.Addr
+	for _, value := range values {
+		if address, err := netip.ParseAddr(value); err == nil {
+			want = append(want, address.Unmap())
+		}
+	}
+	slices.SortFunc(want, func(a, b netip.Addr) int { return a.Compare(b) })
+	want = slices.Compact(want)
+	warned := false
+	for {
+		if !slices.ContainsFunc(st.Nodes(), func(n store.Node) bool { return n.Name == node && slices.Equal(n.Public, want) }) {
+			if err := st.SetPublic(node, want); err == nil {
+				warned = false
+			} else if !errors.Is(err, store.ErrFrozen) && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, cluster.ErrNotJoined) && !warned {
+				log.Warn("record this node's public addresses", "error", err)
+				warned = true
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+		}
+	}
 }
 
 // awayFor is how long a node whose agent stopped cleanly is not failed over
