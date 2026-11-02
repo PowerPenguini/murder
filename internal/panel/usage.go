@@ -24,11 +24,15 @@ const usageStep = 5 * time.Minute
 // tenantUsage is a tenant's day, drawn.
 type tenantUsage struct {
 	Charts []lineChart
-	// Memory is what it uses now against its limit.
-	Memory tenantUse
+	// Memory is what it uses now against its limit, with its CPU; the
+	// rest its requests a minute, errors among them, and the 95th
+	// percentile of their response time, in its last minute.
+	Memory                 tenantUse
+	CPULimit               string
+	Requests, Errors, Wait string
 	// Data is its data's size against its disk limit, if both are known.
-	Data     *meter
-	DataText string
+	Data                *meter
+	DataText, DataLimit string
 }
 
 func (s *Server) tenantUsage(ctx context.Context, name string) *tenantUsage {
@@ -72,7 +76,11 @@ func (s *Server) tenantUsage(ctx context.Context, name string) *tenantUsage {
 			return []float64{perSecond(p.DiskRead, p), perSecond(p.DiskWrite, p)}
 		}), 0, now, usageStep, throughput),
 	}}
-	u.Memory = tenantUse{MemoryText: size(float64(series.Now.Memory))}
+	u.Memory = tenantUse{MemoryText: size(float64(series.Now.Memory)), CPUText: cores(series.Now.CPU)}
+	if limit := series.Now.CPULimit; limit > 0 {
+		u.Memory.CPU, u.CPULimit = meterOf(int(series.Now.CPU*1000), int(limit*1000)), cores(limit)
+	}
+	u.Requests, u.Errors, u.Wait = rate(float64(series.Now.Requests)), rate(float64(series.Now.Errors)), wait(series.Now.P95)
 	if limit := series.Now.MemoryLimit; limit > 0 {
 		u.Memory.Memory = meterOf(int(series.Now.Memory>>20), int(limit>>20))
 		u.Memory.MemoryLimit = size(float64(limit))
@@ -82,7 +90,7 @@ func (s *Server) tenantUsage(ctx context.Context, name string) *tenantUsage {
 		if limit := series.Now.DiskLimit; limit > 0 {
 			m := meterOf(int(used>>20), int(limit>>20))
 			u.Data = &m
-			u.DataText += " of " + size(float64(limit))
+			u.DataLimit = size(float64(limit))
 		}
 	}
 	return u

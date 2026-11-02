@@ -52,62 +52,54 @@
 </div>
 {{end}}
 
-<section class="facts">
-  <div>
-    <h3>Runtime</h3>
-    <dl>
-      <dt>node</dt><dd>{{$t.Node}}</dd>
-      <dt>image</dt><dd class="mono" title="{{$t.Spec.Image}}">{{short $t.Spec.Image}}</dd>
-      <dt>generation</dt><dd class="num">{{$t.Generation}}</dd>
-      {{with $t.Status}}
-      <dt>phase</dt><dd>{{.Phase}}</dd>
-      <dt>healthy</dt><dd>{{if .Healthy}}yes{{else}}no{{end}}</dd>
-      <dt>restarts</dt><dd class="num">{{.Restarts}}</dd>
-      {{with .LastExit}}<dt>last exit</dt><dd>{{.}}</dd>{{end}}
-      {{with .Message}}<dt>message</dt><dd>{{.}}</dd>{{end}}
-      {{with .Warning}}<dt>warning</dt><dd>{{.}}</dd>{{end}}
-      <dt>checked</dt><dd>{{ago .CheckedAt}} ago</dd>
-      {{else}}
-      <dt>status</dt><dd class="dim">{{if $t.Archived}}archived: runs nowhere{{else}}its node did not answer{{end}}</dd>
-      {{end}}
-    </dl>
-  </div>
-  <div>
-    <h3>Copy</h3>
-    <dl>
-      <dt>replica</dt><dd>{{if eq $d.Replica.Kind "ok"}}{{$d.Replica.Label}}{{else if eq $d.Replica.Kind "mute"}}<span class="faint">{{$d.Replica.Label}}</span>{{else}}<span class="st {{$d.Replica.Kind}}">{{$d.Replica.Label}}</span>{{end}}</dd>
-      <dt>can take over</dt><dd>{{if $t.ReplicaReady}}yes{{else}}no{{end}}</dd>
-      {{with $t.ReplicaNext}}<dt>moving to</dt><dd>{{.}}</dd>{{end}}
-      <dt>last match</dt><dd>{{if $t.ReplicaSyncedAt.IsZero}}<span class="dim">ask its node</span>{{else}}{{ago $t.ReplicaSyncedAt}} ago{{end}}</dd>
-    </dl>
-  </div>
-  <div>
-    <h3>Spec</h3>
-    <dl>
-      <dt>port</dt><dd class="num">{{limit $t.Spec.Port}}</dd>
-      <dt>health</dt><dd class="mono">{{if $t.Spec.HealthPath}}{{$t.Spec.HealthPath}}{{else}}—{{end}}</dd>
-      <dt>data</dt><dd class="mono">{{if $t.Spec.DataPath}}{{$t.Spec.DataPath}}{{else}}—{{end}}</dd>
-      <dt>user</dt><dd class="mono">{{$t.Spec.User}}</dd>
-      <dt>root fs</dt><dd>{{if $t.Spec.WritableRoot}}writable{{else}}read-only{{end}}</dd>
-    </dl>
-  </div>
-  <div>
-    <h3>Limits</h3>
-    <dl>
-      <dt>memory</dt><dd class="num">{{limit $t.Spec.Limits.MemoryMB}} MB</dd>
-      <dt>cpus</dt><dd class="num">{{limit $t.Spec.Limits.CPUs}}</dd>
-      <dt>pids</dt><dd class="num">{{limit $t.Spec.Limits.PIDs}}</dd>
-      <dt>disk</dt><dd class="num">{{limit $t.Spec.Limits.DiskGB}} GB</dd>
-    </dl>
+<section class="near">
+  <div class="stats">
+    {{with $d.Usage}}{{with .Memory}}
+    <div class="stat"><div class="caps">Memory</div><div class="v">{{.MemoryText}}{{with .MemoryLimit}} <small>of {{.}}</small>{{end}}</div>{{if .MemoryLimit}}{{template "bar" .Memory}}{{end}}</div>
+    <div class="stat"><div class="caps">CPU</div><div class="v">{{.CPUText}}{{with $d.Usage.CPULimit}} <small>of {{.}} {{if eq . "1"}}core{{else}}cores{{end}}</small>{{end}}</div>{{if $d.Usage.CPULimit}}{{template "bar" .CPU}}{{end}}</div>
+    {{end}}
+    <div class="stat"><div class="caps">Requests/min</div><div class="v">{{.Requests}}{{if ne .Errors "0"}} <small>{{.Errors}} {{if eq .Errors "1"}}error{{else}}errors{{end}}</small>{{end}}</div></div>
+    <div class="stat"><div class="caps">Response, p95</div><div class="v">{{.Wait}}</div></div>
+    {{with .DataText}}<div class="stat"><div class="caps">Data</div><div class="v">{{.}}{{with $d.Usage.DataLimit}} <small>of {{.}}</small>{{end}}</div>{{with $d.Usage.Data}}{{template "bar" .}}{{end}}</div>{{end}}
+    {{else}}
+    <div class="stat"><div class="caps">Memory limit</div><div class="v">{{limit $t.Spec.Limits.MemoryMB}} <small>MB</small></div></div>
+    <div class="stat"><div class="caps">CPU limit</div><div class="v">{{limit $t.Spec.Limits.CPUs}} <small>cores</small></div></div>
+    {{end}}
+    <div class="stat"><div class="caps">Copy</div><div class="v">{{if $t.Archived}}<span class="faint">—</span>{{else}}{{template "copy" $d.Row}}{{end}}</div>
+      {{if not $t.ReplicaSyncedAt.IsZero}}<div class="dim small">matched {{ago $t.ReplicaSyncedAt}} ago</div>{{end}}</div>
   </div>
 </section>
 
 {{with $d.Usage}}
 <section>
-  <div class="head"><h2>Use, last 24 hours</h2>{{with .DataText}}<span class="dim">data {{.}}</span>{{end}}</div>
+  <div class="head"><h2>Use, last 24 hours</h2></div>
   <div class="charts">{{range .Charts}}{{template "line" .}}{{end}}</div>
 </section>
 {{end}}
+
+<section>
+  <div class="head"><h2>Container</h2></div>
+  <dl class="tiles">
+    <div><dt>image</dt><dd class="mono" title="{{$t.Spec.Image}}">{{short $t.Spec.Image}}</dd></div>
+    {{with $t.Status}}
+    <div><dt>phase</dt><dd>{{.Phase}}{{if not .Healthy}}, not healthy{{end}}</dd></div>
+    <div><dt>restarts</dt><dd>{{.Restarts}}</dd></div>
+    {{with .LastExit}}<div class="span"><dt>last exit</dt><dd>{{.}}</dd></div>{{end}}
+    {{with .Message}}<div class="span"><dt>message</dt><dd>{{.}}</dd></div>{{end}}
+    {{with .Warning}}<div class="span"><dt>warning</dt><dd>{{.}}</dd></div>{{end}}
+    <div><dt>checked</dt><dd>{{ago .CheckedAt}} ago</dd></div>
+    {{else}}
+    <div class="span"><dt>status</dt><dd class="dim">{{if $t.Archived}}archived: runs nowhere{{else}}its node did not answer{{end}}</dd></div>
+    {{end}}
+    <div><dt>port</dt><dd>{{limit $t.Spec.Port}}</dd></div>
+    <div><dt>health check</dt><dd class="mono">{{if $t.Spec.HealthPath}}{{$t.Spec.HealthPath}}{{else}}—{{end}}</dd></div>
+    <div><dt>data at</dt><dd class="mono">{{if $t.Spec.DataPath}}{{$t.Spec.DataPath}}{{else}}—{{end}}</dd></div>
+    <div><dt>runs as</dt><dd class="mono">{{$t.Spec.User}}</dd></div>
+    <div><dt>root fs</dt><dd>{{if $t.Spec.WritableRoot}}writable{{else}}read-only{{end}}</dd></div>
+    <div><dt>limits</dt><dd>{{limit $t.Spec.Limits.MemoryMB}} MB · {{limit $t.Spec.Limits.CPUs}} cpu · {{limit $t.Spec.Limits.PIDs}} pids · {{limit $t.Spec.Limits.DiskGB}} GB</dd></div>
+    <div><dt>generation</dt><dd>{{$t.Generation}}</dd></div>
+  </dl>
+</section>
 
 <section>
   <div class="head"><h2>Environment</h2></div>

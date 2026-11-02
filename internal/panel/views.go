@@ -204,7 +204,9 @@ const activityEvents = 1000
 type tenantData struct {
 	Tenant         api.Tenant
 	State, Replica tag
-	Events         []store.Event
+	// Row is the tenant as the overview's table has it, for its copy.
+	Row    tenantRow
+	Events []store.Event
 	// Activity counts its events of the last fortnight, by day.
 	Activity activity
 	// Usage is its last day, drawn; nil if it was not measured.
@@ -244,6 +246,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	}
 	data := tenantData{Tenant: t, State: tenantState(t), Replica: replicaState(t, len(nodes.Nodes) > 1), Events: events[:min(len(events), 30)],
 		Activity: activityOf(events, s.now(), 14*24*time.Hour, 24*time.Hour, len(events) < activityEvents, dayLabel), Usage: use}
+	data.Row = tenantRow{Tenant: t, State: data.State, Replica: data.Replica}
 	if !t.Archived() && !t.Spec.Suspended {
 		data.Problem, data.Broken = tenantProblem(t, data.State)
 		if data.Problem != "" {

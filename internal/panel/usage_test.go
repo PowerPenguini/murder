@@ -25,7 +25,7 @@ func TestUsePages(t *testing.T) {
 		}
 	}
 	_, page = get(t, server.URL+"/tenants/baltic-freight")
-	for _, want := range []string{"Use, last 24 hours", "limit 256 MB", "Response time, 95th percentile", `class="linechart"`, "data 1.4 GB of 10 GB"} {
+	for _, want := range []string{"Use, last 24 hours", "limit 256 MB", "Response time, 95th percentile", `class="linechart"`, ">Data</div>", "1.4 GB <small>of 10 GB</small>"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the tenant's page lacks %q:\n%s", want, page)
 		}

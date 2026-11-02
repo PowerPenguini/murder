@@ -284,3 +284,16 @@ div.logs > div[hidden] { display: none; }
 table.tight td { white-space: nowrap; }
 table.tight svg.bar { width: 90px; }
 .barline .num { white-space: nowrap; }
+
+/* ── a tenant's first screen: its measures, then its container's facts ── */
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 20px 24px; }
+.stat .caps { color: var(--dim); }
+.stat .v { font-size: 20px; font-weight: 500; margin: 6px 0 8px; }
+.stat .v small { font-size: 13px; color: var(--dim); font-weight: 400; }
+.stat svg.bar { width: 100%; max-width: 180px; }
+.small { font-size: 12.5px; }
+dl.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 16px 32px; margin: 0; }
+dl.tiles > div { min-width: 0; }
+dl.tiles > div.span { grid-column: span 2; }
+dl.tiles dt { font-weight: 300; text-transform: uppercase; letter-spacing: 0.14em; font-size: 11px; color: var(--dim); margin-bottom: 4px; }
+dl.tiles dd { margin: 0; overflow-wrap: anywhere; }
