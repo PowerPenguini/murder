@@ -371,9 +371,9 @@ func (a *agentBackups) RunNow(ctx context.Context) ([]api.BackupResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	answers := make([]api.BackupResult, len(results))
-	for i, r := range results {
-		answers[i] = api.BackupResult{Tenant: r.Tenant, Key: r.Key, Size: r.Size, Error: r.Error}
+	var answers []api.BackupResult
+	for _, r := range results {
+		answers = append(answers, api.BackupResult{Tenant: r.Tenant, Key: r.Key, Size: r.Size, Error: r.Error})
 	}
 	return answers, nil
 }

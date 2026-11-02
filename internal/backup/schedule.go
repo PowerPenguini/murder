@@ -99,6 +99,9 @@ type tenantData interface {
 	Dataset(tenant string) string
 }
 
+// The volume driver backups run with gives a scheduler what it needs.
+var _ tenantData = volume.ZFS{}
+
 // NewScheduler makes a scheduler; Run runs it.
 func NewScheduler(c SchedulerConfig) *Scheduler {
 	leader := c.Leader

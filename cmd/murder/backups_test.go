@@ -76,7 +76,7 @@ func TestBackupsThatCannotBeSetUpWaitForAFix(t *testing.T) {
 	}
 	var page strings.Builder
 	a.WriteMetrics(metrics.NewWriter(&page))
-	if !strings.Contains(page.String(), "murder_backups_ready 0") {
+	if !strings.Contains(page.String(), "\nmurder_backups_ready 0\n") {
 		t.Fatalf("metrics:\n%s", page.String())
 	}
 }

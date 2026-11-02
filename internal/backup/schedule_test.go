@@ -103,7 +103,7 @@ func TestARunBacksUpThisNodesTenants(t *testing.T) {
 	}
 	var page strings.Builder
 	s.WriteMetrics(metrics.NewWriter(&page))
-	for _, want := range []string{"murder_backups_ready 1", `murder_tenant_backup_failing{tenant="acme"} 0`, `murder_tenant_backup_last_success_timestamp_seconds{tenant="acme"}`} {
+	for _, want := range []string{"\nmurder_backups_ready 1\n", `murder_tenant_backup_failing{tenant="acme"} 0`, `murder_tenant_backup_last_success_timestamp_seconds{tenant="acme"}`} {
 		if !strings.Contains(page.String(), want) {
 			t.Fatalf("metrics lack %s:\n%s", want, page.String())
 		}
@@ -132,18 +132,22 @@ func TestOnlyTheLeaderBacksTheStateUp(t *testing.T) {
 	}
 }
 
-// A tenant whose backup fails is reported failing, and keeps its older
-// backups.
+// A tenant whose backup fails is reported failing, and its older backups
+// stay, though the policy would thin them out once a new one is there.
 func TestAFailedBackupIsReported(t *testing.T) {
 	f := newFixture(t, Test)
 	state := &fakeState{node: "n1", dir: t.TempDir(), records: []store.Record{record("acme", "n1")}}
 	f.volumes.write(t, "acme", "db", "v1")
 	s := newScheduler(state, func() (*Backups, error) { return f.backups, nil }, nil)
-	if _, err := s.RunNow(context.Background()); err != nil {
-		t.Fatal(err)
+	for range 3 {
+		if _, err := s.RunNow(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.clock = f.clock.Add(time.Hour)
 	}
+	// A hundred days on, the policy keeps one of the three.
+	f.clock = f.clock.Add(100 * 24 * time.Hour)
 	f.store.failPut = errors.New("bucket gone")
-	f.clock = f.clock.Add(2 * time.Hour)
 	results, err := s.RunNow(context.Background())
 	if err != nil || len(results) != 1 || !strings.Contains(results[0].Error, "bucket gone") {
 		t.Fatalf("results %+v, %v", results, err)
@@ -153,8 +157,40 @@ func TestAFailedBackupIsReported(t *testing.T) {
 	if !strings.Contains(page.String(), `murder_tenant_backup_failing{tenant="acme"} 1`) {
 		t.Fatalf("metrics:\n%s", page.String())
 	}
-	if list, _ := f.backups.List(context.Background(), "acme"); len(list) != 1 {
+	if list, _ := f.backups.List(context.Background(), "acme"); len(list) != 3 {
 		t.Fatalf("backups after a failed one: %v", list)
+	}
+	// Once a backup works again, the old ones are thinned out.
+	f.store.failPut = nil
+	if _, err := s.RunNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := f.backups.List(context.Background(), "acme"); len(list) >= 3 {
+		t.Fatalf("backups after one worked again: %v", list)
+	}
+}
+
+// The leader thins out the backups of tenants no longer in the state as
+// the policy says, keeping the newest.
+func TestBackupsOfPurgedTenantsAreThinnedOut(t *testing.T) {
+	f := newFixture(t, Test)
+	state := &fakeState{node: "n1", dir: t.TempDir(), records: []store.Record{record("gone", "n1")}}
+	f.volumes.write(t, "gone", "db", "v1")
+	s := newScheduler(state, func() (*Backups, error) { return f.backups, nil }, nil)
+	for range 3 {
+		if _, err := s.RunNow(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.clock = f.clock.Add(time.Hour)
+	}
+	state.records = nil
+	f.clock = f.clock.Add(100 * 24 * time.Hour)
+	if _, err := s.RunNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := f.backups.List(context.Background(), "gone")
+	if len(list) == 0 || len(list) >= 3 || !list[len(list)-1].At.Equal(f.clock.Add(-100*24*time.Hour-time.Hour)) {
+		t.Fatalf("backups of a purged tenant: %v", list)
 	}
 }
 
@@ -219,6 +255,13 @@ func TestABackupReplacesOnlyAnArchivedTenantOfThisNode(t *testing.T) {
 		t.Fatalf("beside a run: %v", err)
 	}
 	<-a.running
+	// A caller that gives up while the reconciler's lock is waited for
+	// replaces nothing.
+	waiting, cancel = context.WithCancel(ctx)
+	a.exclusive = func(fn func() error) error { cancel(); return fn() }
+	if _, err := a.ReplaceTenant(waiting, "acme", "murder-copy-acme-restore-3"); !errors.Is(err, context.Canceled) || len(volumes.replaced) != 1 {
+		t.Fatalf("given up under the lock: %v, replaced %v", err, volumes.replaced)
+	}
 }
 
 // A tenant another node runs, or that moves away, keeps its data.
@@ -262,7 +305,7 @@ func TestBackupsThatCannotBeSetUpWaitForAFix(t *testing.T) {
 	}
 	var page strings.Builder
 	a.WriteMetrics(metrics.NewWriter(&page))
-	if !strings.Contains(page.String(), "murder_backups_ready 0") {
+	if !strings.Contains(page.String(), "\nmurder_backups_ready 0\n") {
 		t.Fatalf("metrics:\n%s", page.String())
 	}
 	setUpErr = nil
@@ -271,12 +314,12 @@ func TestBackupsThatCannotBeSetUpWaitForAFix(t *testing.T) {
 	}
 	page.Reset()
 	a.WriteMetrics(metrics.NewWriter(&page))
-	if !strings.Contains(page.String(), "murder_backups_ready 1") {
+	if !strings.Contains(page.String(), "\nmurder_backups_ready 1\n") {
 		t.Fatalf("metrics:\n%s", page.String())
 	}
 	// Verifications wait a run after backups start, and for the identity.
-	if time.Until(a.verified.Add(a.verify)) < 50*time.Minute {
-		t.Fatalf("the first verification at %v, not a run after backups start", a.verified.Add(a.verify))
+	if first := time.Until(a.verified.Add(a.verify)); first < 50*time.Minute || first > time.Hour {
+		t.Fatalf("the first verification in %v, not a run after backups start", first)
 	}
 	if a.loadIdentity() {
 		t.Fatal("a missing identity read")
