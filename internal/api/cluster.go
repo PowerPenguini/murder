@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	"github.com/PowerPenguini/murder/internal/cluster"
+	"github.com/PowerPenguini/murder/internal/failover"
+	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 )
 
@@ -20,6 +22,8 @@ type Cluster interface {
 	Remove(ctx context.Context, node, actor string) error
 	// StatusOn decodes the status of a tenant node runs into out.
 	StatusOn(ctx context.Context, node, tenant string, out any) error
+	// Ping reports whether node answers.
+	Ping(ctx context.Context, node string) error
 }
 
 // JoinRequest asks the node to join the cluster of the node at Peer.
@@ -38,6 +42,7 @@ func (s *Server) clusterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/cluster/bootstrap", s.bootstrap)
 	mux.HandleFunc("POST /v1/cluster/join", s.join)
 	mux.HandleFunc("DELETE /v1/cluster/nodes/{name}", s.removeNode)
+	mux.HandleFunc("POST /v1/cluster/nodes/{name}/failover", rootOnly(s.failOver))
 }
 
 var errNoCluster = statusError{http.StatusConflict, errors.New(`this node is not set up for a cluster: add "cluster:" to its config and restart the agent`)}
@@ -97,6 +102,28 @@ func (s *Server) removeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// failOver runs a node's tenants from their replicas, once an operator has
+// made sure the node is powered off; refused while it answers.
+func (s *Server) failOver(w http.ResponseWriter, r *http.Request) {
+	if s.cluster == nil {
+		writeError(w, errNoCluster)
+		return
+	}
+	outcome, err := failover.ManualFailOver(r.Context(), s.store, s.cluster.Ping, r.PathValue("name"), actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, outcome)
+}
+
+// FailOver runs a powered-off node's tenants from their replicas.
+func (c *Client) FailOver(ctx context.Context, node string) (store.FailedOver, error) {
+	var outcome store.FailedOver
+	err := c.do(ctx, http.MethodPost, "/v1/cluster/nodes/"+node+"/failover", nil, &outcome)
+	return outcome, err
 }
 
 // ClusterStatus returns the node's view of its cluster.

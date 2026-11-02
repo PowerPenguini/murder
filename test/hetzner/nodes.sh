@@ -11,6 +11,10 @@
 #   nodes.sh upgrade            build Murder and upgrade the cluster with it
 #   nodes.sh load SECONDS       read every tenant through every edge, count failures
 #   nodes.sh status             the cluster and its tenants as n1 sees them
+#   nodes.sh counter TENANT S   write a counter to a tenant for S seconds: outages, writes lost
+#   nodes.sh poweroff NODE      power a node off through Hetzner's API, as if it died
+#   nodes.sh poweron NODE       power it on again
+#   nodes.sh partition NODE     cut a node off the private network; it keeps running
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -88,6 +92,13 @@ edge:
 cluster:
   address: $(private_ip "$node"):7400
   dir: /var/lib/murder/cluster
+EOF
+  # Automatic failover with the project's token, unless FAILOVER=0.
+  if [[ ${FAILOVER:-1} == 1 ]]; then
+    printf '  failover:\n    hetzner:\n      tokenFile: /etc/murder/hcloud.token\n      servers:\n'
+    for name in $(names); do printf '        %s: murder-test-%s\n' "$name" "$name"; done
+  fi
+  cat <<EOF
 defaults: {memoryMB: 128, cpus: 1, pids: 256, diskGB: 2}
 reconcileInterval: 10s
 EOF
@@ -133,6 +144,11 @@ install_on() {
   if [[ -s $STATE/backup/s3.access ]]; then
     put "$node" /etc/murder/ "$STATE/backup/s3.access" "$STATE/backup/s3.secret"
     on "$node" 'chmod 600 /etc/murder/s3.access /etc/murder/s3.secret'
+  fi
+  # The token goes over stdin, never on a command line.
+  if [[ ${FAILOVER:-1} == 1 ]]; then
+    [[ -n ${HCLOUD_TOKEN:-} ]] || die "failover needs HCLOUD_TOKEN (or FAILOVER=0)"
+    printf '%s' "$HCLOUD_TOKEN" | on "$node" 'umask 077; cat > /etc/murder/hcloud.token'
   fi
   on "$node" 'set -e; cd /tmp/murder-test
     install -m 0644 murder-*.service murder-backup.timer /etc/systemd/system/
@@ -281,6 +297,41 @@ cmd_load() {
   fi
 }
 
+# hcloud calls Hetzner's API with the token from stdin, not the command line.
+hcloud() {
+  local method=$1 path=$2
+  printf 'Authorization: Bearer %s\n' "$HCLOUD_TOKEN" | curl -sS -f -X "$method" -H @- "https://api.hetzner.cloud/v1$path"
+}
+
+server_id() {
+  hcloud GET "/servers?name=murder-test-$1" | jq -r '.servers[0].id // empty'
+}
+
+cmd_power() {
+  local action=$1 node=$2 id
+  id=$(server_id "$node"); [[ -n $id ]] || die "no server murder-test-$node"
+  log "$action $node (server $id) through Hetzner's API"
+  hcloud POST "/servers/$id/actions/$action" > /dev/null
+}
+
+# Cuts the node off the private network, where the cluster talks; it keeps
+# running and serving its tenants over its public address.
+cmd_partition() {
+  local node=$1 address
+  address=$(private_ip "$node"); [[ -n $address ]] || die "no private address of $node"
+  log "cutting $node off the private network ($address)"
+  on "$node" "dev=\$(ip -o -4 addr show | awk -v a=$address '\$4 ~ \"^\"a\"/\" {print \$2}'); [ -n \"\$dev\" ] && ip link set \"\$dev\" down && echo \"down: \$dev\""
+}
+
+cmd_counter() {
+  local tenant=$1 seconds=${2:-120} pairs="" client
+  for node in $(names); do pairs+="$node=$(public_ip "$node") "; done
+  client=$(tofu -chdir="$HERE" output -raw client 2>/dev/null || true)
+  [[ -n $client ]] || die "the counter runs on the client server"
+  scp -q "${SSH_OPTS[@]}" "$HERE/counter.sh" "root@$client:/root/counter.sh"
+  ssh "${SSH_OPTS[@]}" "root@$client" /root/counter.sh "$seconds" "$DOMAIN" "$tenant" "'$pairs'"
+}
+
 cmd_status() {
   on "${STATUS_FROM:-n2}" 'murder cluster status; echo; murder tenant list'
 }
@@ -296,6 +347,10 @@ case $cmd in
   upgrade) cmd_upgrade ;;
   image) cmd_image "${1:?archive}" ;;
   load) cmd_load "${1:-60}" ;;
+  counter) cmd_counter "${1:?tenant}" "${2:-120}" ;;
+  poweroff) cmd_power poweroff "${1:?node}" ;;
+  poweron) cmd_power poweron "${1:?node}" ;;
+  partition) cmd_partition "${1:?node}" ;;
   ssh) node=${1:?node}; shift; on "$node" "$@" ;;
-  *) sed -n 2,14p "$0" >&2; exit 2 ;;
+  *) sed -n 2,18p "$0" >&2; exit 2 ;;
 esac

@@ -143,24 +143,41 @@ The Raft leader probes every other node's cluster port every 2 s, with a 2 s
 timeout. A node that has not answered for `failover.after` (30 s) counts as
 dead. Then the leader:
 
-1. **Powers the node off** through the provider's API. On Hetzner Cloud that
-   means finding the server by the node's name (or a configured server name),
-   calling `POST /servers/{id}/actions/poweroff`, then reading
-   `GET /servers/{id}` until its status is `off`. That read is the
-   confirmation; it is tried for 2 minutes.
-2. **Waits** until at least 60 s have passed since the node last answered.
-3. **Writes `FailOver(node)`.** The replica nodes' reconcilers see tenants of
+1. **Checks there is something to run elsewhere.** If none of the node's
+   tenants has a ready copy on a node the leader hears, the node is not
+   powered off. After 5 minutes of silence it is marked failed: the copies
+   it keeps go to other nodes, and its tenants stay where they are. A
+   shorter pause keeps its copies.
+2. **Powers the node off** through the provider's API:
+   - On Hetzner Cloud, it finds the server by the node's name (or a
+     configured server name) and checks that the server has the node's
+     private address. A wrong name never powers off, or confirms off,
+     another machine.
+   - It then calls `POST /servers/{id}/actions/poweroff`, and reads
+     `GET /servers/{id}` until the status is `off`. That read is the
+     confirmation. It is tried for up to 3 minutes, and a failed read is
+     simply tried again.
+3. **Waits** until at least 60 s have passed since the node last answered.
+4. **Checks again**, and stops if the node answered meanwhile, or if the
+   provider no longer reports it off.
+5. **Writes `FailOver(node)`.** The replica nodes' reconcilers see tenants of
    their own, mount the datasets (`canmount=on`) and start the containers. The
    edges route to them as soon as the state changes.
 
 **What the leader never does:**
 
-- act while changes are frozen for an upgrade (`murder upgrade` restarts
-  agents on purpose);
-- act without a configured provider; then the operator runs
-  `murder cluster failover NODE -powered-off` after checking the node is off;
-- fence two nodes at once;
-- fence the node it runs on.
+- **Act while it hears fewer than a majority of the nodes, itself
+  included.** A leader whose own probes fail may be the node that is cut
+  off. Without this rule, it would power off the others one after another.
+- **Act on a node that is away** (`awayUntil`). An agent that stops cleanly,
+  as for a reboot, marks its node away for 10 minutes, and clears the mark
+  once it is back and caught up. An agent that crashes leaves no mark.
+- **Act while changes are frozen for an upgrade.** `murder upgrade`
+  restarts agents on purpose.
+- **Act without a configured provider.** The operator then runs
+  `murder cluster failover NODE -powered-off` after checking the node is
+  off.
+- **Fence two nodes at once, or the node it runs on.**
 
 A new leader starts counting from zero. So if the leader itself died, its
 tenants fail over up to one election plus 30 s later.
@@ -168,12 +185,23 @@ tenants fail over up to one election plus 30 s later.
 **When no power-off can be confirmed** (API down, wrong token, server not
 found), nothing is promoted. The leader:
 
-- logs an error every minute;
-- sets `murder_failover_blocked{node} 1`;
+- logs an error, tries again every minute, and sets
+  `murder_failover_blocked{node} 1`;
 - leaves the operator to run `murder cluster failover NODE -powered-off`.
 
-**Tenants without a replica** (one node left, or replication never caught
-up) are not promoted. The audit log and metrics name them.
+**Tenants without a ready replica** (one node left, or replication never
+caught up) are not promoted, and get no new replica while their node is
+failed. The audit log names them.
+
+**Limits:**
+
+- **Two nodes:** losing either leaves no majority, so no failover can be
+  written, automatic or manual.
+- **A freeze after the power-off:** if a freeze begins after the leader
+  powered the node off, its tenants wait until the thaw.
+- **A dead agent on a live host:** a host whose agent stays down for 30 s
+  without having stopped cleanly is powered off, even though its tenants
+  were still running.
 
 ## A dead node that comes back
 
@@ -240,6 +268,36 @@ cluster:
   6. No provider token: no promotion, the blocked metric, then a manual
      `cluster failover -powered-off`.
 - **Afterwards**, every test server is deleted.
+
+### Measured on Hetzner, 2 November 2026
+
+Three cpx02 nodes (1 vCPU, 1 GB) in fsn1, nbg1 and hel1 and a client in nbg1; the counter
+writes about 5 times a second, alternating between the nodes' edges.
+
+| Scenario | Clients cut off | Acknowledged writes lost |
+| --- | --- | --- |
+| Steady state | none; replica lag 1–13 s | none |
+| Hard power-off of a node | 56.7 s | 31 (about 6 s) |
+| Partition of a node that keeps serving | 34.9 s | 39 (acknowledged by the cut-off node until it was off) |
+| Power-off of the node running every tenant | 55.8 s | 3 |
+| Power-off of the leader | 64.1 s (new leader after 4 s) | 3 |
+| Partition of the leader | 27.1 s | 48 (as above) |
+| Move onto the replica's node | none | none |
+| No provider, then `cluster failover -powered-off` | until the operator acts | none |
+
+In every power-off the leader called Hetzner's API about 32 s after the
+node's last answer, had the power-off confirmed within 10 s, and promoted
+60 s after the last answer. A cut-off leader powered off no one. Nodes
+powered on again put their old data aside (it held the writes acknowledged
+in isolation), served nothing stale, and rejoined. Rolling upgrades with
+failover enabled powered off no one.
+
+The tests found, and these PRs fix: sends to an unreachable replica that
+held up all replication and placement for over two minutes (connections
+between nodes now time out); a node back from the dead that sent tenants
+from its old state before catching up; a replica refusing a copy it had
+just been given, before applying that; and the blocked-failover alert
+staying on after an operator's failover.
 
 ## Delivery
 

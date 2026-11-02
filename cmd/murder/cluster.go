@@ -25,6 +25,11 @@ const clusterUsage = `Usage: murder cluster <command> [arguments]
   replace <old> <new> move every tenant of old to new, then take old out of
                       the cluster: a server swapped for a bigger or smaller
                       one, which joined first; switch it off afterwards
+  failover <node> -powered-off
+                      run the tenants of node, which you made sure is
+                      powered off, from their replicas; refused while it
+                      answers (with cluster.failover set, the leader does
+                      this by itself, after powering the node off)
 
 A node joins with the cluster's master key: copy /etc/murder/master.key
 from a node of the cluster before "murder init". Every node runs tenants.
@@ -39,6 +44,7 @@ func runCluster(args []string) error {
 	socket := socketPath(flags)
 	asJSON := flags.Bool("json", false, "print JSON")
 	to := flags.String("to", "", "with drain: the node to move the tenants to")
+	poweredOff := flags.Bool("powered-off", false, "with failover: the node is powered off, checked by you")
 	rest, err := parseInterspersed(flags, args[1:])
 	if err != nil {
 		return err
@@ -66,6 +72,19 @@ func runCluster(args []string) error {
 			return err
 		}
 		fmt.Fprintf(stdout, "node %s runs no tenant and left the cluster: point its DNS records at %s and switch it off (its edge serves the tenants it knew until then, not ones created or moved since)\n", rest[0], rest[1])
+		return nil
+	case command == "failover" && len(rest) == 1:
+		if !*poweredOff {
+			return fmt.Errorf("failover runs node %s's tenants elsewhere: make sure it is powered off (its tenants must not run twice), then add -powered-off", rest[0])
+		}
+		outcome, err := client.FailOver(ctx, rest[0])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%d tenants of node %s run from their replicas: %v\n", len(outcome.Promoted), rest[0], outcome.Promoted)
+		if len(outcome.Stranded) > 0 {
+			fmt.Fprintf(stdout, "%d had no replica and stay on %s: %v\n", len(outcome.Stranded), rest[0], outcome.Stranded)
+		}
 		return nil
 	case command == "remove" && len(rest) == 1:
 		if err := client.RemoveNode(ctx, rest[0]); err != nil {

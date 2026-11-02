@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/failover"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/replicate"
@@ -30,6 +31,8 @@ type agentMetrics struct {
 	backups *agentBackups
 	// replicator is nil outside a cluster of ZFS nodes.
 	replicator *replicate.Replicator
+	// monitor is nil outside a cluster.
+	monitor *failover.Monitor
 }
 
 func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +101,9 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if m.replicator != nil {
 		m.replicator.WriteMetrics(out)
+	}
+	if m.monitor != nil {
+		m.monitor.WriteMetrics(out)
 	}
 	_ = out.Err()
 }

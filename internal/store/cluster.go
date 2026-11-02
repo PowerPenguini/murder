@@ -568,8 +568,10 @@ func (s *SQLite) StartMove(name, target, actor string) (Record, error) {
 		case target == record.Node:
 			return fmt.Errorf("%w: tenant %s runs on node %s already", ErrConflict, name, target)
 		}
-		if _, member := current.nodes[target]; !member {
+		if node, member := current.nodes[target]; !member {
 			return fmt.Errorf("node %s: %w", target, ErrNotFound)
+		} else if node.Failed() {
+			return fmt.Errorf("%w: node %s failed and has not answered since", ErrConflict, target)
 		}
 		// A move onto the replica's node writes over its copy: it is not
 		// whole again until replication says so.

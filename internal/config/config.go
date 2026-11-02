@@ -146,6 +146,28 @@ type Cluster struct {
 	Address string `yaml:"address"`
 	// Dir holds the cluster's log and snapshots.
 	Dir string `yaml:"dir"`
+	// Failover, if set, has the leader power a dead node off through its
+	// provider and run its tenants from their replicas.
+	Failover *Failover `yaml:"failover"`
+}
+
+// Failover runs a dead node's tenants from their replicas.
+type Failover struct {
+	// After is how long a node goes unanswered before it counts as dead;
+	// 30 s by default.
+	After Duration `yaml:"after"`
+	// Hetzner powers nodes off through the Hetzner Cloud API.
+	Hetzner *HetznerFence `yaml:"hetzner"`
+}
+
+// HetznerFence reaches the Hetzner Cloud project of the nodes.
+type HetznerFence struct {
+	// TokenFile holds a read and write API token of the project.
+	TokenFile string `yaml:"tokenFile"`
+	// Servers names each node's server, where it is not the node's name.
+	Servers map[string]string `yaml:"servers"`
+	// Endpoint is the API's base URL, for tests; Hetzner's if empty.
+	Endpoint string `yaml:"endpoint"`
 }
 
 // Volumes selects the data volume driver.
@@ -239,6 +261,9 @@ func Parse(data []byte) (Agent, error) {
 		if agent.Cluster.Dir == "" {
 			agent.Cluster.Dir = "/var/lib/murder/cluster"
 		}
+		if f := agent.Cluster.Failover; f != nil && f.After.Duration == 0 {
+			f.After.Duration = 30 * time.Second
+		}
 	}
 	if b := agent.Backups; b != nil {
 		day := 24 * time.Hour
@@ -272,6 +297,9 @@ func (a Agent) Validate() error {
 	}
 	if a.Backups != nil {
 		problems = append(problems, a.Backups.problems(a.Volumes.Driver)...)
+	}
+	if a.Cluster != nil && a.Cluster.Failover != nil && a.Volumes.Driver != "zfs" {
+		problems = append(problems, "cluster.failover needs the zfs volume driver: only ZFS nodes keep copies of tenants to run them from")
 	}
 	switch a.Volumes.Driver {
 	case "dir":
@@ -400,6 +428,16 @@ func (c Cluster) problems() []string {
 	}
 	if !strings.HasPrefix(c.Dir, "/") {
 		problems = append(problems, "cluster.dir must be an absolute path")
+	}
+	if f := c.Failover; f != nil {
+		if f.After.Duration < 10*time.Second {
+			problems = append(problems, "cluster.failover.after must be at least 10s: shorter, a busy node would be powered off")
+		}
+		if f.Hetzner == nil {
+			problems = append(problems, "cluster.failover needs a provider to power nodes off (hetzner); without one, fail a node over by hand: murder cluster failover NODE -powered-off")
+		} else if !strings.HasPrefix(f.Hetzner.TokenFile, "/") {
+			problems = append(problems, "cluster.failover.hetzner.tokenFile must be an absolute path")
+		}
 	}
 	return problems
 }

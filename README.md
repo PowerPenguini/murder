@@ -372,8 +372,72 @@ the policy of every container made by an older release in place, without
 a restart, when it starts. This applies to a node outside a cluster too:
 its tenants start with its agent after a reboot.
 
-How a dead node's tenants then run from their replicas is described in
-[docs/failover.md](docs/failover.md).
+### When a node dies
+
+The cluster's leader probes every node every 2 s. With `cluster.failover`
+set, it handles a node that has not answered for 30 s as follows:
+
+1. It powers the node off through the Hetzner Cloud API.
+2. It waits until Hetzner confirms the server is off, and until at least
+   60 s have passed since the node last answered.
+3. It runs the node's tenants from their replicas: each replica's node
+   mounts its copy and starts the tenant, and every edge routes to it.
+
+The tenants are away for about 70–90 s. They lose the writes of their last
+~15 s of replication, plus any taken until the power-off: up to about 60 s
+in the worst case.
+
+```yaml
+cluster:
+  address: 10.0.0.2:7400
+  failover:
+    hetzner:
+      tokenFile: /etc/murder/hcloud.token   # read/write token of the project
+```
+
+The leader never runs a tenant elsewhere unless the old node is confirmed
+off, so no tenant ever runs twice. When the power-off cannot be confirmed
+(Hetzner's API down, a wrong token, no server of the node's name), or
+without `cluster.failover`:
+
+- nothing happens except an error in the leader's log and
+  `murder_failover_blocked{node} 1`;
+- once you have made sure the node is off, run:
+
+```bash
+sudo murder cluster failover n2 -powered-off   # refused while n2 answers
+```
+
+Other rules:
+
+- **Majority:** the leader acts only while it hears a majority of the
+  nodes, itself included, so a leader that is itself cut off powers no one
+  off.
+- **Reboots:** an agent that stops cleanly, as for a reboot, marks its node
+  away for 10 minutes, and its node is not powered off meanwhile.
+- **Wrong server:** the Hetzner server must have the node's private
+  address. A wrong name never powers off, or confirms off, another machine.
+- **Last-moment check:** if the node answers again before its tenants move,
+  or is no longer off, they stay.
+- **Upgrades:** nothing fails over while changes are frozen for an
+  upgrade, which restarts agents on purpose.
+- **One at a time:** one node fails over at a time; three nodes keep a
+  majority with one down.
+- **No replica:** a tenant without a copy that holds its whole data stays
+  where it is. A dead node with no such tenant is not powered off; it is
+  only marked failed, so the copies it kept move elsewhere.
+- **Two nodes:** losing either leaves no majority, so nothing can fail over.
+- **A node that fails over:** it keeps no copies until it answers again.
+  Powered on again, it serves nothing it no longer runs and puts that data
+  aside.
+- **Clients:** the wildcard DNS name still points at the dead node too.
+  Browsers that try its address first wait for it before trying another,
+  until it is removed from DNS.
+- **The token:** it can power off and delete every server of its project,
+  so keep the cluster in a project of its own.
+
+The design, and why nodes do not stop their own tenants when cut off, is
+in [docs/failover.md](docs/failover.md).
 
 Nodes talk over one TLS port on the private network. A node proves it
 belongs to the cluster with a certificate of an authority derived from the
@@ -574,10 +638,10 @@ through Murder's real components:
 ## Known limits
 
 - **Tenants stay on their node until moved.** A tenant's data lives on the
-  node that runs it, with a copy on its replica (ZFS only); running
-  tenants from their replicas when a node fails comes next. Until a node
-  switched off returns, requests for its tenants fail within seconds (502)
-  on every other edge. Moving a tenant with the `dir` driver
+  node that runs it, with a copy on its replica (ZFS only). When a node
+  dies, its tenants fail with 502 on every other edge until they run from
+  their replicas, 70–90 s later with `cluster.failover`, or when an
+  operator fails the node over. Moving a tenant with the `dir` driver
   copies all its data twice, the second time while it is stopped; ZFS
   sends only what changed.
 - **Upgrades.** A node applies changes made by its own release and older

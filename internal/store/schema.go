@@ -9,8 +9,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 7 in place.
-const schemaVersion = 8
+// versions 4 to 8 in place.
+const schemaVersion = 9
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -83,7 +83,13 @@ CREATE TABLE images (
 CREATE TABLE nodes (
 	name       TEXT PRIMARY KEY,
 	address    TEXT NOT NULL UNIQUE,
-	created_at TEXT NOT NULL
+	created_at TEXT NOT NULL,
+	-- Set when the node's tenants failed over to their replicas, until it
+	-- answers again: it is given no copies meanwhile.
+	failed_at  TEXT,
+	-- Until then the node restarts on purpose, its agent stopped cleanly:
+	-- it is not failed over for not answering.
+	away_until TEXT
 ) STRICT;
 
 -- Sealed secret values, kept until a purge deletes the tenant.
@@ -198,6 +204,18 @@ func upgrade(db *sql.DB) error {
 		for _, statement := range []string{
 			`ALTER TABLE tenants ADD COLUMN replica TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE tenants ADD COLUMN replica_ready INTEGER NOT NULL DEFAULT 0 CHECK (replica_ready IN (0, 1))`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
+		}
+		version = 8
+	}
+	// Version 9 marks the nodes whose tenants failed over.
+	if version == 8 {
+		for _, statement := range []string{
+			`ALTER TABLE nodes ADD COLUMN failed_at TEXT`,
+			`ALTER TABLE nodes ADD COLUMN away_until TEXT`,
 		} {
 			if _, err := tx.Exec(statement); err != nil {
 				return err
