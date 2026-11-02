@@ -45,7 +45,7 @@ type Releaser interface {
 
 // Mover moves tenants away from this node.
 type Mover struct {
-	Store      store.Store
+	Store      State
 	Reconciler Releaser
 	Volumes    volume.Volumes
 	Peer       Peer

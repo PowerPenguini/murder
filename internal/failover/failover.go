@@ -32,7 +32,7 @@ type Fencer interface {
 
 // Monitor watches the other nodes from the cluster's leader.
 type Monitor struct {
-	Store store.Store
+	Store State
 	// Probe reports whether a node answers.
 	Probe func(ctx context.Context, node string) error
 	// Leader reports whether this node leads the cluster.
@@ -433,7 +433,7 @@ func (m *Monitor) wait(ctx context.Context, d time.Duration) error {
 
 // ManualFailOver fails a node over that an operator states is powered off;
 // it is refused while the node answers.
-func ManualFailOver(ctx context.Context, st store.Store, probe func(context.Context, string) error, node, actor string) (store.FailedOver, error) {
+func ManualFailOver(ctx context.Context, st State, probe func(context.Context, string) error, node, actor string) (store.FailedOver, error) {
 	check, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := probe(check, node); err == nil {

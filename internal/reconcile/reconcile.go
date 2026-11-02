@@ -81,7 +81,7 @@ type Config struct {
 
 // Reconciler drives the runtime towards the store's desired state.
 type Reconciler struct {
-	store   store.Store
+	store   State
 	runtime runtime.Runtime
 	volumes volume.Volumes
 	key     *secrets.Key
@@ -127,7 +127,7 @@ type Reconciler struct {
 }
 
 // New returns a reconciler. All dependencies are required.
-func New(st store.Store, rt runtime.Runtime, volumes volume.Volumes, key *secrets.Key, config Config, log *slog.Logger) *Reconciler {
+func New(st State, rt runtime.Runtime, volumes volume.Volumes, key *secrets.Key, config Config, log *slog.Logger) *Reconciler {
 	if config.StopTimeout == 0 {
 		config.StopTimeout = 30 * time.Second
 	}

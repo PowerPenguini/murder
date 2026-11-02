@@ -43,7 +43,7 @@ type Peer interface {
 // Replicator sends this node's tenants to their replicas, and keeps the
 // copies this node holds for other nodes as the state says.
 type Replicator struct {
-	Store   store.Store
+	Store   State
 	Volumes Volumes
 	Peer    Peer
 	Log     *slog.Logger
