@@ -537,3 +537,33 @@ func TestAReplicaCatchesUpBeforeRefusing(t *testing.T) {
 		t.Fatalf("the copy on n3: %+v", copy)
 	}
 }
+
+// While an upgrade freezes changes the leader gives no replicas, and logs
+// nothing for it; it does once changes thaw.
+func TestPlacementWaitsForTheThaw(t *testing.T) {
+	f := newFixture(t)
+	n1 := f.nodes["n1"]
+	f.change(t, func(st *store.SQLite) {
+		if _, err := st.Create(store.NewTenant{Name: "later", App: "web", Node: "n1"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Freeze("upgrade", "test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var logged strings.Builder
+	r, _ := f.replicator("n1")
+	r.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	r.Leader = func() bool { return true }
+	r.step(context.Background())
+	if record, _ := n1.store.Get("later"); record.Replica != "" || strings.Contains(logged.String(), "replicas") {
+		t.Fatalf("placed while frozen: %q; logged %s", record.Replica, logged.String())
+	}
+	if err := n1.store.Thaw("test"); err != nil {
+		t.Fatal(err)
+	}
+	r.step(context.Background())
+	if record, _ := n1.store.Get("later"); record.Replica == "" {
+		t.Fatal("not placed once thawed")
+	}
+}

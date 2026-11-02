@@ -119,7 +119,8 @@ func (r *Replicator) step(ctx context.Context) {
 		}
 		r.caughtUp = true
 	}
-	if r.Leader != nil && r.Leader() {
+	// An upgrade's freeze refuses changes: placement waits for the thaw.
+	if r.Leader != nil && r.Leader() && r.Store.Frozen() == "" {
 		if placed, err := r.Store.PlaceReplicas("murder"); err != nil {
 			r.Log.Warn("give tenants their replicas", "error", err)
 		} else if placed > 0 {
@@ -127,7 +128,7 @@ func (r *Replicator) step(ctx context.Context) {
 		}
 	}
 	r.Pass(ctx)
-	if err := r.Sweep(ctx); err != nil {
+	if err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
 		r.Log.Warn("tidy the copies on this node", "error", err)
 	}
 }
