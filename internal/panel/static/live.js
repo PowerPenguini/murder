@@ -12,7 +12,7 @@
     document.hidden ||
     document.querySelector(".once, [data-still], details[open]") ||
     (document.activeElement && document.activeElement.closest("form")) ||
-    [...document.querySelectorAll("input[type=text]")].some((input) => input.value !== "") ||
+    [...document.querySelectorAll("input[type=text], input[type=search], input[type=number]")].some((input) => input.value !== "" && input.defaultValue !== input.value) ||
     [...document.querySelectorAll("input[type=file]")].some((input) => input.files.length > 0) ||
     [...document.querySelectorAll("select")].some((select) => select.selectedIndex > 0 && !select.options[select.selectedIndex].defaultSelected) ||
     String(getSelection()) !== "";

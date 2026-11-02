@@ -1,9 +1,7 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}
-<div class="title">
-  <h1>{{$t.Spec.Name}}</h1>
-  <span class="st {{$d.State.Kind}}">{{$d.State.Label}}</span>
-</div>
-<p class="lead">{{$t.App}} on {{$t.Node}} · <a href="{{$t.URL}}">{{$t.Host}}</a></p>
+{{template "tenant-head" (head $t.Spec.Name $d.State "overview" .Acts .Edits)}}
+{{with $d.Problem}}<div class="problem{{if $d.Broken}} bad{{end}}">{{.}}{{if and $d.MemoryHigh $.Edits}} <a href="/tenants/{{$t.Spec.Name}}/settings">Raise its memory limit</a>{{end}}</div>{{end}}
+<p class="lead">Of app <a href="/apps/{{$t.App}}">{{$t.App}}</a>, on {{$t.Node}}, at <a href="{{$t.URL}}">{{$t.Host}}</a></p>
 
 {{if or .Acts .Edits}}
 <div class="actions">
@@ -30,9 +28,7 @@
       </details>
       {{end}}
     {{end}}
-    <a class="button" href="/tenants/{{$t.Spec.Name}}/logs">Logs</a>
   {{end}}
-  {{if .Edits}}<a class="button" href="/tenants/{{$t.Spec.Name}}/settings">Settings</a>{{end}}
   {{if .Acts}}
   <details class="drop">
     <summary class="button">More</summary>
@@ -40,13 +36,13 @@
       {{if $t.Archived}}
       <form method="post" class="stack"><input type="hidden" name="do" value="purge">
         <span class="hint">Purging deletes its data for good. Type its name.</span>
-        <input type="text" name="confirm" placeholder="{{$t.Spec.Name}}" aria-label="the tenant's name" autocomplete="off" required>
+        <input type="text" name="confirm" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="the tenant's name" autocomplete="off" required>
         <div><button type="submit" class="danger">Purge</button></div>
       </form>
       {{else}}
       <form method="post" class="stack"><input type="hidden" name="do" value="archive">
         <span class="hint">Archiving stops it serving; its data stays. Type its name.</span>
-        <input type="text" name="confirm" placeholder="{{$t.Spec.Name}}" aria-label="the tenant's name" autocomplete="off" required>
+        <input type="text" name="confirm" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="the tenant's name" autocomplete="off" required>
         <div><button type="submit" class="danger">Archive</button></div>
       </form>
       {{end}}

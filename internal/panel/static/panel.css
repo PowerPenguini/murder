@@ -231,3 +231,48 @@ svg.linechart .tick { font-family: var(--mono); font-size: 22px; fill: var(--dim
 svg.linechart rect:hover { fill: rgba(255, 255, 255, 0.04); }
 .barline.dim .num { color: var(--dim); }
 @media (max-width: 760px) { .charts { grid-template-columns: 1fr; } }
+
+/* ── what needs attention ── */
+ul.attention { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+ul.attention li { padding: 10px 0; border-bottom: 1px solid var(--line); }
+ul.attention li a { font-weight: 600; }
+ul.attention .st::before { margin-right: 12px; }
+p.calm { margin: 0; color: var(--dim); }
+p.calm .st::before { margin-right: 10px; }
+.problem { margin: 14px 0 0; padding: 12px 16px; border-left: 2px solid var(--fg); background: var(--raised); max-width: 80ch; }
+.problem.bad { font-weight: 600; }
+
+/* ── where a page is ── */
+nav.crumbs { display: flex; gap: 8px; color: var(--dim); font-size: 13px; margin-bottom: 10px; }
+nav.crumbs a { color: var(--dim); text-decoration: none; }
+nav.crumbs a:hover { color: var(--fg); }
+nav.tabs { display: flex; gap: 22px; margin: 18px 0 4px; border-bottom: 1px solid var(--line); }
+nav.tabs a { padding: 0 0 10px; text-decoration: none; color: var(--dim); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+nav.tabs a:hover { color: var(--fg); }
+nav.tabs a.on { color: var(--fg); border-bottom-color: var(--fg); }
+nav.tabs + .problem, nav.tabs + .lead { margin-top: 18px; }
+
+/* ── tables: a row is its link; a wide one scrolls on a phone ── */
+.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.scroll > table { min-width: 640px; }
+table.rows tbody tr { position: relative; }
+table.rows tbody tr:hover { background: var(--raised); }
+a.row-link { text-decoration: none; }
+a.row-link::after { content: ""; position: absolute; inset: 0; }
+.glyph-wrap { position: relative; z-index: 1; display: inline-block; }
+td.num-left { white-space: nowrap; font-variant-numeric: tabular-nums; }
+tr[hidden] { display: none; }
+
+/* ── inputs ── */
+input[type=number], input[type=search] {
+  background: transparent; color: var(--fg); border: 1px solid var(--line-strong); padding: 6px 10px;
+  font: inherit; font-size: 13px; font-weight: 400; line-height: 1.4; text-transform: none; letter-spacing: normal;
+}
+input[type=number]:focus, input[type=search]:focus { outline: none; border-color: var(--fg); }
+input:invalid:not(:placeholder-shown) { border-color: var(--fg); border-style: dashed; }
+button:disabled, button:disabled:hover { opacity: 0.4; cursor: not-allowed; background: transparent; color: var(--fg); border-color: var(--line-strong); }
+button.primary:disabled { background: var(--fg); color: var(--bg); }
+button.small, .button.small { padding: 3px 9px; font-size: 12.5px; }
+details.menu-text { display: inline-block; }
+details.menu-text > summary.button::after { display: none; }
+:focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }

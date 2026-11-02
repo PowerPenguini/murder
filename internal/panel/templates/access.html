@@ -42,7 +42,8 @@
         <summary class="button">Invite</summary>
         <div class="pop">
           <form method="post" action="/access" class="stack"><input type="hidden" name="do" value="invite">
-            <label class="field">Name <input type="text" name="name" placeholder="anna" aria-label="name" autocomplete="off" required></label>
+            <label class="field">Name <input type="text" name="name" placeholder="anna" aria-label="name" autocomplete="off" spellcheck="false" required maxlength="32" pattern="[a-z0-9]([a-z0-9._\-]{0,30}[a-z0-9])?" title="1 to 32 lowercase letters, digits, dots, dashes or underscores"></label>
+            <span class="hint">They get a link to open on a device in the tunnel, valid 24 hours: it adds their passkey.</span>
             <div><button type="submit" class="primary">Invite</button></div>
           </form>
         </div>
@@ -83,7 +84,8 @@
       <summary class="button">Add a device</summary>
       <div class="pop">
         <form method="post" action="/access" class="stack"><input type="hidden" name="do" value="add-device">
-          <label class="field">Name <input type="text" name="name" placeholder="anna-phone" aria-label="device name" autocomplete="off" required></label>
+          <label class="field">Name <input type="text" name="name" placeholder="anna-phone" aria-label="device name" autocomplete="off" spellcheck="false" required maxlength="32" pattern="[a-z0-9]([a-z0-9\-]{0,30}[a-z0-9])?" title="1 to 32 lowercase letters, digits and dashes"></label>
+          <span class="hint">You get a QR code for the WireGuard app, shown once.</span>
           <div><button type="submit" class="primary">Add</button></div>
         </form>
       </div>

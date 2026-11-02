@@ -1,6 +1,6 @@
 {{define "content"}}{{$d := .Data}}
-<div class="title"><h1>{{$d.Tenant}}</h1><span class="sub">last {{$d.Tail}} lines</span></div>
-<p class="lead"><a href="/tenants/{{$d.Tenant}}">Back</a> · <a href="?tail=2000">More lines</a></p>
+{{template "tenant-head" (head $d.Tenant nil "logs" true .Edits)}}
+<p class="lead">Its container's last {{$d.Tail}} lines, as they were when this page was opened. {{if lt $d.Tail 2000}}<a href="?tail=2000">The last 2000</a> · {{end}}<a href="">Read again</a></p>
 <section data-still class="near">
   <pre class="logs">{{if $d.Lines}}{{$d.Lines}}{{else}}Nothing written yet.{{end}}</pre>
 </section>

@@ -1,4 +1,5 @@
 {{define "content"}}{{$d := .Data}}{{$a := $d.App}}
+<nav class="crumbs" aria-label="where this is"><a href="/apps">Apps</a><span>/</span><span>{{$a.Name}}</span></nav>
 <div class="title"><h1>{{$a.Name}}</h1></div>
 <p class="lead">{{len $a.Tenants}} live tenants · changed {{ago $a.UpdatedAt}} ago · <a href="/events?app={{$a.Name}}">Events</a></p>
 
@@ -31,7 +32,7 @@
     <div class="pop">
       <form method="post" class="stack"><input type="hidden" name="do" value="delete">
         <span class="hint">No tenant runs it. Type its name.</span>
-        <input type="text" name="confirm" placeholder="{{$a.Name}}" aria-label="the app's name" autocomplete="off" required>
+        <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="the app's name" autocomplete="off" required>
         <div><button type="submit" class="danger">Delete the app</button></div>
       </form>
     </div>

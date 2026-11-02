@@ -24,6 +24,8 @@ const usageStep = 5 * time.Minute
 // tenantUsage is a tenant's day, drawn.
 type tenantUsage struct {
 	Charts []lineChart
+	// Memory is what it uses now against its limit.
+	Memory tenantUse
 	// Data is its data's size against its disk limit, if both are known.
 	Data     *meter
 	DataText string
@@ -70,6 +72,11 @@ func (s *Server) tenantUsage(ctx context.Context, name string) *tenantUsage {
 			return []float64{perSecond(p.DiskRead, p), perSecond(p.DiskWrite, p)}
 		}), 0, now, usageStep, throughput),
 	}}
+	u.Memory = tenantUse{MemoryText: size(float64(series.Now.Memory))}
+	if limit := series.Now.MemoryLimit; limit > 0 {
+		u.Memory.Memory = meterOf(int(series.Now.Memory>>20), int(limit>>20))
+		u.Memory.MemoryLimit = size(float64(limit))
+	}
 	if used := series.Now.DiskUsed; used >= 0 {
 		u.DataText = size(float64(used))
 		if limit := series.Now.DiskLimit; limit > 0 {
@@ -92,6 +99,8 @@ type tenantUse struct {
 	Memory, CPU         meter
 	MemoryText, CPUText string
 	Requests            string
+	// MemoryLimit says the limit, "" if none.
+	MemoryLimit string
 }
 
 // usageNow is the cluster's use now, by node and by tenant; nil maps when
@@ -117,6 +126,7 @@ func (s *Server) usageNow(ctx context.Context) (map[string]nodeUse, map[string]t
 			use := tenantUse{MemoryText: size(float64(t.Memory)), CPUText: cores(t.CPU), Requests: rate(float64(t.Requests))}
 			if t.MemoryLimit > 0 {
 				use.Memory = meterOf(int(t.Memory>>20), int(t.MemoryLimit>>20))
+				use.MemoryLimit = size(float64(t.MemoryLimit))
 			}
 			if t.CPULimit > 0 {
 				use.CPU = meterOf(int(t.CPU*1000), int(t.CPULimit*1000))

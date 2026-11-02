@@ -27,7 +27,7 @@
     <summary class="button">New app</summary>
     <div class="panel">
       <form method="post" action="/apps" class="stack">
-        <label class="field">Name <input type="text" name="name" value="{{$d.Name}}" placeholder="web" aria-label="the app's name" autocomplete="off" required class="short"></label>
+        <label class="field">Name <input type="text" name="name" value="{{$d.Name}}" placeholder="web" aria-label="the app's name" autocomplete="off" spellcheck="false" required class="short" maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end"></label>
         <label class="field"><span>Spec, as an app file of <code>murder app apply</code></span>
           <textarea name="file" rows="10" spellcheck="false" aria-label="the app's spec">{{$d.File}}</textarea></label>
         <div><button type="submit" class="primary">Create the app</button></div>

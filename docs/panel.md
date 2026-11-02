@@ -24,7 +24,14 @@ the audit log as `<person> via murder-panel`.
 - **Look:** black and white, quiet and sharp: lines instead of boxes, a
   state as a dot and a word, labels in light capitals, monospace for
   data (hashes, addresses, logs, YAML, figures), row actions in a
-  "⋯" menu and dangerous ones behind a typed name. Charts are SVG drawn by
+  "⋯" menu and dangerous ones behind a typed name, their button waiting
+  for it (`forms.js`; the agent checks again). The overview leads with
+  what needs attention, said in words: a node failed or not answering, a
+  tenant unhealthy or failed and why, one near its memory limit, one
+  without a copy; a tenant's page says what is wrong with it and where to
+  fix it. A tenant's pages share a head: where it is, its state, and its
+  Overview, Logs and Settings. A form sent once is not sent again while it
+  works; wide tables scroll on a phone. Charts are SVG drawn by
   the server (`charts.go`) in one grey ramp, validated as an ordinal ramp on
   the page, the brightest step kept for what needs attention: live tenants
   by state, each node's tenants, copies and reserved memory, where each

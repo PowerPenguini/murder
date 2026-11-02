@@ -108,6 +108,8 @@ type overviewData struct {
 	Live, Serving, Healthy, Unprotected int
 	// Apps a tenant may be created of.
 	Apps []string
+	// Attention is what needs it, the broken first.
+	Attention []notice
 }
 
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +190,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		data.Tenants[i].Placements = placementsOf(data.Tenants[i], data.Nodes)
 	}
 	data.States = stateBar(data.Tenants)
+	data.Attention = attentionOf(data.Nodes, data.Tenants, clustered, now)
 	if s.Actions != nil {
 		if apps, err := s.Actions(s.actor(userOf(r))).Apps(ctx); err == nil {
 			for _, app := range apps {
@@ -210,7 +213,12 @@ type tenantData struct {
 	Activity activity
 	// Usage is its last day, drawn; nil if it was not measured.
 	Usage *tenantUsage
-	Env   []envVar
+	// Problem says what is wrong with it, if anything; Broken whether it
+	// does not serve; MemoryHigh whether it nears its memory limit.
+	Problem    string
+	Broken     bool
+	MemoryHigh bool
+	Env        []envVar
 	// Targets are the nodes the tenant may move to.
 	Targets []string
 }
@@ -240,6 +248,16 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	}
 	data := tenantData{Tenant: t, State: tenantState(t), Replica: replicaState(t, len(nodes.Nodes) > 1), Events: events[:min(len(events), 30)],
 		Activity: activityOf(events, s.now(), 14*24*time.Hour, 24*time.Hour, len(events) < activityEvents, dayLabel), Usage: use}
+	if !t.Archived() && !t.Spec.Suspended {
+		data.Problem, data.Broken = tenantProblem(t, data.State)
+		if data.Problem != "" {
+			data.Problem = "It " + data.Problem + "."
+		}
+		if use != nil && use.Memory.MemoryLimit != "" && use.Memory.Memory.Width >= memoryWarn {
+			data.MemoryHigh = true
+			data.Problem = strings.TrimSpace(data.Problem + " It uses " + use.Memory.MemoryText + " of its " + use.Memory.MemoryLimit + " of memory: the kernel kills it at the limit.")
+		}
+	}
 	for key, value := range t.Spec.Env {
 		data.Env = append(data.Env, envVar{key, value})
 	}
@@ -303,9 +321,16 @@ func all(calls ...func() error) error {
 func (s *Server) funcs() template.FuncMap {
 	return template.FuncMap{
 		"static": staticURL,
-		"mem":    memory,
-		"lines":  func(text string) int { return strings.Count(text, "\n") + 1 },
-		"ago":    func(t time.Time) string { return ago(s.now(), t) },
+		"head": func(name string, state any, on string, logs, settings bool) tenantHead {
+			h := tenantHead{Name: name, On: on, Logs: logs, Settings: settings}
+			if t, ok := state.(tag); ok {
+				h.State = &t
+			}
+			return h
+		},
+		"mem":   memory,
+		"lines": func(text string) int { return strings.Count(text, "\n") + 1 },
+		"ago":   func(t time.Time) string { return ago(s.now(), t) },
 		"stamp": func(t time.Time) string {
 			if t.IsZero() {
 				return "—"
@@ -375,4 +400,12 @@ func memory(mb int) string {
 		return strconv.Itoa(mb) + " MB"
 	}
 	return strconv.FormatFloat(math.Round(float64(mb)/1024*10)/10, 'f', -1, 64) + " GB"
+}
+
+// tenantHead is the head of a tenant's pages: where it is, its name and
+// state, and its pages.
+type tenantHead struct {
+	Name, On       string
+	State          *tag
+	Logs, Settings bool
 }

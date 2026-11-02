@@ -26,14 +26,14 @@
               {{if and (not .Answers) (not .Failed)}}
               <form method="post" class="stack"><input type="hidden" name="do" value="failover"><input type="hidden" name="node" value="{{.Name}}">
                 <span class="hint">Only once you made sure it is powered off: its tenants must not run twice. Type its name.</span>
-                <input type="text" name="confirm" placeholder="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
+                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
                 <div><button type="submit" class="danger">It is off — fail it over</button></div>
               </form>
               {{end}}
               {{if ne .Name $d.Self}}
               <form method="post" class="stack"><input type="hidden" name="do" value="remove"><input type="hidden" name="node" value="{{.Name}}">
                 <span class="hint">Once it runs no tenant and keeps no copy. Type its name.</span>
-                <input type="text" name="confirm" placeholder="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
+                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
                 <div><button type="submit" class="danger">Remove from the cluster</button></div>
               </form>
               {{else if not (and .Answers .Targets)}}
@@ -56,7 +56,7 @@
   {{else}}
   <p class="lead">{{$d.Frozen}}. An upgrade that stopped leaves it so; once every node runs one release, take changes again.</p>
   <form method="post" class="row spaced"><input type="hidden" name="do" value="thaw">
-    <input type="text" name="confirm" placeholder="type thaw" aria-label="type thaw" autocomplete="off" required class="short">
+    <input type="text" name="confirm" placeholder="type thaw" data-confirm="thaw" aria-label="type thaw" autocomplete="off" required class="short">
     <button type="submit" class="danger">Take changes again</button></form>
   {{end}}
 </section>
@@ -73,7 +73,7 @@
       <div class="pop wide">
         <form method="post" action="/cluster/upgrade" enctype="multipart/form-data" class="stack">
           <span class="hint">A new murder binary, installed on every node one after the other, this one last. Tenants keep serving; changes wait meanwhile. It runs as root on every node.</span>
-          <input type="text" name="confirm" placeholder="type upgrade" aria-label="type upgrade" autocomplete="off" required>
+          <input type="text" name="confirm" placeholder="type upgrade" data-confirm="upgrade" aria-label="type upgrade" autocomplete="off" required>
           <input type="file" name="binary" required aria-label="the murder binary">
           <div><button type="submit" class="primary">Upgrade the cluster</button></div>
         </form>
