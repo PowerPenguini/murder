@@ -93,10 +93,10 @@ section { margin-top: 48px; }
 .figure .l { color: var(--dim); margin-top: 6px; }
 
 /* ── tables ────────────────────────────────────────── */
-table { width: 100%; border-collapse: collapse; }
-th { text-align: left; color: var(--dim); padding: 0 16px 8px 0; border-bottom: 1px solid var(--line-strong); }
-td { padding: 10px 16px 10px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
-th:last-child, td:last-child { padding-right: 0; }
+/* Tables are boxed: a frame, and a line between every row and column. */
+table { width: 100%; border-collapse: collapse; border: 1px solid var(--line-strong); }
+th { text-align: left; color: var(--dim); padding: 10px 14px; border: 1px solid var(--line-strong); background: var(--raised); }
+td { padding: 10px 14px; border: 1px solid #262626; vertical-align: middle; }
 td.num, th.num { text-align: right; }
 td.when { color: var(--dim); white-space: nowrap; width: 1%; }
 td.end, th.end { text-align: right; width: 1%; white-space: nowrap; }
