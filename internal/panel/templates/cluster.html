@@ -1,5 +1,5 @@
 {{define "content"}}{{$d := .Data}}
-<header class="pagehead"><h1>Cluster</h1></header>
+<h1>Cluster</h1>
 {{with $d.Release}}<p class="{{if $d.Mixed}}problem bad{{else}}lead{{end}}">{{.}}</p>{{end}}
 
 <section class="near">

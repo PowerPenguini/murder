@@ -11,10 +11,6 @@
   /* The one colour: what is wrong, and only that. */
   --bad: #ff5147;
   --bad-wash: #170706;
-  /* The grid: the head band's height, shared by the side's brand so one
-     line crosses the screen, and the bands' inner margin. */
-  --head: 72px;
-  --pad: 24px;
   --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -38,32 +34,31 @@ pre, textarea { font-size: 12.5px; }
 .faint { color: var(--faint); }
 .num, .mono-num { font-variant-numeric: tabular-nums; }
 
-/* ── the side: the panel's pages down the left, in cells ── */
+/* ── the side: the panel's pages down the left ───── */
 .shell { display: flex; min-height: 100vh; }
 .side {
   position: sticky; top: 0; align-self: flex-start; flex: none;
   width: 216px; height: 100vh; overflow-y: auto;
-  display: flex; flex-direction: column;
-  border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 28px;
+  padding: 22px 0 20px; border-right: 1px solid var(--line);
 }
-.brand { display: flex; align-items: center; height: var(--head); padding: 0 22px; border-bottom: 1px solid var(--line); text-decoration: none; flex: none; }
+.brand { display: block; padding: 0 22px; text-decoration: none; }
 .brand img { height: 30px; width: auto; display: block; }
 .menu { display: flex; flex-direction: column; }
 .menu a {
-  display: block; padding: 10px 22px; border-bottom: 1px solid var(--line);
-  color: var(--dim); text-decoration: none; position: relative;
+  display: block; padding: 7px 22px; border-left: 2px solid transparent;
+  color: var(--dim); text-decoration: none;
 }
-.menu a:hover { color: var(--fg); background: var(--raised); }
-.menu a.on { color: var(--fg); background: var(--raised); }
-.menu a.on::before { content: ""; position: absolute; left: 0; top: -1px; bottom: -1px; width: 2px; background: var(--fg); }
-.who { margin-top: auto; padding: 14px 22px; border-top: 1px solid var(--line); display: grid; gap: 8px; color: var(--dim); font-size: 13px; }
+.menu a:hover { color: var(--fg); }
+.menu a.on { color: var(--fg); border-left-color: var(--fg); background: var(--raised); }
+.who { margin-top: auto; padding: 0 22px; display: grid; gap: 8px; color: var(--dim); font-size: 13px; }
 .who .node { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12.5px; }
 .who .user { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .who .user span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who form { margin: 0; }
 .who button { border: 0; padding: 0; color: var(--dim); font-size: 13px; background: none; }
 .who button:hover { color: var(--fg); background: none; }
-.page { flex: 1; min-width: 0; overflow-x: clip; }
+.page { flex: 1; min-width: 0; }
 
 .live { display: inline-block; width: 6px; height: 6px; background: var(--fg); animation: pulse 2.4s ease-in-out infinite; }
 .live.off { background: transparent; box-shadow: inset 0 0 0 1px var(--dim); animation: none; }
@@ -209,6 +204,14 @@ main.gate { min-height: 100vh; display: grid; place-items: center; padding: 40px
 .fault h1 { color: var(--bad); }
 
 @media (max-width: 760px) {
+  .shell { display: block; }
+  .side { position: static; width: auto; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 16px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .brand { padding: 0; }
+  .who { order: 2; margin: 0 0 0 auto; padding: 0; display: flex; gap: 14px; }
+  .who .user span { display: none; }
+  .menu { order: 3; width: 100%; flex-direction: row; flex-wrap: nowrap; overflow-x: auto; gap: 18px; }
+  .menu a { padding: 4px 0; border-left: 0; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .menu a.on { background: none; border-bottom-color: var(--fg); }
   main { padding: 28px 16px 60px; }
   .frozen { padding: 9px 16px; }
   .hide-narrow { display: none; }
@@ -259,6 +262,9 @@ p.calm .st::before { margin-right: 10px; }
 .problem.bad { font-weight: 600; border-left-color: var(--bad); background: var(--bad-wash); }
 
 /* ── where a page is ── */
+nav.crumbs { display: flex; gap: 8px; color: var(--dim); font-size: 13px; margin-bottom: 10px; }
+nav.crumbs a { color: var(--dim); text-decoration: none; }
+nav.crumbs a:hover { color: var(--fg); }
 
 /* ── tables: a row is its link; a wide one scrolls on a phone ── */
 .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -314,125 +320,18 @@ dl.tiles dd { margin: 0; overflow-wrap: anywhere; }
 svg .tick.bad { fill: var(--bad); }
 ul.attention li:has(.st.bad) a { color: var(--bad); }
 
-
-
-/* ── the grid ──────────────────────────────────────────
-   Rails down the page's sides; each band opens with a line that crosses
-   the whole screen (border-image, clipped by .page); inside a band, cells
-   meet on hairlines (the container's colour through a 1px gap). */
-.page > main {
-  /* Its left rail is the side's edge; its right one stands clear, where
-     the bands' lines cross it to the screen's edge. */
-  max-width: 1184px; margin: 0; padding: 0 0 80px; min-height: 100vh;
-  border-right: 1px solid var(--line);
-  display: flex; flex-direction: column;
-}
-main > * { margin: 0; }
-.pagehead, main > .lead, main > form, main > section:not(.once), main > .fault, main > p { padding-inline: var(--pad); }
-/* The head band comes first, above what an action did. */
-.pagehead {
-  order: -1; min-height: var(--head); padding-block: 12px;
-  display: flex; align-items: center; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap;
-  border-bottom: 1px solid var(--line);
-  border-image: linear-gradient(var(--line), var(--line)) 1 / 0 0 1px 0 / 0 100vw;
-}
-.pagehead .title { margin: 0; }
-/* A tenant's pages: cells the band's height, beside its name. */
-.pagehead nav.tabs { align-self: stretch; display: flex; margin: -12px auto -12px 8px; border-left: 1px solid var(--line); }
-.pagehead nav.tabs a {
-  display: flex; align-items: center; padding: 0 20px; position: relative;
-  border-right: 1px solid var(--line); color: var(--dim); text-decoration: none;
-}
-.pagehead nav.tabs a:hover { color: var(--fg); background: var(--raised); }
-.pagehead nav.tabs a.on { color: var(--fg); background: var(--raised); }
-.pagehead nav.tabs a.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--fg); }
-.pagehead .actions { margin: 0; }
+/* ── a page's head: its name, and what can be done to it, in one row ── */
+.pagehead { display: flex; align-items: center; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap; }
+.pagehead .title { margin-bottom: 0; }
+.pagehead .actions { margin-top: 0; }
+/* A tenant's pages, beside its name. */
+.pagehead nav.tabs { display: flex; gap: 22px; margin: 0 auto 0 12px; }
+.pagehead nav.tabs a { padding: 4px 0; text-decoration: none; color: var(--dim); border-bottom: 2px solid transparent; }
+.pagehead nav.tabs a:hover { color: var(--fg); }
+.pagehead nav.tabs a.on { color: var(--fg); border-bottom-color: var(--fg); }
 .pagehead details.drop .pop { left: auto; right: 0; }
-h1 a.up, h1 span.up { color: var(--dim); font-weight: 400; text-decoration: none; margin-right: 10px; }
-h1 a.up:hover { color: var(--fg); }
-main > .lead { max-width: none; padding-block: 16px; }
-main > .problem { margin: 16px var(--pad) 0; }
-main > .lead + .problem { margin-top: 0; }
-main > .notice { margin: 16px var(--pad) 0; }
-main > form { padding-block: 0 20px; }
-main > .fault { padding-block: 32px; max-width: none; }
-
-main > section:not(.once) {
-  padding-block: 24px 28px; margin-top: 24px;
-  border-top: 1px solid var(--line);
-  border-image: linear-gradient(var(--line), var(--line)) 1 / 1px 0 0 0 / 0 100vw;
-}
-main > .pagehead + section:not(.once), main > .figures + section:not(.once), main > section + section:not(.once) { margin-top: 0; }
-main > section.once { margin: 24px var(--pad) 0; }
-
-/* A band's head is a strip of its own. */
-main > section > .head:first-child {
-  margin: -24px calc(-1 * var(--pad)) 0; padding: 0 var(--pad); min-height: 46px;
-  border-bottom: 1px solid var(--line);
-}
-main > section > .head:first-child + * { margin-top: 20px; }
-
-/* Cells. */
-main > .figures, main > section > .stats, main > section > .charts, main > section > dl.tiles {
-  display: grid; gap: 0;
-  /* Each cell draws its right and bottom line; the outer ones fall on the
-     rail and on the next band's line. */
-  margin-right: -1px; margin-bottom: -1px;
-}
-main > .figures > *, main > section > .stats > *, main > section > .charts > *, main > section > dl.tiles > * { min-width: 0; padding: 20px var(--pad); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-main > section > .stats, main > section > .charts, main > section > dl.tiles { margin-left: calc(-1 * var(--pad)); margin-right: calc(-1 * var(--pad) - 1px); }
-main > section > .head:first-child + .stats, main > section > .head:first-child + .charts, main > section > .head:first-child + dl.tiles { margin-top: 0; }
-main > section:has(> .stats:first-child, > table:first-child, > .scroll:first-child) { padding-top: 0; }
-main > section:has(> .stats:last-child, > .charts:last-child, > dl.tiles:last-child) { padding-bottom: 0; }
-main > section > .head:first-child + .stats, main > section > .head:first-child + .charts { margin-top: 0; }
-main > .figures { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-main > .figures > .figure { padding-block: 22px; }
-.stats { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
-.stat .v small { white-space: nowrap; }
-.stat .v { margin-bottom: 10px; }
-.charts { grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); }
-dl.tiles { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
-dl.tiles > div { padding-block: 14px; }
-
-/* Tables reach the rails, and their columns are ruled. */
-main > section > table, main > section > .scroll { margin-inline: calc(-1 * var(--pad)); }
-main > section > table { width: calc(100% + 2 * var(--pad)); }
-main > section > .head:first-child + table, main > section > .head:first-child + .scroll { margin-top: 0; }
-main > section th { padding: 12px 16px 10px; border-bottom: 1px solid var(--line); }
-main > section td { padding: 10px 16px; }
-main > section th + th, main > section td + td { border-left: 1px solid var(--line); }
-main > section th:first-child, main > section td:first-child { padding-left: var(--pad); }
-main > section th:last-child, main > section td:last-child { padding-right: var(--pad); }
-main > section:has(> table:last-child, > .scroll:last-child) { padding-bottom: 0; }
-main > section > table > tbody > tr:last-child > td, main > section > .scroll > table > tbody > tr:last-child > td { border-bottom: 0; }
-
-/* Lists of rows reach the rails too. */
-main > section > ul.attention { margin-inline: calc(-1 * var(--pad)); border-top: 0; }
-main > section > ul.attention li { padding: 12px var(--pad); }
-main > section > ul.attention li:last-child { border-bottom: 0; }
-main > section:has(> ul.attention:only-child) { padding-block: 0; }
-
-/* Logs fill their band below the filter strip. */
-main > section > div.logs, main > section > pre.logs { margin: 0 calc(-1 * var(--pad)) -28px; border: 0; max-height: none; }
-main > section > .head:first-child + div.logs { margin-top: 0; }
-
+.pagehead + .lead { margin-top: 2px; }
 @media (max-width: 760px) {
-  :root { --pad: 16px; }
-  .shell { display: block; }
-  .side { position: static; width: auto; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; border-right: 0; border-bottom: 1px solid var(--line); }
-  .brand { height: 56px; padding: 0 16px; border-bottom: 0; }
-  .who { order: 2; margin: 0 0 0 auto; padding: 0 16px; border-top: 0; display: flex; gap: 14px; }
-  .who .user span { display: none; }
-  .menu { order: 3; width: 100%; flex-direction: row; flex-wrap: nowrap; overflow-x: auto; border-top: 1px solid var(--line); }
-  .menu a { padding: 10px 14px; border-bottom: 0; border-right: 1px solid var(--line); white-space: nowrap; }
-  .menu a.on::before { left: -1px; right: 0; top: auto; bottom: 0; width: auto; height: 2px; }
-  .page > main { border-inline: 0; }
-  .pagehead nav.tabs { order: 3; flex: 1 0 100%; margin: 0 calc(-1 * var(--pad)) -12px; border-left: 0; border-top: 1px solid var(--line); }
-  .pagehead nav.tabs a { flex: 1; justify-content: center; padding: 12px 0; }
-  .pagehead nav.tabs a:last-child { border-right: 0; }
-  .charts { grid-template-columns: 1fr; }
-  main > .figures { grid-template-columns: repeat(3, 1fr); }
-  main > .figures > .figure .n { font-size: 24px; }
-  .stats { grid-template-columns: 1fr 1fr; }
-  dl.tiles { grid-template-columns: 1fr 1fr; }
+  .pagehead + .lead { margin-top: 12px; }
+  .pagehead nav.tabs { order: 3; flex: 1 0 100%; margin: 0; }
 }

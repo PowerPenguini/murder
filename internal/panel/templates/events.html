@@ -1,5 +1,5 @@
 {{define "content"}}{{$d := .Data}}
-<header class="pagehead"><h1>Events</h1></header>
+<h1>Events</h1>
 <p class="lead">The audit log: who changed what, newest first. Hover a time for the moment, an action for its code.</p>
 <form class="row filters" method="get" action="/events">
   <label class="field">Tenant <input type="search" name="tenant" value="{{$d.Tenant}}" placeholder="any" list="tenant-names" autocomplete="off" class="short"></label>
