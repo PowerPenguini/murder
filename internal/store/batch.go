@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 )
 
 // ErrStale reports a batch computed against another version of the state
@@ -12,6 +13,25 @@ var ErrStale = errors.New("stale change")
 
 // ErrSchema reports a batch made by a release with another schema.
 var ErrSchema = errors.New("schema mismatch")
+
+// ErrNondeterministic refuses a statement whose result may differ between
+// the nodes that apply it.
+var ErrNondeterministic = errors.New("nondeterministic statement")
+
+// nondeterministic matches what a statement of a batch may not use:
+// functions whose result differs between nodes, runs or releases, and the
+// current time. Every node applies a batch's statements itself, so each
+// must give every node the same result; a value such as the time is
+// computed once, by the writer, and passed as an argument.
+var nondeterministic = regexp.MustCompile(`(?i)\b(random|randomblob|changes|total_changes|last_insert_rowid|sqlite_version|sqlite_source_id|sqlite_offset)\s*\(|'now'|\bcurrent_(timestamp|date|time)\b`)
+
+// deterministic refuses a statement that may give nodes different results.
+func (s Statement) deterministic() error {
+	if use := nondeterministic.FindString(s.SQL); use != "" {
+		return fmt.Errorf("%w: it uses %s, which differs between nodes: %s", ErrNondeterministic, use, s.SQL)
+	}
+	return nil
+}
 
 // A Batch is one change of the replicated state: the statements one write
 // made, with every value they need, computed against state version
@@ -109,6 +129,9 @@ type recorder struct {
 
 func (r *recorder) Exec(query string, args ...any) error {
 	statement := Statement{SQL: query, Args: make([]Arg, len(args))}
+	if err := statement.deterministic(); err != nil {
+		return err
+	}
 	for i, value := range args {
 		arg, err := newArg(value)
 		if err != nil {
@@ -120,15 +143,18 @@ func (r *recorder) Exec(query string, args ...any) error {
 	return nil
 }
 
-// Check refuses a batch no node of this release can apply: of another
-// schema version than a release that writes batches, or with malformed
-// arguments. The leader checks every batch before it enters the log.
+// Check refuses a batch no node of this release can apply, of another
+// schema version than a release that writes batches or with malformed
+// arguments, and one whose statements may give nodes different results. The leader checks every batch before it enters the log.
 func (b Batch) Check() error {
 	if b.Schema < firstBatchSchema || b.Schema > schemaVersion {
 		return fmt.Errorf("%w: a batch for schema version %d, the leader runs %d: upgrade it", ErrSchema, b.Schema, schemaVersion)
 	}
 	for _, statement := range b.Statements {
 		if _, err := statement.values(); err != nil {
+			return err
+		}
+		if err := statement.deterministic(); err != nil {
 			return err
 		}
 	}

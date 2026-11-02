@@ -38,6 +38,7 @@ func (c *Cluster) handler() http.Handler {
 	members("GET /cluster/v1/tenants/{name}/replica", c.handleSnapshots)
 	members("PUT /cluster/v1/tenants/{name}/replica", c.handleReplicate)
 	members("GET /cluster/v1/usage", c.handleUsage)
+	members("GET /cluster/v1/digest", c.handleDigest)
 	members("GET /cluster/v1/tenants/{name}/usage", c.handleTenantUsage)
 	return mux
 }

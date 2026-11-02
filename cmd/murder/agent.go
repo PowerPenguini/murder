@@ -40,6 +40,9 @@ import (
 
 const defaultConfig = "/etc/murder/agent.yaml"
 
+// digestEvery is how often the leader compares the nodes' states.
+const digestEvery = 5 * time.Minute
+
 func runInit(args []string) error {
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfig, "agent configuration file")
@@ -265,6 +268,13 @@ func runAgent(args []string) error {
 	if monitor != nil {
 		go monitor.Run(ctx)
 	}
+	// The leader compares the nodes' replicated states every few minutes:
+	// they apply the same log, so a difference is a fault to look into.
+	var digests *cluster.Digests
+	if member != nil {
+		digests = &cluster.Digests{}
+		go member.WatchDigests(ctx, digestEvery, digests)
+	}
 	go newCollector(st, reconciler, docker, volumes, recorder, node, cfg.Defaults, log).Run(ctx)
 	reconciled := make(chan struct{})
 	go func() {
@@ -297,7 +307,7 @@ func runAgent(args []string) error {
 	}
 
 	servers := []*http.Server{apiServer}
-	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator, monitor: monitor, usage: recorder}
+	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator, monitor: monitor, usage: recorder, digests: digests}
 	if metricsListener != nil {
 		metricsServer := &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, metricsServer)

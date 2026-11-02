@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -716,4 +717,56 @@ func TestCopiesKnowTheirSender(t *testing.T) {
 	if _, err := nodes[0].cluster.SnapshotsOn(ctx(t), "hel-1", "acme"); err == nil {
 		t.Fatal("a node that keeps no copies answered for one")
 	}
+}
+
+// The leader compares every node's state with its own: alike while they
+// apply the same log, different once one's changed around it.
+func TestTheLeaderFindsAStateThatDrifted(t *testing.T) {
+	nodes := threeNodes(t)
+	leader := nodes[0]
+	for _, n := range nodes {
+		if n.cluster.Leader() {
+			leader = n
+		}
+	}
+	if _, err := leader.store.PutApp(store.App{Name: "web", Spec: appSpec()}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := leader.store.Create(store.NewTenant{Name: "acme", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	sameState(t, nodes)
+	found := leader.cluster.CompareDigests(ctx(t))
+	if len(found) != 2 || found["fsn-1"] || found["nbg-1"] || found["hel-1"] {
+		t.Fatalf("nodes of one state: %v", found)
+	}
+	for _, n := range nodes {
+		if n != leader && n.cluster.CompareDigests(ctx(t)) != nil {
+			t.Fatalf("%s, not the leader, compared states", n.name)
+		}
+	}
+	var drifted *node
+	for _, n := range nodes {
+		if n != leader {
+			drifted = n
+			break
+		}
+	}
+	db, err := sql.Open("sqlite", filepath.Join(drifted.dir, "murder.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE tenants SET node = 'elsewhere' WHERE name = 'acme'`); err != nil {
+		t.Fatal(err)
+	}
+	found = leader.cluster.CompareDigests(ctx(t))
+	if len(found) != 2 || !found[drifted.name] {
+		t.Fatalf("after %s drifted: %v", drifted.name, found)
+	}
+	var watched Digests
+	watch, stop := context.WithCancel(ctx(t))
+	defer stop()
+	go leader.cluster.WatchDigests(watch, 10*time.Millisecond, &watched)
+	eventually(t, "the watch finds the drift", func() bool { return watched.Diverged()[drifted.name] })
 }
