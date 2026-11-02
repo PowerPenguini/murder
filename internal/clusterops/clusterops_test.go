@@ -38,11 +38,20 @@ type fakeAgent struct {
 	refuse  map[string]bool
 	stuck   map[string]bool
 	down    map[string]bool
-	// behind is how many answers a node gives, once it took a binary,
-	// before it has caught up with the cluster and reconciled; lagging
-	// counts them down.
-	behind  map[string]int
-	lagging map[string]int
+	// statusFails makes the cluster's status fail as it does without a
+	// leader. installFails makes a node take the binary but fail the
+	// request, as a node that restarts before it answers does.
+	statusFails  bool
+	installFails map[string]bool
+	// behind and unreconciled are how many answers a node gives, once it
+	// took a binary, before it has caught up with the cluster and before
+	// it has reconciled since it started; lagging and stale count them
+	// down. restarting is a node that still reports its old binary once.
+	behind       map[string]int
+	unreconciled map[string]int
+	lagging      map[string]int
+	stale        map[string]int
+	restarting   map[string]string
 
 	applied   uint64
 	installed []string
@@ -79,6 +88,9 @@ func (a *fakeAgent) ClusterStatus(context.Context) (cluster.Status, error) {
 	if a.alone {
 		return cluster.Status{}, &api.Error{Status: http.StatusConflict, Message: "this node is not in a cluster"}
 	}
+	if a.statusFails {
+		return cluster.Status{}, &api.Error{Status: http.StatusServiceUnavailable, Message: "no leader"}
+	}
 	status := cluster.Status{Node: a.self, Applied: a.applied}
 	for _, name := range a.members {
 		status.Members = append(status.Members, cluster.Member{Name: name})
@@ -91,13 +103,21 @@ func (a *fakeAgent) NodeInfo(_ context.Context, name string) (upgrade.Info, erro
 	defer a.mu.Unlock()
 	node := a.node(name)
 	if a.down[node] {
-		return upgrade.Info{}, &api.Error{Status: http.StatusBadGateway, Message: "node does not answer"}
+		return upgrade.Info{}, &api.Error{Status: http.StatusInternalServerError, Message: "node does not answer"}
 	}
 	started := time.Now().Add(-time.Second)
 	info := upgrade.Info{Node: node, Version: upgrade.Version{Binary: a.running[node], Schema: 5}, Started: started, Applied: a.applied, LastPass: time.Now()}
+	if old, ok := a.restarting[node]; ok {
+		delete(a.restarting, node)
+		info.Version.Binary = old
+		return info, nil
+	}
 	if a.lagging[node] > 0 {
 		a.lagging[node]--
 		info.Applied = a.applied - 1
+	}
+	if a.stale[node] > 0 {
+		a.stale[node]--
 		info.LastPass = started.Add(-time.Second)
 	}
 	return info, nil
@@ -112,23 +132,38 @@ func (a *fakeAgent) Install(_ context.Context, name string, binary io.Reader, sh
 	defer a.mu.Unlock()
 	node := a.node(name)
 	sum := sha256.Sum256(data)
-	if a.frozen == "" || a.refuse[node] || sha != hex.EncodeToString(sum[:]) {
+	if !strings.HasPrefix(a.frozen, store.UpgradeFreeze) {
+		return &api.Error{Status: http.StatusConflict, Message: "changes are not frozen for an upgrade"}
+	}
+	if a.refuse[node] || sha != hex.EncodeToString(sum[:]) {
 		return &api.Error{Status: http.StatusUnprocessableEntity, Message: "the edge did not hand over"}
 	}
 	a.installed = append(a.installed, node)
 	if a.lagging == nil {
-		a.lagging = map[string]int{}
+		a.lagging, a.stale, a.restarting = map[string]int{}, map[string]int{}, map[string]string{}
 	}
-	a.lagging[node] = a.behind[node]
+	a.lagging[node], a.stale[node] = a.behind[node], a.unreconciled[node]
 	if !a.stuck[node] {
+		// The node restarts: once more it answers as it ran before.
+		a.restarting[node] = a.running[node]
 		a.running[node] = sha
+	}
+	// The cluster went on meanwhile; the node must catch up to it.
+	a.applied++
+	if a.installFails[node] {
+		return &api.Error{Status: http.StatusInternalServerError, Message: "connection reset"}
 	}
 	return nil
 }
 
+// Freeze refuses as store.Freeze does: an upgrade takes over another
+// upgrade's freeze, nothing else's.
 func (a *fakeAgent) Freeze(_ context.Context, reason string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.frozen != "" && a.frozen != reason && !(strings.HasPrefix(a.frozen, store.UpgradeFreeze) && strings.HasPrefix(reason, store.UpgradeFreeze)) {
+		return &api.Error{Status: http.StatusConflict, Message: "changes are frozen: " + a.frozen}
+	}
 	a.frozen = reason
 	a.freezes++
 	return nil
@@ -225,16 +260,61 @@ func TestANodeAloneUpgradesItself(t *testing.T) {
 }
 
 // A node counts as upgraded only once it runs the binary, has caught up
-// with the cluster and has reconciled since it started.
+// with the cluster as it was once the node took the binary, and has
+// reconciled since it started; each is waited for on its own.
 func TestAnUpgradeWaitsForEachNodeToCatchUp(t *testing.T) {
-	agent := newFakeAgent(old3())
-	agent.behind = map[string]int{"n2": 2}
-	path, _ := binary(t)
-	if err := Upgrade(context.Background(), agent, path, 10*time.Second, io.Discard); err != nil {
-		t.Fatal(err)
+	for _, c := range []struct {
+		name         string
+		behind       int
+		unreconciled int
+	}{{"applied", 2, 0}, {"reconciled", 0, 2}} {
+		t.Run(c.name, func(t *testing.T) {
+			agent := newFakeAgent(old3())
+			agent.behind = map[string]int{"n2": c.behind}
+			agent.unreconciled = map[string]int{"n2": c.unreconciled}
+			path, _ := binary(t)
+			if err := Upgrade(context.Background(), agent, path, 10*time.Second, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if agent.lagging["n2"] != 0 || agent.stale["n2"] != 0 {
+				t.Fatalf("the upgrade went on while n2 was %d answers behind and %d unreconciled", agent.lagging["n2"], agent.stale["n2"])
+			}
+		})
 	}
-	if agent.lagging["n2"] != 0 {
-		t.Fatalf("the upgrade went on while n2 was %d answers behind", agent.lagging["n2"])
+}
+
+// A node whose install request failed in another way than a refusal may
+// run the new binary: changes stay frozen, even on the first node.
+func TestAFailedInstallIsNotARefusal(t *testing.T) {
+	agent := newFakeAgent(old3())
+	agent.installFails = map[string]bool{"n2": true}
+	path, _ := binary(t)
+	err := Upgrade(context.Background(), agent, path, 5*time.Second, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "n2: install") || !strings.Contains(err.Error(), "changes stay frozen") || agent.frozen == "" || agent.thawed != 0 {
+		t.Fatalf("upgrade: %v, frozen %q, thawed %d", err, agent.frozen, agent.thawed)
+	}
+}
+
+// Only a node outside a cluster upgrades alone: a cluster whose status
+// fails is not upgraded at all.
+func TestAClusterWithoutStatusIsNotUpgraded(t *testing.T) {
+	agent := newFakeAgent(old3())
+	agent.statusFails = true
+	path, _ := binary(t)
+	err := Upgrade(context.Background(), agent, path, 5*time.Second, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "no leader") || agent.freezes != 0 || len(agent.installed) != 0 {
+		t.Fatalf("upgrade: %v, freezes %d, installed %v", err, agent.freezes, agent.installed)
+	}
+}
+
+// An upgrade does not take over a freeze made for something else.
+func TestAnUpgradeLeavesAnotherFreezeAlone(t *testing.T) {
+	agent := newFakeAgent(old3())
+	agent.frozen = "restoring a backup"
+	path, _ := binary(t)
+	err := Upgrade(context.Background(), agent, path, 5*time.Second, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "freeze changes") || agent.frozen != "restoring a backup" || len(agent.installed) != 0 {
+		t.Fatalf("upgrade: %v, frozen %q, installed %v", err, agent.frozen, agent.installed)
 	}
 }
 
