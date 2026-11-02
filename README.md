@@ -348,9 +348,11 @@ its tenants never writes over the copies that took over.
 - **`tenant show`:** shows the replica, whether its copy holds the whole
   data and may take over (`replicaReady`), and when it last matched the
   data (`replicaSyncedAt`), when asked on the node that runs the tenant.
-- **Connections between nodes** dial within 10 s and end 30 s after the
-  peer stops acknowledging (keepalive and TCP user timeout), so a replica
-  that vanishes holds up no other tenant's sends.
+- **Connections between nodes** dial within 10 s; one waiting on a peer
+  that vanished ends after about 30 s (TCP keepalive), and a send whose
+  peer answered no ping for 30 s is cancelled. So a replica that vanishes
+  holds up no other tenant's sends, while one that is merely slow to take
+  a large copy is not cut off.
 - **Metrics:** `/metrics` has `murder_tenant_replica_lag_seconds` and
   `murder_tenant_replica_failing` for each tenant.
 - **Cleanup:** a copy a node no longer keeps, of a tenant purged or whose

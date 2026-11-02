@@ -32,6 +32,7 @@ func (c *Cluster) handler() http.Handler {
 	members("GET /cluster/v1/tenants/{name}/status", c.handleTenantStatus)
 	members("POST /cluster/v1/tenants/{name}/move", c.handleMove)
 	members("PUT /cluster/v1/node/binary", c.handleInstall)
+	members("GET /cluster/v1/ping", c.handlePing)
 	members("GET /cluster/v1/tenants/{name}/replica", c.handleSnapshots)
 	members("PUT /cluster/v1/tenants/{name}/replica", c.handleReplicate)
 	return mux
@@ -350,6 +351,11 @@ func (c *Cluster) moves(w http.ResponseWriter) bool {
 		return false
 	}
 	return true
+}
+
+// handlePing answers the leader's probe: this node is up.
+func (c *Cluster) handlePing(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, struct{}{})
 }
 
 // replicaSender is the node a replica request comes from, once this node

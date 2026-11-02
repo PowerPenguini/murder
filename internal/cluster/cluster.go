@@ -584,6 +584,11 @@ type Replicas interface {
 	Receive(ctx context.Context, sender, tenant string, whole bool, data io.Reader) error
 }
 
+// Ping reports whether node answers on the cluster port, within ctx.
+func (c *Cluster) Ping(ctx context.Context, node string) error {
+	return c.stream(ctx, node, http.MethodGet, "/cluster/v1/ping", nil, nil)
+}
+
 // SnapshotsOn lists the snapshots of the copy of tenant node keeps.
 func (c *Cluster) SnapshotsOn(ctx context.Context, node, tenant string) ([]string, error) {
 	var answer struct {
@@ -609,10 +614,17 @@ type moveRequest struct {
 }
 
 // stream sends a request with any body to node and decodes its answer.
+// A request with a body, which may stream data for a long time, is
+// cancelled once node has answered no ping for long.
 func (c *Cluster) stream(ctx context.Context, node, method, path string, body io.Reader, out any) error {
 	address, err := c.addressOf(node)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		var stop func()
+		ctx, stop = watchPeer(ctx, func(ctx context.Context) error { return c.Ping(ctx, node) }, peerPingEvery, peerSilentFor)
+		defer stop()
 	}
 	request, err := http.NewRequestWithContext(ctx, method, "https://"+address+path, body)
 	if err != nil {
@@ -620,6 +632,9 @@ func (c *Cluster) stream(ctx context.Context, node, method, path string, body io
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
+		if cause := context.Cause(ctx); errors.Is(cause, errPeerSilent) {
+			err = cause
+		}
 		return fmt.Errorf("node %s: %w", node, err)
 	}
 	defer response.Body.Close()
