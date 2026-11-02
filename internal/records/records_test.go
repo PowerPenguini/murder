@@ -3,6 +3,7 @@ package records
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -217,5 +218,26 @@ func TestNamecheapSetsTheRecordsOfTheName(t *testing.T) {
 	fake.zoneNow = append(fake.zoneNow, fake.records...)
 	if err := n.Publish(context.Background(), addrs("203.0.113.1", "2001:db8::1")); err != nil || fake.sets != 1 {
 		t.Fatalf("written again: %d sets, %v", fake.sets, err)
+	}
+}
+
+type stuckAPI struct{}
+
+func (stuckAPI) GetRecords(context.Context, string) ([]libdns.Record, error) {
+	select {}
+}
+
+func (stuckAPI) SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error) {
+	select {}
+}
+
+// A provider call that never returns, as one without a time limit, still
+// ends with the write's context.
+func TestNamecheapEndsWithItsContext(t *testing.T) {
+	n := &Namecheap{Zone: "example.com", Name: "*", api: stuckAPI{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := n.Publish(ctx, addrs("203.0.113.1")); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a stuck call: %v", err)
 	}
 }

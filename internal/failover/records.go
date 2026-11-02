@@ -168,11 +168,13 @@ func (m *Monitor) publish(ctx context.Context, addresses []netip.Addr, term int)
 	if m.Leader() {
 		err = m.Records.Publish(write, addresses)
 	}
+	leads := m.Leader()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.writing = false
 	r := &m.records
-	if !m.leading || r.term != term {
+	// A write stopped because this node no longer leads is no failure.
+	if !leads || !m.leading || r.term != term {
 		return
 	}
 	key := addressKey(addresses)

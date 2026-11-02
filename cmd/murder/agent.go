@@ -355,7 +355,7 @@ func keepRestartPolicies(ctx context.Context, reconciler *reconcile.Reconciler, 
 func newMonitor(cfg *config.Cluster, baseDomain string, st *store.SQLite, member *cluster.Cluster, log *slog.Logger) *failover.Monitor {
 	monitor := &failover.Monitor{Store: st, Probe: member.Ping, Leader: member.Leader, Log: log}
 	if cfg.DNS != nil {
-		publisher, err := newPublisher(cfg.DNS, baseDomain)
+		publisher, err := newPublisher(cfg.DNS, baseDomain, cfg.PublicAddresses)
 		if err != nil {
 			log.Error("the DNS records are not kept: the token cannot be read", "error", err)
 		} else {
@@ -378,7 +378,7 @@ func newMonitor(cfg *config.Cluster, baseDomain string, st *store.SQLite, member
 }
 
 // newPublisher writes the base domain's records through the provider.
-func newPublisher(cfg *config.DNS, baseDomain string) (records.Publisher, error) {
+func newPublisher(cfg *config.DNS, baseDomain string, public []string) (records.Publisher, error) {
 	name, err := records.Wildcard(baseDomain, cfg.Zone)
 	if err != nil {
 		return nil, err
@@ -393,7 +393,15 @@ func newPublisher(cfg *config.DNS, baseDomain string) (records.Publisher, error)
 		if !ok {
 			return nil, errors.New("the namecheap token file must hold user:apikey")
 		}
-		return &records.Namecheap{User: user, APIKey: key, Zone: zone, Name: name, TTL: cfg.TTL.Duration}, nil
+		// Namecheap needs the address it is asked from; IPv4 only.
+		clientIP := ""
+		for _, value := range public {
+			if address, err := netip.ParseAddr(value); err == nil && address.Unmap().Is4() {
+				clientIP = address.Unmap().String()
+				break
+			}
+		}
+		return &records.Namecheap{User: user, APIKey: key, ClientIP: clientIP, Zone: zone, Name: name, TTL: cfg.TTL.Duration}, nil
 	}
 	return &records.Hetzner{Token: token, Zone: zone, Name: name, TTL: cfg.TTL.Duration, Endpoint: cfg.Endpoint}, nil
 }

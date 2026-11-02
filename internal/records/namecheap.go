@@ -17,11 +17,18 @@ import (
 // public address must be on the account's API allow list.
 type Namecheap struct {
 	User, APIKey string
-	Zone, Name   string
-	TTL          time.Duration
+	// ClientIP is this node's public IPv4 address, which Namecheap must
+	// allow; without it the provider asks a web service for it, with no
+	// time limit.
+	ClientIP   string
+	Zone, Name string
+	TTL        time.Duration
 	// api is the libdns provider; Namecheap's if nil.
 	api namecheapAPI
 }
+
+// MaxNamecheapTTL is the longest TTL Namecheap takes.
+const MaxNamecheapTTL = 60000 * time.Second
 
 type namecheapAPI interface {
 	libdns.RecordGetter
@@ -43,20 +50,37 @@ func (n *Namecheap) Publish(ctx context.Context, addresses []netip.Addr) error {
 	if len(records) == 0 {
 		return nil
 	}
-	api := n.api
-	if api == nil {
-		api = &namecheap.Provider{User: n.User, APIKey: n.APIKey}
+	if n.api == nil {
+		n.api = &namecheap.Provider{User: n.User, APIKey: n.APIKey, ClientIP: n.ClientIP}
 	}
 	// Unchanged records are not written: a write sets the whole host list.
-	existing, err := api.GetRecords(ctx, n.Zone)
-	if err != nil {
+	var existing []libdns.Record
+	if err := withContext(ctx, func() (err error) {
+		existing, err = n.api.GetRecords(ctx, n.Zone)
+		return err
+	}); err != nil {
 		return err
 	}
 	if sameAddresses(existing, records, n.Name) {
 		return nil
 	}
-	_, err = api.SetRecords(ctx, n.Zone, records)
-	return err
+	return withContext(ctx, func() error {
+		_, err := n.api.SetRecords(ctx, n.Zone, records)
+		return err
+	})
+}
+
+// withContext runs call, returning when ctx ends if call has not: the
+// provider makes some requests without a context.
+func withContext(ctx context.Context, call func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- call() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // sameAddresses reports whether the zone's A and AAAA records of name, of

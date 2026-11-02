@@ -215,6 +215,7 @@ func TestDNSRecords(t *testing.T) {
 		"another zone":     "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: /t, zone: other.com}\n",
 		"a short ttl":      "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: /t, ttl: 10s}\n",
 		"a long ttl":       "  publicAddresses: [203.0.113.7]\n  dns: {provider: hetzner, tokenFile: /t, ttl: 48h}\n",
+		"namecheap's max":  "  publicAddresses: [203.0.113.7]\n  dns: {provider: namecheap, tokenFile: /t, ttl: 20h}\n",
 	} {
 		if _, err := Parse([]byte(base + extra)); err == nil || !strings.Contains(err.Error(), "cluster.") {
 			t.Errorf("%s: %v", name, err)

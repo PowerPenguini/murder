@@ -493,6 +493,8 @@ func (c Cluster) problems() []string {
 		}
 		if d.TTL.Duration < time.Minute || d.TTL.Duration > 24*time.Hour {
 			problems = append(problems, "cluster.dns.ttl must be from 60s, which providers require, to 24h")
+		} else if d.Provider == "namecheap" && d.TTL.Duration > records.MaxNamecheapTTL {
+			problems = append(problems, "cluster.dns.ttl must be at most 60000s with namecheap")
 		}
 		if len(c.PublicAddresses) == 0 {
 			problems = append(problems, "cluster.dns needs cluster.publicAddresses: without them the records never name this node")
