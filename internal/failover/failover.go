@@ -59,6 +59,8 @@ type Monitor struct {
 	// time. blocked says why a node's failover waits.
 	fencing string
 	blocked map[string]string
+	// stuck names the tenants each blocked failover would have promoted.
+	stuck map[string][]string
 	// waits says why a silent node is left alone on purpose.
 	waits map[string]string
 	// retry is when a node whose failover failed is tried again.
@@ -157,6 +159,7 @@ func (m *Monitor) Check(ctx context.Context) {
 		if !slices.ContainsFunc(nodes, func(node store.Node) bool { return node.Name == name }) {
 			delete(m.seen, name)
 			delete(m.blocked, name)
+			delete(m.stuck, name)
 			delete(m.retry, name)
 		}
 	}
@@ -169,6 +172,7 @@ func (m *Monitor) Check(ctx context.Context) {
 			heard++
 			m.seen[node.Name] = now
 			delete(m.blocked, node.Name)
+			delete(m.stuck, node.Name)
 			delete(m.retry, node.Name)
 			delete(m.waits, node.Name)
 			if node.Failed() && frozen == "" {
@@ -201,11 +205,16 @@ func (m *Monitor) Check(ctx context.Context) {
 		}
 	}
 	majority := heard >= len(all)/2+1
-	// A silent node with nothing left to promote, as after an operator's
-	// failover, no longer waits on anything.
+	// A blocked failover ends once none of the tenants it would have
+	// promoted still runs on the node, as after an operator's failover.
+	// Tenants merely no longer promotable, their replica gone silent too,
+	// still wait.
 	if majority {
 		for _, name := range settled {
-			delete(m.blocked, name)
+			if !m.stillOn(name) {
+				delete(m.blocked, name)
+				delete(m.stuck, name)
+			}
 		}
 	}
 	if !majority && (len(dead) > 0 || len(silent) > 0) {
@@ -256,6 +265,17 @@ func (m *Monitor) promotableLocked(node string) []string {
 		}
 	}
 	return names
+}
+
+// stillOn reports whether a tenant a blocked failover of node would have
+// promoted still runs on node.
+func (m *Monitor) stillOn(node string) bool {
+	for _, name := range m.stuck[node] {
+		if record, err := m.Store.Get(name); err == nil && record.Node == node {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Monitor) markFailed(node string) {
@@ -319,14 +339,18 @@ func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.T
 		m.mu.Unlock()
 	}()
 	log := m.Log.With("node", node.Name)
-	blocked := func(why string) {
-		m.mu.Lock()
-		m.block(node.Name, why)
-		m.mu.Unlock()
-	}
 	tenants := m.promotable(node.Name)
 	if len(tenants) == 0 {
 		return
+	}
+	blocked := func(why string) {
+		m.mu.Lock()
+		m.block(node.Name, why)
+		if m.stuck == nil {
+			m.stuck = map[string][]string{}
+		}
+		m.stuck[node.Name] = tenants
+		m.mu.Unlock()
 	}
 	manual := "; once it is off, run: murder cluster failover " + node.Name + " -powered-off"
 	if m.Fence == nil {
@@ -372,6 +396,7 @@ func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.T
 	}
 	m.mu.Lock()
 	delete(m.blocked, node.Name)
+	delete(m.stuck, node.Name)
 	m.mu.Unlock()
 	log.Warn("the node's tenants run from their replicas", "promoted", outcome.Promoted, "stranded", outcome.Stranded)
 }

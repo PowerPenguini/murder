@@ -488,3 +488,44 @@ func TestASilentNodeWithNothingToPromoteIsNotPoweredOff(t *testing.T) {
 		}
 	}
 }
+
+// A blocked failover stays blocked while the tenants it would have
+// promoted still run on the silent node, even once they are no longer
+// promotable themselves.
+func TestABlockedFailoverStaysBlockedWhileItsTenantsAreStuck(t *testing.T) {
+	f := newFixture(t)
+	for i, name := range []string{"n4", "n5"} {
+		if err := f.store.PutNode(store.Node{Name: name, Address: fmt.Sprintf("10.0.0.%d:7400", i+4)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// c runs on n3, its copy on n2.
+	if _, err := f.store.Create(store.NewTenant{Name: "c", App: "web", Node: "n3"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PlaceReplicas("test"); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := f.store.Get("c")
+	if c.Replica != "n2" {
+		t.Fatalf("c's replica: %q", c.Replica)
+	}
+	if err := f.store.ReplicaReady("c", "n2"); err != nil {
+		t.Fatal(err)
+	}
+	f.fenceErr = errors.New("401 unauthorized")
+	f.check(t)
+	f.down["n3"] = true
+	f.advance(31 * time.Second)
+	f.check(t)
+	// c's replica node goes silent too: c can no longer be promoted, but
+	// still runs on n3, which may still be up. The leader hears 3 of 5.
+	f.down["n2"] = true
+	f.advance(2 * time.Minute)
+	f.check(t)
+	var page strings.Builder
+	f.monitor.WriteMetrics(metrics.NewWriter(&page))
+	if !strings.Contains(page.String(), `murder_failover_blocked{node="n3"} 1`) {
+		t.Fatalf("the stuck failover looks settled:\n%s", page.String())
+	}
+}
