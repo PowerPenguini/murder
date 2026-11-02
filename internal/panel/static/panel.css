@@ -30,8 +30,8 @@ a:hover { text-decoration-color: var(--fg); }
   display: flex; align-items: center; gap: 36px; height: 56px; padding: 0 32px;
   border-bottom: 1px solid var(--line);
 }
-.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; letter-spacing: 0.01em; }
-.brand img { width: 26px; height: 26px; display: block; }
+.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; font-weight: 600; letter-spacing: 0.01em; }
+.brand img { height: 18px; width: auto; display: block; }
 .top nav { display: flex; gap: 24px; }
 .top nav a { text-decoration: none; color: var(--dim); }
 .top nav a:hover, .top nav a.on { color: var(--fg); }
@@ -167,7 +167,7 @@ section.once p { color: var(--dim); margin: 4px 0 14px; }
 /* ── signing in ────────────────────────────────────── */
 main.gate { min-height: 100vh; display: grid; place-items: center; padding: 40px 20px; max-width: none; }
 .gatebox { width: min(380px, 100%); }
-.gatebox .crow { width: 52px; height: 52px; display: block; margin: 0 0 18px; }
+.gatebox .crow { height: 34px; width: auto; display: block; margin: 0 0 24px; }
 .gatebox h1 { margin-bottom: 4px; }
 .gatebox > p.dim { margin: 0 0 24px; }
 .gatebox .field { margin-bottom: 14px; }

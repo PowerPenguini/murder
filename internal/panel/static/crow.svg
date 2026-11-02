@@ -1,21 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1 1 132 32">
   <title>Murder</title>
-  <!-- A murder of crows: three heads, one before the other, in one colour;
-       the gaps between them are cut out, not drawn. -->
+  <!-- A murder of crows: three heads in a row, in one colour; each beak
+       reaches over the next crow, the gap between them cut out, not drawn. -->
   <defs>
     <path id="h" fill-rule="evenodd" d="M3 32 C0 24 0 14 5 8 C9 3.5 14 2 19 2.5 L28 5 L50 13 L31 16.5 L27 23 L23 22 L21 32 Z M20 7.4 L22.1 9.5 L20 11.6 L17.9 9.5 Z"/>
-    <mask id="m1" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
-      <rect width="64" height="64" fill="#fff"/>
-      <use href="#h" transform="translate(7 14)" stroke="#000" stroke-width="3" stroke-linejoin="round"/>
+    <mask id="m1" maskUnits="userSpaceOnUse" x="-10" y="-10" width="160" height="60">
+      <rect x="-10" y="-10" width="160" height="60" fill="#fff"/>
+      <use href="#h" transform="translate(40 0)" stroke="#000" stroke-width="3" stroke-linejoin="round"/>
     </mask>
-    <mask id="m2" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
-      <rect width="64" height="64" fill="#fff"/>
-      <use href="#h" transform="translate(10 27)" stroke="#000" stroke-width="3" stroke-linejoin="round"/>
+    <mask id="m2" maskUnits="userSpaceOnUse" x="-10" y="-10" width="160" height="60">
+      <rect x="-10" y="-10" width="160" height="60" fill="#fff"/>
+      <use href="#h" stroke="#000" stroke-width="3" stroke-linejoin="round"/>
     </mask>
   </defs>
   <g fill="#ececec">
-    <g mask="url(#m1)"><use href="#h" transform="translate(4 1)"/></g>
-    <g mask="url(#m2)"><use href="#h" transform="translate(7 14)"/></g>
-    <use href="#h" transform="translate(10 27)"/>
+    <g mask="url(#m1)"><use href="#h" transform="translate(80 0)"/></g>
+    <g mask="url(#m2)"><use href="#h" transform="translate(40 0)"/></g>
+    <use href="#h"/>
   </g>
 </svg>

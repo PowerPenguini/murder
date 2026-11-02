@@ -24,7 +24,8 @@ the audit log as `<person> via murder-panel`.
 - **Look:** black and white, quiet and sharp: lines instead of boxes, a
   state as a dot and a word, monospace only for data, row actions in a
   "⋯" menu and dangerous ones behind a typed name. The mark is three crows'
-  heads, one before the other, in one colour. No JavaScript frameworks and
+  heads in a row, in one colour (`static/crow.svg`; one head for the tab
+  icon, `static/icon.svg`). No JavaScript frameworks and
   nothing loaded from elsewhere (a strict CSP, so no inline styles); pages
   fetch themselves every 5 s (`live.js`) and actions are plain forms.
 
