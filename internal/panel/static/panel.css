@@ -40,7 +40,7 @@ pre, textarea { font-size: 12.5px; }
   position: sticky; top: 0; align-self: flex-start; flex: none;
   width: 216px; height: 100vh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 28px;
-  padding: 22px 0 20px; border-right: 1px solid var(--line);
+  padding: 22px 0 20px;
 }
 .brand { display: block; padding: 0 22px; text-decoration: none; }
 .brand img { height: 30px; width: auto; display: block; }
@@ -50,7 +50,7 @@ pre, textarea { font-size: 12.5px; }
   color: var(--dim); text-decoration: none;
 }
 .menu a:hover { color: var(--fg); }
-.menu a.on { color: var(--fg); border-left-color: var(--fg); background: var(--raised); }
+.menu a.on { color: var(--fg); border-left-color: var(--fg); }
 .who { margin-top: auto; padding: 0 22px; display: grid; gap: 8px; color: var(--dim); font-size: 13px; }
 .who .node { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12.5px; }
 .who .user { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
