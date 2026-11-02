@@ -20,8 +20,10 @@
     if (busy()) return;
     try {
       const response = await fetch(location.href, { credentials: "same-origin", headers: { "X-Murder-Live": "1" } });
-      // Signed out, or the session ended: the page stops following.
-      if (response.redirected || response.status === 401) {
+      // Signed out, the session ended, or what the page shows is gone (a
+      // job of a panel that restarted, a purged tenant): it stops following,
+      // keeping what it showed last.
+      if (response.redirected || response.status === 401 || response.status === 404) {
         clearInterval(timer);
         if (indicator) indicator.classList.add("off");
         return;
