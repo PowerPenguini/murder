@@ -73,16 +73,21 @@ type Server struct {
 	// on the cluster.
 	Actions func(actor string) ActionAgent
 	Cluster func(actor string) ClusterAgent
-	jobs    jobs
-	backend Backend
-	log     *slog.Logger
-	now     func() time.Time
-	pages   map[string]*template.Template
+	// Jobs are the panel's background work; panels of one process share
+	// them.
+	Jobs *Jobs
+	// UploadDir keeps uploaded binaries until they are installed; the
+	// system's temporary directory if empty.
+	UploadDir string
+	backend   Backend
+	log       *slog.Logger
+	now       func() time.Time
+	pages     map[string]*template.Template
 }
 
 // New returns a panel asking backend.
 func New(backend Backend, log *slog.Logger) (*Server, error) {
-	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}}
+	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}, Jobs: &Jobs{}}
 	for _, page := range []string{"overview", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job"} {
 		t, err := template.New("layout.html").Funcs(s.funcs()).ParseFS(templateFiles, "templates/layout.html", "templates/partials.html", "templates/"+page+".html")
 		if err != nil {
@@ -115,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 	if s.Cluster != nil {
 		pages.HandleFunc("GET /cluster", s.cluster)
 		pages.HandleFunc("POST /cluster", s.clusterAction)
+		pages.HandleFunc("POST /cluster/upgrade", s.upgradeAction)
 		pages.HandleFunc("GET /jobs/{id}", s.jobPage)
 	}
 	if s.Auth != nil {

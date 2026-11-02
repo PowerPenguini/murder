@@ -14,9 +14,9 @@
         <td class="dim hide-narrow">{{if .Started.IsZero}}—{{else}}{{ago .Started}}{{end}}</td>
         <td class="dim hide-narrow">{{with .Tunnel}}{{.Address}}{{else}}—{{end}}</td>
         <td class="actions">
-          {{if .Answers}}
+          {{if and .Answers .Targets}}
           <form method="post" class="inline"><input type="hidden" name="do" value="drain"><input type="hidden" name="node" value="{{.Name}}">
-            <select name="to" aria-label="to">{{range $d.Nodes}}{{if and (ne .Name $n.Name) .Answers (not .Failed)}}<option>{{.Name}}</option>{{end}}{{end}}</select>
+            <select name="to" aria-label="to" required><option value="" selected disabled>to…</option>{{range .Targets}}<option>{{.}}</option>{{end}}</select>
             <button type="submit" class="small" title="moves every tenant of {{.Name}} there, one after the other">drain</button></form>
           {{end}}
           {{if and (not .Answers) (not .Failed)}}
@@ -39,22 +39,29 @@
 {{if $d.Frozen}}
 <section class="actions">
   <h2>changes frozen</h2>
+  {{with $d.Busy}}
+  <p class="dim">{{$d.Frozen}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>, begun by {{.By}}, runs now and takes changes again once it ends.</p>
+  {{else}}
   <p class="dim">{{$d.Frozen}}. An upgrade that stopped leaves it so; once every node runs one release, take changes again.</p>
   <form method="post" class="inline"><input type="hidden" name="do" value="thaw">
     <input type="text" name="confirm" placeholder="type thaw" aria-label="type thaw" autocomplete="off" required>
     <button type="submit" class="danger">take changes again</button></form>
+  {{end}}
 </section>
 {{end}}
 
 <section class="actions">
   <h2>upgrade</h2>
   <p class="dim">A new murder binary, installed on every node one after the other, this one last; tenants keep serving, changes wait meanwhile. It runs as root on every node.</p>
-  <form method="post" enctype="multipart/form-data" class="inline">
-    <input type="hidden" name="do" value="upgrade">
-    <input type="file" name="binary" required aria-label="the murder binary">
+  {{with $d.Busy}}
+  <p>Waits for <a href="/jobs/{{.ID}}">{{.Title}}</a>, which runs now.</p>
+  {{else}}
+  <form method="post" action="/cluster/upgrade" enctype="multipart/form-data" class="inline">
     <input type="text" name="confirm" placeholder="type upgrade" aria-label="type upgrade" autocomplete="off" required>
+    <input type="file" name="binary" required aria-label="the murder binary">
     <button type="submit">upgrade the cluster</button>
   </form>
+  {{end}}
 </section>
 
 <section class="actions">

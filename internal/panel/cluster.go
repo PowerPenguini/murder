@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,6 +39,8 @@ type Job struct {
 	ID, Title, By  string
 	Started, Ended time.Time
 	Failed         string
+	// exclusive jobs change the cluster: one runs at a time.
+	exclusive bool
 
 	mu  sync.Mutex
 	out bytes.Buffer
@@ -63,59 +66,132 @@ func (j *Job) Done() bool {
 	return !j.Ended.IsZero()
 }
 
-// jobs are the panel's recent jobs, newest first.
-type jobs struct {
-	mu   sync.Mutex
-	list []*Job
+// Jobs are a panel's recent jobs, newest first. The socket's panel and
+// the tunnel's share them, so that one change of the cluster runs at a time
+// whichever began it.
+type Jobs struct {
+	mu      sync.Mutex
+	list    []*Job
+	closed  bool
+	running sync.WaitGroup
 }
 
+// jobsKept bounds the ended jobs kept; running ones are always kept.
 const jobsKept = 20
 
-// startJob runs work in the background, for up to an hour, whatever
-// becomes of the request that began it.
-func (s *Server) startJob(title, by string, work func(ctx context.Context, out io.Writer) error) *Job {
+// errClosed refuses a job while the panel restarts.
+var errClosed = errors.New("the panel restarts: try again in a moment")
+
+// jobLimit bounds a job, as a safety net only: an upgrade waits for each
+// node in turn, and a drain moves every tenant of a node.
+const jobLimit = 24 * time.Hour
+
+// Start runs work in the background, whatever becomes of the request that
+// began it. An exclusive job, one that changes the cluster, is refused
+// while another runs.
+func (j *Jobs) Start(title, by string, exclusive bool, now func() time.Time, log *slog.Logger, work func(ctx context.Context, out io.Writer) error) (*Job, error) {
 	id := make([]byte, 8)
 	_, _ = rand.Read(id)
-	job := &Job{ID: hex.EncodeToString(id), Title: title, By: by, Started: s.now()}
-	s.jobs.mu.Lock()
-	s.jobs.list = append([]*Job{job}, s.jobs.list...)
-	if len(s.jobs.list) > jobsKept {
-		s.jobs.list = s.jobs.list[:jobsKept]
+	job := &Job{ID: hex.EncodeToString(id), Title: title, By: by, Started: now(), exclusive: exclusive}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return nil, errClosed
 	}
-	s.jobs.mu.Unlock()
+	if exclusive {
+		if busy := j.busyLocked(); busy != nil {
+			return nil, fmt.Errorf("%q runs now, begun by %s: one change of the cluster at a time", busy.Title, busy.By)
+		}
+	}
+	kept := []*Job{job}
+	ended := 0
+	for _, old := range j.list {
+		if old.Done() {
+			if ended == jobsKept {
+				continue
+			}
+			ended++
+		}
+		kept = append(kept, old)
+	}
+	j.list = kept
+	j.running.Add(1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		defer j.running.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), jobLimit)
 		defer cancel()
 		err := work(ctx, job)
 		job.mu.Lock()
 		defer job.mu.Unlock()
-		job.Ended = s.now()
+		job.Ended = now()
 		if err != nil {
 			job.Failed = err.Error()
 			fmt.Fprintf(&job.out, "\nfailed: %v\n", err)
 		}
-		s.log.Info("a panel job ended", "job", title, "by", by, "failed", job.Failed)
+		log.Info("a panel job ended", "job", title, "by", by, "failed", job.Failed)
 	}()
-	return job
+	return job, nil
 }
 
-// Working reports whether a job of the panel is under way: an upgrade
-// replaces the panel's own binary, and must still thaw changes after.
-func (s *Server) Working() bool {
-	s.jobs.mu.Lock()
-	defer s.jobs.mu.Unlock()
-	for _, job := range s.jobs.list {
-		if !job.Done() {
-			return true
+// busyLocked is the exclusive job that runs, if one does.
+func (j *Jobs) busyLocked() *Job {
+	for _, job := range j.list {
+		if job.exclusive && !job.Done() {
+			return job
 		}
 	}
-	return false
+	return nil
 }
 
-func (s *Server) job(id string) *Job {
-	s.jobs.mu.Lock()
-	defer s.jobs.mu.Unlock()
-	for _, job := range s.jobs.list {
+// Busy is the job that changes the cluster now, if one does.
+func (j *Jobs) Busy() *Job {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.busyLocked()
+}
+
+// CloseIdle takes no more jobs, if none runs, and reports whether it
+// closed: a panel replaced by an upgrade restarts only then, and no job
+// begins as it does.
+func (j *Jobs) CloseIdle() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for _, job := range j.list {
+		if !job.Done() {
+			return false
+		}
+	}
+	j.closed = true
+	return true
+}
+
+// Close takes no more jobs; Wait waits for those that run.
+func (j *Jobs) Close() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.closed = true
+}
+
+// Wait waits until no job runs.
+func (j *Jobs) Wait() { j.running.Wait() }
+
+// Running counts the jobs that run.
+func (j *Jobs) Running() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	n := 0
+	for _, job := range j.list {
+		if !job.Done() {
+			n++
+		}
+	}
+	return n
+}
+
+func (j *Jobs) find(id string) *Job {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for _, job := range j.list {
 		if job.ID == id {
 			return job
 		}
@@ -123,8 +199,16 @@ func (s *Server) job(id string) *Job {
 	return nil
 }
 
+func (j *Jobs) all() []*Job {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return slices.Clone(j.list)
+}
+
 type nodeRow struct {
 	api.NodeState
+	// Targets are the nodes it could be drained to: they answer.
+	Targets []string
 	State   tag
 	Leader  bool
 	Version string
@@ -135,8 +219,10 @@ type nodeRow struct {
 type clusterData struct {
 	Nodes  []nodeRow
 	Frozen string
-	Jobs   []*Job
-	Self   string
+	// Busy is the job that changes the cluster now, if one does.
+	Busy *Job
+	Jobs []*Job
+	Self string
 }
 
 func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +239,11 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 	var wg sync.WaitGroup
 	for i, node := range nodes.Nodes {
 		data.Nodes[i] = nodeRow{NodeState: node, State: nodeState(node, s.now()), Leader: node.Name == nodes.Leader}
+		for _, other := range nodes.Nodes {
+			if other.Name != node.Name && other.Answers && !other.Failed() {
+				data.Nodes[i].Targets = append(data.Nodes[i].Targets, other.Name)
+			}
+		}
 		if !node.Answers {
 			continue
 		}
@@ -171,26 +262,26 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	wg.Wait()
-	s.jobs.mu.Lock()
-	data.Jobs = slices.Clone(s.jobs.list)
-	s.jobs.mu.Unlock()
+	data.Jobs, data.Busy = s.Jobs.all(), s.Jobs.Busy()
 	s.render(w, r, "cluster", "Cluster", "cluster", data)
 }
-
-// upgradeLimit bounds an uploaded binary.
-const upgradeLimit = 256 << 20
 
 func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	user := s.actor(userOf(r))
 	agent := s.Cluster(user)
-	r.Body = http.MaxBytesReader(w, r.Body, upgradeLimit+1<<20)
 	node := r.FormValue("node")
 	confirmed := strings.TrimSpace(r.FormValue("confirm"))
 	back := func(kind, message string) {
 		flash(w, r, kind, message)
 		http.Redirect(w, r, "/cluster", http.StatusSeeOther)
 	}
-	toJob := func(job *Job) { http.Redirect(w, r, "/jobs/"+url.PathEscape(job.ID), http.StatusSeeOther) }
+	toJob := func(job *Job, err error) {
+		if err != nil {
+			back("problem", err.Error())
+			return
+		}
+		http.Redirect(w, r, "/jobs/"+url.PathEscape(job.ID), http.StatusSeeOther)
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 	defer cancel()
 	switch r.FormValue("do") {
@@ -200,7 +291,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", "pick the node to move the tenants to")
 			return
 		}
-		toJob(s.startJob("drain "+node+" to "+to, user, func(ctx context.Context, out io.Writer) error {
+		toJob(s.Jobs.Start("drain "+node+" to "+to, user, true, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			return clusterops.Drain(ctx, agent, node, to, out)
 		}))
 	case "remove":
@@ -229,13 +320,17 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", "type thaw to take changes again")
 			return
 		}
+		if busy := s.Jobs.Busy(); busy != nil {
+			back("problem", fmt.Sprintf("%q runs now: it takes changes again once it ends", busy.Title))
+			return
+		}
 		if err := agent.Thaw(ctx); err != nil {
 			back("problem", err.Error())
 			return
 		}
 		back("done", "changes are taken again")
 	case "backups":
-		toJob(s.startJob("back up the tenants of "+s.nodeName(ctx, agent), user, func(ctx context.Context, out io.Writer) error {
+		toJob(s.Jobs.Start("back up the tenants of "+s.nodeName(ctx, agent), user, false, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			results, err := agent.RunBackups(ctx)
 			for _, result := range results {
 				if result.Error != "" {
@@ -245,20 +340,6 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			return err
-		}))
-	case "upgrade":
-		if confirmed != "upgrade" {
-			back("problem", "type upgrade: the binary runs as root on every node")
-			return
-		}
-		path, err := s.saveBinary(r)
-		if err != nil {
-			back("problem", err.Error())
-			return
-		}
-		toJob(s.startJob("upgrade the cluster", user, func(ctx context.Context, out io.Writer) error {
-			defer os.Remove(path)
-			return clusterops.Upgrade(ctx, agent, path, 5*time.Minute, out)
 		}))
 	default:
 		back("problem", "unknown action")
@@ -272,39 +353,121 @@ func (s *Server) nodeName(ctx context.Context, agent ClusterAgent) string {
 	return "this node"
 }
 
-// saveBinary keeps an uploaded binary in a file only root reads, for the
-// upgrade, and checks that it is one: it says its version.
-func (s *Server) saveBinary(r *http.Request) (string, error) {
-	file, header, err := r.FormFile("binary")
+// upgradeLimit bounds an uploaded binary; a variable for tests.
+var upgradeLimit int64 = 256 << 20
+
+// upgradeAction takes a new murder binary and upgrades the cluster with
+// it, as a job.
+func (s *Server) upgradeAction(w http.ResponseWriter, r *http.Request) {
+	user := s.actor(userOf(r))
+	back := func(message string) {
+		flash(w, r, "problem", message)
+		http.Redirect(w, r, "/cluster", http.StatusSeeOther)
+	}
+	if busy := s.Jobs.Busy(); busy != nil {
+		back(fmt.Sprintf("%q runs now, begun by %s: one change of the cluster at a time", busy.Title, busy.By))
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, upgradeLimit+1<<20)
+	path, err := s.receiveBinary(r)
+	if err != nil {
+		back(err.Error())
+		return
+	}
+	probe, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	_, err = upgrade.Probe(probe, path)
+	cancel()
+	if err != nil {
+		os.Remove(path)
+		back("the file did not tell its murder version, so it is not used: " + err.Error())
+		return
+	}
+	agent := s.Cluster(user)
+	job, err := s.Jobs.Start("upgrade the cluster", user, true, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+		defer os.Remove(path)
+		return clusterops.Upgrade(ctx, agent, path, 5*time.Minute, out)
+	})
+	if err != nil {
+		os.Remove(path)
+		back(err.Error())
+		return
+	}
+	http.Redirect(w, r, "/jobs/"+url.PathEscape(job.ID), http.StatusSeeOther)
+}
+
+// receiveBinary keeps an uploaded binary in a file only root reads, in
+// the panel's upload directory. The form says "upgrade" before the file,
+// so a file without it is never kept.
+func (s *Server) receiveBinary(r *http.Request) (string, error) {
+	reader, err := r.MultipartReader()
 	if err != nil {
 		return "", errors.New("choose the new murder binary to upload")
 	}
-	defer file.Close()
-	if header.Size > upgradeLimit {
-		return "", fmt.Errorf("the binary is %d MB: at most %d MB", header.Size>>20, upgradeLimit>>20)
+	confirmed := false
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			return "", errors.New("choose the new murder binary to upload")
+		}
+		if err != nil {
+			return "", uploadError(err)
+		}
+		switch part.FormName() {
+		case "confirm":
+			value, _ := io.ReadAll(io.LimitReader(part, 64))
+			confirmed = strings.TrimSpace(string(value)) == "upgrade"
+		case "binary":
+			if !confirmed {
+				return "", errors.New("type upgrade: the binary runs as root on every node")
+			}
+			if part.FileName() == "" {
+				return "", errors.New("choose the new murder binary to upload")
+			}
+			return s.keepBinary(part)
+		}
 	}
-	temp, err := os.CreateTemp("", "murder-upgrade-*")
+}
+
+func (s *Server) keepBinary(data io.Reader) (string, error) {
+	dir := s.UploadDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	file, err := os.CreateTemp(dir, "murder-upgrade-*")
 	if err != nil {
 		return "", err
 	}
-	_, err = io.Copy(temp, file)
-	err = errors.Join(err, temp.Chmod(0o700), temp.Close())
-	if err == nil {
-		probe, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		_, err = upgrade.Probe(probe, temp.Name())
+	n, err := io.Copy(file, io.LimitReader(data, upgradeLimit+1))
+	switch {
+	case err != nil:
+		err = uploadError(err)
+	case n == 0:
+		err = errors.New("the file is empty: choose the new murder binary")
+	case n > upgradeLimit:
+		err = uploadError(&http.MaxBytesError{Limit: upgradeLimit})
 	}
+	err = errors.Join(err, file.Chmod(0o700), file.Close())
 	if err != nil {
-		os.Remove(temp.Name())
-		return "", fmt.Errorf("not a murder binary: %w", err)
+		os.Remove(file.Name())
+		return "", err
 	}
-	return temp.Name(), nil
+	return file.Name(), nil
+}
+
+func uploadError(err error) error {
+	if errors.As(err, new(*http.MaxBytesError)) {
+		return fmt.Errorf("the binary is larger than %d MB", upgradeLimit>>20)
+	}
+	return fmt.Errorf("the upload broke off: %w", err)
 }
 
 type jobData struct{ Job *Job }
 
 func (s *Server) jobPage(w http.ResponseWriter, r *http.Request) {
-	job := s.job(r.PathValue("id"))
+	job := s.Jobs.find(r.PathValue("id"))
 	if job == nil {
 		s.fail(w, r, &api.Error{Status: http.StatusNotFound, Message: "no such job on this node's panel: jobs are kept by the panel that began them, until it restarts"})
 		return

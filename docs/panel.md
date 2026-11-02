@@ -67,9 +67,13 @@ Each stage is one PR, reviewed and tested before the next.
    ("upgrade" typed; the panel checks that it says a murder version, then
    installs it node by node, this one last, as `murder upgrade` does: the
    same code, in `internal/clusterops`). Upgrades, drains and backups are
-   jobs: their page follows what they say. Jobs live in the panel process
-   that began them, so a panel replaced by an upgrade restarts only once
-   its jobs ended. Restoring a backup stays on a node (`murder backups
+   jobs: their page follows what they say. One change of the cluster (an
+   upgrade or a drain) runs at a time, from either of a node's panels; a
+   thaw waits for it too. The binary is uploaded beside the database, not
+   to /tmp. Jobs live in the panel process that began them, so a panel
+   replaced by an upgrade restarts only once its jobs ended, taking none
+   meanwhile, and a stopped panel waits for them (up to 30 minutes, as
+   its unit says). Restoring a backup stays on a node (`murder backups
    restore`). Static files carry a hash of their content in their
    address, so a new release never runs an old page's script.
 6. **Apps and secrets:** edit app specs, a tenant's settings and secrets

@@ -11,6 +11,8 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/murder panel -config /etc/murder/agent.yaml
 Restart=always
 RestartSec=2
+# Stopping waits for the panel's jobs, such as an upgrade, to end.
+TimeoutStopSec=30min
 StateDirectory=murder
 StateDirectoryMode=0700
 
