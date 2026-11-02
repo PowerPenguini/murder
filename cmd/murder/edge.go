@@ -103,6 +103,7 @@ func runEdge(args []string) error {
 	following, stopFollowing := context.WithCancel(context.Background())
 	defer stopFollowing()
 	go followRoutes(following, api.NewClient(cfg.Socket), table, cfg.Edge.Routes, log)
+	go reportServed(following, api.NewClient(cfg.Socket), proxy.Served(), table, log)
 	if credentials != nil {
 		go keepWarm(following, proxy, table)
 	}
@@ -303,6 +304,39 @@ const handoverGrace = 2 * time.Second
 // warmEvery keeps a connection to each other node's edge from going idle
 // for long enough to close (the transport closes them after 90 s).
 const warmEvery = 30 * time.Second
+
+// reportServed tells the agent, every so often, how many requests this
+// edge passed to its node's containers, and how they went: the agent
+// measures its tenants by them.
+func reportServed(ctx context.Context, client *api.Client, served *metrics.Edge, table *edge.LiveTable, log *slog.Logger) {
+	ticker := time.NewTicker(servedEvery)
+	defer ticker.Stop()
+	quiet := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		routes := table.Load()
+		served.Keep(func(tenant string) bool { _, ok := routes.Routes[tenant]; return ok })
+		request, cancel := context.WithTimeout(ctx, servedEvery)
+		err := client.EdgeUsage(request, served.Counts())
+		cancel()
+		// Said once while it lasts: an agent restarting, or one of an
+		// older release, takes none for a while.
+		switch {
+		case err != nil && !quiet:
+			log.Info("the agent takes no request counts for now", "error", err)
+			quiet = true
+		case err == nil:
+			quiet = false
+		}
+	}
+}
+
+// servedEvery is how often the edge tells the agent its counts.
+const servedEvery = 15 * time.Second
 
 // keepWarm keeps a connection open to every other node's edge the routes
 // lead to, opening one as soon as the routes name a new one.

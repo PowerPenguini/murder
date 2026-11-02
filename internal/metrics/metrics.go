@@ -79,9 +79,9 @@ func Bool(b bool) float64 {
 // Timestamp is t in Unix seconds.
 func Timestamp(t time.Time) float64 { return float64(t.UnixNano()) / 1e9 }
 
-// buckets are the upper bounds, in seconds, of the response time
+// Buckets are the upper bounds, in seconds, of the response time
 // histogram: from a cached page to a slow report.
-var buckets = [...]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
+var Buckets = [...]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
 
 // Edge counts the edge proxy's requests. Counting takes no lock once a
 // tenant has counts: requests on many cores do not wait on each other.
@@ -98,7 +98,7 @@ type tenantRequests struct {
 	backendErrors atomic.Uint64
 	// waits is the response time histogram: counts per bucket (not
 	// cumulative), their sum in nanoseconds and count.
-	waits [len(buckets)]atomic.Uint64
+	waits [len(Buckets)]atomic.Uint64
 	sum   atomic.Int64
 	count atomic.Uint64
 }
@@ -116,7 +116,7 @@ func (e *Edge) Request(tenant string, status int, wait time.Duration) {
 	counts := e.tenant(tenant)
 	counts.byClass[class].Add(1)
 	seconds := wait.Seconds()
-	for i, bound := range buckets {
+	for i, bound := range Buckets {
 		if seconds <= bound {
 			counts.waits[i].Add(1)
 			break
@@ -159,11 +159,46 @@ func (e *Edge) tenant(name string) *tenantRequests {
 	return counts
 }
 
+// Counts are one tenant's requests as counted so far: by status class (1xx
+// to 5xx), those that could not be passed on, how many waited up to each
+// of Buckets for their response headers and, last, longer.
+type Counts struct {
+	ByClass       [5]uint64 `json:"byClass"`
+	BackendErrors uint64    `json:"backendErrors"`
+	Waits         []uint64  `json:"waits"`
+	Count         uint64    `json:"count"`
+}
+
+// Counts returns every tenant's counts as they stand.
+func (e *Edge) Counts() map[string]Counts {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make(map[string]Counts, len(e.tenants))
+	for name, counts := range e.tenants {
+		// Count first, as Write does: buckets read after it hold at least
+		// as much, and the longest waits are what is left of it.
+		c := Counts{Count: counts.count.Load(), BackendErrors: counts.backendErrors.Load(), Waits: make([]uint64, len(Buckets)+1)}
+		for i := range counts.byClass {
+			c.ByClass[i] = counts.byClass[i].Load()
+		}
+		var inBuckets uint64
+		for i := range counts.waits {
+			c.Waits[i] = counts.waits[i].Load()
+			inBuckets += c.Waits[i]
+		}
+		if c.Count > inBuckets {
+			c.Waits[len(Buckets)] = c.Count - inBuckets
+		}
+		out[name] = c
+	}
+	return out
+}
+
 // tenantCounts is one tenant's counts at one moment.
 type tenantCounts struct {
 	byClass       [5]uint64
 	backendErrors uint64
-	waits         [len(buckets)]uint64
+	waits         [len(Buckets)]uint64
 	sum           float64
 	count         uint64
 }
@@ -202,7 +237,7 @@ func (e *Edge) Write(w *Writer) {
 	for _, name := range names {
 		counts := tenants[name]
 		var cumulative uint64
-		for i, bound := range buckets {
+		for i, bound := range Buckets {
 			cumulative = min(cumulative+counts.waits[i], counts.count)
 			w.Sample("murder_edge_response_seconds_bucket", float64(cumulative), "tenant", name, "le", format(bound))
 		}

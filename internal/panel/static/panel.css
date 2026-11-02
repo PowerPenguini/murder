@@ -221,3 +221,13 @@ svg.bar { display: block; width: 140px; height: 6px; flex: none; }
 svg.activity { display: block; width: 100%; height: auto; overflow: visible; }
 svg.activity .tick { font-family: var(--mono); font-size: 12px; fill: var(--dim); }
 svg.activity g:hover rect:last-child { fill: #ececec; }
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 32px 40px; }
+figure.line { margin: 0; }
+figure.line figcaption { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+figure.line .caps { color: var(--dim); }
+figure.line .now { font-family: var(--mono); font-size: 12.5px; }
+svg.linechart { display: block; width: 100%; height: auto; overflow: visible; }
+svg.linechart .tick { font-family: var(--mono); font-size: 22px; fill: var(--dim); }
+svg.linechart rect:hover { fill: rgba(255, 255, 255, 0.04); }
+.barline.dim .num { color: var(--dim); }
+@media (max-width: 760px) { .charts { grid-template-columns: 1fr; } }

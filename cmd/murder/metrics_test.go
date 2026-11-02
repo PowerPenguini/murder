@@ -19,6 +19,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
+	measure "github.com/PowerPenguini/murder/internal/usage"
 	"github.com/PowerPenguini/murder/internal/volume"
 )
 
@@ -121,5 +122,34 @@ func TestEdgeMetricsDescribeTheEdge(t *testing.T) {
 	}
 	if t.Failed() {
 		t.Logf("metrics:\n%s", text)
+	}
+}
+
+// What tenants use is written as Prometheus reads it: their containers'
+// counters as counters, memory and data as gauges, and nothing not known.
+func TestUsageMetrics(t *testing.T) {
+	var out strings.Builder
+	writeUsage(metrics.NewWriter(&out), measure.Report{Tenants: map[string]measure.Now{
+		"acme": {Memory: 64 << 20, MemoryLimit: 512 << 20, DiskUsed: 1 << 30, Counters: measure.Raw{CPU: 2_500_000, NetRx: 100, NetTx: 200, DiskRead: 300, DiskWrite: 400}},
+		"beta": {Memory: 1, DiskUsed: -1},
+	}})
+	text := out.String()
+	for _, want := range []string{
+		"# TYPE murder_tenant_cpu_seconds_total counter",
+		`murder_tenant_cpu_seconds_total{tenant="acme"} 2.5`,
+		`murder_tenant_memory_bytes{tenant="acme"} 6.7108864e+07`,
+		`murder_tenant_memory_limit_bytes{tenant="acme"} 5.36870912e+08`,
+		`murder_tenant_network_receive_bytes_total{tenant="acme"} 100`,
+		`murder_tenant_network_transmit_bytes_total{tenant="acme"} 200`,
+		`murder_tenant_disk_read_bytes_total{tenant="acme"} 300`,
+		`murder_tenant_disk_written_bytes_total{tenant="acme"} 400`,
+		`murder_tenant_data_bytes{tenant="acme"} 1.073741824e+09`,
+	} {
+		if !strings.Contains(text, want+"\n") {
+			t.Errorf("missing %s in:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, `murder_tenant_memory_limit_bytes{tenant="beta"}`) || strings.Contains(text, `murder_tenant_data_bytes{tenant="beta"}`) {
+		t.Errorf("an unknown limit or size was written:\n%s", text)
 	}
 }

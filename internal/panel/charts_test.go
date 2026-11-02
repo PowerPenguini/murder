@@ -1,6 +1,9 @@
 package panel
 
 import (
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,5 +50,71 @@ func TestMemory(t *testing.T) {
 		if got := memory(mb); got != want {
 			t.Errorf("memory(%d) = %q, want %q", mb, got, want)
 		}
+	}
+}
+
+// A line breaks where nothing was measured; the limit is drawn as a level
+// and names the top of the scale; every step has a hover.
+func TestLineChart(t *testing.T) {
+	now := time.Date(2026, 11, 2, 17, 23, 0, 0, time.UTC)
+	step := 5 * time.Minute
+	end := now.Truncate(step)
+	var samples []sample
+	for i := 1; i <= 10; i++ {
+		if i == 5 || i == 6 {
+			continue // the agent did not measure
+		}
+		samples = append(samples, sample{At: end.Add(-time.Duration(i) * step), Values: []float64{float64(i), 1}})
+	}
+	slices.SortFunc(samples, func(a, b sample) int { return a.At.Compare(b.At) })
+	chart := newLineChart("Memory", []string{"used", "errors"}, samples, 20, now, step, func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) })
+	if len(chart.Series) != 2 || strings.Count(chart.Series[0].Line, "M") != 2 || strings.Count(chart.Series[0].Area, "Z") != 2 {
+		t.Fatalf("a gap did not break the line: %+v", chart.Series[0])
+	}
+	if chart.Limit == nil || chart.Limit.Label != "limit 20" || chart.Top != "" || len(chart.Hover) != 8 {
+		t.Fatalf("chart: limit %+v, top %q, %d hovers", chart.Limit, chart.Top, len(chart.Hover))
+	}
+	if chart.Now != "1 used · 1 errors" || chart.Hover[7].Title != "17:15: 1 used, 1 errors" {
+		t.Fatalf("now %q, last hover %q", chart.Now, chart.Hover[7].Title)
+	}
+	// The limit at 20 is the highest value: the scale leaves 8% above it.
+	if want := lineTop + (lineHeight-lineTop)*(1-1/1.08); chart.Limit.Y < want-0.01 || chart.Limit.Y > want+0.01 {
+		t.Fatalf("the limit's level: %v", chart.Limit.Y)
+	}
+	if empty := newLineChart("CPU", []string{"cores"}, nil, 0, now, step, cores); !empty.Empty {
+		t.Fatal("a chart of nothing is not empty")
+	}
+}
+
+func TestUnits(t *testing.T) {
+	for v, want := range map[float64]string{0: "0 B", 812: "812 B", 1536: "1.5 KB", 300 << 20: "300 MB", 1.2 * (1 << 30): "1.2 GB"} {
+		if got := size(v); got != want {
+			t.Errorf("size(%v) = %q, want %q", v, got, want)
+		}
+	}
+	for v, want := range map[float64]string{0: "0", 0.004: "<0.01", 0.123: "0.12", 12.34: "12.3"} {
+		if got := cores(v); got != want {
+			t.Errorf("cores(%v) = %q, want %q", v, got, want)
+		}
+	}
+	for v, want := range map[float64]string{0: "0", 0.25: "0.3", 97.4: "97", 1530: "1.5k"} {
+		if got := rate(v); got != want {
+			t.Errorf("rate(%v) = %q, want %q", v, got, want)
+		}
+	}
+	for v, want := range map[float64]string{0: "—", 0.0423: "42 ms", 1.234: "1.23 s"} {
+		if got := wait(v); got != want {
+			t.Errorf("wait(%v) = %q, want %q", v, got, want)
+		}
+	}
+}
+
+// A step alone between gaps is drawn across its width.
+func TestALoneStepIsDrawn(t *testing.T) {
+	now := time.Date(2026, 11, 2, 17, 23, 0, 0, time.UTC)
+	step := 5 * time.Minute
+	chart := newLineChart("CPU", []string{"cores"}, []sample{{At: now.Truncate(step).Add(-step), Values: []float64{1}}}, 0, now, step, cores)
+	if line := chart.Series[0].Line; strings.Count(line, "M") != 1 || strings.Count(line, "L") != 1 {
+		t.Fatalf("a lone step: %q", line)
 	}
 }

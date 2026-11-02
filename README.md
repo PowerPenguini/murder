@@ -78,6 +78,24 @@ the state replicated between nodes.
   when the certificate expires and the agent last confirmed the routes.
   Enough to alert on a tenant down or crashing, a stuck agent, a missing
   backup or a certificate not renewed.
+- **Use.** Every 15 seconds the agent measures each running tenant: CPU,
+  memory against its limit and disk I/O from its container's cgroup (v2;
+  on a cgroup v1 host containers are not measured), its traffic from its
+  network namespace, its data's size from ZFS every 5 minutes, and the
+  host's CPU, memory and load. The edge counts the requests it passes to
+  its own node's containers (each request once, however many edges it went
+  through) and tells the agent every 15 seconds: requests, errors (5xx and
+  requests it could not pass on) and the 95th percentile of the time to
+  the response headers. A day is kept a minute at a time, in memory: a
+  restarted agent starts the day again. `GET /v1/usage` is the cluster's
+  use now, `GET /v1/tenants/NAME/usage?step=300` a tenant's day; the panel
+  draws both. `/metrics` has `murder_tenant_cpu_seconds_total`,
+  `murder_tenant_memory_bytes` and `_limit_bytes`, network and disk byte
+  counters and `murder_tenant_data_bytes`, for a Prometheus to keep longer.
+  Memory leaves out the files a container no longer uses (as `docker
+  stats` does). On the zfs driver the cgroup counts few of a container's
+  disk writes, as ZFS writes them later on its own: the disk chart reads
+  low there; the data's size is exact.
 - **Secrets.** Generated per tenant and sealed with the node's master key
   (AES-256-GCM, bound to tenant and name). The database never holds them in
   the clear.

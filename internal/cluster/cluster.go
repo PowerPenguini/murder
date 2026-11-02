@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -90,6 +91,8 @@ type Config struct {
 	Moves Moves
 	// Replicas keeps the copies of other nodes' tenants this node holds.
 	Replicas Replicas
+	// Usage is what this node measures of its tenants; nil if nothing.
+	Usage Usage
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
@@ -544,6 +547,25 @@ type Moves interface {
 	Discard(ctx context.Context, tenant string) error
 	Status(tenant string) (any, bool)
 	Move(ctx context.Context, tenant, to, actor string) error
+}
+
+// Usage is what a node measured of itself and its tenants, for the
+// others to show.
+type Usage interface {
+	// Report is the node's use now; Series a tenant's day in steps.
+	Report() any
+	Series(tenant string, step time.Duration) (any, bool)
+}
+
+// UsageOn decodes node's use now into out.
+func (c *Cluster) UsageOn(ctx context.Context, node string, out any) error {
+	return c.request(ctx, node, http.MethodGet, "/cluster/v1/usage", nil, out)
+}
+
+// TenantUsageOn decodes the day of a tenant node runs into out.
+func (c *Cluster) TenantUsageOn(ctx context.Context, node, tenant string, step time.Duration, out any) error {
+	path := "/cluster/v1/tenants/" + url.PathEscape(tenant) + "/usage?step=" + strconv.Itoa(int(step/time.Second))
+	return c.stream(ctx, node, http.MethodGet, path, nil, out)
 }
 
 // ReceiveOn streams a moving tenant's data to node.

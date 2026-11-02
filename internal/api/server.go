@@ -133,6 +133,8 @@ type Server struct {
 	replicas Replicas
 	// backups backs this node's tenants up; nil without backups set up.
 	backups Backups
+	// usage is what this node measures of its tenants; nil if nothing.
+	usage Usage
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }
@@ -157,6 +159,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.clusterRoutes(mux)
 	s.upgradeRoutes(mux)
+	s.usageRoutes(mux)
 	mux.HandleFunc("GET /v1/routes", s.routes)
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)

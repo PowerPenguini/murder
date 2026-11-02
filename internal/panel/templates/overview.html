@@ -20,18 +20,19 @@
 <section>
   <div class="head"><h2>Nodes</h2><div class="legend"><span>{{template "swatch" "#b0b0b0"}}tenants</span><span>{{template "swatch" "#4a4a4a"}}copies</span></div></div>
   <table>
-    <thead><tr><th>Node</th><th>State</th><th>Tenants and copies</th><th>Memory reserved</th><th class="hide-narrow">Address</th></tr></thead>
+    <thead><tr><th>Node</th><th>State</th><th>CPU</th><th>Memory</th><th>Tenants and copies</th><th class="hide-narrow">Address</th></tr></thead>
     <tbody>
     {{range $d.Nodes}}
       <tr>
         <td>{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}</td>
         <td><span class="st {{.State.Kind}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
+        <td class="barcell">{{with .Use}}<div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.CPU.Width}}" height="6" fill="#b0b0b0"/></svg><span class="num">{{.CPUText}}</span></div>{{else}}<span class="faint">—</span>{{end}}</td>
+        <td class="barcell">{{with .Use}}<div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.Memory.Width}}" height="6" fill="#b0b0b0"/></svg><span class="num">{{.MemoryText}}</span></div>{{end}}
+          <div class="barline dim">{{if .MemoryMB}}<span class="num">{{mem .MemoryMB}} reserved</span>{{else if not .Use}}<span class="faint">—</span>{{end}}</div>
+        </td>
         <td class="barcell">
           <div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.TenantBar.Width}}" height="6" fill="#b0b0b0"/></svg><span class="num">{{.Tenants}}</span></div>
           <div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.CopyBar.Width}}" height="6" fill="#4a4a4a"/></svg><span class="num dim">{{.Copies}}</span></div>
-        </td>
-        <td class="barcell">
-          <div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.MemoryBar.Width}}" height="6" fill="#7a7a7a"/></svg><span class="num">{{if .MemoryMB}}{{mem .MemoryMB}}{{else}}—{{end}}</span></div>
         </td>
         <td class="mono dim hide-narrow">{{addrs .NodeState}}</td>
       </tr>
@@ -66,15 +67,19 @@
     </div>
   </div>
   <table>
-    <thead><tr><th>Tenant</th><th>State</th>{{range $d.Nodes}}<th class="place">{{.Name}}</th>{{end}}<th>Copy</th><th class="hide-narrow">App</th></tr></thead>
+    <thead><tr><th>Tenant</th><th>State</th><th>Memory</th><th>CPU</th><th class="num">Requests a minute</th>{{range $d.Nodes}}<th class="place">{{.Name}}</th>{{end}}<th>Copy</th></tr></thead>
     <tbody>
     {{range $d.Tenants}}
       <tr>
         <td><a href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
         <td><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
+        {{with .Use}}
+        <td class="barcell"><div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.Memory.Width}}" height="6" fill="#b0b0b0"/></svg><span class="num">{{.MemoryText}}</span></div></td>
+        <td class="barcell"><div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.CPU.Width}}" height="6" fill="#7a7a7a"/></svg><span class="num">{{.CPUText}}</span></div></td>
+        <td class="num">{{.Requests}}</td>
+        {{else}}<td class="faint">—</td><td class="faint">—</td><td class="num faint">—</td>{{end}}
         {{range .Placements}}<td class="place">{{if .Kind}}<svg class="glyph" viewBox="0 0 14 14" role="img" aria-label="{{.Title}}"><title>{{.Title}}</title>{{if eq .Kind "runs"}}<rect x="2" y="2" width="10" height="10" fill="#ececec"/>{{else if eq .Kind "archived"}}<rect x="2" y="2" width="10" height="10" fill="#4a4a4a"/>{{else if eq .Kind "copy"}}<rect x="3" y="3" width="8" height="8" fill="none" stroke="#b0b0b0" stroke-width="2"/>{{else if eq .Kind "syncing"}}<rect x="3" y="3" width="8" height="8" fill="none" stroke="#4a4a4a" stroke-width="2"/>{{else}}<rect x="5" y="5" width="4" height="4" fill="#7a7a7a"/>{{end}}</svg>{{end}}</td>{{end}}
         <td>{{if eq .Replica.Kind "bad"}}<span class="st bad">none</span>{{else if eq .Replica.Kind "warn"}}<span class="dim">{{if .ReplicaNext}}moving{{else}}catching up{{end}}</span>{{else if eq .Replica.Kind "ok"}}<span class="dim">ready</span>{{else}}<span class="faint">—</span>{{end}}</td>
-        <td class="dim hide-narrow">{{.App}}</td>
       </tr>
     {{else}}
       <tr><td colspan="9" class="empty">No tenants yet.</td></tr>

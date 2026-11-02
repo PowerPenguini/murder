@@ -34,6 +34,8 @@ type nodeView struct {
 	MemoryMB int
 	// The bars of the nodes' table, each against the largest node's.
 	TenantBar, CopyBar, MemoryBar meter
+	// Use is its host as measured; nil if it was not.
+	Use *nodeUse
 }
 
 func nodeState(node api.NodeState, now time.Time) tag {
@@ -88,6 +90,8 @@ type tenantRow struct {
 	State, Replica tag
 	// Placements say, per node, what the tenant has there.
 	Placements []placement
+	// Use is what it uses now; nil if it was not measured.
+	Use *tenantUse
 }
 
 type overviewData struct {
@@ -113,7 +117,11 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	var nodes api.Nodes
 	var tenants []api.Tenant
 	var events []store.Event
+	// Use is shown when it can be had: a page without it is still the page.
+	var nodeUses map[string]nodeUse
+	var tenantUses map[string]tenantUse
 	if err := all(
+		func() error { nodeUses, tenantUses = s.usageNow(ctx); return nil },
 		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
 		func() (err error) { tenants, err = s.backend.List(ctx); return },
 		func() (err error) {
@@ -134,10 +142,16 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := range data.Nodes {
 		byName[data.Nodes[i].Name] = &data.Nodes[i]
+		if use, ok := nodeUses[data.Nodes[i].Name]; ok {
+			data.Nodes[i].Use = &use
+		}
 	}
 	slices.SortFunc(tenants, func(a, b api.Tenant) int { return strings.Compare(a.Spec.Name, b.Spec.Name) })
 	for _, t := range tenants {
 		row := tenantRow{Tenant: t, State: tenantState(t), Replica: replicaState(t, clustered)}
+		if use, ok := tenantUses[t.Spec.Name]; ok && !t.Archived() {
+			row.Use = &use
+		}
 		data.Tenants = append(data.Tenants, row)
 		if t.Archived() {
 			continue
@@ -194,7 +208,9 @@ type tenantData struct {
 	Events         []store.Event
 	// Activity counts its events of the last fortnight, by day.
 	Activity activity
-	Env      []envVar
+	// Usage is its last day, drawn; nil if it was not measured.
+	Usage *tenantUsage
+	Env   []envVar
 	// Targets are the nodes the tenant may move to.
 	Targets []string
 }
@@ -208,7 +224,10 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	var t api.Tenant
 	var events []store.Event
 	var nodes api.Nodes
+	var use *tenantUsage
 	if err := all(
+		// An archived tenant is measured no more: it has no day to show.
+		func() error { use = s.tenantUsage(ctx, name); return nil },
 		func() (err error) { t, err = s.backend.Get(ctx, name); return },
 		func() (err error) {
 			events, err = s.backend.Events(ctx, store.EventQuery{Tenant: name, Limit: activityEvents})
@@ -220,7 +239,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := tenantData{Tenant: t, State: tenantState(t), Replica: replicaState(t, len(nodes.Nodes) > 1), Events: events[:min(len(events), 30)],
-		Activity: activityOf(events, s.now(), 14*24*time.Hour, 24*time.Hour, len(events) < activityEvents, dayLabel)}
+		Activity: activityOf(events, s.now(), 14*24*time.Hour, 24*time.Hour, len(events) < activityEvents, dayLabel), Usage: use}
 	for key, value := range t.Spec.Env {
 		data.Env = append(data.Env, envVar{key, value})
 	}

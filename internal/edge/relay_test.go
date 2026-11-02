@@ -34,8 +34,9 @@ func credentialsFor(t testing.TB, seed byte) *cluster.Credentials {
 // relayPair is two nodes' edges: acme runs on the second, the first passes
 // its requests on.
 type relayPair struct {
-	front, back *httptest.Server
-	seen        chan http.Header
+	front, back           *httptest.Server
+	frontProxy, backProxy *Proxy
+	seen                  chan http.Header
 }
 
 func newRelayPair(t *testing.T) relayPair {
@@ -59,9 +60,10 @@ func newRelayPair(t *testing.T) relayPair {
 	back.StartTLS()
 	t.Cleanup(back.Close)
 	frontRoutes := staticRoutes{"acme": {Relay: strings.TrimPrefix(back.URL, "https://")}}
-	front := httptest.NewServer(NewProxy("example.com", frontRoutes, quietLog()).WithRelay(credentials(t, 7).RelayClient()))
+	frontProxy := NewProxy("example.com", frontRoutes, quietLog()).WithRelay(credentials(t, 7).RelayClient())
+	front := httptest.NewServer(frontProxy)
 	t.Cleanup(front.Close)
-	return relayPair{front: front, back: back, seen: seen}
+	return relayPair{front: front, back: back, frontProxy: frontProxy, backProxy: backProxy, seen: seen}
 }
 
 func TestRequestsReachTenantsOfOtherNodes(t *testing.T) {
@@ -613,5 +615,35 @@ func TestOnlySmallBodiesAreKeptToSendAgain(t *testing.T) {
 		t.Fatal("a body was kept beyond the budget")
 	} else {
 		release()
+	}
+}
+
+// A request is counted as served once, by the edge of the node that runs
+// the tenant: the agent measures its tenants by these counts.
+func TestARelayedRequestIsServedOnce(t *testing.T) {
+	pair := newRelayPair(t)
+	request, _ := http.NewRequest("GET", pair.front.URL+"/", nil)
+	request.Host = "acme.example.com"
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	<-pair.seen
+	if served := pair.frontProxy.Served().Counts(); served["acme"].Count != 0 {
+		t.Fatalf("the edge that passed it on served it: %+v", served)
+	}
+	// The back edge counts once its response is written.
+	deadline := time.Now().Add(5 * time.Second)
+	for pair.backProxy.Served().Counts()["acme"].Count == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if served := pair.backProxy.Served().Counts()["acme"]; served.Count != 1 || served.ByClass[1] != 1 || len(served.Waits) != 13 {
+		t.Fatalf("the edge that served it: %+v", served)
+	}
+	// Both still count it for Prometheus, each its own way.
+	if pair.frontProxy.Stats().Counts()["acme"].Count != 1 {
+		t.Fatal("the front edge's own counts lost the request")
 	}
 }

@@ -34,6 +34,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
+	measure "github.com/PowerPenguini/murder/internal/usage"
 	"github.com/PowerPenguini/murder/internal/volume"
 )
 
@@ -113,6 +114,8 @@ func runAgent(args []string) error {
 		return err
 	}
 	reconciler := reconcile.New(st, docker, volumes, key, reconcile.Config{BaseDomain: cfg.BaseDomain, Scheme: cfg.Scheme(), DefaultLimits: cfg.Defaults}, log)
+	// What the node's tenants use, measured here and kept for a day.
+	recorder := measure.NewRecorder(node)
 	// The agent's part in an upgrade: the new binary replaces this one, and
 	// the agent stops for its service to start the new one.
 	version, err := ownVersion()
@@ -159,6 +162,7 @@ func runAgent(args []string) error {
 		member, err = cluster.Start(cluster.Config{
 			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
 			Seed: key.Derive(clusterSeed), Store: st, Log: log, Upgrade: upgrader, Moves: moves, Replicas: receiver,
+			Usage: peerUsage{recorder},
 			Fatal: func(err error) {
 				select {
 				case fatal <- err:
@@ -223,7 +227,7 @@ func runAgent(args []string) error {
 		}
 	}
 
-	apiHandler := api.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves)
+	apiHandler := api.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves).WithUsage(recorder)
 	// Backups to a bucket, if set up: this node's tenants, and the
 	// cluster's state from its leader.
 	var backups *agentBackups
@@ -260,6 +264,7 @@ func runAgent(args []string) error {
 	if monitor != nil {
 		go monitor.Run(ctx)
 	}
+	go newCollector(st, reconciler, docker, volumes, recorder, node, cfg.Defaults, log).Run(ctx)
 	reconciled := make(chan struct{})
 	go func() {
 		defer close(reconciled)
@@ -291,7 +296,7 @@ func runAgent(args []string) error {
 	}
 
 	servers := []*http.Server{apiServer}
-	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator, monitor: monitor}
+	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator, monitor: monitor, usage: recorder}
 	if metricsListener != nil {
 		metricsServer := &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, metricsServer)
