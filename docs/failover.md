@@ -78,9 +78,12 @@ These changes go together in one schema version:
   replica, ready (`SwitchReplica`); the old node then drops its copy. So a
   tenant never lacks a whole copy while its copy moves. A failover, a move
   of the tenant, or the new node failing or leaving stops the move of the
-  copy; a failover promotes the old, whole copy. After 4 failed sends in a
-  row the owner gives the move up, and no copy moves to that node for 30
-  minutes, so one node that cannot take copies stops no other move.
+  copy; a failover promotes the old, whole copy. A copy not whole yet, a
+  replica's first or a moving one, is given up after 4 sends in a row that
+  the other node failed (not this node's own failures, nor while the other
+  restarts on purpose), and no copy goes to that node for 30 minutes, or
+  until it comes back from a failure: placement picks another node if
+  there is one. So one node that cannot take copies stops no other move.
 - **`FinishMove`:** it clears `Replica` when the tenant moves onto its replica
   node, so placement picks another.
 - **`FailOver(node)`:** in one batch, every tenant of the dead node with a

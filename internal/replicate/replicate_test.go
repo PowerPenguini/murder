@@ -30,6 +30,8 @@ type memoryVolumes struct {
 	aside   []string
 	clock   func() time.Time
 	failRcv error
+	// failSend fails this node's sends.
+	failSend error
 }
 
 type memoryData struct {
@@ -121,6 +123,9 @@ func (v *memoryVolumes) SendSnapshot(_ context.Context, tenant, from, to string,
 	v.mu.Unlock()
 	if !ok || (from != "" && !hasFrom) {
 		return fmt.Errorf("send %s→%s: no such snapshot", from, to)
+	}
+	if v.failSend != nil {
+		return v.failSend
 	}
 	_, err := fmt.Fprintf(w, "%s|%s|%d", from, to, version)
 	return err
@@ -689,7 +694,7 @@ func TestAStuckCopyMoveIsGivenUp(t *testing.T) {
 	})
 	// n3 refuses every copy.
 	n3.volumes.failRcv = errors.New("pool full")
-	for i := range moveGiveUp {
+	for i := range copyGiveUp {
 		if record, _ := n1.store.Get("acme"); record.ReplicaNext != "n3" {
 			t.Fatalf("given up after %d tries: %+v", i, record)
 		}
@@ -697,13 +702,59 @@ func TestAStuckCopyMoveIsGivenUp(t *testing.T) {
 	}
 	record, _ := n1.store.Get("acme")
 	if record.ReplicaNext != "" || record.Replica != "n2" || !record.ReplicaReady {
-		t.Fatalf("after %d failed sends: %+v", moveGiveUp, record)
+		t.Fatalf("after %d failed sends: %+v", copyGiveUp, record)
 	}
-	if events, _ := n1.store.Events(store.EventQuery{Tenant: "acme"}); len(events) == 0 || !strings.Contains(events[0].Detail, "no longer moves to n3") {
+	if events, _ := n1.store.Events(store.EventQuery{Tenant: "acme"}); len(events) == 0 || !strings.Contains(events[0].Detail, "no copy is kept on n3") {
 		t.Fatalf("events: %+v", events)
 	}
 	// No copy moves to n3 again for a while: none would get there.
 	if placed, err := n1.store.PlaceReplicas("test"); err != nil || placed != 0 {
 		t.Fatalf("moved %d copies to the node that refused one, %v", placed, err)
+	}
+}
+
+// A first copy that never gets to the replica is given up, after a few
+// tries, and placement gives the tenant another node; a send failing on
+// this node's side counts for nothing against the other.
+func TestAReplicaThatNeverGetsItsCopyIsReplaced(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	n1, n2 := f.nodes["n1"], f.nodes["n2"]
+	n1.volumes.write("acme")
+	r, _ := f.replicator("n1")
+	// This node's own failures: n2 is not to blame.
+	n1.volumes.failSend = errors.New("pool busy")
+	for range copyGiveUp + 1 {
+		r.Pass(ctx)
+	}
+	if record, _ := n1.store.Get("acme"); record.Replica != "n2" {
+		t.Fatalf("a replica given up for this node's failures: %+v", record)
+	}
+	n1.volumes.failSend = nil
+	n2.volumes.failRcv = errors.New("pool full")
+	for range copyGiveUp {
+		r.Pass(ctx)
+	}
+	record, _ := n1.store.Get("acme")
+	if record.Replica != "" {
+		t.Fatalf("after %d refused copies: %+v", copyGiveUp, record)
+	}
+	if _, err := n1.store.PlaceReplicas("test"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := n1.store.Get("acme"); record.Replica != "n3" {
+		t.Fatalf("placed on %q, not on the other node", record.Replica)
+	}
+	// Back from a failure, a node takes copies again at once.
+	if _, err := n1.store.MarkFailed("n2", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := n1.store.NodeBack("n2", "test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range n1.store.Nodes() {
+		if node.Name == "n2" && !node.CopiesRefusedUntil.IsZero() {
+			t.Fatalf("n2 still refused: %+v", node)
+		}
 	}
 }

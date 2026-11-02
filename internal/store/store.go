@@ -251,9 +251,11 @@ type Store interface {
 	// ready, once next holds the whole data; nothing changes unless next
 	// is still its ReplicaNext. It reports whether it switched.
 	SwitchReplica(name, next string) (bool, error)
-	// StopReplicaMove gives up moving the tenant's copy to next, its
-	// ReplicaNext, for why; nothing changes unless next is still it.
-	StopReplicaMove(name, next, why string) error
+	// GiveUpCopy gives up the tenant's copy on node, for why: its
+	// ReplicaNext, or its replica while that copy is not whole yet. No
+	// copy goes to node for a while. It reports whether it changed
+	// anything.
+	GiveUpCopy(name, node, why string) (bool, error)
 	// FailOver gives every tenant of node, a node confirmed powered off,
 	// to its replica's node, and marks node failed: it keeps no copies
 	// until NodeBack, once it answers again. Tenants moving away from node

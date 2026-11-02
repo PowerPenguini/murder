@@ -26,7 +26,7 @@ func (s *SQLite) PlaceReplicas(actor string) (int, error) {
 			}
 			placed++
 		}
-		changes := placeReplicas(current)
+		changes := placeReplicas(current, now)
 		if len(changes) == 0 && placed == 0 {
 			// Copies move only once nothing else changes: one at a time,
 			// on a state this batch has not changed.
@@ -143,30 +143,40 @@ func (s *SQLite) SwitchReplica(name, next string) (bool, error) {
 	return err == nil, err
 }
 
-// copiesRefusedFor is how long no copy moves to a node one failed to get
+// copiesRefusedFor is how long no copy goes to a node one failed to get
 // to.
 const copiesRefusedFor = 30 * time.Minute
 
-func (s *SQLite) StopReplicaMove(name, next, why string) error {
+func (s *SQLite) GiveUpCopy(name, node, why string) (bool, error) {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
-		if !ok || next == "" || record.ReplicaNext != next {
+		switch {
+		case !ok || node == "":
+			return errUnchanged
+		case record.ReplicaNext == node:
+			if err := tx.Exec(`UPDATE tenants SET replica_next = '' WHERE name = ? AND replica_next = ?`, name, node); err != nil {
+				return err
+			}
+		case record.Replica == node && !record.ReplicaReady:
+			// A copy that never became whole: placement gives another.
+			if err := tx.Exec(`UPDATE tenants SET replica = '', replica_ready = 0 WHERE name = ? AND replica = ? AND replica_ready = 0`, name, node); err != nil {
+				return err
+			}
+		default:
 			return errUnchanged
 		}
-		if err := tx.Exec(`UPDATE tenants SET replica_next = '' WHERE name = ? AND replica_next = ?`, name, next); err != nil {
-			return err
-		}
+		next := node
 		// Other copies would fail to get there too: none moves there for
 		// a while.
 		if err := tx.Exec(`UPDATE nodes SET copies_refused_until = ? WHERE name = ?`, formatTime(now.Add(copiesRefusedFor)), next); err != nil {
 			return err
 		}
-		return event(tx, now, "murder", "tenant.replica", name, record.App, "the copy no longer moves to "+next+": "+why)
+		return event(tx, now, "murder", "tenant.replica", name, record.App, "no copy is kept on "+next+" any more: "+why)
 	})
 	if errors.Is(err, errUnchanged) {
-		return nil
+		return false, nil
 	}
-	return err
+	return err == nil, err
 }
 
 func (s *SQLite) ReplicaReady(name, replica string) error {
@@ -191,7 +201,7 @@ func (s *SQLite) ReplicaReady(name, replica string) error {
 // longer in the cluster, the node of the cluster, other than its own, that
 // keeps the fewest copies (the first by name among equals); "" if there is
 // none. Moving tenants are left as they are: a move settles their nodes.
-func placeReplicas(current *snapshot) map[string]string {
+func placeReplicas(current *snapshot, now time.Time) map[string]string {
 	// Failed nodes keep no copies until they answer again.
 	counts := map[string]int{}
 	for name, node := range current.nodes {
@@ -221,10 +231,19 @@ func placeReplicas(current *snapshot) map[string]string {
 		if record.MoveTo != "" || valid(record) || ownerFailed(record) {
 			continue
 		}
+		// A node that refused a copy lately gets one only if no other can.
 		best := ""
-		for _, node := range nodes {
-			if node != record.Node && (best == "" || counts[node] < counts[best]) {
-				best = node
+		for _, refusing := range []bool{false, true} {
+			for _, node := range nodes {
+				if node == record.Node || now.Before(current.nodes[node].CopiesRefusedUntil) != refusing {
+					continue
+				}
+				if best == "" || counts[node] < counts[best] {
+					best = node
+				}
+			}
+			if best != "" {
+				break
 			}
 		}
 		if best == record.Replica {
@@ -315,7 +334,7 @@ func (s *SQLite) NodeBack(node, actor string) error {
 		if !member || !failed.Failed() {
 			return errUnchanged
 		}
-		if err := tx.Exec(`UPDATE nodes SET failed_at = NULL WHERE name = ?`, node); err != nil {
+		if err := tx.Exec(`UPDATE nodes SET failed_at = NULL, copies_refused_until = NULL WHERE name = ?`, node); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "node.back", "", "", node+" answers again; it keeps copies again")

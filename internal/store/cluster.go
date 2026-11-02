@@ -445,7 +445,7 @@ func (s *SQLite) PutNode(node Node, actor string) error {
 			}
 		}
 		if err := tx.Exec(`INSERT INTO nodes (name, address, created_at) VALUES (?, ?, ?)
-			ON CONFLICT (name) DO UPDATE SET address = excluded.address`,
+			ON CONFLICT (name) DO UPDATE SET address = excluded.address, copies_refused_until = NULL`,
 			node.Name, node.Address, formatTime(now)); err != nil {
 			return err
 		}

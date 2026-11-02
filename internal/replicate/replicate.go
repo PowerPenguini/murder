@@ -69,9 +69,9 @@ type Replicator struct {
 	// why its last send failed.
 	synced  map[string]time.Time
 	failing map[string]string
-	// moveFailures counts the failed sends in a row of each tenant's copy
-	// to the node it moves to.
-	moveFailures map[string]int
+	// copyFailures counts, by tenant and node, the failed sends in a row
+	// of copies not whole yet.
+	copyFailures map[string]int
 	// caughtUp is set, by Run only, once this node first caught up.
 	caughtUp bool
 }
@@ -156,8 +156,22 @@ func (r *Replicator) Pass(ctx context.Context) {
 		}
 	}
 	// Tenants that went, or whose copy is elsewhere's to report, leave
-	// the metrics.
+	// the metrics; copies no longer sent leave the failure counts.
+	counted := map[string]bool{}
+	for _, record := range tenants {
+		if !record.ReplicaReady {
+			counted[copyKey(record.Spec.Name, record.Replica)] = true
+		}
+	}
+	for _, record := range moving {
+		counted[copyKey(record.Spec.Name, record.ReplicaNext)] = true
+	}
 	r.mu.Lock()
+	for key := range r.copyFailures {
+		if !counted[key] {
+			delete(r.copyFailures, key)
+		}
+	}
 	for name := range r.synced {
 		if !current[name] {
 			delete(r.synced, name)
@@ -181,6 +195,9 @@ func (r *Replicator) Pass(ctx context.Context) {
 		go func() {
 			defer func() { <-slots; wg.Done() }()
 			err := r.Replicate(ctx, record.Spec.Name, record.Replica)
+			if !record.ReplicaReady && ctx.Err() == nil {
+				r.copyFailed(record.Spec.Name, record.Replica, err)
+			}
 			// Once the copy holds the whole data, it may take over.
 			if err == nil && !record.ReplicaReady {
 				err = r.Store.ReplicaReady(record.Spec.Name, record.Replica)
@@ -211,16 +228,17 @@ func (r *Replicator) Pass(ctx context.Context) {
 			name, next := record.Spec.Name, record.ReplicaNext
 			switched := false
 			err := r.replicate(ctx, name, next, false)
+			if ctx.Err() == nil {
+				r.copyFailed(name, next, err)
+			}
 			if err == nil {
 				switched, err = r.Store.SwitchReplica(name, next)
 			}
 			switch {
 			case err != nil && ctx.Err() == nil:
 				r.Log.Warn("send a tenant's copy to the node it moves to", "tenant", name, "to", next, "error", err)
-				r.moveFailed(name, next, err)
 			case switched:
 				r.Log.Info("a tenant's copy moved", "tenant", name, "from", record.Replica, "to", next)
-				r.moveFailed(name, "", nil)
 			}
 		}()
 	}
@@ -243,7 +261,7 @@ func (r *Replicator) replicate(ctx context.Context, tenant, node string, track b
 	}
 	theirs, err := r.Peer.Snapshots(ctx, node, tenant)
 	if err != nil {
-		return fmt.Errorf("ask node %s for its copy: %w", node, err)
+		return fmt.Errorf("ask node %s for its copy: %w", node, peerFailure{err})
 	}
 	base := NewestCommon(snapshots, theirs)
 	if base != "" {
@@ -297,46 +315,92 @@ func (r *Replicator) send(ctx context.Context, tenant, node, base, snapshot stri
 	sent := make(chan error, 1)
 	go func() {
 		err := r.Volumes.SendSnapshot(ctx, tenant, base, snapshot, writer)
-		_ = writer.CloseWithError(err)
+		// Known before the other node can see the stream end.
 		sent <- err
+		_ = writer.CloseWithError(err)
 	}()
 	received := r.Peer.Send(ctx, node, tenant, base == "", reader)
+	// Whose failure: a send that failed here first ended the stream; a
+	// send that failed only once the other node gave up is its failure.
+	var sentErr error
+	failedHere := false
+	select {
+	case sentErr = <-sent:
+		failedHere = sentErr != nil
+	default:
+		_ = reader.CloseWithError(received)
+		sentErr = <-sent
+	}
 	_ = reader.CloseWithError(received)
-	return errors.Join(<-sent, received)
+	switch {
+	case failedHere:
+		return errors.Join(sentErr, received)
+	case received != nil:
+		return peerFailure{received}
+	}
+	return sentErr
 }
 
-// moveGiveUp is how many sends to the node a tenant's copy moves to may
-// fail in a row before the move is given up: copies move one at a time,
-// so one that never gets there would stop every other.
-const moveGiveUp = 4
+// peerFailure is a failure of the node a copy goes to, not of this one.
+type peerFailure struct{ err error }
 
-// moveFailed counts a failed send of tenant's copy to next; err nil, or
-// next empty, resets the count.
-func (r *Replicator) moveFailed(tenant, next string, err error) {
+func (p peerFailure) Error() string { return p.err.Error() }
+func (p peerFailure) Unwrap() error { return p.err }
+
+// copyGiveUp is how many sends of a copy that is not whole yet, a
+// replica's first or a copy moving to another node, may fail in a row
+// for the other node before the copy is given up there: copies move one
+// at a time, and only once every replica is whole, so one that never gets
+// there would stop every other.
+const copyGiveUp = 4
+
+func copyKey(tenant, node string) string { return tenant + "\x00" + node }
+
+// copyFailed counts a send of tenant's copy, not whole yet, to node; a
+// success resets the count. Only the other node's failures count, and
+// not while it restarts on purpose.
+func (r *Replicator) copyFailed(tenant, node string, err error) {
+	key := copyKey(tenant, node)
 	r.mu.Lock()
-	if r.moveFailures == nil {
-		r.moveFailures = map[string]int{}
-	}
-	if err == nil || next == "" {
-		delete(r.moveFailures, tenant)
+	if err == nil {
+		delete(r.copyFailures, key)
 		r.mu.Unlock()
 		return
 	}
-	r.moveFailures[tenant]++
-	failed := r.moveFailures[tenant]
-	if failed >= moveGiveUp {
-		delete(r.moveFailures, tenant)
+	var peer peerFailure
+	if !errors.As(err, &peer) || r.away(node) {
+		r.mu.Unlock()
+		return
+	}
+	if r.copyFailures == nil {
+		r.copyFailures = map[string]int{}
+	}
+	r.copyFailures[key]++
+	failed := r.copyFailures[key]
+	if failed >= copyGiveUp {
+		delete(r.copyFailures, key)
 	}
 	r.mu.Unlock()
-	if failed < moveGiveUp {
+	if failed < copyGiveUp {
 		return
 	}
 	why := fmt.Sprintf("%d sends in a row failed, the last: %v", failed, err)
-	if stopErr := r.Store.StopReplicaMove(tenant, next, why); stopErr != nil {
-		r.Log.Warn("give up moving a tenant's copy", "tenant", tenant, "to", next, "error", stopErr)
-		return
+	if changed, giveUpErr := r.Store.GiveUpCopy(tenant, node, why); giveUpErr != nil {
+		r.Log.Warn("give up a tenant's copy on a node that does not take it", "tenant", tenant, "node", node, "error", giveUpErr)
+	} else if changed {
+		r.Log.Warn("gave up a tenant's copy on a node that does not take it; no copy goes there for a while", "tenant", tenant, "node", node, "why", why)
 	}
-	r.Log.Warn("gave up moving a tenant's copy; it stays where it is", "tenant", tenant, "to", next, "why", why)
+}
+
+// away reports whether node restarts on purpose now.
+func (r *Replicator) away(node string) bool {
+	now := r.now()
+	for _, n := range r.Store.Nodes() {
+		if n.Name == node {
+			return now.Before(n.AwayUntil)
+		}
+	}
+	return false
 }
 
 func (r *Replicator) markSynced(tenant string, at time.Time) {
