@@ -1,7 +1,9 @@
 package main
 
 import (
+	"maps"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/replicate"
 	"github.com/PowerPenguini/murder/internal/store"
+	measure "github.com/PowerPenguini/murder/internal/usage"
 )
 
 // phases are the values murder_tenant_phase takes; "pending" is a tenant
@@ -33,6 +36,8 @@ type agentMetrics struct {
 	replicator *replicate.Replicator
 	// monitor is nil outside a cluster.
 	monitor *failover.Monitor
+	// usage is what the node's tenants use; nil in tests that measure none.
+	usage *measure.Recorder
 }
 
 func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -105,5 +110,35 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if m.monitor != nil {
 		m.monitor.WriteMetrics(out)
 	}
+	if m.usage != nil {
+		writeUsage(out, m.usage.Report(time.Now()))
+	}
 	_ = out.Err()
+}
+
+// writeUsage writes what the node's tenants use: their containers'
+// counters as they stand, and memory and data as last measured.
+func writeUsage(out *metrics.Writer, report measure.Report) {
+	names := slices.Sorted(maps.Keys(report.Tenants))
+	families := []struct {
+		name, kind, help string
+		value            func(measure.Now) (float64, bool)
+	}{
+		{"murder_tenant_cpu_seconds_total", "counter", "Processor time the tenant's container used since it started.", func(n measure.Now) (float64, bool) { return float64(n.Counters.CPU) / 1e6, true }},
+		{"murder_tenant_memory_bytes", "gauge", "Memory the tenant's container uses.", func(n measure.Now) (float64, bool) { return float64(n.Memory), true }},
+		{"murder_tenant_memory_limit_bytes", "gauge", "The tenant's container's memory limit.", func(n measure.Now) (float64, bool) { return float64(n.MemoryLimit), n.MemoryLimit > 0 }},
+		{"murder_tenant_network_receive_bytes_total", "counter", "Bytes the tenant's container received since it started.", func(n measure.Now) (float64, bool) { return float64(n.Counters.NetRx), true }},
+		{"murder_tenant_network_transmit_bytes_total", "counter", "Bytes the tenant's container sent since it started.", func(n measure.Now) (float64, bool) { return float64(n.Counters.NetTx), true }},
+		{"murder_tenant_disk_read_bytes_total", "counter", "Bytes the tenant's container read from disk since it started.", func(n measure.Now) (float64, bool) { return float64(n.Counters.DiskRead), true }},
+		{"murder_tenant_disk_written_bytes_total", "counter", "Bytes the tenant's container wrote to disk since it started.", func(n measure.Now) (float64, bool) { return float64(n.Counters.DiskWrite), true }},
+		{"murder_tenant_data_bytes", "gauge", "The size of the tenant's data, as its disk limit counts it.", func(n measure.Now) (float64, bool) { return float64(n.DiskUsed), n.DiskUsed >= 0 }},
+	}
+	for _, family := range families {
+		out.Family(family.name, family.kind, family.help)
+		for _, name := range names {
+			if value, ok := family.value(report.Tenants[name]); ok {
+				out.Sample(family.name, value, "tenant", name)
+			}
+		}
+	}
 }

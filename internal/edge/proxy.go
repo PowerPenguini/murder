@@ -64,6 +64,10 @@ type Proxy struct {
 	routes     Routes
 	log        *slog.Logger
 	stats      *metrics.Edge
+	// served counts only the requests this edge passed to a container on
+	// its own node: each request once, however many edges it went
+	// through. The agent measures its tenants by them.
+	served *metrics.Edge
 	// hold is how long a request for a tenant that is moving waits for it.
 	hold time.Duration
 	// local passes requests to tenants on this node, forward to other
@@ -184,7 +188,7 @@ func hopOf(r *http.Request) *hop { return r.Context().Value(hopKey{}).(*hop) }
 
 // NewProxy returns a proxy for tenants below baseDomain.
 func NewProxy(baseDomain string, routes Routes, log *slog.Logger) *Proxy {
-	p := &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, stats: metrics.NewEdge(), hold: HoldMoving}
+	p := &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, stats: metrics.NewEdge(), served: metrics.NewEdge(), hold: HoldMoving}
 	p.local = p.reverseProxy(newTransport(nil), false)
 	p.relayed = p.reverseProxy(newTransport(nil), true)
 	return p
@@ -391,6 +395,9 @@ func (p *Proxy) reverseProxy(transport http.RoundTripper, relayed bool) *httputi
 				return
 			}
 			p.stats.BackendError(h.tenant)
+			if h.hops == 0 {
+				p.served.BackendError(h.tenant)
+			}
 			p.log.Warn("proxy to tenant", "tenant", h.tenant, "error", err)
 			w.Header().Set("Retry-After", "10")
 			http.Error(w, "this workspace is not available right now", http.StatusBadGateway)
@@ -403,6 +410,10 @@ var forwarded = []string{"X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Ho
 
 // Stats returns the proxy's request counters.
 func (p *Proxy) Stats() *metrics.Edge { return p.stats }
+
+// Served returns the counters of the requests this edge passed to its own
+// node's containers.
+func (p *Proxy) Served() *metrics.Edge { return p.served }
 
 // Tenant returns the tenant a host name belongs to: exactly one label in
 // front of the base domain.
@@ -487,9 +498,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 	recorder := &recorder{ResponseWriter: w, start: time.Now(), upgraded: &p.upgraded}
 	w = recorder
 	// A request the client gave up before any response is not counted.
+	local := false
 	defer func() {
 		if recorder.status != 0 {
 			p.stats.Request(tenant, recorder.status, recorder.wait)
+			if local {
+				p.served.Request(tenant, recorder.status, recorder.wait)
+			}
 		}
 	}()
 	if route.Suspended {
@@ -508,6 +523,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 		unavailable() // it did not arrive in time
 		return
 	case route.Backend != "":
+		local = true
 		h.target, proxy = &url.URL{Scheme: "http", Host: route.Backend}, p.local
 		if relayed {
 			proxy = p.relayed

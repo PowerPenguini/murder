@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/hashicorp/raft"
 
@@ -35,6 +37,8 @@ func (c *Cluster) handler() http.Handler {
 	members("GET /cluster/v1/ping", c.handlePing)
 	members("GET /cluster/v1/tenants/{name}/replica", c.handleSnapshots)
 	members("PUT /cluster/v1/tenants/{name}/replica", c.handleReplicate)
+	members("GET /cluster/v1/usage", c.handleUsage)
+	members("GET /cluster/v1/tenants/{name}/usage", c.handleTenantUsage)
 	return mux
 }
 
@@ -351,6 +355,34 @@ func (c *Cluster) moves(w http.ResponseWriter) bool {
 		return false
 	}
 	return true
+}
+
+// handleUsage is this node's use now.
+func (c *Cluster) handleUsage(w http.ResponseWriter, _ *http.Request) {
+	if c.config.Usage == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this node measures no use"))
+		return
+	}
+	writeJSON(w, http.StatusOK, c.config.Usage.Report())
+}
+
+// handleTenantUsage is the day of one of this node's tenants.
+func (c *Cluster) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
+	if c.config.Usage == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this node measures no use"))
+		return
+	}
+	seconds, err := strconv.Atoi(r.URL.Query().Get("step"))
+	if err != nil || seconds < 60 || seconds > 3600 {
+		writeError(w, http.StatusBadRequest, errors.New("step must be 60-3600 seconds"))
+		return
+	}
+	series, ok := c.config.Usage.Series(r.PathValue("name"), time.Duration(seconds)*time.Second)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("node %s has not measured tenant %s", c.config.Node, r.PathValue("name")))
+		return
+	}
+	writeJSON(w, http.StatusOK, series)
 }
 
 // handlePing answers the leader's probe: this node is up.

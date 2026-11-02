@@ -174,6 +174,19 @@ func (z ZFS) now() time.Time {
 	return time.Now()
 }
 
+// Used is the size of the tenant's data, as its disk limit counts it.
+func (z ZFS) Used(ctx context.Context, tenant string) (int64, error) {
+	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", "referenced", z.dataset(tenant))
+	if err != nil {
+		return 0, err
+	}
+	used, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("zfs get referenced %s: %q", z.dataset(tenant), output)
+	}
+	return used, nil
+}
+
 // properties are what Murder reads of a dataset.
 type properties struct {
 	owner, mounted, mountpoint string
