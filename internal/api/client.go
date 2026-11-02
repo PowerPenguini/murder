@@ -238,7 +238,7 @@ func responseError(response *http.Response) error {
 	if response.StatusCode < 300 {
 		return nil
 	}
-	var failure errorBody
+	var failure ErrorBody
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<16))
 	if json.Unmarshal(data, &failure) != nil || failure.Error == "" {
 		failure.Error = string(bytes.TrimSpace(data))

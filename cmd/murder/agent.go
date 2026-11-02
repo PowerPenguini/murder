@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/failover"
@@ -227,7 +227,7 @@ func runAgent(args []string) error {
 		}
 	}
 
-	apiHandler := api.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves).WithUsage(recorder)
+	apiHandler := apiserver.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves).WithUsage(recorder)
 	// Backups to a bucket, if set up: this node's tenants, and the
 	// cluster's state from its leader.
 	var backups *agentBackups
@@ -249,7 +249,7 @@ func runAgent(args []string) error {
 		apiHandler.WithRelayPort(cfg.Edge.RelayPort)
 		apiHandler.WithCluster(member)
 	}
-	apiServer := &http.Server{Handler: apiHandler.Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: api.ConnContext}
+	apiServer := &http.Server{Handler: apiHandler.Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: apiserver.ConnContext}
 	go serve("api", apiServer, apiListener)
 	// Moves an agent restart cut short leave the tenant here.
 	if mover != nil {

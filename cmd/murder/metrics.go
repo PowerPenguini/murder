@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/failover"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/reconcile"
@@ -26,7 +26,7 @@ var phases = []string{"pending", reconcile.PhaseRunning, reconcile.PhasePulling,
 type agentMetrics struct {
 	store      store.Store
 	reconciler *reconcile.Reconciler
-	api        *api.Server
+	api        *apiserver.Server
 	// firewall is when the firewall was last loaded, in Unix nanoseconds;
 	// nil when it is off.
 	firewall *atomic.Int64

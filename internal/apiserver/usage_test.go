@@ -1,4 +1,4 @@
-package api
+package apiserver
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/usage"
@@ -34,7 +35,7 @@ func (c fakeUsageCluster) UsageOn(_ context.Context, node string, out any) error
 func (c fakeUsageCluster) TenantUsageOn(_ context.Context, node, tenant string, step time.Duration, out any) error {
 	series, ok := c.series[node+"/"+tenant]
 	if !ok {
-		return &Error{Status: http.StatusNotFound, Message: "not measured"}
+		return &api.Error{Status: http.StatusNotFound, Message: "not measured"}
 	}
 	series.Step = int(step / time.Second)
 	*out.(*usage.Series) = series
@@ -47,7 +48,7 @@ func TestUsage(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
 	recorder := usage.NewRecorder(f.store.Node())
-	f.api.WithUsage(recorder)
+	f.server.WithUsage(recorder)
 	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
 		t.Fatal(err)
 	}
@@ -88,10 +89,10 @@ func TestUsage(t *testing.T) {
 	}
 
 	recorder.Keep(func(string) bool { return false })
-	if _, err := f.client.TenantUsage(ctx, "acme", time.Minute); !IsNotFound(err) {
+	if _, err := f.client.TenantUsage(ctx, "acme", time.Minute); !api.IsNotFound(err) {
 		t.Fatalf("a tenant not measured: %v", err)
 	}
-	if _, err := f.client.TenantUsage(ctx, "nobody", time.Minute); !IsNotFound(err) {
+	if _, err := f.client.TenantUsage(ctx, "nobody", time.Minute); !api.IsNotFound(err) {
 		t.Fatalf("no such tenant: %v", err)
 	}
 	recorder.Sample("acme", usage.Raw{At: ago, Container: "c"}, 0)
@@ -112,7 +113,7 @@ func TestUsage(t *testing.T) {
 	if _, err := f.store.Create(store.NewTenant{Name: "away", App: "web", Node: "n2"}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	f.api.WithCluster(fakeUsageCluster{
+	f.server.WithCluster(fakeUsageCluster{
 		reports: map[string]usage.Report{"n2": {Node: "n2", Host: usage.Host{CPUs: 4}, Tenants: map[string]usage.Now{"away": {Memory: 1 << 20}}}},
 		series:  map[string]usage.Series{"n2/away": {Tenant: "away", Node: "n2", Points: []usage.Point{{Memory: 1 << 20}}}},
 	})

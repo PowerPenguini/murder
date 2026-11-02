@@ -1,4 +1,4 @@
-package api
+package apiserver
 
 import (
 	"context"
@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
@@ -36,28 +37,37 @@ type memoryRuntime struct {
 	containers []runtime.Container
 }
 
-func (m *memoryRuntime) HasImage(context.Context, string) (bool, error)  { return true, nil }
-func (m *memoryRuntime) PullImage(context.Context, string) error         { return nil }
-func (m *memoryRuntime) RemoveImage(context.Context, string) error       { return nil }
+func (m *memoryRuntime) HasImage(context.Context, string) (bool, error) { return true, nil }
+
+func (m *memoryRuntime) PullImage(context.Context, string) error { return nil }
+
+func (m *memoryRuntime) RemoveImage(context.Context, string) error { return nil }
+
 func (m *memoryRuntime) ImageID(context.Context, string) (string, error) { return "", nil }
+
 func (m *memoryRuntime) EnsureNetwork(context.Context, string, string, map[string]string) error {
 	return nil
 }
+
 func (m *memoryRuntime) RemoveNetwork(context.Context, string) error { return nil }
+
 func (m *memoryRuntime) ListNetworks(context.Context) ([]runtime.Network, error) {
 	return nil, nil
 }
+
 func (m *memoryRuntime) List(context.Context) ([]runtime.Container, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]runtime.Container(nil), m.containers...), nil
 }
+
 func (m *memoryRuntime) Create(_ context.Context, s runtime.ContainerSpec) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.containers = append(m.containers, runtime.Container{ID: "c-" + s.Labels[runtime.LabelTenant], Name: s.Name, Labels: s.Labels})
 	return "c-" + s.Labels[runtime.LabelTenant], nil
 }
+
 func (m *memoryRuntime) Start(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -68,7 +78,9 @@ func (m *memoryRuntime) Start(_ context.Context, id string) error {
 	}
 	return nil
 }
+
 func (m *memoryRuntime) Stop(context.Context, string, time.Duration) error { return nil }
+
 func (m *memoryRuntime) Remove(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -80,6 +92,7 @@ func (m *memoryRuntime) Remove(_ context.Context, id string) error {
 	}
 	return nil
 }
+
 func (m *memoryRuntime) Inspect(context.Context, string) (runtime.ContainerState, error) {
 	return runtime.ContainerState{Pid: 1}, nil
 }
@@ -96,17 +109,18 @@ func (m *memoryRuntime) Resolve(_ context.Context, ref string) (string, string, 
 	}
 	return pinnedTag(ref), "", nil
 }
+
 func (m *memoryRuntime) Logs(_ context.Context, id string, tail int) ([]byte, error) {
 	return []byte("logs of " + id + "\n"), nil
 }
 
 type apiFixture struct {
-	client     *Client
+	client     *api.Client
 	store      *store.SQLite
 	reconciler *reconcile.Reconciler
 	handler    http.Handler
 	dataRoot   string
-	api        *Server
+	server     *Server
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
@@ -129,11 +143,11 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	dataRoot := filepath.Join(t.TempDir(), "tenants")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := reconcile.New(st, rt, volume.Dir{Root: dataRoot}, key, reconcile.Config{BaseDomain: "example.test", HealthTimeout: 100 * time.Millisecond}, log)
-	api := NewServer(st, reconciler, rt, key, log)
-	handler := api.Handler()
+	served := NewServer(st, reconciler, rt, key, log)
+	handler := served.Handler()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return &apiFixture{client: NewClientURL(server.URL), store: st, reconciler: reconciler, handler: handler, dataRoot: dataRoot, api: api}
+	return &apiFixture{client: api.NewClientURL(server.URL), store: st, reconciler: reconciler, handler: handler, dataRoot: dataRoot, server: served}
 }
 
 func appSpec() spec.Tenant {
@@ -154,7 +168,7 @@ func withApp(t *testing.T) *apiFixture {
 	return f
 }
 
-func tenantOf(name string) TenantRequest { return TenantRequest{Name: name, App: "web"} }
+func tenantOf(name string) api.TenantRequest { return api.TenantRequest{Name: name, App: "web"} }
 
 // pinnedTag is how memoryRuntime pins a tag.
 func pinnedTag(ref string) string {
@@ -165,7 +179,7 @@ func pinnedTag(ref string) string {
 
 func checkStatus(t *testing.T, name string, err error, status int) {
 	t.Helper()
-	apiErr, ok := err.(*Error)
+	apiErr, ok := err.(*api.Error)
 	if !ok || apiErr.Status != status {
 		t.Errorf("%s: error %v, want HTTP %d", name, err, status)
 	}
@@ -261,7 +275,7 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	checkStatus(t, "duplicate", err, 409)
 	_, err = f.client.Get(ctx, "nobody")
 	checkStatus(t, "missing", err, 404)
-	if !IsNotFound(err) {
+	if !api.IsNotFound(err) {
 		t.Error("IsNotFound missed a 404")
 	}
 	bad := tenantOf("bad")
@@ -270,7 +284,7 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	checkStatus(t, "invalid override", err, 400)
 	_, err = f.client.Create(ctx, tenantOf("www"))
 	checkStatus(t, "reserved name", err, 400)
-	_, err = f.client.Create(ctx, TenantRequest{Name: "orphan", App: "nope"})
+	_, err = f.client.Create(ctx, api.TenantRequest{Name: "orphan", App: "nope"})
 	checkStatus(t, "unknown app", err, 404)
 	unpinnable := tenantOf("nopull")
 	unpinnable.Overrides.Image = "ghcr.io/example/missing:1"
@@ -286,9 +300,9 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	checkStatus(t, "malformed image", err, 400)
 	_, err = f.client.Secret(ctx, "acme", "NOPE")
 	checkStatus(t, "missing secret", err, 404)
-	_, err = f.client.Configure(ctx, "other", TenantRequest{App: "web"})
+	_, err = f.client.Configure(ctx, "other", api.TenantRequest{App: "web"})
 	checkStatus(t, "configure missing", err, 404)
-	huge := TenantRequest{App: "web", Overrides: spec.Overrides{Secrets: spec.Secrets{"HUGE": {Kind: "password", Bytes: 3_000_000}}}}
+	huge := api.TenantRequest{App: "web", Overrides: spec.Overrides{Secrets: spec.Secrets{"HUGE": {Kind: "password", Bytes: 3_000_000}}}}
 	_, err = f.client.Configure(ctx, "acme", huge)
 	checkStatus(t, "oversized secret", err, 400)
 	checkStatus(t, "purge a live tenant", f.client.Purge(ctx, "acme"), 409)
@@ -322,7 +336,7 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	_, err = f.client.PutApp(ctx, "asleep", asleep)
 	checkStatus(t, "suspended app", err, 400)
 	// A change that breaks a tenant is refused before its image is pulled.
-	acmeSecret := TenantRequest{App: "web", Overrides: spec.Overrides{Secrets: spec.Secrets{"TOKEN": {}}}}
+	acmeSecret := api.TenantRequest{App: "web", Overrides: spec.Overrides{Secrets: spec.Secrets{"TOKEN": {}}}}
 	if _, err := f.client.Configure(ctx, "acme", acmeSecret); err != nil {
 		t.Fatal(err)
 	}
@@ -333,10 +347,10 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	checkStatus(t, "an app change that breaks a tenant, with an image that cannot be pulled", err, 400)
 	// A change based on an outdated read is refused.
 	current, _ := f.client.Get(ctx, "acme")
-	if _, err := f.client.Configure(ctx, "acme", TenantRequest{App: "web", Generation: current.Generation}); err != nil {
+	if _, err := f.client.Configure(ctx, "acme", api.TenantRequest{App: "web", Generation: current.Generation}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.client.Configure(ctx, "acme", TenantRequest{App: "web", Overrides: acmeSecret.Overrides, Generation: current.Generation})
+	_, err = f.client.Configure(ctx, "acme", api.TenantRequest{App: "web", Overrides: acmeSecret.Overrides, Generation: current.Generation})
 	checkStatus(t, "an outdated change", err, 409)
 	_, err = f.client.Events(ctx, store.EventQuery{Limit: 5000})
 	checkStatus(t, "event limit", err, 400)
@@ -364,14 +378,14 @@ func TestConfigureKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
-	same, err := f.client.Configure(ctx, "acme", TenantRequest{App: "web"})
+	same, err := f.client.Configure(ctx, "acme", api.TenantRequest{App: "web"})
 	if err != nil || same.Changed || same.Tenant.Generation != 1 {
 		t.Fatalf("an unchanged tenant = %+v, %v", same, err)
 	}
 	if _, err := f.client.Suspend(ctx, "acme", true); err != nil {
 		t.Fatal(err)
 	}
-	next := TenantRequest{App: "web", Overrides: spec.Overrides{Env: map[string]string{"MODE": "prod"}, Secrets: spec.Secrets{"ADMIN_PASSWORD": {Kind: "password"}}}}
+	next := api.TenantRequest{App: "web", Overrides: spec.Overrides{Env: map[string]string{"MODE": "prod"}, Secrets: spec.Secrets{"ADMIN_PASSWORD": {Kind: "password"}}}}
 	replaced, err := f.client.Configure(ctx, "acme", next)
 	if err != nil || !replaced.Changed || replaced.Tenant.Spec.Env["MODE"] != "prod" {
 		t.Fatalf("configure = %+v, %v", replaced, err)
@@ -387,7 +401,7 @@ func TestConfigureKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
 		t.Fatalf("new secret = %q, %v", password, err)
 	}
 	// A secret removed and added back keeps its value.
-	if _, err := f.client.Configure(ctx, "acme", TenantRequest{App: "web"}); err != nil {
+	if _, err := f.client.Configure(ctx, "acme", api.TenantRequest{App: "web"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.client.Configure(ctx, "acme", next); err != nil {
@@ -435,16 +449,16 @@ func TestArchiveRestorePurge(t *testing.T) {
 	_, secretErr := f.client.Secret(ctx, "acme", "SESSION_SECRET")
 	_, logsErr := f.client.Logs(ctx, "acme", 10)
 	for what, err := range map[string]error{"suspend": suspendErr, "secret": secretErr, "logs": logsErr} {
-		if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
+		if apiErr, ok := err.(*api.Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
 			t.Fatalf("%s an archived tenant = %v", what, err)
 		}
 	}
 	_, err = f.client.Create(ctx, tenantOf("acme"))
-	if apiErr, ok := err.(*Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
+	if apiErr, ok := err.(*api.Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
 		t.Fatalf("create over an archived name = %v", err)
 	}
 	// An archived tenant can be reconfigured; restore runs the result.
-	archivedConfig := TenantRequest{App: "web", Overrides: spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, Generation: archived.Generation}
+	archivedConfig := api.TenantRequest{App: "web", Overrides: spec.Overrides{Env: map[string]string{"TZ": "UTC"}}, Generation: archived.Generation}
 	if changed, err := f.client.Configure(ctx, "acme", archivedConfig); err != nil || !changed.Changed || changed.Tenant.ArchivedAt.IsZero() {
 		t.Fatalf("configure an archived tenant = %+v, %v", changed, err)
 	}
@@ -467,7 +481,7 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.dataRoot, "acme")); !os.IsNotExist(err) {
 		t.Fatal("purge left the data")
 	}
-	if _, err := f.client.Get(ctx, "acme"); !IsNotFound(err) {
+	if _, err := f.client.Get(ctx, "acme"); !api.IsNotFound(err) {
 		t.Fatalf("purge left the tenant: %v", err)
 	}
 	fresh, err := f.client.Create(ctx, tenantOf("acme"))
@@ -593,7 +607,7 @@ func TestStatusOfTenantsOfOtherNodes(t *testing.T) {
 		}
 	}
 	healthy := reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true, Generation: 1}
-	f.api.WithCluster(statusCluster{statuses: map[string]reconcile.Status{"n2/on-n2": healthy}})
+	f.server.WithCluster(statusCluster{statuses: map[string]reconcile.Status{"n2/on-n2": healthy}})
 
 	tenant, err := f.client.Get(ctx, "on-n2")
 	if err != nil || tenant.Status == nil || !tenant.Status.Healthy || tenant.Status.Phase != reconcile.PhaseRunning {
@@ -650,7 +664,7 @@ func TestEventsNameTheSocketUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := NewClient(socket)
+	client := api.NewClient(socket)
 	ctx := context.Background()
 	if _, err := client.PutApp(ctx, "web", appSpec()); err != nil {
 		t.Fatal(err)
@@ -714,7 +728,7 @@ func TestNodesSayWhichAnswer(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	f.api.WithCluster(pingCluster{up: map[string]bool{"n2": true}, leader: "n2"})
+	f.server.WithCluster(pingCluster{up: map[string]bool{"n2": true}, leader: "n2"})
 	view, err = f.client.Nodes(ctx)
 	if err != nil || view.Leader != "n2" || len(view.Nodes) != 3 {
 		t.Fatalf("view: %+v, %v", view, err)
@@ -745,11 +759,11 @@ func TestDevicesAreReadCaughtUp(t *testing.T) {
 	if err := f.store.NameCluster("TESTCLUSTER", "test"); err != nil {
 		t.Fatal(err)
 	}
-	f.api.WithCluster(catchUpCluster{err: errors.New("no leader")})
+	f.server.WithCluster(catchUpCluster{err: errors.New("no leader")})
 	if _, err := f.client.Devices(ctx); err == nil {
 		t.Fatal("devices listed by a node that cannot catch up")
 	}
-	f.api.WithCluster(catchUpCluster{})
+	f.server.WithCluster(catchUpCluster{})
 	if devices, err := f.client.Devices(ctx); err != nil || len(devices) != 0 {
 		t.Fatalf("devices %+v, %v", devices, err)
 	}
@@ -761,24 +775,24 @@ func TestThePanelsPeopleThroughTheAPI(t *testing.T) {
 	f := newAPIFixture(t)
 	ctx := context.Background()
 	hash := strings.Repeat("ab", 32)
-	user, err := f.client.InvitePanelUser(ctx, "jan", InviteRequest{Hash: hash, Expires: time.Now().Add(time.Hour)})
+	user, err := f.client.InvitePanelUser(ctx, "jan", api.InviteRequest{Hash: hash, Expires: time.Now().Add(time.Hour)})
 	if err != nil || user.Name != "jan" {
 		t.Fatalf("invite: %+v, %v", user, err)
 	}
 	if e, err := f.client.Enrollment(ctx, hash); err != nil || e.User != "jan" {
 		t.Fatalf("enrollment %+v, %v", e, err)
 	}
-	if err := f.client.AddPasskey(ctx, PasskeyRequest{Hash: hash, Passkey: store.Passkey{ID: "k1", User: "jan", Data: "{}", Label: "laptop"}}); err != nil {
+	if err := f.client.AddPasskey(ctx, api.PasskeyRequest{Hash: hash, Passkey: store.Passkey{ID: "k1", User: "jan", Data: "{}", Label: "laptop"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Enrollment(ctx, hash); !IsNotFound(err) {
+	if _, err := f.client.Enrollment(ctx, hash); !api.IsNotFound(err) {
 		t.Fatalf("a used invitation: %v", err)
 	}
 	if u, err := f.client.PanelUserByHandle(ctx, user.Handle); err != nil || len(u.Passkeys) != 1 {
 		t.Fatalf("by handle: %+v, %v", u, err)
 	}
 	session := strings.Repeat("cd", 32)
-	if err := f.client.StartPanelSession(ctx, SessionRequest{Hash: session, User: "jan", Passkey: "k1", Challenge: "c1", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := f.client.StartPanelSession(ctx, api.SessionRequest{Hash: session, User: "jan", Passkey: "k1", Challenge: "c1", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	if s, err := f.client.PanelSession(ctx, session, true); err != nil || s.User != "jan" {
@@ -791,7 +805,7 @@ func TestThePanelsPeopleThroughTheAPI(t *testing.T) {
 	if err := f.client.WithActor("anna (panel)").RemovePanelUser(ctx, "jan"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.PanelSession(ctx, session, false); !IsNotFound(err) {
+	if _, err := f.client.PanelSession(ctx, session, false); !api.IsNotFound(err) {
 		t.Fatalf("a removed person's session: %v", err)
 	}
 	events, _ := f.client.Events(ctx, store.EventQuery{Limit: 1})
