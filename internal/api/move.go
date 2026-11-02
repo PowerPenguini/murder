@@ -64,3 +64,16 @@ func (c *Client) Move(ctx context.Context, tenant, to string) (Tenant, error) {
 	err := c.do(ctx, http.MethodPost, tenantPath(tenant)+"/move", MoveRequest{To: to}, &view)
 	return view, err
 }
+
+// Replicas reports on the copies of this node's tenants.
+type Replicas interface {
+	// Synced is when the tenant's copy last matched its data; zero if not
+	// known.
+	Synced(tenant string) time.Time
+}
+
+// WithReplicas reports on the copies of this node's tenants.
+func (s *Server) WithReplicas(r Replicas) *Server {
+	s.replicas = r
+	return s
+}

@@ -74,8 +74,18 @@ func (a *agentMoves) Discard(ctx context.Context, tenant string) error {
 	if err := a.catchUp(); err != nil {
 		return err
 	}
-	if record, err := a.store.Get(tenant); err == nil && (record.Node == a.store.Node() || record.MoveTo == a.store.Node()) {
+	record, err := a.store.Get(tenant)
+	if err == nil && (record.Node == a.store.Node() || record.MoveTo == a.store.Node()) {
 		return fmt.Errorf("tenant %s runs on node %s, or is moving here: its data stays", tenant, a.store.Node())
+	}
+	// This node keeps the tenant's copy, which the move added to: back to
+	// the copy's newest snapshot, kept for a failover.
+	if replicas, ok := a.volumes.(volume.Replicas); ok && err == nil && record.Replica == a.store.Node() {
+		if replica, err := replicas.IsReplica(ctx, tenant); err != nil {
+			return err
+		} else if replica {
+			return replicas.RollbackReplica(ctx, tenant)
+		}
 	}
 	return a.volumes.Remove(ctx, tenant)
 }
@@ -116,6 +126,10 @@ type clusterPeer struct{ cluster *cluster.Cluster }
 
 func (p clusterPeer) Receive(ctx context.Context, node, tenant string, incremental bool, data io.Reader) error {
 	return p.cluster.ReceiveOn(ctx, node, tenant, incremental, data)
+}
+
+func (p clusterPeer) Snapshots(ctx context.Context, node, tenant string) ([]string, error) {
+	return p.cluster.SnapshotsOn(ctx, node, tenant)
 }
 
 func (p clusterPeer) Discard(ctx context.Context, node, tenant string) error {

@@ -8,6 +8,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/replicate"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -27,6 +28,8 @@ type agentMetrics struct {
 	firewall *atomic.Int64
 	// backups is nil without backups set up.
 	backups *agentBackups
+	// replicator is nil outside a cluster of ZFS nodes.
+	replicator *replicate.Replicator
 }
 
 func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +95,9 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if m.backups != nil {
 		m.backups.writeMetrics(out)
+	}
+	if m.replicator != nil {
+		m.replicator.WriteMetrics(out)
 	}
 	_ = out.Err()
 }

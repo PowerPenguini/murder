@@ -32,6 +32,9 @@ func (c *Cluster) handler() http.Handler {
 	members("GET /cluster/v1/tenants/{name}/status", c.handleTenantStatus)
 	members("POST /cluster/v1/tenants/{name}/move", c.handleMove)
 	members("PUT /cluster/v1/node/binary", c.handleInstall)
+	members("GET /cluster/v1/ping", c.handlePing)
+	members("GET /cluster/v1/tenants/{name}/replica", c.handleSnapshots)
+	members("PUT /cluster/v1/tenants/{name}/replica", c.handleReplicate)
 	return mux
 }
 
@@ -348,6 +351,58 @@ func (c *Cluster) moves(w http.ResponseWriter) bool {
 		return false
 	}
 	return true
+}
+
+// handlePing answers the leader's probe: this node is up.
+func (c *Cluster) handlePing(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+// replicaSender is the node a replica request comes from, once this node
+// keeps copies at all.
+func (c *Cluster) replicaSender(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if c.config.Replicas == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this node keeps no copies of tenants"))
+		return "", false
+	}
+	sender, err := peerName(r.TLS)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return "", false
+	}
+	return sender, true
+}
+
+// handleSnapshots lists the snapshots of a copy this node keeps.
+func (c *Cluster) handleSnapshots(w http.ResponseWriter, r *http.Request) {
+	sender, ok := c.replicaSender(w, r)
+	if !ok {
+		return
+	}
+	snapshots, err := c.config.Replicas.Snapshots(r.Context(), sender, r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if snapshots == nil {
+		snapshots = []string{}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Snapshots []string `json:"snapshots"`
+	}{snapshots})
+}
+
+// handleReplicate takes a tenant's data into the copy this node keeps.
+func (c *Cluster) handleReplicate(w http.ResponseWriter, r *http.Request) {
+	sender, ok := c.replicaSender(w, r)
+	if !ok {
+		return
+	}
+	if err := c.config.Replicas.Receive(r.Context(), sender, r.PathValue("name"), r.URL.Query().Get("whole") == "1", r.Body); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct{}{})
 }
 
 // handleReceive takes the data of a tenant moving here.

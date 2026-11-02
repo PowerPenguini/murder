@@ -60,8 +60,6 @@ github.com/hashicorp/raft-boltdb/v2 v2.4.2 h1:r2RRgZ6ajT+VH8/9yC5mfoKAlt3KrYiUDh
 github.com/hashicorp/raft-boltdb/v2 v2.4.2/go.mod h1:+wvKK1thWEqM7amY1MXjtQpkm+b9KNUXks0fcus5ZGU=
 github.com/hetznercloud/hcloud-go/v2 v2.27.0 h1:SOGpAP3kQ6+aevB4Hxr63ukNsdYJjHhuWNB1C3NsiJo=
 github.com/hetznercloud/hcloud-go/v2 v2.27.0/go.mod h1:OVlbjfoEuvNPI8ji3Sm/jPkjOxO7MKEiPyfctZ0R8jw=
-github.com/klauspost/compress v1.19.2 h1:hMRETovs/pu/dVWN7zIT1PGG8t509MwT6bO7XSi26R8=
-github.com/klauspost/compress v1.19.2/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
 github.com/klauspost/compress v1.20.3 h1:zWNoFqq/lSuYQRim3dUXlXeA0IqwuZGicdG5ZTfY5j4=
 github.com/klauspost/compress v1.20.3/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 github.com/klauspost/cpuid/v2 v2.0.1/go.mod h1:FInQzS24/EEf25PyTYn52gqo7WaD8xa0213Md/qVLRg=

@@ -56,9 +56,9 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 }
 
 type fakeDataset struct {
-	owner, mountpoint, canmount string
-	mounted                     bool
-	refquota, used              int64
+	owner, mountpoint, canmount, role string
+	mounted                           bool
+	refquota, used                    int64
 }
 
 // fakeZFS answers zfs commands from an in-memory set of datasets.
@@ -86,6 +86,8 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 	case "unmount":
 		f.datasets[dataset].mounted = false
 		return nil, nil
+	case "rollback":
+		return nil, nil
 	case "get":
 		d, ok := f.datasets[dataset]
 		if !ok {
@@ -95,11 +97,22 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		if d.mounted {
 			mounted = "yes"
 		}
-		owner := d.owner
-		if owner == "" {
-			owner = "-"
+		dash := func(value string) string {
+			if value == "" {
+				return "-"
+			}
+			return value
 		}
-		return []byte(owner + "\n" + mounted + "\n" + d.mountpoint + "\n" + strconv.FormatInt(d.refquota, 10) + "\n"), nil
+		canmount := d.canmount
+		if canmount == "" {
+			canmount = "on"
+		}
+		return []byte(dash(d.owner) + "\n" + mounted + "\n" + d.mountpoint + "\n" + strconv.FormatInt(d.refquota, 10) + "\n" + dash(d.role) + "\n" + canmount + "\n"), nil
+	case "inherit":
+		if args[1] == roleProperty {
+			f.datasets[dataset].role = ""
+		}
+		return nil, nil
 	case "create":
 		d := &fakeDataset{mounted: true}
 		for i, arg := range args {
@@ -249,7 +262,7 @@ func TestZFSRefusesForeignDatasets(t *testing.T) {
 			t.Errorf("Remove destroyed foreign dataset tank/%s", tenant)
 		}
 	}
-	if fake.ran("destroy") || fake.ran("mount ") {
+	if fake.ran("zfs destroy") || fake.ran("zfs mount ") || fake.ran("zfs set") {
 		t.Fatalf("a foreign dataset was touched: %v", fake.calls)
 	}
 }

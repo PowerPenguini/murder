@@ -9,8 +9,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 6 in place.
-const schemaVersion = 7
+// versions 4 to 7 in place.
+const schemaVersion = 8
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -61,7 +61,12 @@ CREATE TABLE tenants (
 	-- A move to another node under way: its target, and whether requests
 	-- are held because the tenant runs nowhere for a moment.
 	move_to     TEXT NOT NULL DEFAULT '',
-	move_held   INTEGER NOT NULL DEFAULT 0 CHECK (move_held IN (0, 1))
+	move_held   INTEGER NOT NULL DEFAULT 0 CHECK (move_held IN (0, 1)),
+	-- The node that keeps a copy of the tenant's data, to run it from if
+	-- its node fails; never the tenant's own node. replica_ready is set
+	-- once the copy holds the whole data: only then may it take over.
+	replica     TEXT NOT NULL DEFAULT '',
+	replica_ready INTEGER NOT NULL DEFAULT 0 CHECK (replica_ready IN (0, 1))
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -181,6 +186,18 @@ func upgrade(db *sql.DB) error {
 		for _, statement := range []string{
 			`ALTER TABLE tenants ADD COLUMN move_to TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE tenants ADD COLUMN move_held INTEGER NOT NULL DEFAULT 0 CHECK (move_held IN (0, 1))`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
+		}
+		version = 7
+	}
+	// Version 8 keeps a copy of every tenant's data on a second node.
+	if version == 7 {
+		for _, statement := range []string{
+			`ALTER TABLE tenants ADD COLUMN replica TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE tenants ADD COLUMN replica_ready INTEGER NOT NULL DEFAULT 0 CHECK (replica_ready IN (0, 1))`,
 		} {
 			if _, err := tx.Exec(statement); err != nil {
 				return err

@@ -88,6 +88,8 @@ type Config struct {
 	Upgrade Upgrader
 	// Moves is this node's part in moving tenants between nodes.
 	Moves Moves
+	// Replicas keeps the copies of other nodes' tenants this node holds.
+	Replicas Replicas
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
@@ -570,6 +572,41 @@ func (c *Cluster) MoveOn(ctx context.Context, node, tenant, to, actor string) er
 	return c.stream(ctx, node, http.MethodPost, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/move", bytes.NewReader(body), nil)
 }
 
+// Replicas is the node's part in keeping copies of tenants other nodes
+// run. sender is the node a request comes from, as its cluster certificate
+// proves.
+type Replicas interface {
+	// Snapshots lists the snapshots of the copy of tenant this node keeps
+	// for sender, oldest first; none if it keeps none yet.
+	Snapshots(ctx context.Context, sender, tenant string) ([]string, error)
+	// Receive takes a stream of tenant's data from sender into the copy:
+	// whole, or the changes since its newest snapshot.
+	Receive(ctx context.Context, sender, tenant string, whole bool, data io.Reader) error
+}
+
+// Ping reports whether node answers on the cluster port, within ctx.
+func (c *Cluster) Ping(ctx context.Context, node string) error {
+	return c.stream(ctx, node, http.MethodGet, "/cluster/v1/ping", nil, nil)
+}
+
+// SnapshotsOn lists the snapshots of the copy of tenant node keeps.
+func (c *Cluster) SnapshotsOn(ctx context.Context, node, tenant string) ([]string, error) {
+	var answer struct {
+		Snapshots []string `json:"snapshots"`
+	}
+	err := c.stream(ctx, node, http.MethodGet, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/replica", nil, &answer)
+	return answer.Snapshots, err
+}
+
+// ReplicateOn streams tenant's data to the copy node keeps.
+func (c *Cluster) ReplicateOn(ctx context.Context, node, tenant string, whole bool, data io.Reader) error {
+	path := "/cluster/v1/tenants/" + url.PathEscape(tenant) + "/replica"
+	if whole {
+		path += "?whole=1"
+	}
+	return c.stream(ctx, node, http.MethodPut, path, data, nil)
+}
+
 // moveRequest asks a node to move one of its tenants.
 type moveRequest struct {
 	To    string `json:"to"`
@@ -577,10 +614,17 @@ type moveRequest struct {
 }
 
 // stream sends a request with any body to node and decodes its answer.
+// A request with a body, which may stream data for a long time, is
+// cancelled once node has answered no ping for long.
 func (c *Cluster) stream(ctx context.Context, node, method, path string, body io.Reader, out any) error {
 	address, err := c.addressOf(node)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		var stop func()
+		ctx, stop = watchPeer(ctx, func(ctx context.Context) error { return c.Ping(ctx, node) }, peerPingEvery, peerSilentFor)
+		defer stop()
 	}
 	request, err := http.NewRequestWithContext(ctx, method, "https://"+address+path, body)
 	if err != nil {
@@ -588,6 +632,9 @@ func (c *Cluster) stream(ctx context.Context, node, method, path string, body io
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
+		if cause := context.Cause(ctx); errors.Is(cause, errPeerSilent) {
+			err = cause
+		}
 		return fmt.Errorf("node %s: %w", node, err)
 	}
 	defer response.Body.Close()

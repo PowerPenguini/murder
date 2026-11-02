@@ -81,7 +81,18 @@ type Runtime interface {
 	Logs(ctx context.Context, id string, tail int) ([]byte, error)
 	// Inspect returns what the engine knows about a container's process.
 	Inspect(ctx context.Context, id string) (ContainerState, error)
+	// SetRestartPolicy changes a container's restart policy in place,
+	// without restarting it.
+	SetRestartPolicy(ctx context.Context, id, policy string) error
 }
+
+// RestartPolicy is the restart policy of tenant containers: the engine
+// starts none by itself, not when the server or the engine starts either
+// (with on-failure it would: a container cut off by a power-off counts as
+// failed). The agent starts them, a crashed one at its next pass, and at
+// boot only once it knows they are still this node's: a node that was down
+// may have lost its tenants to their replicas meanwhile.
+const RestartPolicy = "no"
 
 // ContainerState is the state of a container's process.
 type ContainerState struct {
@@ -102,6 +113,8 @@ type ContainerState struct {
 	ExitKnown bool
 	ExitCode  int
 	OOMKilled bool
+	// RestartPolicy is the container's restart policy.
+	RestartPolicy string
 }
 
 // Container is the observed state of one managed container.

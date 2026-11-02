@@ -83,6 +83,8 @@ func (m *memoryRuntime) Inspect(context.Context, string) (runtime.ContainerState
 	return runtime.ContainerState{Pid: 1}, nil
 }
 
+func (m *memoryRuntime) SetRestartPolicy(context.Context, string, string) error { return nil }
+
 // Resolve pins tags to a digest derived from the tag; "missing" tags fail.
 func (m *memoryRuntime) Resolve(_ context.Context, ref string) (string, string, error) {
 	if spec.Pinned(ref) {
@@ -595,6 +597,19 @@ func TestStatusOfTenantsOfOtherNodes(t *testing.T) {
 	tenant, err := f.client.Get(ctx, "on-n2")
 	if err != nil || tenant.Status == nil || !tenant.Status.Healthy || tenant.Status.Phase != reconcile.PhaseRunning {
 		t.Fatalf("on-n2 = %+v, %v", tenant, err)
+	}
+	// Its copy, and whether it can take over.
+	if _, err := f.store.PlaceReplicas("test"); err != nil {
+		t.Fatal(err)
+	}
+	if tenant, err = f.client.Get(ctx, "on-n2"); err != nil || tenant.Replica == "" || tenant.ReplicaReady {
+		t.Fatalf("on-n2 with a replica = %+v, %v", tenant, err)
+	}
+	if err := f.store.ReplicaReady("on-n2", tenant.Replica); err != nil {
+		t.Fatal(err)
+	}
+	if tenant, err = f.client.Get(ctx, "on-n2"); err != nil || !tenant.ReplicaReady {
+		t.Fatalf("on-n2 with a ready replica = %+v, %v", tenant, err)
 	}
 	start := time.Now()
 	tenants, err := f.client.List(ctx)

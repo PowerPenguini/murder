@@ -35,11 +35,12 @@ between servers, is not something they solve.
 
 ## Failover
 
-- The agent renews a lease every 5 s and stops its tenants if it cannot for
-  20 s. After 30 s without contact the control plane powers the server off
-  through the provider API, and only after a confirmed power-off and 60 s since
-  the last lease does it start the tenants from their replicas. No confirmed
-  power-off means no promotion, only an alert.
+- The cluster's leader probes every node every 2 s. After 30 s without an
+  answer it powers the server off through the provider API, and only after a
+  confirmed power-off and 60 s since the node last answered does it start the
+  tenants from their replicas. No confirmed power-off means no promotion, only
+  an alert. Nodes do not stop their own tenants when cut off: see
+  [failover.md](failover.md).
 - A planned move (`drain`) stops the tenant, sends a final incremental
   snapshot and starts it on the replica: no data loss, 10–30 s downtime.
 

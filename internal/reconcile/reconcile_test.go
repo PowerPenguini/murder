@@ -39,6 +39,9 @@ type fakeRuntime struct {
 	mu         sync.Mutex
 	images     map[string]bool
 	containers map[string]*fakeContainer
+	// policies are containers' restart policies, as SetRestartPolicy or a
+	// test set them; none for a container made by Create.
+	policies   map[string]string
 	networks   map[string]map[string]string // name → labels
 	subnets    map[string]string            // name → subnet
 	pulled     []string
@@ -72,7 +75,7 @@ type fakeContainer struct {
 }
 
 func newFakeRuntime() *fakeRuntime {
-	return &fakeRuntime{images: map[string]bool{imageA: true}, containers: map[string]*fakeContainer{}, networks: map[string]map[string]string{}, subnets: map[string]string{}}
+	return &fakeRuntime{images: map[string]bool{imageA: true}, containers: map[string]*fakeContainer{}, networks: map[string]map[string]string{}, subnets: map[string]string{}, policies: map[string]string{}}
 }
 
 func (f *fakeRuntime) record(event string) { f.events = append(f.events, event) }
@@ -206,6 +209,7 @@ func (f *fakeRuntime) Create(_ context.Context, spec runtime.ContainerSpec) (str
 	f.next++
 	id := fmt.Sprintf("c%d", f.next)
 	f.containers[id] = &fakeContainer{Container: runtime.Container{ID: id, Name: spec.Name, State: "created", Labels: spec.Labels}, spec: spec}
+	f.policies[id] = runtime.RestartPolicy
 	f.record("create " + id)
 	return id, nil
 }
@@ -249,6 +253,14 @@ func (f *fakeRuntime) Resolve(_ context.Context, ref string) (string, string, er
 	return ref, "", nil
 }
 
+func (f *fakeRuntime) SetRestartPolicy(_ context.Context, id, policy string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("restart-policy " + id + " " + policy)
+	f.policies[id] = policy
+	return nil
+}
+
 func (f *fakeRuntime) Inspect(_ context.Context, id string) (runtime.ContainerState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -259,6 +271,9 @@ func (f *fakeRuntime) Inspect(_ context.Context, id string) (runtime.ContainerSt
 	state := f.state
 	if container.Running && !state.Restarting && !f.exitBeforeInspect {
 		state.Pid = 4242
+	}
+	if policy, ok := f.policies[id]; ok {
+		state.RestartPolicy = policy
 	}
 	f.exitBeforeInspect = false
 	return state, nil
@@ -335,6 +350,17 @@ func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string
 func (f *fakeVolumes) Prune(_ context.Context, tenant, reason string, keep int) error {
 	f.pruned = append(f.pruned, fmt.Sprintf("%s@%s keep %d", tenant, reason, keep))
 	return f.failPrune
+}
+
+// IsReplica says a tenant's data is a copy while a file "replica" marks it.
+func (f *fakeVolumes) IsReplica(_ context.Context, tenant string) (bool, error) {
+	_, err := os.Stat(filepath.Join(f.Root, tenant, ".replica"))
+	return err == nil, nil
+}
+
+func (f *fakeVolumes) DropReplica(ctx context.Context, tenant string) error {
+	f.removed = append(f.removed, "copy "+tenant)
+	return f.Dir.Remove(ctx, tenant)
 }
 
 func (f *fakeVolumes) Remove(ctx context.Context, tenant string) error {
@@ -1716,5 +1742,107 @@ func TestAReplacedTenantIsServedBeforeThePassEnds(t *testing.T) {
 	}
 	if alphaHeldDuringBetasStop {
 		t.Fatal("alpha's requests still waited while beta was being replaced")
+	}
+}
+
+// Containers made when the engine still started them at boot get the
+// restart policy that leaves that to the agent, in place: not replaced.
+func TestOldContainersGetTheNewRestartPolicyInPlace(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	var id string
+	for candidate := range f.runtime.containers {
+		id = candidate
+	}
+	f.runtime.policies[id] = "unless-stopped"
+	f.runtime.takeEvents()
+	f.reconcile(t)
+	if events := f.runtime.takeEvents(); len(events) != 1 || events[0] != "restart-policy "+id+" "+runtime.RestartPolicy {
+		t.Fatalf("events = %v, want only the policy changed", events)
+	}
+	f.reconcile(t)
+	if events := f.runtime.takeEvents(); len(events) != 0 {
+		t.Fatalf("events after = %v", events)
+	}
+}
+
+// The engine starts no container by itself: one whose app exited is
+// started at the next pass, and the exit reported; an exit from before the
+// agent started (the server restarted) or a stop is not the app's.
+func TestAnExitedAppIsStartedAgainAndReported(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	var id string
+	for candidate := range f.runtime.containers {
+		id = candidate
+	}
+	exit := func(code int, at time.Time) {
+		f.runtime.mu.Lock()
+		f.runtime.containers[id].Running = false
+		f.runtime.containers[id].State = "exited"
+		f.runtime.state = runtime.ContainerState{ExitKnown: true, ExitCode: code, ExitedAt: at}
+		f.runtime.mu.Unlock()
+	}
+	exit(2, time.Now())
+	f.runtime.takeEvents()
+	f.reconcile(t)
+	status, _ := f.reconciler.Status("acme")
+	if status.Phase != PhaseRestarting || status.Restarts != 1 || !strings.HasPrefix(status.LastExit, "exited with code 2") {
+		t.Fatalf("after the app exited: %+v", status)
+	}
+	if events := f.runtime.takeEvents(); !slices.Contains(events, "start "+id) {
+		t.Fatalf("events = %v, want it started again", events)
+	}
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.Phase != PhaseRunning || status.Restarts != 1 {
+		t.Fatalf("running again: %+v", status)
+	}
+	// Stopped (SIGTERM), or exited before the agent started: started,
+	// not reported.
+	exit(143, time.Now())
+	f.reconcile(t)
+	exit(1, f.reconciler.started.Add(-time.Minute))
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.Restarts != 1 || status.Phase != PhaseRunning {
+		t.Fatalf("after a stop and an old exit: %+v", status)
+	}
+}
+
+// A tenant that ran before is not started on empty data when its data is
+// missing, as when a copy that should have taken over holds nothing; a
+// copy of an earlier tenant of the same name is not taken for a new one's.
+func TestATenantIsNotStartedOnMissingData(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	if record, _ := f.store.Get("acme"); record.DataImage == "" {
+		t.Fatal("no data image after the first start")
+	}
+	if err := os.RemoveAll(filepath.Join(f.volumes.Root, "acme")); err != nil {
+		t.Fatal(err)
+	}
+	f.runtime.takeEvents()
+	if err := f.reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("a tenant that ran before was started on new, empty data")
+	}
+	if _, err := os.Stat(filepath.Join(f.volumes.Root, "acme")); err == nil {
+		t.Fatal("an empty data directory was made")
+	}
+	// An earlier tenant's copy is dropped for a new tenant.
+	if err := os.MkdirAll(filepath.Join(f.volumes.Root, "beta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.volumes.Root, "beta", ".replica"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.create(t, "beta")
+	_ = f.reconciler.Reconcile(context.Background())
+	if !slices.Contains(f.volumes.removed, "copy beta") {
+		t.Fatalf("removed %v, want the old copy dropped", f.volumes.removed)
+	}
+	if _, err := os.Stat(filepath.Join(f.volumes.Root, "beta", ".replica")); err == nil {
+		t.Fatal("the new tenant runs on the earlier tenant's copy")
 	}
 }

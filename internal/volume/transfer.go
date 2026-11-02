@@ -274,6 +274,8 @@ func (z ZFS) Receive(ctx context.Context, tenant string, incremental bool, r io.
 		return err
 	}
 	dataset := z.dataset(tenant)
+	// Not beside a copy's receive or promotion.
+	defer lockDataset(dataset)()
 	args := []string{"receive", "-u"}
 	if incremental {
 		current, exists, err := z.properties(ctx, dataset)
