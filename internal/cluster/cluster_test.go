@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -320,6 +321,15 @@ func TestANodeFarBehindCatchesUpFromASnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	sameState(t, nodes)
+	// A state installed from a snapshot hashes as one applied from the log.
+	ours, err := behind.store.Digest(ctx(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := nodes[0].store.Digest(ctx(t))
+	if err != nil || !ours.Comparable(theirs) || ours.Hash != theirs.Hash {
+		t.Fatalf("digests after a snapshot: %+v and %+v, %v", ours, theirs, err)
+	}
 }
 
 func TestOneNodeLeftWritesNothing(t *testing.T) {
@@ -716,4 +726,87 @@ func TestCopiesKnowTheirSender(t *testing.T) {
 	if _, err := nodes[0].cluster.SnapshotsOn(ctx(t), "hel-1", "acme"); err == nil {
 		t.Fatal("a node that keeps no copies answered for one")
 	}
+}
+
+// The leader compares every node's state with its own: alike while they
+// apply the same log, different once one's changed around it.
+func TestTheLeaderFindsAStateThatDrifted(t *testing.T) {
+	nodes := threeNodes(t)
+	// Leadership may move under load: each comparison asks whoever leads.
+	leader := func() *node {
+		for _, n := range nodes {
+			if n.cluster.Leader() {
+				return n
+			}
+		}
+		return nil
+	}
+	compare := func() (*node, map[string]bool) {
+		var found map[string]bool
+		var by *node
+		eventually(t, "a leader compares the nodes", func() bool {
+			by = leader()
+			if by == nil {
+				return false
+			}
+			found = by.cluster.CompareDigests(ctx(t))
+			return len(found) == 2
+		})
+		return by, found
+	}
+	if _, err := nodes[0].store.PutApp(store.App{Name: "web", Spec: appSpec()}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes[0].store.Create(store.NewTenant{Name: "acme", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	sameState(t, nodes)
+	by, found := compare()
+	for name, diverged := range found {
+		if diverged {
+			t.Fatalf("%s diverged from %s with one state: %v", name, by.name, found)
+		}
+	}
+	for _, n := range nodes {
+		if n != leader() && n.cluster.CompareDigests(ctx(t)) != nil && n != leader() {
+			t.Fatalf("%s, not the leader, compared states", n.name)
+		}
+	}
+	// Every node but one drifts alike, so whichever leads finds that one.
+	drifted := nodes[2]
+	db, err := sql.Open("sqlite", filepath.Join(drifted.dir, "murder.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE tenants SET node = 'elsewhere' WHERE name = 'acme'`); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the leader finds "+drifted.name+" drifted", func() bool {
+		by := leader()
+		if by == nil {
+			return false
+		}
+		found := by.cluster.CompareDigests(ctx(t))
+		if by == drifted {
+			return len(found) == 2 && found[nodes[0].name] && found[nodes[1].name]
+		}
+		return found[drifted.name]
+	})
+	var watched Digests
+	watch, stop := context.WithCancel(ctx(t))
+	defer stop()
+	for _, n := range nodes {
+		go n.cluster.WatchDigests(watch, 10*time.Millisecond, &Digests{})
+	}
+	go func() {
+		for watch.Err() == nil {
+			if by := leader(); by != nil && by != drifted {
+				by.cluster.WatchDigests(watch, 10*time.Millisecond, &watched)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	eventually(t, "the watch finds the drift", func() bool { return watched.Diverged()[drifted.name] })
 }

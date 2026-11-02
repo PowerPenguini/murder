@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/apiserver"
+	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/failover"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/reconcile"
@@ -36,6 +37,8 @@ type agentMetrics struct {
 	replicator *replicate.Replicator
 	// monitor is nil outside a cluster.
 	monitor *failover.Monitor
+	// digests is nil outside a cluster.
+	digests *cluster.Digests
 	// usage is what the node's tenants use; nil in tests that measure none.
 	usage *measure.Recorder
 }
@@ -109,6 +112,13 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if m.monitor != nil {
 		m.monitor.WriteMetrics(out)
+	}
+	if m.digests != nil {
+		diverged := m.digests.Diverged()
+		out.Family("murder_state_diverged", "gauge", "On the leader, 1 for each node whose replicated state differs from the leader's at the same version; nodes not compared are left out.")
+		for _, node := range slices.Sorted(maps.Keys(diverged)) {
+			out.Sample("murder_state_diverged", metrics.Bool(diverged[node]), "node", node)
+		}
 	}
 	if m.usage != nil {
 		writeUsage(out, m.usage.Report(time.Now()))
