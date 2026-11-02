@@ -12,9 +12,34 @@ func (s *SQLite) PlaceReplicas(actor string) (int, error) {
 	placed := 0
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		placed = 0
+		// A copy stops moving to a node that can no longer keep it.
+		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
+			record := current.tenants[name]
+			if record.ReplicaNext == "" || canKeep(current, record, record.ReplicaNext) {
+				continue
+			}
+			if err := tx.Exec(`UPDATE tenants SET replica_next = '' WHERE name = ? AND replica_next = ?`, name, record.ReplicaNext); err != nil {
+				return err
+			}
+			if err := event(tx, now, actor, "tenant.replica", name, record.App, "the copy no longer moves to "+record.ReplicaNext); err != nil {
+				return err
+			}
+			placed++
+		}
 		changes := placeReplicas(current)
-		if len(changes) == 0 {
-			return errUnchanged
+		if len(changes) == 0 && placed == 0 {
+			// Copies move only once nothing else changes: one at a time,
+			// on a state this batch has not changed.
+			name, target := rebalance(current)
+			if name == "" {
+				return errUnchanged
+			}
+			record := current.tenants[name]
+			if err := tx.Exec(`UPDATE tenants SET replica_next = ? WHERE name = ? AND replica = ? AND replica_next = ''`, target, name, record.Replica); err != nil {
+				return err
+			}
+			placed++
+			return event(tx, now, actor, "tenant.replica-moving", name, record.App, "copy moves from "+record.Replica+" to "+target+", which keeps fewer")
 		}
 		for _, name := range slices.Sorted(maps.Keys(changes)) {
 			record := current.tenants[name]
@@ -38,6 +63,80 @@ func (s *SQLite) PlaceReplicas(actor string) (int, error) {
 		return 0, nil
 	}
 	return placed, err
+}
+
+// canKeep reports whether node can take the copy of record as its next
+// replica.
+func canKeep(current *snapshot, record Record, node string) bool {
+	member, ok := current.nodes[node]
+	return ok && !member.Failed() && node != record.Node && node != record.Replica && record.MoveTo == ""
+}
+
+// rebalance picks the copy to move, and where: once every tenant whose
+// node is not failed has a whole copy, and none moves already, the copy
+// of the first tenant (by name) kept on the node keeping the most copies,
+// to the node keeping the fewest, at least two fewer. A tenant's copy is
+// never moved to its own node; tenants of failed nodes keep theirs where
+// it is, their node sending nothing.
+func rebalance(current *snapshot) (string, string) {
+	counts := map[string]int{}
+	for name, node := range current.nodes {
+		if !node.Failed() {
+			counts[name] = 0
+		}
+	}
+	for _, record := range current.tenants {
+		if current.nodes[record.Node].Failed() {
+			if _, ok := counts[record.Replica]; ok && record.Replica != "" {
+				counts[record.Replica]++
+			}
+			continue
+		}
+		if record.Replica == "" || !record.ReplicaReady || record.ReplicaNext != "" || record.MoveTo != "" {
+			return "", ""
+		}
+		if _, ok := counts[record.Replica]; !ok {
+			return "", "" // placement gives it another first
+		}
+		counts[record.Replica]++
+	}
+	nodes := slices.Sorted(maps.Keys(counts))
+	most := slices.Clone(nodes)
+	slices.SortStableFunc(most, func(a, b string) int { return counts[b] - counts[a] })
+	fewest := slices.Clone(nodes)
+	slices.SortStableFunc(fewest, func(a, b string) int { return counts[a] - counts[b] })
+	names := slices.Sorted(maps.Keys(current.tenants))
+	for _, from := range most {
+		for _, to := range fewest {
+			if counts[from]-counts[to] < 2 {
+				break
+			}
+			for _, name := range names {
+				record := current.tenants[name]
+				if record.Replica == from && record.Node != to && !current.nodes[record.Node].Failed() {
+					return name, to
+				}
+			}
+		}
+	}
+	return "", ""
+}
+
+func (s *SQLite) SwitchReplica(name, next string) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[name]
+		if !ok || next == "" || record.ReplicaNext != next {
+			return errUnchanged
+		}
+		if err := tx.Exec(`UPDATE tenants SET replica = replica_next, replica_ready = 1, replica_next = '' WHERE name = ? AND replica_next = ?`, name, next); err != nil {
+			return err
+		}
+		return event(tx, now, "murder", "tenant.replica", name, record.App, "copy kept on "+next+", which holds the whole data, instead of "+record.Replica)
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
 }
 
 func (s *SQLite) ReplicaReady(name, replica string) error {
@@ -80,6 +179,9 @@ func placeReplicas(current *snapshot) map[string]string {
 	for _, record := range current.tenants {
 		if valid(record) {
 			counts[record.Replica]++
+		}
+		if _, usable := counts[record.ReplicaNext]; usable && record.ReplicaNext != "" {
+			counts[record.ReplicaNext]++
 		}
 	}
 	nodes := slices.Sorted(maps.Keys(counts))
@@ -141,7 +243,7 @@ func (s *SQLite) FailOver(node, actor string) (FailedOver, error) {
 					outcome.Stranded = append(outcome.Stranded, name)
 					continue
 				}
-				if err := tx.Exec(`UPDATE tenants SET node = replica, replica = '', replica_ready = 0, move_to = '', move_held = 0, generation = generation + 1, updated_at = ? WHERE name = ? AND node = ? AND replica_ready = 1`, formatTime(now), name, node); err != nil {
+				if err := tx.Exec(`UPDATE tenants SET node = replica, replica = '', replica_ready = 0, replica_next = '', move_to = '', move_held = 0, generation = generation + 1, updated_at = ? WHERE name = ? AND node = ? AND replica_ready = 1`, formatTime(now), name, node); err != nil {
 					return err
 				}
 				if err := event(tx, now, actor, "tenant.failed-over", name, record.App, node+" → "+record.Replica); err != nil {
@@ -194,12 +296,20 @@ func (s *SQLite) NodeBack(node, actor string) error {
 	return err
 }
 
-// dropCopiesOn clears the replica of every tenant whose copy node keeps.
+// dropCopiesOn clears the replica of every tenant whose copy node keeps,
+// and stops copies moving to it.
 func dropCopiesOn(tx *recorder, current *snapshot, node string) (bool, error) {
 	dropped := false
 	for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
-		if record := current.tenants[name]; record.Replica == node && record.Node != node {
+		record := current.tenants[name]
+		if record.Replica == node && record.Node != node {
 			if err := tx.Exec(`UPDATE tenants SET replica = '', replica_ready = 0 WHERE name = ? AND replica = ?`, name, node); err != nil {
+				return false, err
+			}
+			dropped = true
+		}
+		if record.ReplicaNext == node {
+			if err := tx.Exec(`UPDATE tenants SET replica_next = '' WHERE name = ? AND replica_next = ?`, name, node); err != nil {
 				return false, err
 			}
 			dropped = true

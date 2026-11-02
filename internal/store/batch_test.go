@@ -214,7 +214,7 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{`ALTER TABLE nodes DROP COLUMN failed_at`, `ALTER TABLE nodes DROP COLUMN away_until`, `DROP TABLE nodes`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`, `ALTER TABLE tenants DROP COLUMN rollout`, `ALTER TABLE tenants DROP COLUMN move_to`, `ALTER TABLE tenants DROP COLUMN move_held`, `ALTER TABLE tenants DROP COLUMN replica`, `ALTER TABLE tenants DROP COLUMN replica_ready`} {
+	for _, statement := range []string{`ALTER TABLE nodes DROP COLUMN failed_at`, `ALTER TABLE nodes DROP COLUMN away_until`, `DROP TABLE nodes`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`, `ALTER TABLE tenants DROP COLUMN rollout`, `ALTER TABLE tenants DROP COLUMN move_to`, `ALTER TABLE tenants DROP COLUMN move_held`, `ALTER TABLE tenants DROP COLUMN replica`, `ALTER TABLE tenants DROP COLUMN replica_ready`, `ALTER TABLE tenants DROP COLUMN replica_next`} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -272,6 +272,7 @@ func TestOpenUpgradesSchemaVersion5(t *testing.T) {
 		`ALTER TABLE tenants DROP COLUMN move_held`,
 		`ALTER TABLE tenants DROP COLUMN replica`,
 		`ALTER TABLE tenants DROP COLUMN replica_ready`,
+		`ALTER TABLE tenants DROP COLUMN replica_next`,
 		`ALTER TABLE nodes DROP COLUMN failed_at`,
 		`ALTER TABLE nodes DROP COLUMN away_until`,
 		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '2'), ('applied', '7')`,

@@ -42,8 +42,11 @@ type Tenant struct {
 	// fail over to it; ReplicaSyncedAt is when the copy last matched the
 	// data, as the node that runs the tenant knows it (asked of that node
 	// only).
-	Replica         string    `json:"replica,omitempty"`
-	ReplicaReady    bool      `json:"replicaReady,omitempty"`
+	Replica      string `json:"replica,omitempty"`
+	ReplicaReady bool   `json:"replicaReady,omitempty"`
+	// ReplicaNext is the node the copy moves to, to even out the copies
+	// the nodes keep, until its copy there is whole.
+	ReplicaNext     string    `json:"replicaNext,omitempty"`
 	ReplicaSyncedAt time.Time `json:"replicaSyncedAt,omitzero"`
 	Host            string    `json:"host"`
 	URL             string    `json:"url"`
@@ -183,7 +186,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) view(record store.Record) Tenant {
 	view := Tenant{
-		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node, Replica: record.Replica, ReplicaReady: record.ReplicaReady,
+		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node, Replica: record.Replica, ReplicaReady: record.ReplicaReady, ReplicaNext: record.ReplicaNext,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
 	}

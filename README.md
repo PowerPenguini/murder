@@ -335,7 +335,9 @@ and switch the old one off. `murder cluster drain NODE
 In a cluster of ZFS nodes, every tenant has a **replica**: another node
 that keeps a copy of its data, never mounted, to run it from if its node
 fails. The cluster's leader picks the replicas and spreads them over the
-nodes. Every 15 s, the node that runs a tenant snapshots its data and sends
+nodes; when a node joins or comes back, it moves copies to it one at a
+time (`replicaNext`), each tenant keeping its old copy until the new one
+is whole. Every 15 s, the node that runs a tenant snapshots its data and sends
 the replica what changed since the copy's newest snapshot; when nothing
 changed, nothing is sent. So the copy is at most about 15 s behind, plus
 the time a send takes. A whole copy goes in beside the old one, so the node
@@ -429,7 +431,9 @@ Other rules:
 - **Two nodes:** losing either leaves no majority, so nothing can fail over.
 - **A node that fails over:** it keeps no copies until it answers again.
   Powered on again, it serves nothing it no longer runs and puts that data
-  aside.
+  aside; then copies move back to it, one at a time, until no node keeps
+  two more than another. Each tenant keeps its whole copy on the old node
+  until the new one is whole.
 - **Clients:** the wildcard DNS name still points at the dead node too.
   Browsers that try its address first wait for it before trying another,
   until it is removed from DNS.

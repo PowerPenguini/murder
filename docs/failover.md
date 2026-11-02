@@ -68,8 +68,17 @@ These changes go together in one schema version:
 
 - **Placement:** the leader gives every tenant without a replica, or with a
   replica on a node that left the cluster, the member node (other than its
-  own) holding the fewest replicas. It does not rebalance tenants that
-  already have a replica when a node joins.
+  own) holding the fewest replicas.
+- **Rebalancing:** once every tenant whose node is not failed has a ready
+  copy and none moves, the leader moves one copy at a time from the node
+  keeping the most to one keeping at least two fewer, as after a node
+  joins or comes back from a failure (schema 10: `tenants.replica_next`).
+  The owner sends the new node a whole copy while still sending the
+  replica its changes, and only once that copy is whole does it become the
+  replica, ready (`SwitchReplica`); the old node then drops its copy. So a
+  tenant never lacks a whole copy while its copy moves. A failover, a move
+  of the tenant, or the new node failing or leaving stops the move of the
+  copy; a failover promotes the old, whole copy.
 - **`FinishMove`:** it clears `Replica` when the tenant moves onto its replica
   node, so placement picks another.
 - **`FailOver(node)`:** in one batch, every tenant of the dead node with a

@@ -47,7 +47,7 @@ func (r *Receiver) checkState(sender, tenant string) error {
 		return fmt.Errorf("tenant %s runs on this node, %s: it keeps no copy of it", tenant, self)
 	case record.Node != sender:
 		return fmt.Errorf("tenant %s runs on node %s, not %s: its copy is not taken from %s", tenant, record.Node, sender, sender)
-	case record.Replica != self:
+	case record.Replica != self && record.ReplicaNext != self:
 		return fmt.Errorf("node %s does not keep the copy of tenant %s (node %q does)", self, tenant, record.Replica)
 	case record.MoveTo == self:
 		return fmt.Errorf("tenant %s is moving here: the move brings its copy up to date", tenant)

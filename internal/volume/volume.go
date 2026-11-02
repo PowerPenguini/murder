@@ -429,6 +429,9 @@ func (z ZFS) Remove(ctx context.Context, tenant string) error {
 	if err := checkTenant(tenant); err != nil {
 		return err
 	}
+	// Not beside a copy's receive, which may be renaming a whole copy
+	// into place.
+	defer lockDataset(z.dataset(tenant))()
 	current, exists, err := z.properties(ctx, z.dataset(tenant))
 	if err != nil || !exists {
 		return err

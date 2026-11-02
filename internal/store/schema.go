@@ -9,8 +9,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 8 in place.
-const schemaVersion = 9
+// versions 4 to 9 in place.
+const schemaVersion = 10
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -66,7 +66,11 @@ CREATE TABLE tenants (
 	-- its node fails; never the tenant's own node. replica_ready is set
 	-- once the copy holds the whole data: only then may it take over.
 	replica     TEXT NOT NULL DEFAULT '',
-	replica_ready INTEGER NOT NULL DEFAULT 0 CHECK (replica_ready IN (0, 1))
+	replica_ready INTEGER NOT NULL DEFAULT 0 CHECK (replica_ready IN (0, 1)),
+	-- The node the copy moves to, to even out the copies the nodes keep:
+	-- it gets a whole copy while replica keeps its own, and replaces
+	-- replica once that copy is whole.
+	replica_next TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -220,6 +224,13 @@ func upgrade(db *sql.DB) error {
 			if _, err := tx.Exec(statement); err != nil {
 				return err
 			}
+		}
+		version = 9
+	}
+	// Version 10 moves copies between nodes to even them out.
+	if version == 9 {
+		if _, err := tx.Exec(`ALTER TABLE tenants ADD COLUMN replica_next TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

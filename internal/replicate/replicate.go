@@ -135,14 +135,21 @@ func (r *Replicator) step(ctx context.Context) {
 
 // Pass sends every tenant of this node with a replica what changed since
 // its copy's newest snapshot. A tenant moving to its replica's node waits:
-// the move brings that copy up to date.
+// the move brings that copy up to date. A copy moving to another node
+// (ReplicaNext) is sent there too, and replaces the replica once whole.
 func (r *Replicator) Pass(ctx context.Context) {
-	var tenants []store.Record
+	var tenants, moving []store.Record
 	current := map[string]bool{}
 	for _, record := range r.Store.List() {
-		if record.Node == r.Store.Node() && record.Replica != "" && record.Replica != record.Node && record.MoveTo != record.Replica {
+		if record.Node != r.Store.Node() {
+			continue
+		}
+		if record.Replica != "" && record.Replica != record.Node && record.MoveTo != record.Replica {
 			tenants = append(tenants, record)
 			current[record.Spec.Name] = true
+		}
+		if record.ReplicaNext != "" && record.ReplicaNext != record.Node && record.MoveTo == "" {
+			moving = append(moving, record)
 		}
 	}
 	// Tenants that went, or whose copy is elsewhere's to report, leave
@@ -190,6 +197,26 @@ func (r *Replicator) Pass(ctx context.Context) {
 			}
 		}()
 	}
+	// Copies moving to another node go once the replicas are sent: two
+	// sends of one tenant at once would snapshot and prune it side by side.
+	wg.Wait()
+	for _, record := range moving {
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			name, next := record.Spec.Name, record.ReplicaNext
+			err := r.replicate(ctx, name, next, false)
+			if err == nil {
+				err = r.Store.SwitchReplica(name, next)
+			}
+			if err != nil && ctx.Err() == nil {
+				r.Log.Warn("send a tenant's copy to the node it moves to", "tenant", name, "to", next, "error", err)
+			} else if err == nil {
+				r.Log.Info("a tenant's copy moved", "tenant", name, "from", record.Replica, "to", next)
+			}
+		}()
+	}
 	wg.Wait()
 }
 
@@ -197,6 +224,12 @@ func (r *Replicator) Pass(ctx context.Context) {
 // the changes since the newest snapshot both have, or the whole data if
 // they have none in common. Nothing is sent when nothing changed.
 func (r *Replicator) Replicate(ctx context.Context, tenant, node string) error {
+	return r.replicate(ctx, tenant, node, true)
+}
+
+// replicate is Replicate; track says the copy is the replica's, whose
+// last match the metrics report.
+func (r *Replicator) replicate(ctx context.Context, tenant, node string, track bool) error {
 	snapshots, err := r.Volumes.Snapshots(ctx, tenant, ReplicaReason)
 	if err != nil {
 		return err
@@ -212,7 +245,9 @@ func (r *Replicator) Replicate(ctx context.Context, tenant, node string) error {
 			return err
 		}
 		if written == 0 {
-			r.markSynced(tenant, r.now())
+			if track {
+				r.markSynced(tenant, r.now())
+			}
 			return nil
 		}
 	}
@@ -230,7 +265,9 @@ func (r *Replicator) Replicate(ctx context.Context, tenant, node string) error {
 		}
 		return err
 	}
-	r.markSynced(tenant, taken)
+	if track {
+		r.markSynced(tenant, taken)
+	}
 	if err := r.Volumes.Prune(ctx, tenant, ReplicaReason, r.keep()); err != nil {
 		r.Log.Warn("prune replica snapshots", "tenant", tenant, "error", err)
 	}
@@ -317,7 +354,7 @@ func (r *Replicator) Sweep(ctx context.Context) error {
 			continue
 		}
 		if dataset.Replica {
-			if known && record.Replica == self {
+			if known && (record.Replica == self || record.ReplicaNext == self) {
 				continue
 			}
 			if err := r.Volumes.DropReplica(ctx, name); err != nil {

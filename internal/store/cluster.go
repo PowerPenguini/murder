@@ -485,6 +485,9 @@ func (s *SQLite) RemoveNode(name, actor string) error {
 		if err := tx.Exec(`UPDATE tenants SET replica = '', replica_ready = 0 WHERE replica = ?`, name); err != nil {
 			return err
 		}
+		if err := tx.Exec(`UPDATE tenants SET replica_next = '' WHERE replica_next = ?`, name); err != nil {
+			return err
+		}
 		if err := tx.Exec(`DELETE FROM nodes WHERE name = ?`, name); err != nil {
 			return err
 		}
@@ -574,8 +577,9 @@ func (s *SQLite) StartMove(name, target, actor string) (Record, error) {
 			return fmt.Errorf("%w: node %s failed and has not answered since", ErrConflict, target)
 		}
 		// A move onto the replica's node writes over its copy: it is not
-		// whole again until replication says so.
-		if err := tx.Exec(`UPDATE tenants SET move_to = ?, replica_ready = CASE WHEN replica = ? THEN 0 ELSE replica_ready END, updated_at = ? WHERE name = ?`, target, target, formatTime(now), name); err != nil {
+		// whole again until replication says so. A copy moving elsewhere
+		// stops: the move settles where the tenant and its copy are.
+		if err := tx.Exec(`UPDATE tenants SET move_to = ?, replica_ready = CASE WHEN replica = ? THEN 0 ELSE replica_ready END, replica_next = '', updated_at = ? WHERE name = ?`, target, target, formatTime(now), name); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "tenant.moving", name, record.App, record.Node+" → "+target)
@@ -610,7 +614,7 @@ func (s *SQLite) FinishMove(name, actor string) (Record, error) {
 			return err
 		}
 		// A tenant moved onto its replica's node needs another replica.
-		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', replica = CASE WHEN replica = move_to THEN '' ELSE replica END, replica_ready = 0, generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
+		if err := tx.Exec(`UPDATE tenants SET node = move_to, move_to = '', replica = CASE WHEN replica = move_to THEN '' ELSE replica END, replica_ready = 0, replica_next = '', generation = generation + 1, updated_at = ? WHERE name = ?`, formatTime(now), name); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "tenant.moved", name, record.App, record.Node+" → "+record.MoveTo)
