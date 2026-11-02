@@ -15,7 +15,7 @@
 </main>
 {{else}}
 <header class="top">
-  <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt=""><span>murder</span></a>
+  <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt="murder"></a>
   <nav>
     <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
     {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on"{{end}}>Apps</a>{{end}}

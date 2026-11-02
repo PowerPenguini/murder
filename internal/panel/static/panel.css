@@ -24,7 +24,7 @@ a:hover { text-decoration-color: var(--fg); }
 .mono, code { font-size: 12.5px; }
 pre, textarea { font-size: 12.5px; }
 /* Labels: light capitals, a little apart. */
-.caps, h2, h3, th, .figure .l, label.field, .top nav a, .brand span {
+.caps, h2, h3, th, .figure .l, label.field, .top nav a {
   font-weight: 300; text-transform: uppercase; letter-spacing: 0.14em; font-size: 11px;
 }
 .dim { color: var(--dim); }
@@ -37,7 +37,6 @@ pre, textarea { font-size: 12.5px; }
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 14px; text-decoration: none; }
-.brand span { font-size: 13px; letter-spacing: 0.32em; color: var(--fg); }
 .brand img { height: 30px; width: auto; display: block; }
 .top nav { display: flex; gap: 24px; }
 .top nav a { text-decoration: none; color: var(--dim); font-weight: 400; }
