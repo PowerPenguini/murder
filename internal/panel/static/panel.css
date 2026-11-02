@@ -103,6 +103,7 @@ td.end, th.end { text-align: right; width: 1%; white-space: nowrap; }
 td a { text-decoration: none; }
 td a:hover { text-decoration: underline; }
 .empty { padding: 24px 0; color: var(--dim); }
+td.empty { padding: 20px 14px; }
 table.kv td:first-child { width: 32%; }
 
 /* ── facts ─────────────────────────────────────────── */
