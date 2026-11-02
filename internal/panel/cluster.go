@@ -39,8 +39,9 @@ type Job struct {
 	ID, Title, By  string
 	Started, Ended time.Time
 	Failed         string
-	// exclusive jobs change the cluster: one runs at a time.
-	exclusive bool
+	Kind           JobKind
+
+	done chan struct{}
 
 	mu  sync.Mutex
 	out bytes.Buffer
@@ -66,6 +67,18 @@ func (j *Job) Done() bool {
 	return !j.Ended.IsZero()
 }
 
+// JobKind is what a job does.
+type JobKind string
+
+const (
+	JobUpgrade JobKind = "upgrade"
+	JobDrain   JobKind = "drain"
+	JobBackups JobKind = "backups"
+)
+
+// exclusive kinds change the cluster: one runs at a time.
+func (k JobKind) exclusive() bool { return k == JobUpgrade || k == JobDrain }
+
 // Jobs are a panel's recent jobs, newest first. The socket's panel and
 // the tunnel's share them, so that one change of the cluster runs at a time
 // whichever began it.
@@ -89,16 +102,16 @@ const jobLimit = 24 * time.Hour
 // Start runs work in the background, whatever becomes of the request that
 // began it. An exclusive job, one that changes the cluster, is refused
 // while another runs.
-func (j *Jobs) Start(title, by string, exclusive bool, now func() time.Time, log *slog.Logger, work func(ctx context.Context, out io.Writer) error) (*Job, error) {
+func (j *Jobs) Start(kind JobKind, title, by string, now func() time.Time, log *slog.Logger, work func(ctx context.Context, out io.Writer) error) (*Job, error) {
 	id := make([]byte, 8)
 	_, _ = rand.Read(id)
-	job := &Job{ID: hex.EncodeToString(id), Title: title, By: by, Started: now(), exclusive: exclusive}
+	job := &Job{ID: hex.EncodeToString(id), Title: title, By: by, Started: now(), Kind: kind, done: make(chan struct{})}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.closed {
 		return nil, errClosed
 	}
-	if exclusive {
+	if kind.exclusive() {
 		if busy := j.busyLocked(); busy != nil {
 			return nil, fmt.Errorf("%q runs now, begun by %s: one change of the cluster at a time", busy.Title, busy.By)
 		}
@@ -123,6 +136,7 @@ func (j *Jobs) Start(title, by string, exclusive bool, now func() time.Time, log
 		err := work(ctx, job)
 		job.mu.Lock()
 		defer job.mu.Unlock()
+		defer close(job.done)
 		job.Ended = now()
 		if err != nil {
 			job.Failed = err.Error()
@@ -136,7 +150,7 @@ func (j *Jobs) Start(title, by string, exclusive bool, now func() time.Time, log
 // busyLocked is the exclusive job that runs, if one does.
 func (j *Jobs) busyLocked() *Job {
 	for _, job := range j.list {
-		if job.exclusive && !job.Done() {
+		if job.Kind.exclusive() && !job.Done() {
 			return job
 		}
 	}
@@ -170,6 +184,14 @@ func (j *Jobs) Close() {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.closed = true
+}
+
+// WaitBusy waits until no job changes the cluster; with the jobs closed,
+// none begins meanwhile.
+func (j *Jobs) WaitBusy() {
+	for busy := j.Busy(); busy != nil; busy = j.Busy() {
+		<-busy.done
+	}
 }
 
 // Wait waits until no job runs.
@@ -219,10 +241,11 @@ type nodeRow struct {
 type clusterData struct {
 	Nodes  []nodeRow
 	Frozen string
-	// Busy is the job that changes the cluster now, if one does.
-	Busy *Job
-	Jobs []*Job
-	Self string
+	// Busy is the job that changes the cluster now, if one does;
+	// Upgrading the upgrade among them, which takes changes again.
+	Busy, Upgrading *Job
+	Jobs            []*Job
+	Self            string
 }
 
 func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
@@ -263,10 +286,15 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 	data.Jobs, data.Busy = s.Jobs.all(), s.Jobs.Busy()
+	if data.Busy != nil && data.Busy.Kind == JobUpgrade {
+		data.Upgrading = data.Busy
+	}
 	s.render(w, r, "cluster", "Cluster", "cluster", data)
 }
 
 func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
+	// Forms of a few fields; an upgrade posts to its own address.
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	user := s.actor(userOf(r))
 	agent := s.Cluster(user)
 	node := r.FormValue("node")
@@ -291,7 +319,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", "pick the node to move the tenants to")
 			return
 		}
-		toJob(s.Jobs.Start("drain "+node+" to "+to, user, true, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+		toJob(s.Jobs.Start(JobDrain, "drain "+node+" to "+to, user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			return clusterops.Drain(ctx, agent, node, to, out)
 		}))
 	case "remove":
@@ -320,7 +348,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", "type thaw to take changes again")
 			return
 		}
-		if busy := s.Jobs.Busy(); busy != nil {
+		if busy := s.Jobs.Busy(); busy != nil && busy.Kind == JobUpgrade {
 			back("problem", fmt.Sprintf("%q runs now: it takes changes again once it ends", busy.Title))
 			return
 		}
@@ -330,7 +358,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 		}
 		back("done", "changes are taken again")
 	case "backups":
-		toJob(s.Jobs.Start("back up the tenants of "+s.nodeName(ctx, agent), user, false, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+		toJob(s.Jobs.Start(JobBackups, "back up the tenants of "+s.nodeName(ctx, agent), user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			results, err := agent.RunBackups(ctx)
 			for _, result := range results {
 				if result.Error != "" {
@@ -360,7 +388,11 @@ var upgradeLimit int64 = 256 << 20
 // it, as a job.
 func (s *Server) upgradeAction(w http.ResponseWriter, r *http.Request) {
 	user := s.actor(userOf(r))
+	r.Body = http.MaxBytesReader(w, r.Body, upgradeLimit+1<<20)
 	back := func(message string) {
+		// The rest of the upload is read first: a browser shown a reply
+		// before it sent its file reports a broken connection instead.
+		_, _ = io.Copy(io.Discard, r.Body)
 		flash(w, r, "problem", message)
 		http.Redirect(w, r, "/cluster", http.StatusSeeOther)
 	}
@@ -368,7 +400,6 @@ func (s *Server) upgradeAction(w http.ResponseWriter, r *http.Request) {
 		back(fmt.Sprintf("%q runs now, begun by %s: one change of the cluster at a time", busy.Title, busy.By))
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, upgradeLimit+1<<20)
 	path, err := s.receiveBinary(r)
 	if err != nil {
 		back(err.Error())
@@ -383,7 +414,7 @@ func (s *Server) upgradeAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agent := s.Cluster(user)
-	job, err := s.Jobs.Start("upgrade the cluster", user, true, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+	job, err := s.Jobs.Start(JobUpgrade, "upgrade the cluster", user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 		defer os.Remove(path)
 		return clusterops.Upgrade(ctx, agent, path, 5*time.Minute, out)
 	})
@@ -418,7 +449,7 @@ func (s *Server) receiveBinary(r *http.Request) (string, error) {
 			confirmed = strings.TrimSpace(string(value)) == "upgrade"
 		case "binary":
 			if !confirmed {
-				return "", errors.New("type upgrade: the binary runs as root on every node")
+				return "", errors.New("type upgrade, before the file: the binary runs as root on every node")
 			}
 			if part.FileName() == "" {
 				return "", errors.New("choose the new murder binary to upload")

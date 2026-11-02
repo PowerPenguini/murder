@@ -163,7 +163,7 @@ func TestUpgradingFromThePanel(t *testing.T) {
 		data, _ := io.ReadAll(response.Body)
 		return string(data)
 	}
-	if body := read(uploadBinary(t, client, server, binary, "yes")); !strings.Contains(body, "type upgrade: the binary runs as root") {
+	if body := read(uploadBinary(t, client, server, binary, "yes")); !strings.Contains(body, "type upgrade, before the file") {
 		t.Fatalf("upgraded without upgrade typed:\n%s", body)
 	}
 	if body := read(uploadBinary(t, client, server, notBinary, "upgrade")); !strings.Contains(body, "did not tell its murder version") {
@@ -236,7 +236,7 @@ func TestStaticFilesAreVersioned(t *testing.T) {
 func TestOneChangeOfTheClusterAtATime(t *testing.T) {
 	cluster, s, server, client := newClusterPanel(t)
 	release := make(chan struct{})
-	upgrading, err := s.Jobs.Start("upgrade the cluster", "jan (panel)", true, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+	upgrading, err := s.Jobs.Start(JobUpgrade, "upgrade the cluster", "jan (panel)", s.now, s.log, func(ctx context.Context, out io.Writer) error {
 		<-release
 		return nil
 	})
@@ -272,9 +272,9 @@ func TestOneChangeOfTheClusterAtATime(t *testing.T) {
 func TestJobsAreKeptWhileTheyRun(t *testing.T) {
 	jobs, log := &Jobs{}, slog.New(slog.NewTextHandler(io.Discard, nil))
 	release := make(chan struct{})
-	long, _ := jobs.Start("upgrade", "jan", true, time.Now, log, func(context.Context, io.Writer) error { <-release; return nil })
+	long, _ := jobs.Start(JobUpgrade, "upgrade", "jan", time.Now, log, func(context.Context, io.Writer) error { <-release; return nil })
 	for range jobsKept + 5 {
-		job, err := jobs.Start("backup", "jan", false, time.Now, log, func(context.Context, io.Writer) error { return nil })
+		job, err := jobs.Start(JobBackups, "backup", "jan", time.Now, log, func(context.Context, io.Writer) error { return nil })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -291,12 +291,21 @@ func TestJobsAreKeptWhileTheyRun(t *testing.T) {
 	if jobs.CloseIdle() {
 		t.Fatal("closed while a job ran")
 	}
+	// A stopping panel waits for the change of the cluster that runs.
+	waited := make(chan struct{})
+	go func() { jobs.WaitBusy(); close(waited) }()
+	select {
+	case <-waited:
+		t.Fatal("WaitBusy returned while the upgrade ran")
+	case <-time.After(20 * time.Millisecond):
+	}
 	close(release)
+	<-waited
 	jobs.Wait()
 	if !jobs.CloseIdle() {
 		t.Fatal("did not close once idle")
 	}
-	if _, err := jobs.Start("backup", "jan", false, time.Now, log, func(context.Context, io.Writer) error { return nil }); err == nil {
+	if _, err := jobs.Start(JobBackups, "backup", "jan", time.Now, log, func(context.Context, io.Writer) error { return nil }); err == nil {
 		t.Fatal("a closed panel began a job")
 	}
 }

@@ -17,7 +17,7 @@ func TestThePanelRestartsOnceItsJobsEnded(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	jobs := &panel.Jobs{}
 	release := make(chan struct{})
-	if _, err := jobs.Start("upgrade the cluster", "jan", true, time.Now, log, func(context.Context, io.Writer) error {
+	if _, err := jobs.Start(panel.JobUpgrade, "upgrade the cluster", "jan", time.Now, log, func(context.Context, io.Writer) error {
 		<-release
 		return nil
 	}); err != nil {
@@ -44,7 +44,7 @@ func TestThePanelRestartsOnceItsJobsEnded(t *testing.T) {
 	if !stopped.Load() {
 		t.Fatal("restartOnUpgrade returned without stopping the panel")
 	}
-	if _, err := jobs.Start("backup", "jan", false, time.Now, log, func(context.Context, io.Writer) error { return nil }); err == nil {
+	if _, err := jobs.Start(panel.JobBackups, "backup", "jan", time.Now, log, func(context.Context, io.Writer) error { return nil }); err == nil {
 		t.Fatal("a restarting panel began a job")
 	}
 }

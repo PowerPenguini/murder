@@ -39,7 +39,7 @@
 {{if $d.Frozen}}
 <section class="actions">
   <h2>changes frozen</h2>
-  {{with $d.Busy}}
+  {{with $d.Upgrading}}
   <p class="dim">{{$d.Frozen}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>, begun by {{.By}}, runs now and takes changes again once it ends.</p>
   {{else}}
   <p class="dim">{{$d.Frozen}}. An upgrade that stopped leaves it so; once every node runs one release, take changes again.</p>

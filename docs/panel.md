@@ -72,8 +72,10 @@ Each stage is one PR, reviewed and tested before the next.
    thaw waits for it too. The binary is uploaded beside the database, not
    to /tmp. Jobs live in the panel process that began them, so a panel
    replaced by an upgrade restarts only once its jobs ended, taking none
-   meanwhile, and a stopped panel waits for them (up to 30 minutes, as
-   its unit says). Restoring a backup stays on a node (`murder backups
+   meanwhile; a panel asked to stop serves on until its upgrade or drain
+   ended (up to an hour, as its unit says: an upgrade killed halfway
+   leaves changes frozen until it is run again, and resumes). Uploads a
+   stopped panel left are removed when it starts. Restoring a backup stays on a node (`murder backups
    restore`). Static files carry a hash of their content in their
    address, so a new release never runs an old page's script.
 6. **Apps and secrets:** edit app specs, a tenant's settings and secrets
