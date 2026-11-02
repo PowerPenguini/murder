@@ -39,6 +39,6 @@ type Placements interface {
 
 // The agent passes its store.
 var (
-	_ State = (*store.SQLite)(nil)
+	_ State      = (*store.SQLite)(nil)
 	_ Placements = (*store.SQLite)(nil)
 )
