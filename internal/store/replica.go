@@ -30,7 +30,7 @@ func (s *SQLite) PlaceReplicas(actor string) (int, error) {
 		if len(changes) == 0 && placed == 0 {
 			// Copies move only once nothing else changes: one at a time,
 			// on a state this batch has not changed.
-			name, target := rebalance(current)
+			name, target := rebalance(current, now)
 			if name == "" {
 				return errUnchanged
 			}
@@ -78,13 +78,14 @@ func canKeep(current *snapshot, record Record, node string) bool {
 // to the node keeping the fewest, at least two fewer. A tenant's copy is
 // never moved to its own node; tenants of failed nodes keep theirs where
 // it is, their node sending nothing.
-func rebalance(current *snapshot) (string, string) {
+func rebalance(current *snapshot, now time.Time) (string, string) {
 	counts := map[string]int{}
 	for name, node := range current.nodes {
 		if !node.Failed() {
 			counts[name] = 0
 		}
 	}
+	refused := func(node string) bool { return now.Before(current.nodes[node].CopiesRefusedUntil) }
 	for _, record := range current.tenants {
 		if current.nodes[record.Node].Failed() {
 			if _, ok := counts[record.Replica]; ok && record.Replica != "" {
@@ -111,6 +112,9 @@ func rebalance(current *snapshot) (string, string) {
 			if counts[from]-counts[to] < 2 {
 				break
 			}
+			if refused(to) {
+				continue
+			}
 			for _, name := range names {
 				record := current.tenants[name]
 				if record.Replica == from && record.Node != to && !current.nodes[record.Node].Failed() {
@@ -122,7 +126,7 @@ func rebalance(current *snapshot) (string, string) {
 	return "", ""
 }
 
-func (s *SQLite) SwitchReplica(name, next string) error {
+func (s *SQLite) SwitchReplica(name, next string) (bool, error) {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
 		if !ok || next == "" || record.ReplicaNext != next {
@@ -132,6 +136,32 @@ func (s *SQLite) SwitchReplica(name, next string) error {
 			return err
 		}
 		return event(tx, now, "murder", "tenant.replica", name, record.App, "copy kept on "+next+", which holds the whole data, instead of "+record.Replica)
+	})
+	if errors.Is(err, errUnchanged) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// copiesRefusedFor is how long no copy moves to a node one failed to get
+// to.
+const copiesRefusedFor = 30 * time.Minute
+
+func (s *SQLite) StopReplicaMove(name, next, why string) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[name]
+		if !ok || next == "" || record.ReplicaNext != next {
+			return errUnchanged
+		}
+		if err := tx.Exec(`UPDATE tenants SET replica_next = '' WHERE name = ? AND replica_next = ?`, name, next); err != nil {
+			return err
+		}
+		// Other copies would fail to get there too: none moves there for
+		// a while.
+		if err := tx.Exec(`UPDATE nodes SET copies_refused_until = ? WHERE name = ?`, formatTime(now.Add(copiesRefusedFor)), next); err != nil {
+			return err
+		}
+		return event(tx, now, "murder", "tenant.replica", name, record.App, "the copy no longer moves to "+next+": "+why)
 	})
 	if errors.Is(err, errUnchanged) {
 		return nil

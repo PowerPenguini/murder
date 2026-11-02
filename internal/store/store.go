@@ -164,6 +164,9 @@ type Node struct {
 	// AwayUntil is set while the node restarts on purpose, its agent
 	// stopped cleanly: until then it is not failed over for not answering.
 	AwayUntil time.Time `json:"awayUntil,omitzero"`
+	// CopiesRefusedUntil is set when a copy failed to move to the node:
+	// until then no copy moves there.
+	CopiesRefusedUntil time.Time `json:"copiesRefusedUntil,omitzero"`
 }
 
 // Failed reports whether the node's tenants failed over and it has not
@@ -246,8 +249,11 @@ type Store interface {
 	ReplicaReady(name, replica string) error
 	// SwitchReplica makes next, the tenant's ReplicaNext, its replica,
 	// ready, once next holds the whole data; nothing changes unless next
-	// is still its ReplicaNext.
-	SwitchReplica(name, next string) error
+	// is still its ReplicaNext. It reports whether it switched.
+	SwitchReplica(name, next string) (bool, error)
+	// StopReplicaMove gives up moving the tenant's copy to next, its
+	// ReplicaNext, for why; nothing changes unless next is still it.
+	StopReplicaMove(name, next, why string) error
 	// FailOver gives every tenant of node, a node confirmed powered off,
 	// to its replica's node, and marks node failed: it keeps no copies
 	// until NodeBack, once it answers again. Tenants moving away from node

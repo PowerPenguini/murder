@@ -93,7 +93,9 @@ CREATE TABLE nodes (
 	failed_at  TEXT,
 	-- Until then the node restarts on purpose, its agent stopped cleanly:
 	-- it is not failed over for not answering.
-	away_until TEXT
+	away_until TEXT,
+	-- Until then no copy moves to the node: one failed to get there.
+	copies_refused_until TEXT
 ) STRICT;
 
 -- Sealed secret values, kept until a purge deletes the tenant.
@@ -229,8 +231,13 @@ func upgrade(db *sql.DB) error {
 	}
 	// Version 10 moves copies between nodes to even them out.
 	if version == 9 {
-		if _, err := tx.Exec(`ALTER TABLE tenants ADD COLUMN replica_next TEXT NOT NULL DEFAULT ''`); err != nil {
-			return err
+		for _, statement := range []string{
+			`ALTER TABLE tenants ADD COLUMN replica_next TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE nodes ADD COLUMN copies_refused_until TEXT`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

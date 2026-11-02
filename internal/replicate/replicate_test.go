@@ -633,7 +633,7 @@ func TestACopyMovesToAnotherNode(t *testing.T) {
 		t.Fatalf("dropped before the switch: %v", err)
 	}
 	for _, st := range []*store.SQLite{n2.store, n3.store} {
-		if err := st.SwitchReplica("acme", "n3"); err != nil {
+		if _, err := st.SwitchReplica("acme", "n3"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -647,5 +647,63 @@ func TestACopyMovesToAnotherNode(t *testing.T) {
 	// Its metrics are the replica's: synced at the last send.
 	if synced := r.Synced("acme"); synced.IsZero() {
 		t.Fatal("no sync time")
+	}
+}
+
+// A copy that never gets to the node it moves to stops moving after a few
+// tries, so the other copies may move.
+func TestAStuckCopyMoveIsGivenUp(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	n1, n3 := f.nodes["n1"], f.nodes["n3"]
+	f.change(t, func(st *store.SQLite) {
+		if err := st.RemoveNode("n3", "test"); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"b", "c"} {
+			if _, err := st.Create(store.NewTenant{Name: name, App: "web", Node: "n1"}, "test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.PlaceReplicas("test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, name := range []string{"acme", "b", "c"} {
+		n1.volumes.write(name)
+	}
+	r, _ := f.replicator("n1")
+	r.Pass(ctx)
+	f.change(t, func(st *store.SQLite) {
+		for _, name := range []string{"acme", "b", "c"} {
+			if err := st.ReplicaReady(name, "n2"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.PutNode(store.Node{Name: "n3", Address: "10.0.0.3:7400"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.PlaceReplicas("test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// n3 refuses every copy.
+	n3.volumes.failRcv = errors.New("pool full")
+	for i := range moveGiveUp {
+		if record, _ := n1.store.Get("acme"); record.ReplicaNext != "n3" {
+			t.Fatalf("given up after %d tries: %+v", i, record)
+		}
+		r.Pass(ctx)
+	}
+	record, _ := n1.store.Get("acme")
+	if record.ReplicaNext != "" || record.Replica != "n2" || !record.ReplicaReady {
+		t.Fatalf("after %d failed sends: %+v", moveGiveUp, record)
+	}
+	if events, _ := n1.store.Events(store.EventQuery{Tenant: "acme"}); len(events) == 0 || !strings.Contains(events[0].Detail, "no longer moves to n3") {
+		t.Fatalf("events: %+v", events)
+	}
+	// No copy moves to n3 again for a while: none would get there.
+	if placed, err := n1.store.PlaceReplicas("test"); err != nil || placed != 0 {
+		t.Fatalf("moved %d copies to the node that refused one, %v", placed, err)
 	}
 }

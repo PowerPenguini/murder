@@ -352,11 +352,11 @@ func TestCopiesMoveToANodeThatCameBack(t *testing.T) {
 			t.Fatal("a second copy moves at once")
 		}
 		// A stale switch changes nothing; the real one does.
-		if err := st.SwitchReplica(next[0].Spec.Name, "n3x"); err != nil {
-			t.Fatal(err)
+		if switched, err := st.SwitchReplica(next[0].Spec.Name, "n3x"); err != nil || switched {
+			t.Fatalf("a stale switch: %v, %v", switched, err)
 		}
-		if err := st.SwitchReplica(next[0].Spec.Name, "n4"); err != nil {
-			t.Fatal(err)
+		if switched, err := st.SwitchReplica(next[0].Spec.Name, "n4"); err != nil || !switched {
+			t.Fatalf("the switch: %v, %v", switched, err)
 		}
 		switched, _ := st.Get(next[0].Spec.Name)
 		if switched.Replica != "n4" || !switched.ReplicaReady || switched.ReplicaNext != "" {

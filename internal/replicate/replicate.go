@@ -69,6 +69,9 @@ type Replicator struct {
 	// why its last send failed.
 	synced  map[string]time.Time
 	failing map[string]string
+	// moveFailures counts the failed sends in a row of each tenant's copy
+	// to the node it moves to.
+	moveFailures map[string]int
 	// caughtUp is set, by Run only, once this node first caught up.
 	caughtUp bool
 }
@@ -206,14 +209,18 @@ func (r *Replicator) Pass(ctx context.Context) {
 		go func() {
 			defer func() { <-slots; wg.Done() }()
 			name, next := record.Spec.Name, record.ReplicaNext
+			switched := false
 			err := r.replicate(ctx, name, next, false)
 			if err == nil {
-				err = r.Store.SwitchReplica(name, next)
+				switched, err = r.Store.SwitchReplica(name, next)
 			}
-			if err != nil && ctx.Err() == nil {
+			switch {
+			case err != nil && ctx.Err() == nil:
 				r.Log.Warn("send a tenant's copy to the node it moves to", "tenant", name, "to", next, "error", err)
-			} else if err == nil {
+				r.moveFailed(name, next, err)
+			case switched:
 				r.Log.Info("a tenant's copy moved", "tenant", name, "from", record.Replica, "to", next)
+				r.moveFailed(name, "", nil)
 			}
 		}()
 	}
@@ -296,6 +303,40 @@ func (r *Replicator) send(ctx context.Context, tenant, node, base, snapshot stri
 	received := r.Peer.Send(ctx, node, tenant, base == "", reader)
 	_ = reader.CloseWithError(received)
 	return errors.Join(<-sent, received)
+}
+
+// moveGiveUp is how many sends to the node a tenant's copy moves to may
+// fail in a row before the move is given up: copies move one at a time,
+// so one that never gets there would stop every other.
+const moveGiveUp = 4
+
+// moveFailed counts a failed send of tenant's copy to next; err nil, or
+// next empty, resets the count.
+func (r *Replicator) moveFailed(tenant, next string, err error) {
+	r.mu.Lock()
+	if r.moveFailures == nil {
+		r.moveFailures = map[string]int{}
+	}
+	if err == nil || next == "" {
+		delete(r.moveFailures, tenant)
+		r.mu.Unlock()
+		return
+	}
+	r.moveFailures[tenant]++
+	failed := r.moveFailures[tenant]
+	if failed >= moveGiveUp {
+		delete(r.moveFailures, tenant)
+	}
+	r.mu.Unlock()
+	if failed < moveGiveUp {
+		return
+	}
+	why := fmt.Sprintf("%d sends in a row failed, the last: %v", failed, err)
+	if stopErr := r.Store.StopReplicaMove(tenant, next, why); stopErr != nil {
+		r.Log.Warn("give up moving a tenant's copy", "tenant", tenant, "to", next, "error", stopErr)
+		return
+	}
+	r.Log.Warn("gave up moving a tenant's copy; it stays where it is", "tenant", tenant, "to", next, "why", why)
 }
 
 func (r *Replicator) markSynced(tenant string, at time.Time) {

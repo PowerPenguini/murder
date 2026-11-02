@@ -425,17 +425,20 @@ func load(q querier) (state *snapshot, err error) {
 	if err := closeRows(rows); err != nil {
 		return nil, err
 	}
-	rows, err = q.Query(`SELECT name, address, created_at, failed_at, away_until FROM nodes`)
+	rows, err = q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var node Node
 		var created string
-		var failed, away sql.NullString
-		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away); err != nil {
+		var failed, away, refused sql.NullString
+		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away, &refused); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if refused.Valid {
+			node.CopiesRefusedUntil = parseTime(refused.String)
 		}
 		node.CreatedAt = parseTime(created)
 		if failed.Valid {
