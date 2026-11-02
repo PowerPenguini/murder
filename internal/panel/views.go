@@ -246,7 +246,8 @@ func all(calls ...func() error) error {
 
 func (s *Server) funcs() template.FuncMap {
 	return template.FuncMap{
-		"ago": func(t time.Time) string { return ago(s.now(), t) },
+		"static": staticURL,
+		"ago":    func(t time.Time) string { return ago(s.now(), t) },
 		"stamp": func(t time.Time) string {
 			if t.IsZero() {
 				return "—"

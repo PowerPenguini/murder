@@ -219,3 +219,8 @@ pre.logs { background: #000; border: 1px solid var(--line-strong); padding: 12px
 .live.off { opacity: 0.4; text-decoration: line-through; }
 .live.off::before { animation: none; }
 main .frozen { margin: -26px -28px 22px; }
+input[type=file] { color: var(--dim); font: inherit; font-size: 12px; }
+input[type=file]::file-selector-button { background: var(--bg); color: var(--fg); border: 1px solid var(--line-strong); padding: 5px 10px; font: inherit; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; margin-right: 10px; cursor: pointer; }
+section.actions p { margin: 0 0 10px; }
+code { font: inherit; border: 1px solid var(--line-strong); padding: 0 4px; }
+input[type=text].short { min-width: 0; width: 9em; }

@@ -43,6 +43,7 @@ func runPanel(args []string) error {
 	// Root reaches the socket's panel through SSH: no one signs in there.
 	server.Access = func(actor string) panel.AccessAgent { return client.WithActor(actor) }
 	server.Actions = func(actor string) panel.ActionAgent { return client.WithActor(actor) }
+	server.Cluster = func(actor string) panel.ClusterAgent { return client.WithActor(actor) }
 	if t := cfg.Panel.Tunnel; t != nil {
 		server.TunnelNetwork, _ = netip.ParsePrefix(t.Network)
 	}
@@ -70,14 +71,15 @@ func runPanel(args []string) error {
 		defer cancel()
 		_ = httpServer.Shutdown(shutdown)
 	}()
-	go restartOnUpgrade(ctx, stop, log)
 	tunnelDone := make(chan error, 1)
+	working := server.Working
 	if t := cfg.Panel.Tunnel; t != nil {
 		inTunnel, err := panel.New(client, log)
 		if err != nil {
 			return err
 		}
-		inTunnel.Name, inTunnel.Access, inTunnel.TunnelNetwork, inTunnel.Actions = server.Name, server.Access, server.TunnelNetwork, server.Actions
+		working = func() bool { return server.Working() || inTunnel.Working() }
+		inTunnel.Name, inTunnel.Access, inTunnel.TunnelNetwork, inTunnel.Actions, inTunnel.Cluster = server.Name, server.Access, server.TunnelNetwork, server.Actions, server.Cluster
 		if inTunnel.Auth, err = panel.NewAuth(client, cfg.Panel.Name, log); err != nil {
 			return err
 		}
@@ -92,6 +94,7 @@ func runPanel(args []string) error {
 			tunnelDone <- err
 		}()
 	}
+	go restartOnUpgrade(ctx, stop, working, log)
 	log.Info("the panel serves", "socket", cfg.Panel.Socket)
 	if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -105,15 +108,17 @@ func runPanel(args []string) error {
 }
 
 // restartOnUpgrade stops the panel once its binary was replaced, as an
-// upgrade does: systemd starts the new one.
-func restartOnUpgrade(ctx context.Context, stop func(), log *slog.Logger) {
+// upgrade does, and no job of the panel runs: systemd starts the new one.
+// An upgrade begun in the panel replaces the panel's binary last, then
+// still has to wait for the agent and take changes again.
+func restartOnUpgrade(ctx context.Context, stop func(), working func() bool, log *slog.Logger) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(10 * time.Second):
 		}
-		if exe, err := os.Readlink("/proc/self/exe"); err == nil && strings.HasSuffix(exe, " (deleted)") {
+		if exe, err := os.Readlink("/proc/self/exe"); err == nil && strings.HasSuffix(exe, " (deleted)") && !working() {
 			log.Info("the murder binary was replaced: the panel restarts with it")
 			stop()
 			return

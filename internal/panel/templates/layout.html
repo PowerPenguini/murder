@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>{{.Title}} · murder</title>
-<link rel="icon" href="/static/crow.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/panel.css">
+<link rel="icon" href="{{static "crow.svg"}}" type="image/svg+xml">
+<link rel="stylesheet" href="{{static "panel.css"}}">
 </head>
 <body>
 {{if .Gate}}
@@ -15,7 +15,7 @@
 </main>
 {{else}}
 <header class="bar">
-  <a class="brand" href="/"><img src="/static/crow.svg" alt=""><span class="word">MURDER</span><span class="cursor"></span></a>
+  <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt=""><span class="word">MURDER</span><span class="cursor"></span></a>
   <div class="meta">
     {{with .Cluster.Cluster}}<span>cluster <b>{{.}}</b></span>{{end}}
     <span>node <b>{{.Cluster.Self}}</b></span>
@@ -28,6 +28,7 @@
 <nav>
   <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
   <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
+  <a href="/cluster" {{if eq .Section "cluster"}}class="on"{{end}}>Cluster</a>
   <a href="/access" {{if eq .Section "access"}}class="on"{{end}}>Access</a>
 </nav>
 <main id="live">
@@ -36,7 +37,7 @@
 {{with .Done}}<div class="notice">&gt; {{.}}</div>{{end}}
 {{template "content" .}}
 </main>
-<script src="/static/live.js"></script>
+<script src="{{static "live.js"}}"></script>
 <footer>murder · a murder of crows keeps your tenants · rendered on {{.Cluster.Self}} at {{.Now.UTC.Format "2006-01-02 15:04:05"}}Z</footer>
 {{end}}
 </body>

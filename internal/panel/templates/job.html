@@ -1,0 +1,10 @@
+{{define "content"}}{{$j := .Data.Job}}
+<div class="title">
+  <h1>{{$j.Title}}</h1>
+  {{if not $j.Done}}<span class="tag warn">running</span>{{else if $j.Failed}}<span class="tag bad loud">failed</span>{{else}}<span class="tag ok">done</span>{{end}}
+  <span class="sub">by {{$j.By}} · began {{ago $j.Started}} ago · <a href="/cluster">cluster</a></span>
+</div>
+<section>
+  <pre class="logs">{{with $j.Output}}{{.}}{{else}}— under way —{{end}}</pre>
+</section>
+{{end}}

@@ -20,11 +20,14 @@ type DemoCluster struct {
 	mu      sync.Mutex
 	tenants map[string]api.Tenant
 	events  []store.Event
-	actor   string
+	nodes   demoNodes
+	// Pace is how long the demo's slow work takes, as an upgrade's install
+	// or a backup: for watching jobs; none in tests.
+	Pace time.Duration
 }
 
 func NewDemoCluster() *DemoCluster {
-	d := &DemoCluster{tenants: map[string]api.Tenant{}}
+	d := &DemoCluster{tenants: map[string]api.Tenant{}, nodes: demoNodes{binaries: map[string]string{}, removed: map[string]bool{}, failed: map[string]time.Time{}, started: time.Now().Add(-3 * 24 * time.Hour)}, Pace: time.Second}
 	tenants, _ := d.Demo.List(context.Background())
 	for _, t := range tenants {
 		d.tenants[t.Spec.Name] = t

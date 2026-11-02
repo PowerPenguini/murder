@@ -59,7 +59,18 @@ Each stage is one PR, reviewed and tested before the next.
    Each action is a form posted to the panel, which acts through the
    agent's API for the person signed in and sends back to the page with
    what it did, once (a cookie, so a reload repeats nothing).
-5. **Cluster actions:** upgrades, drain and replace, a manual failover,
-   backups and restores.
+5. **Cluster actions:** the Cluster page shows each node's release and
+   schema, drains a node to another, removes one (its name typed), fails
+   over one that does not answer (its name typed: only once it is off),
+   takes changes again after a stopped upgrade ("thaw" typed), backs up
+   this node's tenants, and upgrades the cluster with an uploaded binary
+   ("upgrade" typed; the panel checks that it says a murder version, then
+   installs it node by node, this one last, as `murder upgrade` does: the
+   same code, in `internal/clusterops`). Upgrades, drains and backups are
+   jobs: their page follows what they say. Jobs live in the panel process
+   that began them, so a panel replaced by an upgrade restarts only once
+   its jobs ended. Restoring a backup stays on a node (`murder backups
+   restore`). Static files carry a hash of their content in their
+   address, so a new release never runs an old page's script.
 6. **Apps and secrets:** edit app specs, a tenant's settings and secrets
    (secrets are never shown whole).
