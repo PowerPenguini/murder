@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/binary"
@@ -340,55 +341,93 @@ type querier interface {
 }
 
 // load reads the whole state. It is small: one row per app and tenant.
-func load(q querier) (state *snapshot, err error) {
-	state = &snapshot{apps: map[string]App{}, tenants: map[string]Record{}, nodes: map[string]Node{}, devices: map[string]Device{}, images: map[string]bool{}}
+func load(q querier) (*snapshot, error) {
+	state := &snapshot{}
+	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadAllTenants, loadNodes, loadDevices, loadPanel, loadImages} {
+		if err := part(q, state); err != nil {
+			return nil, err
+		}
+	}
+	return state, nil
+}
+
+// loadMeta reads the node's name, the state's version, its cluster, its
+// freeze and its newest event.
+func loadMeta(q querier, state *snapshot) error {
+	var err error
 	if err := q.QueryRow(`SELECT value FROM meta WHERE key = 'node'`).Scan(&state.node); err != nil {
-		return nil, fmt.Errorf("read the node name: %w", err)
+		return fmt.Errorf("read the node name: %w", err)
 	}
 	var version string
 	if err := q.QueryRow(`SELECT value FROM meta WHERE key = 'version'`).Scan(&version); err != nil {
-		return nil, fmt.Errorf("read the state version: %w", err)
+		return fmt.Errorf("read the state version: %w", err)
 	}
 	if state.version, err = strconv.ParseInt(version, 10, 64); err != nil {
-		return nil, fmt.Errorf("state version %q: %w", version, err)
+		return fmt.Errorf("state version %q: %w", version, err)
 	}
 	if err := q.QueryRow(`SELECT COALESCE((SELECT value FROM meta WHERE key = 'cluster'), ''), COALESCE((SELECT value FROM meta WHERE key = 'frozen'), '')`).Scan(&state.cluster, &state.frozen); err != nil {
-		return nil, fmt.Errorf("read the cluster: %w", err)
+		return fmt.Errorf("read the cluster: %w", err)
 	}
 	if err := q.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&state.lastEvent); err != nil {
-		return nil, err
+		return err
 	}
+	return nil
+}
+
+func loadApps(q querier, state *snapshot) error {
+	state.apps = map[string]App{}
 	rows, err := q.Query(`SELECT name, spec, created_at, updated_at FROM apps`)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for rows.Next() {
 		var app App
 		var specJSON, created, updated string
 		if err := rows.Scan(&app.Name, &specJSON, &created, &updated); err != nil {
 			rows.Close()
-			return nil, err
+			return err
 		}
 		if err := json.Unmarshal([]byte(specJSON), &app.Spec); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("app %s: %w", app.Name, err)
+			return fmt.Errorf("app %s: %w", app.Name, err)
 		}
 		app.CreatedAt, app.UpdatedAt = parseTime(created), parseTime(updated)
 		state.apps[app.Name] = app
 	}
 	if err := closeRows(rows); err != nil {
-		return nil, err
+		return err
+	}
+	return nil
+}
+
+func loadAllTenants(q querier, state *snapshot) error {
+	state.tenants = map[string]Record{}
+	return loadTenants(q, state, nil)
+}
+
+// loadTenants reads the tenants named, or all of them if names is nil, into
+// state.tenants, composing each spec from state.apps. A tenant named that
+// is not stored is left out.
+func loadTenants(q querier, state *snapshot, names []string) error {
+	var args []any
+	where := func(string) string { return "" }
+	if names != nil {
+		for _, name := range names {
+			args = append(args, name)
+		}
+		marks := strings.TrimSuffix(strings.Repeat("?, ", len(names)), ", ")
+		where = func(column string) string { return " WHERE " + column + " IN (" + marks + ")" }
 	}
 	sealed := map[string]map[string]string{}
-	rows, err = q.Query(`SELECT tenant, name, sealed FROM secrets`)
+	rows, err := q.Query(`SELECT tenant, name, sealed FROM secrets`+where("tenant"), args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for rows.Next() {
 		var tenant, name, value string
 		if err := rows.Scan(&tenant, &name, &value); err != nil {
 			rows.Close()
-			return nil, err
+			return err
 		}
 		if sealed[tenant] == nil {
 			sealed[tenant] = map[string]string{}
@@ -396,11 +435,11 @@ func load(q querier) (state *snapshot, err error) {
 		sealed[tenant][name] = value
 	}
 	if err := closeRows(rows); err != nil {
-		return nil, err
+		return err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next FROM tenants`)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next FROM tenants`+where("name"), args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for rows.Next() {
 		var record Record
@@ -409,11 +448,11 @@ func load(q querier) (state *snapshot, err error) {
 		var archivedAt sql.NullString
 		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext); err != nil {
 			rows.Close()
-			return nil, err
+			return err
 		}
 		if err := json.Unmarshal([]byte(overrides), &record.Overrides); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("tenant %s: %w", name, err)
+			return fmt.Errorf("tenant %s: %w", name, err)
 		}
 		record.Spec = spec.Compose(state.apps[record.App].Spec, name, record.Overrides)
 		record.Spec.Suspended = suspended
@@ -425,11 +464,16 @@ func load(q querier) (state *snapshot, err error) {
 		state.tenants[name] = record
 	}
 	if err := closeRows(rows); err != nil {
-		return nil, err
+		return err
 	}
-	rows, err = q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until, public, tunnel FROM nodes`)
+	return nil
+}
+
+func loadNodes(q querier, state *snapshot) error {
+	state.nodes = map[string]Node{}
+	rows, err := q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until, public, tunnel FROM nodes`)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for rows.Next() {
 		var node Node
@@ -438,7 +482,7 @@ func load(q querier) (state *snapshot, err error) {
 		var public, tunnel string
 		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away, &refused, &public, &tunnel); err != nil {
 			rows.Close()
-			return nil, err
+			return err
 		}
 		node.Tunnel = parseTunnel(tunnel)
 		if refused.Valid {
@@ -459,45 +503,52 @@ func load(q querier) (state *snapshot, err error) {
 		state.nodes[node.Name] = node
 	}
 	if err := closeRows(rows); err != nil {
-		return nil, err
+		return err
 	}
-	rows, err = q.Query(`SELECT name, key, address, created_at, created_by FROM devices`)
+	return nil
+}
+
+func loadDevices(q querier, state *snapshot) error {
+	state.devices = map[string]Device{}
+	rows, err := q.Query(`SELECT name, key, address, created_at, created_by FROM devices`)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for rows.Next() {
 		var device Device
 		var address, created string
 		if err := rows.Scan(&device.Name, &device.Key, &address, &created, &device.CreatedBy); err != nil {
 			rows.Close()
-			return nil, err
+			return err
 		}
 		device.Address, _ = netip.ParseAddr(address)
 		device.CreatedAt = parseTime(created)
 		state.devices[device.Name] = device
 	}
 	if err := closeRows(rows); err != nil {
-		return nil, err
+		return err
 	}
-	if err := loadPanel(q, state); err != nil {
-		return nil, err
-	}
-	rows, err = q.Query(`SELECT ref FROM images`)
+	return nil
+}
+
+func loadImages(q querier, state *snapshot) error {
+	state.images = map[string]bool{}
+	rows, err := q.Query(`SELECT ref FROM images`)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for rows.Next() {
 		var ref string
 		if err := rows.Scan(&ref); err != nil {
 			rows.Close()
-			return nil, err
+			return err
 		}
 		state.images[ref] = true
 	}
 	if err := closeRows(rows); err != nil {
-		return nil, err
+		return err
 	}
-	return state, nil
+	return nil
 }
 
 // recordImages adds every image a tenant now has to the images table.
@@ -632,17 +683,29 @@ func (s *SQLite) transact(signal bool, change func(tx *sql.Tx, current *snapshot
 }
 
 func (s *SQLite) transactLocked(signal bool, change func(tx *sql.Tx, current *snapshot) error) (*snapshot, error) {
-	tx, err := s.db.Begin()
+	ctx := context.Background()
+	watched, err := s.watch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer watched.done()
+	tx, err := watched.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	if err := change(tx, s.state.Load()); err != nil {
+	current := s.state.Load()
+	if err := change(tx, current); err != nil {
 		return nil, err
 	}
-	next, err := load(tx)
+	next, err := reload(tx, current, watched.changes)
 	if err != nil {
 		return nil, err
+	}
+	if verifyReloads {
+		if err := verifyReload(tx, next); err != nil {
+			return nil, err
+		}
 	}
 	if err := recordImages(tx, next); err != nil {
 		return nil, err
