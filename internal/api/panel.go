@@ -38,7 +38,17 @@ func (s *Server) setTunnel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// devices lists the devices as the cluster has them, not as a node cut
+// off from it last heard: a device removed meanwhile must not reach its
+// panel. A node that cannot catch up answers an error, and its panel
+// then lets no device in.
 func (s *Server) devices(w http.ResponseWriter, _ *http.Request) {
+	if s.cluster != nil && s.store.Cluster() != "" {
+		if err := s.cluster.CatchUp(); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, s.store.Devices())
 }
 

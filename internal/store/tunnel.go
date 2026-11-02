@@ -132,8 +132,14 @@ func (s *SQLite) AddDevice(name, key string, network netip.Prefix, actor string)
 	return added, err
 }
 
+// tunnelSchema is the schema version that added the panel's tunnel.
+// Removing a device works the same in every release since, so it is
+// marked as of it, and taken while an upgrade freezes changes: a lost
+// device is shut out at once, upgrade or not.
+const tunnelSchema = 12
+
 func (s *SQLite) RemoveDevice(name, actor string) error {
-	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+	_, err := s.writeAs(tunnelSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
 		device, ok := current.devices[name]
 		if !ok {
 			return fmt.Errorf("device %s: %w", name, ErrNotFound)

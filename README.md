@@ -547,17 +547,20 @@ panel:
 
 The panel needs `edge.tls` (internal or acme): it serves HTTPS with the
 wildcard certificate, as `panel.<baseDomain>` (so no tenant may be named
-`panel`). Then, on any node:
+`panel`; rename one from before, or set `panel.name`). The nodes must be a
+cluster: the devices are kept in its state. Then, on any node:
 
 ```bash
 sudo murder admin device add laptop          # a QR code for the WireGuard app
 sudo murder admin device add laptop -out laptop.conf
 sudo murder admin device list
-sudo murder admin device remove laptop       # it reaches nothing at once
+sudo murder admin device remove laptop       # shut out within seconds, during an upgrade too
 ```
 
 The device's private key is in the QR code and the configuration, shown
-once and kept nowhere. Each node is a peer of its own, so the panel stays
+once and kept nowhere (`-out` only ever makes a new file, readable by you).
+A node that cannot read the devices as the cluster has them, cut off from
+it, lets no device in. Each node is a peer of its own, so the panel stays
 reachable through any node that is up. The panel's name must lead to the
 nodes' tunnel addresses: with `cluster.dns`, the leader keeps its records
 (of the nodes that serve), otherwise add them, or a hosts file entry. Some

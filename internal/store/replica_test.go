@@ -557,3 +557,21 @@ func TestDevicesOfThePanelsTunnel(t *testing.T) {
 		t.Fatal("a node with a device's address")
 	}
 }
+
+// A lost device is shut out while an upgrade freezes changes too.
+func TestADeviceIsRemovedDuringAFreeze(t *testing.T) {
+	st, _ := withApp(t, options())
+	if err := st.PutNode(Node{Name: "node-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	if _, err := st.AddDevice("phone", key, netip.MustParsePrefix("10.77.0.0/24"), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Freeze("upgrade", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RemoveDevice("phone", "alice"); err != nil || len(st.Devices()) != 0 {
+		t.Fatalf("removed during a freeze: %v, %+v", err, st.Devices())
+	}
+}

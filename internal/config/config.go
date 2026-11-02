@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -186,6 +187,12 @@ type Tunnel struct {
 	Port int `yaml:"port"`
 	// KeyFile holds this node's WireGuard private key, made at first start.
 	KeyFile string `yaml:"keyFile"`
+}
+
+// hostNumber is address's place in network: 1 for its first host.
+func hostNumber(network netip.Prefix, address netip.Addr) uint32 {
+	base, host := network.Masked().Addr().As4(), address.As4()
+	return binary.BigEndian.Uint32(host[:]) - binary.BigEndian.Uint32(base[:])
 }
 
 // DNS reaches the provider of the base domain's zone.
@@ -392,8 +399,11 @@ func (a Agent) Validate() error {
 			problems = append(problems, "panel.tunnel.network must be an IPv4 network, a /24 or larger, such as 10.77.0.0/24")
 		case addressErr != nil || !network.Contains(address) || address == network.Masked().Addr():
 			problems = append(problems, "panel.tunnel.address must be this node's address in panel.tunnel.network")
-		case int(address.As4()[3])-int(network.Masked().Addr().As4()[3]) >= 100 && network.Bits() == 24:
+		case hostNumber(network, address) >= 100:
 			problems = append(problems, "panel.tunnel.address must be below the network's 100th address, where devices begin")
+		}
+		if a.Cluster == nil {
+			problems = append(problems, "panel.tunnel needs cluster: the devices are kept in the cluster's state")
 		}
 		if t.Port < 1 || t.Port > 65535 {
 			problems = append(problems, "panel.tunnel.port must be a UDP port")

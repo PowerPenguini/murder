@@ -364,8 +364,12 @@ func newMonitor(cfg *config.Cluster, baseDomain, panelName string, st *store.SQL
 			log.Error("the DNS records are not kept", "error", err)
 		} else {
 			monitor.Records = publisher
-			// The panel's name, for the devices in its tunnel.
-			if relative, err := records.Relative(panelName, cfg.DNS.Zone); err == nil {
+			// The panel's name, for the devices in its tunnel; never over
+			// a tenant of that name from before it was reserved.
+			label, _, _ := strings.Cut(panelName, ".")
+			if _, err := st.Get(label); err == nil {
+				log.Warn("the DNS records do not lead the panel's name to it: a tenant has that name; rename it, or set panel.name", "tenant", label)
+			} else if relative, err := records.Relative(panelName, cfg.DNS.Zone); err == nil {
 				monitor.PanelRecords, _ = newPublisher(cfg.DNS, relative, cfg.PublicAddresses)
 			}
 		}

@@ -93,6 +93,14 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 		}
 		if devices, err := agent.Devices(ctx); err != nil && ctx.Err() == nil {
 			report("devices", "read the devices that may reach the panel", err)
+			// Not knowing which devices may, it lets none in: one removed
+			// meanwhile must not reach this node.
+			if failed["devices"] == 3 && lastPeers != "" {
+				if err := end.SetPeers(nil); err == nil {
+					lastPeers = ""
+					log.Warn("no device reaches the panel on this node until the devices can be read again")
+				}
+			}
 		} else if err == nil {
 			failed["devices"] = 0
 			peers, key := devicePeers(devices)

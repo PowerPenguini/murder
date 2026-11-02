@@ -121,28 +121,46 @@ func addDevice(ctx context.Context, client *api.Client, name string, cfg config.
 	if len(ends) == 0 {
 		return errors.New("no node serves the panel in its tunnel yet: start murder-panel, with panel.tunnel and cluster.publicAddresses in its config")
 	}
+	// The file is made new, readable by its owner only: never one that
+	// is there already, or a link, which would get the private key.
+	var file *os.File
+	if out != "" {
+		if file, err = os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err != nil {
+			return err
+		}
+		defer file.Close()
+	}
 	private, public, err := tunnel.GenerateKey()
 	if err != nil {
 		return err
 	}
 	device, err := client.AddDevice(ctx, api.DeviceRequest{Name: name, Key: public, Network: network})
 	if err != nil {
+		if file != nil {
+			_ = os.Remove(out)
+		}
 		return err
 	}
-	text := tunnel.DeviceConfig{PrivateKey: private, Address: device.Address, Panel: "https://" + cfg.Panel.Name, Nodes: ends}.String()
-	qr, err := tunnel.QRText(text)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "Device %s reaches the panel at https://%s from %s.\nScan this with the WireGuard app (it holds the device's private key, shown once):\n\n%s\n",
-		name, cfg.Panel.Name, device.Address, qr)
-	if out != "" {
-		if err := os.WriteFile(out, []byte(text), 0o600); err != nil {
+	config := tunnel.DeviceConfig{PrivateKey: private, Address: device.Address, Panel: "https://" + cfg.Panel.Name, Nodes: ends}
+	text := config.String()
+	if file != nil {
+		if _, err := file.WriteString(text); err != nil {
+			// Its private key is lost: the device goes too.
+			_ = client.RemoveDevice(context.WithoutCancel(ctx), name)
+			_ = os.Remove(out)
 			return err
 		}
-		fmt.Fprintf(stdout, "The same configuration is in %s, for a computer's WireGuard app or murder admin connect.\n", out)
+	}
+	fmt.Fprintf(stdout, "Device %s reaches the panel at https://%s from %s.\n", name, cfg.Panel.Name, device.Address)
+	if qr, err := tunnel.QRText(config.Compact()); err == nil {
+		fmt.Fprintf(stdout, "Scan this with the WireGuard app (it holds the device's private key, shown once):\n\n%s\n", qr)
 	} else {
-		fmt.Fprintf(stdout, "Or import this configuration on a computer:\n\n%s\n", text)
+		fmt.Fprintf(stdout, "The configuration is too long for a QR code (%v): import it from text.\n", err)
+	}
+	if file != nil {
+		fmt.Fprintf(stdout, "The configuration is in %s, for a computer's WireGuard app or murder admin connect.\n", out)
+	} else {
+		fmt.Fprintf(stdout, "The configuration, for a computer's WireGuard app or murder admin connect:\n\n%s\n", text)
 	}
 	fmt.Fprintf(stdout, "The name %s must lead to %s: the leader's DNS records do (cluster.dns), or a hosts file entry.\n", cfg.Panel.Name, nodeAddresses(ends))
 	return nil
@@ -239,10 +257,20 @@ func pass(ctx context.Context, end *tunnel.Tunnel, nodes []tunnel.Node, preferre
 		}
 		preferred.Store(int64(index))
 		defer remote.Close()
+		// Each way ends on its own: a side done sending may still read.
 		done := make(chan struct{}, 2)
-		go func() { _, _ = io.Copy(remote, local); done <- struct{}{} }()
-		go func() { _, _ = io.Copy(local, remote); done <- struct{}{} }()
+		go func() { _, _ = io.Copy(remote, local); closeWrite(remote); done <- struct{}{} }()
+		go func() { _, _ = io.Copy(local, remote); closeWrite(local); done <- struct{}{} }()
+		<-done
 		<-done
 		return
 	}
+}
+
+func closeWrite(conn net.Conn) {
+	if c, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = c.CloseWrite()
+		return
+	}
+	_ = conn.Close()
 }

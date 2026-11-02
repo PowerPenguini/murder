@@ -67,7 +67,16 @@ func runPanel(args []string) error {
 	go restartOnUpgrade(ctx, stop, log)
 	tunnelDone := make(chan error, 1)
 	if t := cfg.Panel.Tunnel; t != nil {
-		go func() { tunnelDone <- serveTunnel(ctx, cfg, client, server.Handler(), log) }()
+		go func() {
+			err := serveTunnel(ctx, cfg, client, server.Handler(), log)
+			// The panel stops, so the failure is in the log and systemd
+			// starts it again.
+			if err != nil && ctx.Err() == nil {
+				log.Error("the panel's tunnel stopped", "error", err)
+				stop()
+			}
+			tunnelDone <- err
+		}()
 	}
 	log.Info("the panel serves", "socket", cfg.Panel.Socket)
 	if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -106,9 +115,21 @@ func serveTunnel(ctx context.Context, cfg config.Agent, client *api.Client, hand
 	if err != nil {
 		return err
 	}
-	certificates, err := edge.NewTLS(ctx, cfg.Edge.TLS, cfg.BaseDomain, log)
-	if err != nil {
-		return err
+	// The edge's certificate; with the internal CA, once the edge made it.
+	var certificates *edge.Certificates
+	for attempt := 0; ; attempt++ {
+		certificates, err = edge.SharedTLS(ctx, cfg.Edge.TLS, cfg.BaseDomain, log)
+		if err == nil {
+			break
+		}
+		if attempt == 5 {
+			log.Warn("the panel waits for the edge's certificate", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(2 * time.Second):
+		}
 	}
 	address, err := netip.ParseAddr(t.Address)
 	if err != nil {

@@ -10,7 +10,9 @@ import (
 // QRText draws text as a QR code with half blocks, for a terminal with a
 // dark background: two rows of modules a line, with a quiet border.
 func QRText(text string) (string, error) {
-	code, err := qr.Encode(text, qr.M)
+	// Low error correction keeps the code small enough for a terminal: it
+	// is read from a screen, not a worn print.
+	code, err := qr.Encode(text, qr.L)
 	if err != nil {
 		return "", err
 	}

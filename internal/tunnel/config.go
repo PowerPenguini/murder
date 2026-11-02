@@ -47,6 +47,18 @@ func (c DeviceConfig) String() string {
 	return b.String()
 }
 
+// Compact is the configuration without comments or keepalives, as small a
+// QR code as it can be: a phone always begins the talk with the panel, so
+// it needs no keepalive through NAT.
+func (c DeviceConfig) Compact() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Interface]\nPrivateKey=%s\nAddress=%s/32\n", c.PrivateKey, c.Address)
+	for _, node := range c.Nodes {
+		fmt.Fprintf(&b, "[Peer]\nPublicKey=%s\nAllowedIPs=%s/32\nEndpoint=%s\n", node.Key, node.Address, node.Endpoint)
+	}
+	return b.String()
+}
+
 // ParseDeviceConfig reads what String writes.
 func ParseDeviceConfig(text string) (DeviceConfig, error) {
 	var c DeviceConfig

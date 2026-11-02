@@ -117,3 +117,24 @@ func TestKeysAndQR(t *testing.T) {
 		t.Fatalf("SVG %q, %v", svg, err)
 	}
 }
+
+// A device's QR code for three nodes fits an 80-column terminal.
+func TestTheQRCodeFitsATerminal(t *testing.T) {
+	private, _, _ := GenerateKey()
+	config := DeviceConfig{PrivateKey: private, Address: netip.MustParseAddr("10.77.0.100")}
+	for i := 1; i <= 3; i++ {
+		_, public, _ := GenerateKey()
+		config.Nodes = append(config.Nodes, Node{Name: fmt.Sprintf("n%d", i), Key: public, Address: netip.MustParseAddr(fmt.Sprintf("10.77.0.%d", i)), Endpoint: netip.MustParseAddrPort(fmt.Sprintf("203.0.113.%d:51820", i))})
+	}
+	text, err := QRText(config.Compact())
+	if err != nil {
+		t.Fatal(err)
+	}
+	width := len([]rune(strings.SplitN(text, "\n", 2)[0]))
+	if width > 80 {
+		t.Fatalf("the QR code is %d columns wide", width)
+	}
+	if parsed, err := ParseDeviceConfig(config.Compact()); err != nil || len(parsed.Nodes) != 3 {
+		t.Fatalf("the compact configuration: %+v, %v", parsed, err)
+	}
+}

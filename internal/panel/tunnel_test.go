@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,6 +29,7 @@ type fakeAgent struct {
 	mu      sync.Mutex
 	end     store.Tunnel
 	devices []store.Device
+	err     error
 }
 
 func (a *fakeAgent) SetTunnel(_ context.Context, end store.Tunnel) error {
@@ -40,7 +42,7 @@ func (a *fakeAgent) SetTunnel(_ context.Context, end store.Tunnel) error {
 func (a *fakeAgent) Devices(context.Context) ([]store.Device, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]store.Device(nil), a.devices...), nil
+	return append([]store.Device(nil), a.devices...), a.err
 }
 
 func selfSigned(t *testing.T, name string) *tls.Config {
@@ -122,9 +124,10 @@ func TestThePanelServesInItsTunnel(t *testing.T) {
 	if end != (store.Tunnel{Address: nodeAddress, Key: nodePublic, Port: port}) {
 		t.Fatalf("recorded end %+v", end)
 	}
-	// Removed from the state, the device reaches nothing.
+	// Not knowing the devices, as a node cut off from the cluster, it lets
+	// none in.
 	agent.mu.Lock()
-	agent.devices = nil
+	agent.err = errors.New("no leader")
 	agent.mu.Unlock()
 	time.Sleep(300 * time.Millisecond)
 	client.Transport.(*http.Transport).CloseIdleConnections()
