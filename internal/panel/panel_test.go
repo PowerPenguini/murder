@@ -50,13 +50,25 @@ func TestTheOverviewShowsTheCluster(t *testing.T) {
 	}
 	for _, want := range []string{
 		"fsn-1", "nbg-1", "hel-1", ">failed<", ">leader<",
-		`href="/tenants/kowalski-trans"`, "→ hel-1, moving", ">unhealthy<", ">archived<", ">suspended<",
 		"2<small> / 3</small>", // nodes up
 		"5<small> / 6</small>", // healthy of those meant to run
 		"copy moves from fsn-1 to hel-1",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the overview lacks %q", want)
+		}
+	}
+	// The tenants have a page of their own.
+	if strings.Contains(body, `id="tenants"`) {
+		t.Error("the overview still lists the tenants")
+	}
+	_, tenants := get(t, server.URL+"/tenants")
+	for _, want := range []string{
+		`href="/tenants/kowalski-trans"`, "→ hel-1, moving", ">unhealthy<", ">archived<", ">suspended<",
+		`data-filter="tenants"`, " live, ", " healthy",
+	} {
+		if !strings.Contains(tenants, want) {
+			t.Errorf("the tenants' page lacks %q", want)
 		}
 	}
 	// Nothing is loaded from elsewhere, nor framed.

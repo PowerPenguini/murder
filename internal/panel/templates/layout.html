@@ -19,6 +19,7 @@
   <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt="murder"></a>
   <nav class="menu" aria-label="the panel">
     <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
+    <a href="/tenants" {{if eq .Section "tenants"}}class="on"{{end}}>Tenants</a>
     {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on"{{end}}>Apps</a>{{end}}
     <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
     <a href="/cluster" {{if eq .Section "cluster"}}class="on"{{end}}>Cluster</a>

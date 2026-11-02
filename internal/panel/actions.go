@@ -111,7 +111,7 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 		}
 		if err = agent.Purge(ctx, name); err == nil {
 			flash(w, r, "done", name+" is purged: its data is gone")
-			http.Redirect(w, r, "/", http.StatusSeeOther)
+			http.Redirect(w, r, "/tenants", http.StatusSeeOther)
 			return
 		}
 	default:
@@ -135,13 +135,13 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.FormValue("name"))
 	if !tenantName.MatchString(name) {
 		flash(w, r, "problem", "a tenant's name is lowercase letters, digits and dashes")
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, "/tenants", http.StatusSeeOther)
 		return
 	}
 	applied, err := agent.Create(ctx, api.TenantRequest{Name: name, App: r.FormValue("app")})
 	if err != nil {
 		flash(w, r, "problem", err.Error())
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, "/tenants", http.StatusSeeOther)
 		return
 	}
 	message := name + " is created on " + applied.Tenant.Node + ", at " + applied.Tenant.URL
@@ -181,5 +181,5 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	if len(data) > logBytes {
 		data = data[len(data)-logBytes:]
 	}
-	s.render(w, r, "logs", name+" logs", "overview", logsData{Tenant: name, Lines: ansi.ReplaceAllString(string(data), ""), Tail: tail})
+	s.render(w, r, "logs", name+" logs", "tenants", logsData{Tenant: name, Lines: ansi.ReplaceAllString(string(data), ""), Tail: tail})
 }

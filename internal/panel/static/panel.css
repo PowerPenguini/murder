@@ -335,3 +335,5 @@ ul.attention li:has(.st.bad) a { color: var(--bad); }
   .pagehead + .lead { margin-top: 12px; }
   .pagehead nav.tabs { order: 3; flex: 1 0 100%; margin: 0; }
 }
+a.figure { text-decoration: none; color: inherit; }
+a.figure:hover .l { color: var(--fg); }

@@ -114,6 +114,28 @@ type overviewData struct {
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+	nodes, data, err := s.overviewOf(ctx, r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.write(w, "overview", s.pageFor(w, r, "Overview", "overview", nodes, data), http.StatusOK)
+}
+
+// tenants is every tenant, with what each uses, and the way to make one.
+func (s *Server) tenants(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	nodes, data, err := s.overviewOf(ctx, r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.write(w, "tenants", s.pageFor(w, r, "Tenants", "tenants", nodes, data), http.StatusOK)
+}
+
+// overviewOf is the cluster as the overview and the tenants' page show it.
+func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, overviewData, error) {
 	// Asked at once: each may wait on a node that does not answer.
 	var nodes api.Nodes
 	var tenants []api.Tenant
@@ -130,8 +152,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			return
 		},
 	); err != nil {
-		s.fail(w, r, err)
-		return
+		return nodes, overviewData{}, err
 	}
 	now := s.now()
 	clustered := len(nodes.Nodes) > 1
@@ -194,7 +215,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.write(w, "overview", s.pageFor(w, r, "Overview", "overview", nodes, data), http.StatusOK)
+	return nodes, data, nil
 }
 
 // activityEvents is how many of the newest events the activity charts
@@ -266,7 +287,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 			data.Targets = append(data.Targets, node.Name)
 		}
 	}
-	s.write(w, "tenant", s.pageFor(w, r, t.Spec.Name, "overview", nodes, data), http.StatusOK)
+	s.write(w, "tenant", s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data), http.StatusOK)
 }
 
 type eventsData struct {

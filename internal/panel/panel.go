@@ -90,7 +90,7 @@ type Server struct {
 // New returns a panel asking backend.
 func New(backend Backend, log *slog.Logger) (*Server, error) {
 	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}, Jobs: &Jobs{}}
-	for _, page := range []string{"overview", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job", "apps", "app", "settings"} {
+	for _, page := range []string{"overview", "tenants", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job", "apps", "app", "settings"} {
 		t, err := template.New("layout.html").Funcs(s.funcs()).ParseFS(templateFiles, "templates/layout.html", "templates/partials.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("panel template %s: %w", page, err)
@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", noListing(cacheFor(24*time.Hour, files))))
 	pages := http.NewServeMux()
 	pages.HandleFunc("GET /{$}", s.overview)
+	pages.HandleFunc("GET /tenants", s.tenants)
 	pages.HandleFunc("GET /tenants/{name}", s.tenant)
 	pages.HandleFunc("GET /events", s.events)
 	if s.Access != nil {
