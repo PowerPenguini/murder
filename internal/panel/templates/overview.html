@@ -58,31 +58,26 @@
     </div>
   </div>
   <div class="scroll">
-  <table id="tenants" class="rows">
-    <thead><tr><th>Tenant</th><th>State</th><th>Memory</th><th>CPU</th><th class="num">Requests a minute</th>{{range $d.Nodes}}<th class="place" title="what the tenant has on {{.Name}}">{{.Name}}</th>{{end}}</tr></thead>
+  <table id="tenants" class="rows tight">
+    <thead><tr><th>Tenant</th><th>State</th><th>Memory</th><th>CPU</th><th class="num">Requests/min</th><th>Runs on</th><th>Copy</th></tr></thead>
     <tbody>
     {{range $d.Tenants}}
       <tr>
-        <td><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a> <span class="dim hide-narrow">{{.App}}</span></td>
+        <td title="of app {{.App}}"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
         <td><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         {{with .Use}}
         <td class="barcell"><div class="barline">{{template "bar" .Memory}}<span class="num">{{.MemoryText}}</span></div></td>
         <td class="barcell"><div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div></td>
         <td class="num">{{.Requests}}</td>
         {{else}}<td class="faint">—</td><td class="faint">—</td><td class="num faint">—</td>{{end}}
-        {{range .Placements}}<td class="place">{{template "placement" .}}</td>{{end}}
+        <td>{{if .Archived}}<span class="faint">{{.Node}}</span>{{else}}{{.Node}}{{end}}</td>
+        <td>{{template "copy" .}}</td>
       </tr>
     {{else}}
       <tr><td colspan="9" class="empty">No tenants yet. Create one of an app: “New tenant” above.</td></tr>
     {{end}}
     </tbody>
   </table>
-  </div>
-  <div class="legend">
-    <span>{{template "placement-glyph" "runs"}}runs there</span>
-    <span>{{template "placement-glyph" "copy"}}its copy, ready to take over</span>
-    <span>{{template "placement-glyph" "syncing"}}its copy, catching up</span>
-    <span>{{template "placement-glyph" "next"}}its copy, moving there</span>
   </div>
 </section>
 

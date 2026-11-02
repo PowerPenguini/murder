@@ -211,8 +211,6 @@ svg.segbar text { font-family: var(--mono); font-size: 13px; font-weight: 600; }
 .head .legend { margin-top: 0; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 svg.glyph { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; }
-td.place, th.place { text-align: center; width: 1%; padding-left: 8px; padding-right: 8px; white-space: nowrap; }
-td.place svg.glyph { display: block; margin: 0 auto; }
 td.barcell { min-width: 180px; }
 .barline { display: flex; align-items: center; gap: 10px; }
 .barline + .barline { margin-top: 4px; }
@@ -259,7 +257,6 @@ table.rows tbody tr { position: relative; }
 table.rows tbody tr:hover { background: var(--raised); }
 a.row-link { text-decoration: none; }
 a.row-link::after { content: ""; position: absolute; inset: 0; }
-.glyph-wrap { position: relative; z-index: 1; display: inline-block; }
 td.num-left { white-space: nowrap; font-variant-numeric: tabular-nums; }
 tr[hidden] { display: none; }
 
@@ -284,3 +281,6 @@ div.logs > div { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--di
 div.logs > div.warn { color: var(--fg); }
 div.logs > div.error { color: var(--fg); font-weight: 700; border-left: 2px solid var(--fg); padding-left: 8px; margin-left: -10px; }
 div.logs > div[hidden] { display: none; }
+table.tight td { white-space: nowrap; }
+table.tight svg.bar { width: 90px; }
+.barline .num { white-space: nowrap; }

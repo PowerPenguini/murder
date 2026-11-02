@@ -50,7 +50,7 @@ func TestTheOverviewShowsTheCluster(t *testing.T) {
 	}
 	for _, want := range []string{
 		"fsn-1", "nbg-1", "hel-1", ">failed<", ">leader<",
-		`href="/tenants/kowalski-trans"`, "the copy moves to hel-1", ">unhealthy<", ">archived<", ">suspended<",
+		`href="/tenants/kowalski-trans"`, "→ hel-1, moving", ">unhealthy<", ">archived<", ">suspended<",
 		"2<small> / 3</small>", // nodes up
 		"5<small> / 6</small>", // healthy of those meant to run
 		"copy moves from fsn-1 to hel-1",

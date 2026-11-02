@@ -19,7 +19,7 @@ func TestUsePages(t *testing.T) {
 	server := httptest.NewServer(s.Handler())
 	defer server.Close()
 	_, page := get(t, server.URL+"/")
-	for _, want := range []string{"of 8 GB", " MB</span>", "Requests a minute"} {
+	for _, want := range []string{"of 8 GB", " MB</span>", "Requests/min"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the overview lacks %q:\n%s", want, page)
 		}

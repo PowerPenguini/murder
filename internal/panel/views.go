@@ -89,8 +89,6 @@ func replicaState(t api.Tenant, cluster bool) tag {
 type tenantRow struct {
 	api.Tenant
 	State, Replica tag
-	// Placements say, per node, what the tenant has there.
-	Placements []placement
 	// Use is what it uses now; nil if it was not measured.
 	Use *tenantUse
 }
@@ -186,9 +184,6 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	for i := range data.Nodes {
 		n := &data.Nodes[i]
 		n.TenantBar, n.CopyBar, n.MemoryBar = meterOf(n.Tenants, most), meterOf(n.Copies, most), meterOf(n.MemoryMB, mostMemory)
-	}
-	for i := range data.Tenants {
-		data.Tenants[i].Placements = placementsOf(data.Tenants[i], data.Nodes)
 	}
 	data.States = stateBar(data.Tenants)
 	data.Attention = attentionOf(data.Nodes, data.Tenants, clustered, now)
