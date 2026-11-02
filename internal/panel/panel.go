@@ -5,7 +5,9 @@ package panel
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -36,6 +38,25 @@ var templateFiles embed.FS
 //go:embed static
 var staticFiles embed.FS
 
+// staticVersion changes with the static files, so that a browser never
+// keeps one from an earlier release: their addresses carry it.
+var staticVersion = func() string {
+	hash := sha256.New()
+	_ = fs.WalkDir(staticFiles, "static", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		data, err := staticFiles.ReadFile(path)
+		hash.Write([]byte(path))
+		hash.Write(data)
+		return err
+	})
+	return hex.EncodeToString(hash.Sum(nil))[:12]
+}()
+
+// staticURL is where the page asks for a static file.
+func staticURL(name string) string { return "/static/" + name + "?v=" + staticVersion }
+
 // Server serves the panel's pages.
 type Server struct {
 	// Name is the panel's host name in its tunnel; requests are answered
@@ -48,18 +69,26 @@ type Server struct {
 	// person signed in; TunnelNetwork is where devices get addresses.
 	Access        func(actor string) AccessAgent
 	TunnelNetwork netip.Prefix
-	// Actions, if set, acts on tenants for the person signed in.
+	// Actions, if set, acts on tenants for the person signed in; Cluster
+	// on the cluster.
 	Actions func(actor string) ActionAgent
-	backend Backend
-	log     *slog.Logger
-	now     func() time.Time
-	pages   map[string]*template.Template
+	Cluster func(actor string) ClusterAgent
+	// Jobs are the panel's background work; panels of one process share
+	// them.
+	Jobs *Jobs
+	// UploadDir keeps uploaded binaries until they are installed; the
+	// system's temporary directory if empty.
+	UploadDir string
+	backend   Backend
+	log       *slog.Logger
+	now       func() time.Time
+	pages     map[string]*template.Template
 }
 
 // New returns a panel asking backend.
 func New(backend Backend, log *slog.Logger) (*Server, error) {
-	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}}
-	for _, page := range []string{"overview", "tenant", "events", "error", "login", "enroll", "access", "logs"} {
+	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}, Jobs: &Jobs{}}
+	for _, page := range []string{"overview", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job"} {
 		t, err := template.New("layout.html").Funcs(s.funcs()).ParseFS(templateFiles, "templates/layout.html", "templates/partials.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("panel template %s: %w", page, err)
@@ -74,7 +103,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(staticFiles, "static")
 	files := http.FileServerFS(static)
-	mux.Handle("GET /static/", http.StripPrefix("/static/", noListing(cacheFor(time.Hour, files))))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", noListing(cacheFor(24*time.Hour, files))))
 	pages := http.NewServeMux()
 	pages.HandleFunc("GET /{$}", s.overview)
 	pages.HandleFunc("GET /tenants/{name}", s.tenant)
@@ -87,6 +116,12 @@ func (s *Server) Handler() http.Handler {
 		pages.HandleFunc("POST /tenants", s.createTenant)
 		pages.HandleFunc("POST /tenants/{name}", s.tenantAction)
 		pages.HandleFunc("GET /tenants/{name}/logs", s.logs)
+	}
+	if s.Cluster != nil {
+		pages.HandleFunc("GET /cluster", s.cluster)
+		pages.HandleFunc("POST /cluster", s.clusterAction)
+		pages.HandleFunc("POST /cluster/upgrade", s.upgradeAction)
+		pages.HandleFunc("GET /jobs/{id}", s.jobPage)
 	}
 	if s.Auth != nil {
 		mux.HandleFunc("GET /login", s.gate("login", "Sign in"))

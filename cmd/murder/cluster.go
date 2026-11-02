@@ -10,6 +10,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
+	"github.com/PowerPenguini/murder/internal/clusterops"
 )
 
 const clusterUsage = `Usage: murder cluster <command> [arguments]
@@ -122,26 +123,7 @@ func printCluster(status cluster.Status) error {
 	return table.Flush()
 }
 
-// drain moves every tenant of node, live or archived, to target, one after
-// the other, and stops at the first that does not move.
+// drain moves every tenant of node to target, telling each move.
 func drain(client *api.Client, node, target string) error {
-	ctx := context.Background()
-	tenants, err := client.List(ctx)
-	if err != nil {
-		return err
-	}
-	moved := 0
-	for _, tenant := range tenants {
-		if tenant.Node != node {
-			continue
-		}
-		start := time.Now()
-		if _, err := client.Move(ctx, tenant.Spec.Name, target); err != nil {
-			return fmt.Errorf("move %s: %w (moved %d before it)", tenant.Spec.Name, err, moved)
-		}
-		moved++
-		fmt.Fprintf(stdout, "%s moved to %s in %v\n", tenant.Spec.Name, target, time.Since(start).Round(time.Second))
-	}
-	fmt.Fprintf(stdout, "node %s runs no tenant now (%d moved)\n", node, moved)
-	return nil
+	return clusterops.Drain(context.Background(), client, node, target, stdout)
 }

@@ -1,6 +1,6 @@
 // Murder panel: the page follows the cluster. Every few seconds it asks
 // for itself again and puts in the new content, unless someone is at
-// work on it (typing, a choice made, text selected), or it shows
+// work on it (typing, a choice made, a file chosen, text selected), or it shows
 // something once (a secret), or it holds still (logs), or is hidden.
 "use strict";
 (() => {
@@ -12,6 +12,7 @@
     document.querySelector(".once, [data-still]") ||
     (document.activeElement && document.activeElement.closest("form")) ||
     [...document.querySelectorAll("input[type=text]")].some((input) => input.value !== "") ||
+    [...document.querySelectorAll("input[type=file]")].some((input) => input.files.length > 0) ||
     [...document.querySelectorAll("select")].some((select) => select.selectedIndex > 0 && !select.options[select.selectedIndex].defaultSelected) ||
     String(getSelection()) !== "";
   let timer;

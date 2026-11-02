@@ -61,7 +61,10 @@ func Hash(path string) (string, error) {
 func Probe(ctx context.Context, path string) (Version, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, path, "version", "-json").Output()
+	command := exec.CommandContext(ctx, path, "version", "-json")
+	// A child that keeps the output open must not hold the probe past ctx.
+	command.WaitDelay = 5 * time.Second
+	output, err := command.Output()
 	if err != nil {
 		return Version{}, fmt.Errorf("run %s version: %w", path, err)
 	}

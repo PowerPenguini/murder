@@ -586,7 +586,11 @@ a phone near it) and shows ten recovery codes, once: each adds one passkey,
 should every passkey be lost, at the same page (`/enroll`, "an invitation,
 or a lost passkey?"). Signed in, the Access page invites others, removes
 people and passkeys, makes new recovery codes, and adds or removes devices
-(a QR code, shown once). Sessions last 12 hours; signing in and out is in
+(a QR code, shown once). The Cluster page shows each node's release,
+drains, removes and fails over nodes, backs up this node's tenants, takes
+changes again after a stopped upgrade, and upgrades the cluster with an
+uploaded `murder` binary; the slow ones run as jobs, with a page that
+follows them. Sessions last 12 hours; signing in and out is in
 the audit log. Should everyone lose everything, `murder admin invite` on a
 node starts over.
 

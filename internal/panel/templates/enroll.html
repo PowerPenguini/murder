@@ -1,6 +1,6 @@
 {{define "content"}}
 <div class="gatebox">
-  <img class="crow" src="/static/crow.svg" alt="">
+  <img class="crow" src="{{static "crow.svg"}}" alt="">
   <div class="wordmark">MURDER<span class="cursor"></span></div>
   <div class="frame" id="enroll">
     <div class="label">// add a passkey</div>
@@ -20,5 +20,5 @@
   </div>
   <p class="aside"><a href="/login">← sign in</a></p>
 </div>
-<script src="/static/auth.js"></script>
+<script src="{{static "auth.js"}}"></script>
 {{end}}

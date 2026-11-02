@@ -43,6 +43,13 @@ func runPanel(args []string) error {
 	// Root reaches the socket's panel through SSH: no one signs in there.
 	server.Access = func(actor string) panel.AccessAgent { return client.WithActor(actor) }
 	server.Actions = func(actor string) panel.ActionAgent { return client.WithActor(actor) }
+	server.Cluster = func(actor string) panel.ClusterAgent { return client.WithActor(actor) }
+	// Beside the database: /tmp may be small, in memory, or noexec.
+	server.UploadDir = filepath.Join(filepath.Dir(cfg.Database), "panel-uploads")
+	// What a panel stopped mid-upgrade left behind.
+	if err := os.RemoveAll(server.UploadDir); err != nil {
+		log.Warn("the panel's old uploads stay", "error", err)
+	}
 	if t := cfg.Panel.Tunnel; t != nil {
 		server.TunnelNetwork, _ = netip.ParsePrefix(t.Network)
 	}
@@ -62,63 +69,90 @@ func runPanel(args []string) error {
 	httpServer := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Asked to stop, the panel takes no more jobs, but serves on until the
+	// change of the cluster that runs ends: an upgrade stopped halfway
+	// leaves changes frozen.
+	serving, stopServing := context.WithCancel(context.Background())
+	defer stopServing()
+	go func() {
+		<-ctx.Done()
+		server.Jobs.Close()
+		if busy := server.Jobs.Busy(); busy != nil {
+			log.Info("the panel stops once its job ends", "job", busy.Title, "id", busy.ID, "by", busy.By)
+		}
+		server.Jobs.WaitBusy()
+		stopServing()
+	}()
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		<-ctx.Done()
+		<-serving.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdown)
 	}()
-	go restartOnUpgrade(ctx, stop, log)
 	tunnelDone := make(chan error, 1)
 	if t := cfg.Panel.Tunnel; t != nil {
 		inTunnel, err := panel.New(client, log)
 		if err != nil {
 			return err
 		}
-		inTunnel.Name, inTunnel.Access, inTunnel.TunnelNetwork, inTunnel.Actions = server.Name, server.Access, server.TunnelNetwork, server.Actions
+		inTunnel.Jobs, inTunnel.UploadDir = server.Jobs, server.UploadDir
+		inTunnel.Name, inTunnel.Access, inTunnel.TunnelNetwork, inTunnel.Actions, inTunnel.Cluster = server.Name, server.Access, server.TunnelNetwork, server.Actions, server.Cluster
 		if inTunnel.Auth, err = panel.NewAuth(client, cfg.Panel.Name, log); err != nil {
 			return err
 		}
 		go func() {
-			err := serveTunnel(ctx, cfg, client, inTunnel.Handler(), log)
+			err := serveTunnel(serving, cfg, client, inTunnel.Handler(), log)
 			// The panel stops, so the failure is in the log and systemd
 			// starts it again.
-			if err != nil && ctx.Err() == nil {
+			if err != nil && serving.Err() == nil {
 				log.Error("the panel's tunnel stopped", "error", err)
 				stop()
 			}
 			tunnelDone <- err
 		}()
 	}
+	go restartOnUpgrade(ctx, stop, binaryReplaced, server.Jobs, 10*time.Second, log)
 	log.Info("the panel serves", "socket", cfg.Panel.Socket)
-	if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	serveErr := httpServer.Serve(listener)
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	} else {
+		log.Error("the panel's socket stopped", "error", serveErr)
+		stop()
 	}
-	// Requests under way finish first.
 	<-stopped
+	var tunnelErr error
 	if cfg.Panel.Tunnel != nil {
-		return <-tunnelDone
+		tunnelErr = <-tunnelDone
 	}
-	return nil
+	return errors.Join(serveErr, tunnelErr)
 }
 
 // restartOnUpgrade stops the panel once its binary was replaced, as an
-// upgrade does: systemd starts the new one.
-func restartOnUpgrade(ctx context.Context, stop func(), log *slog.Logger) {
+// upgrade does, and no job of the panel runs: systemd starts the new one.
+// An upgrade begun in the panel replaces the panel's binary last, then
+// still has to wait for the agent and take changes again.
+func restartOnUpgrade(ctx context.Context, stop func(), replaced func() bool, jobs *panel.Jobs, every time.Duration, log *slog.Logger) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(10 * time.Second):
+		case <-time.After(every):
 		}
-		if exe, err := os.Readlink("/proc/self/exe"); err == nil && strings.HasSuffix(exe, " (deleted)") {
+		if replaced() && jobs.CloseIdle() {
 			log.Info("the murder binary was replaced: the panel restarts with it")
 			stop()
 			return
 		}
 	}
+}
+
+// binaryReplaced reports whether the running binary was replaced.
+func binaryReplaced() bool {
+	exe, err := os.Readlink("/proc/self/exe")
+	return err == nil && strings.HasSuffix(exe, " (deleted)")
 }
 
 // serveTunnel serves the panel inside its WireGuard tunnel, over HTTPS
