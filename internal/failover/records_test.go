@@ -192,6 +192,30 @@ func TestTheRecordsWaitWhenUnsure(t *testing.T) {
 	}
 }
 
+// Nothing is written while a node that serves has no public addresses:
+// the records would leave it out.
+func TestTheRecordsWaitForEveryNodesAddresses(t *testing.T) {
+	f := newFixture(t)
+	fake := withRecords(t, f)
+	if err := f.store.SetPublic("n2", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.round(t)
+	f.advance(30 * time.Second)
+	f.round(t)
+	if fake.count() != 0 {
+		t.Fatalf("written without n2: %v", fake.last())
+	}
+	if err := f.store.SetPublic("n2", []netip.Addr{netip.MustParseAddr("192.0.2.2")}); err != nil {
+		t.Fatal(err)
+	}
+	f.advance(2 * time.Second)
+	f.round(t)
+	if !slices.Equal(fake.last(), all3) {
+		t.Fatalf("records %v", fake.last())
+	}
+}
+
 // A new leader leaves out failed nodes from the start.
 func TestANewLeaderLeavesOutFailedNodes(t *testing.T) {
 	f := newFixture(t)

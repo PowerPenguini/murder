@@ -41,6 +41,9 @@ type recordsView struct {
 	writing     bool
 	failing     bool
 	retry       time.Time
+	// missing names the serving nodes without public addresses, while
+	// nothing is written for want of them.
+	missing string
 }
 
 // startRecords begins a leader's view: every node not failed serves.
@@ -71,7 +74,7 @@ func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answ
 			}
 			if !r.serving[name] && now.Sub(r.upSince[name]) >= m.after() {
 				r.serving[name] = true
-				m.Log.Info("a node answers again: the records name it", "node", name)
+				m.Log.Info("a node serves: the records name it", "node", name)
 			}
 		default:
 			delete(r.upSince, name)
@@ -91,13 +94,26 @@ func (m *Monitor) serveLocked(now time.Time, self string, all []store.Node, answ
 	if !majority || now.Sub(r.since) < m.after() || r.writing || now.Before(r.retry) {
 		return nil, false
 	}
+	// While a node that serves has not recorded its public addresses, as
+	// before its agent runs a release that does, nothing is written: the
+	// records would leave out a node that serves.
 	var addresses []netip.Addr
+	var missing []string
 	for _, node := range all {
 		if r.serving[node.Name] {
+			if len(node.Public) == 0 {
+				missing = append(missing, node.Name)
+			}
 			addresses = append(addresses, node.Public...)
 		}
 	}
-	if len(addresses) == 0 {
+	if key := strings.Join(missing, " "); key != r.missing {
+		if key != "" {
+			m.Log.Warn("the DNS records are not written while nodes that serve have no public addresses (cluster.publicAddresses)", "nodes", key)
+		}
+		r.missing = key
+	}
+	if len(missing) > 0 || len(addresses) == 0 {
 		return nil, false
 	}
 	slices.SortFunc(addresses, func(a, b netip.Addr) int { return a.Compare(b) })

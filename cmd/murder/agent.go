@@ -417,7 +417,7 @@ func keepPublic(ctx context.Context, st *store.SQLite, node string, values []str
 		}
 		if err := st.SetPublic(node, want); err == nil {
 			return
-		} else if !errors.Is(err, store.ErrFrozen) && !errors.Is(err, store.ErrNotFound) && !warned {
+		} else if !errors.Is(err, store.ErrFrozen) && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, cluster.ErrNotJoined) && !warned {
 			log.Warn("record this node's public addresses", "error", err)
 			warned = true
 		}
