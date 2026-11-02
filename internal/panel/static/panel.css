@@ -49,17 +49,13 @@ pre, textarea { font-size: 12.5px; }
 .brand { display: flex; align-items: center; height: var(--head); padding: 0 22px; border-bottom: 1px solid var(--line); text-decoration: none; flex: none; }
 .brand img { height: 30px; width: auto; display: block; }
 .menu { display: flex; flex-direction: column; }
-.menu a, .sub-name {
+.menu a {
   display: block; padding: 10px 22px; border-bottom: 1px solid var(--line);
   color: var(--dim); text-decoration: none; position: relative;
 }
 .menu a:hover { color: var(--fg); background: var(--raised); }
 .menu a.on { color: var(--fg); background: var(--raised); }
 .menu a.on::before { content: ""; position: absolute; left: 0; top: -1px; bottom: -1px; width: 2px; background: var(--fg); }
-.menu .sub { display: flex; flex-direction: column; }
-.menu .sub-name { color: var(--fg); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.menu .sub a { padding-left: 38px; font-size: 13px; }
-.menu .sub a::after { content: ""; position: absolute; left: 22px; top: 0; bottom: -1px; width: 1px; background: var(--line-strong); }
 .who { margin-top: auto; padding: 14px 22px; border-top: 1px solid var(--line); display: grid; gap: 8px; color: var(--dim); font-size: 13px; }
 .who .node { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12.5px; }
 .who .user { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -341,6 +337,15 @@ main > * { margin: 0; }
   border-image: linear-gradient(var(--line), var(--line)) 1 / 0 0 1px 0 / 0 100vw;
 }
 .pagehead .title { margin: 0; }
+/* A tenant's pages: cells the band's height, beside its name. */
+.pagehead nav.tabs { align-self: stretch; display: flex; margin: -12px auto -12px 8px; border-left: 1px solid var(--line); }
+.pagehead nav.tabs a {
+  display: flex; align-items: center; padding: 0 20px; position: relative;
+  border-right: 1px solid var(--line); color: var(--dim); text-decoration: none;
+}
+.pagehead nav.tabs a:hover { color: var(--fg); background: var(--raised); }
+.pagehead nav.tabs a.on { color: var(--fg); background: var(--raised); }
+.pagehead nav.tabs a.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--fg); }
 .pagehead .actions { margin: 0; }
 .pagehead details.drop .pop { left: auto; right: 0; }
 h1 a.up, h1 span.up { color: var(--dim); font-weight: 400; text-decoration: none; margin-right: 10px; }
@@ -419,12 +424,12 @@ main > section > .head:first-child + div.logs { margin-top: 0; }
   .who { order: 2; margin: 0 0 0 auto; padding: 0 16px; border-top: 0; display: flex; gap: 14px; }
   .who .user span { display: none; }
   .menu { order: 3; width: 100%; flex-direction: row; flex-wrap: nowrap; overflow-x: auto; border-top: 1px solid var(--line); }
-  .menu a, .sub-name { padding: 10px 14px; border-bottom: 0; border-right: 1px solid var(--line); white-space: nowrap; }
+  .menu a { padding: 10px 14px; border-bottom: 0; border-right: 1px solid var(--line); white-space: nowrap; }
   .menu a.on::before { left: -1px; right: 0; top: auto; bottom: 0; width: auto; height: 2px; }
-  .menu .sub { flex-direction: row; }
-  .menu .sub a { padding-left: 14px; font-size: 14px; }
-  .menu .sub a::after { display: none; }
   .page > main { border-inline: 0; }
+  .pagehead nav.tabs { order: 3; flex: 1 0 100%; margin: 0 calc(-1 * var(--pad)) -12px; border-left: 0; border-top: 1px solid var(--line); }
+  .pagehead nav.tabs a { flex: 1; justify-content: center; padding: 12px 0; }
+  .pagehead nav.tabs a:last-child { border-right: 0; }
   .charts { grid-template-columns: 1fr; }
   main > .figures { grid-template-columns: repeat(3, 1fr); }
   main > .figures > .figure .n { font-size: 24px; }

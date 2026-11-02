@@ -301,10 +301,7 @@ type page struct {
 	Done, Problem string
 	// Edits says apps and tenants' settings may be edited.
 	Edits bool
-	// Here is the tenant whose page this is, for the navigation's pages
-	// of it; nil on any other page.
-	Here *tenantHead
-	Data any
+	Data  any
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, section string, data any) {
@@ -339,10 +336,6 @@ func (s *Server) renderWith(w http.ResponseWriter, r *http.Request, name, title,
 // what their last action did.
 func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section string, nodes api.Nodes, data any) page {
 	p := page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Edits: s.Apps != nil, Data: data}
-	if of, ok := data.(tenantPage); ok {
-		name, on := of.tenantPage()
-		p.Here = &tenantHead{Name: name, On: on, Logs: p.Acts || on == "logs", Settings: p.Edits || on == "settings"}
-	}
 	// A page following the cluster leaves what an action did to the page
 	// it was meant for.
 	if r.Header.Get("X-Murder-Live") == "" {

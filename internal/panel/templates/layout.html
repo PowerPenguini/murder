@@ -18,15 +18,7 @@
 <aside class="side">
   <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt="murder"></a>
   <nav class="menu" aria-label="the panel">
-    <a href="/" {{if and (eq .Section "overview") (not .Here)}}class="on" aria-current="page"{{end}}>Overview</a>
-    {{with .Here}}
-    <div class="sub" role="group" aria-label="{{.Name}}'s pages">
-      <span class="sub-name" title="{{.Name}}">{{.Name}}</span>
-      <a href="/tenants/{{.Name}}" {{if eq .On "overview"}}class="on" aria-current="page"{{end}}>Overview</a>
-      {{if .Logs}}<a href="/tenants/{{.Name}}/logs" {{if eq .On "logs"}}class="on" aria-current="page"{{end}}>Logs</a>{{end}}
-      {{if .Settings}}<a href="/tenants/{{.Name}}/settings" {{if eq .On "settings"}}class="on" aria-current="page"{{end}}>Settings</a>{{end}}
-    </div>
-    {{end}}
+    <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
     {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on"{{end}}>Apps</a>{{end}}
     <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
     <a href="/cluster" {{if eq .Section "cluster"}}class="on"{{end}}>Cluster</a>

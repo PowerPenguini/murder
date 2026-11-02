@@ -433,13 +433,6 @@ func memory(mb int) string {
 	return strconv.FormatFloat(math.Round(float64(mb)/1024*10)/10, 'f', -1, 64) + " GB"
 }
 
-// tenantPage is the data of one of a tenant's pages: its name, and which.
-type tenantPage interface{ tenantPage() (name, on string) }
-
-func (d tenantData) tenantPage() (string, string)   { return d.Tenant.Spec.Name, "overview" }
-func (d logsData) tenantPage() (string, string)     { return d.Tenant, "logs" }
-func (d settingsData) tenantPage() (string, string) { return d.Tenant.Spec.Name, "settings" }
-
 // tenantHead is the head of a tenant's pages: where it is, its name and
 // state, and its pages.
 type tenantHead struct {
