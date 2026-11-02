@@ -3,10 +3,11 @@
 <section>
   <form class="filter" method="get" action="/events">
     <input type="text" name="tenant" value="{{$d.Tenant}}" placeholder="tenant" aria-label="tenant">
+    <input type="text" name="app" value="{{$d.App}}" placeholder="app" aria-label="app" class="short">
     <button type="submit">filter</button>
-    {{if $d.Tenant}}<a class="button" href="/events">clear</a>{{end}}
+    {{if or $d.Tenant $d.App}}<a class="button" href="/events">clear</a>{{end}}
   </form>
   {{template "events" $d.Events}}
-  {{if $d.Older}}<div class="more"><a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}before={{$d.Older}}">older →</a></div>{{end}}
+  {{if $d.Older}}<div class="more"><a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}before={{$d.Older}}">older →</a></div>{{end}}
 </section>
 {{end}}

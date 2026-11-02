@@ -1,0 +1,52 @@
+{{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}{{$f := $d.Form}}
+<div class="title">
+  <h1>{{$t.Spec.Name}}</h1>
+  <span class="sub">settings · its app's spec, with what is its own · <a href="/tenants/{{$t.Spec.Name}}">back to {{$t.Spec.Name}}</a></span>
+</div>
+
+<section class="actions" data-still>
+  <h2>overrides</h2>
+  <p class="dim">Empty takes the app's. Saved, {{$t.Spec.Name}} gets a new container{{if $t.Archived}} once restored{{end}}.</p>
+  <form method="post" class="settings">
+    <input type="hidden" name="do" value="save">
+    <input type="hidden" name="generation" value="{{$f.Generation}}">
+    <label>app <select name="app">{{range $d.Apps}}<option {{if eq . $f.App}}selected{{end}}>{{.}}</option>{{end}}</select></label>
+    <label>image <input type="text" name="image" value="{{$f.Image}}" placeholder="the app's: {{short $t.Spec.Image}}" autocomplete="off"></label>
+    <label>env <span class="hint">NAME=value, a line each; adds to the app's, or replaces</span>
+      <textarea name="env" rows="5" spellcheck="false">{{$f.Env}}</textarea></label>
+    <label>secrets <span class="hint">NAME [kind [length]], a line each: hex, base64 or password; adds to the app's</span>
+      <textarea name="secrets" rows="3" spellcheck="false">{{$f.Secrets}}</textarea></label>
+    <div class="limits">
+      <label>memory MB <input type="text" name="memoryMB" value="{{$f.MemoryMB}}" class="short" inputmode="numeric"></label>
+      <label>cpus <input type="text" name="cpus" value="{{$f.CPUs}}" class="short" inputmode="decimal"></label>
+      <label>pids <input type="text" name="pids" value="{{$f.PIDs}}" class="short" inputmode="numeric"></label>
+      <label>disk GB <input type="text" name="diskGB" value="{{$f.DiskGB}}" class="short" inputmode="numeric"></label>
+    </div>
+    <div><button type="submit">save</button></div>
+  </form>
+</section>
+
+<section>
+  <h2>secrets</h2>
+  <p class="dim">Made once by murder and kept encrypted; the panel never shows them. A new value restarts {{$t.Spec.Name}}, and what it signed or set with the old one (sessions, a password) stops working.</p>
+  <table>
+    <thead><tr><th>name</th><th>kind</th><th>of</th><th></th></tr></thead>
+    <tbody>
+    {{range $d.Secrets}}
+      <tr>
+        <td><b>{{.Name}}</b></td>
+        <td class="dim">{{.Kind}}{{if .Bytes}} · {{.Bytes}}{{end}}</td>
+        <td class="dim">{{if .Own}}{{$t.Spec.Name}}{{else}}app {{$t.App}}{{end}}</td>
+        <td class="actions">
+          <form method="post" class="inline"><input type="hidden" name="do" value="rotate"><input type="hidden" name="key" value="{{.Name}}">
+            <input type="text" name="confirm" placeholder="{{.Name}}" aria-label="the secret's name" autocomplete="off" required class="short">
+            <button type="submit" class="small danger">new value</button></form>
+        </td>
+      </tr>
+    {{else}}
+      <tr><td colspan="4" class="empty">none</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}

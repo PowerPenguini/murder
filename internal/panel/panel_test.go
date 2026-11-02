@@ -75,7 +75,7 @@ func TestTheOverviewShowsTheCluster(t *testing.T) {
 func TestATenantsPage(t *testing.T) {
 	server := newTestServer(t, Demo{Now: demoNow})
 	_, body := get(t, server.URL+"/tenants/baltic-freight")
-	for _, want := range []string{"baltic-freight", ">UNHEALTHY<", "exit 137", "SESSION_KEY", "secret · random", "Europe/Warsaw", "256 MB"} {
+	for _, want := range []string{"baltic-freight", ">UNHEALTHY<", "exit 137", "SESSION_KEY", "secret · hex", "Europe/Warsaw", "256 MB"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the tenant's page lacks %q", want)
 		}

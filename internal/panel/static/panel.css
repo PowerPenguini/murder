@@ -224,3 +224,12 @@ input[type=file]::file-selector-button { background: var(--bg); color: var(--fg)
 section.actions p { margin: 0 0 10px; }
 code { font: inherit; border: 1px solid var(--line-strong); padding: 0 4px; }
 input[type=text].short { min-width: 0; width: 9em; }
+textarea { display: block; width: 100%; box-sizing: border-box; background: var(--bg); color: var(--fg); border: 1px solid var(--line-strong); padding: 10px 12px; font: inherit; font-size: 13px; line-height: 1.55; resize: vertical; tab-size: 2; }
+textarea:focus { outline: none; border-color: var(--fg); }
+form.editor { display: grid; gap: 10px; }
+form.editor input[type=text].short { width: 16em; }
+form.settings { display: grid; gap: 14px; max-width: 900px; }
+form.settings label { display: grid; gap: 6px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+form.settings label .hint { text-transform: none; letter-spacing: 0; font-size: 12px; }
+form.settings label select, form.settings label input { justify-self: start; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--fg); }
+form.settings .limits { display: flex; flex-wrap: wrap; gap: 14px; }

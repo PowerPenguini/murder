@@ -44,6 +44,7 @@ func runPanel(args []string) error {
 	server.Access = func(actor string) panel.AccessAgent { return client.WithActor(actor) }
 	server.Actions = func(actor string) panel.ActionAgent { return client.WithActor(actor) }
 	server.Cluster = func(actor string) panel.ClusterAgent { return client.WithActor(actor) }
+	server.Apps = func(actor string) panel.AppAgent { return client.WithActor(actor) }
 	// Beside the database: /tmp may be small, in memory, or noexec.
 	server.UploadDir = filepath.Join(filepath.Dir(cfg.Database), "panel-uploads")
 	// What a panel stopped mid-upgrade left behind.
@@ -98,7 +99,7 @@ func runPanel(args []string) error {
 			return err
 		}
 		inTunnel.Jobs, inTunnel.UploadDir = server.Jobs, server.UploadDir
-		inTunnel.Name, inTunnel.Access, inTunnel.TunnelNetwork, inTunnel.Actions, inTunnel.Cluster = server.Name, server.Access, server.TunnelNetwork, server.Actions, server.Cluster
+		inTunnel.Name, inTunnel.Access, inTunnel.TunnelNetwork, inTunnel.Actions, inTunnel.Cluster, inTunnel.Apps = server.Name, server.Access, server.TunnelNetwork, server.Actions, server.Cluster, server.Apps
 		if inTunnel.Auth, err = panel.NewAuth(client, cfg.Panel.Name, log); err != nil {
 			return err
 		}

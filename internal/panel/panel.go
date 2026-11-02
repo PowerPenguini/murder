@@ -73,6 +73,8 @@ type Server struct {
 	// on the cluster.
 	Actions func(actor string) ActionAgent
 	Cluster func(actor string) ClusterAgent
+	// Apps, when set, edits apps and tenants' settings.
+	Apps func(actor string) AppAgent
 	// Jobs are the panel's background work; panels of one process share
 	// them.
 	Jobs *Jobs
@@ -88,7 +90,7 @@ type Server struct {
 // New returns a panel asking backend.
 func New(backend Backend, log *slog.Logger) (*Server, error) {
 	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}, Jobs: &Jobs{}}
-	for _, page := range []string{"overview", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job"} {
+	for _, page := range []string{"overview", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job", "apps", "app", "settings"} {
 		t, err := template.New("layout.html").Funcs(s.funcs()).ParseFS(templateFiles, "templates/layout.html", "templates/partials.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("panel template %s: %w", page, err)
@@ -116,6 +118,14 @@ func (s *Server) Handler() http.Handler {
 		pages.HandleFunc("POST /tenants", s.createTenant)
 		pages.HandleFunc("POST /tenants/{name}", s.tenantAction)
 		pages.HandleFunc("GET /tenants/{name}/logs", s.logs)
+	}
+	if s.Apps != nil {
+		pages.HandleFunc("GET /apps", s.apps)
+		pages.HandleFunc("POST /apps", s.createApp)
+		pages.HandleFunc("GET /apps/{name}", s.app)
+		pages.HandleFunc("POST /apps/{name}", s.appAction)
+		pages.HandleFunc("GET /tenants/{name}/settings", s.settings)
+		pages.HandleFunc("POST /tenants/{name}/settings", s.settingsAction)
 	}
 	if s.Cluster != nil {
 		pages.HandleFunc("GET /cluster", s.cluster)
@@ -301,6 +311,23 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, sec
 		return
 	}
 	s.write(w, name, s.pageFor(w, r, title, section, nodes, data), http.StatusOK)
+}
+
+// renderWith renders a page saying problem, such as a form refused and
+// shown again with what was typed.
+func (s *Server) renderWith(w http.ResponseWriter, r *http.Request, name, title, section string, data any, problem string, status int) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	nodes, err := s.backend.Nodes(ctx)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	p := s.pageFor(w, r, title, section, nodes, data)
+	if problem != "" {
+		p.Problem = problem
+	}
+	s.write(w, name, p, status)
 }
 
 // pageFor is a page's layout data: who looks, whether they may act, and

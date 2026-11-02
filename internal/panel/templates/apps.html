@@ -1,0 +1,32 @@
+{{define "content"}}{{$d := .Data}}
+<div class="title"><h1>Apps</h1><span class="sub">specs shared by their tenants; a change rolls out to every one</span></div>
+
+<section>
+  <h2>apps</h2>
+  <table>
+    <thead><tr><th>app</th><th class="hide-narrow">image</th><th>tenants</th><th class="hide-narrow">changed</th></tr></thead>
+    <tbody>
+    {{range $d.Apps}}
+      <tr>
+        <td><a href="/apps/{{.Name}}"><b>{{.Name}}</b></a></td>
+        <td class="dim hide-narrow" title="{{.Spec.Image}}">{{short .Spec.Image}}</td>
+        <td class="mono-num">{{len .Tenants}}</td>
+        <td class="when hide-narrow">{{ago .UpdatedAt}} ago</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="4" class="empty">no app yet</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section class="actions" data-still>
+  <h2>new app</h2>
+  <p class="dim">As an app file of <code>murder app apply</code>: checked the same way before anything is stored.</p>
+  <form method="post" action="/apps" class="editor">
+    <input type="text" name="name" value="{{$d.Name}}" placeholder="name" aria-label="the app's name" autocomplete="off" required class="short">
+    <textarea name="file" rows="12" spellcheck="false" aria-label="the app's spec">{{$d.File}}</textarea>
+    <div><button type="submit">create the app</button></div>
+  </form>
+</section>
+{{end}}
