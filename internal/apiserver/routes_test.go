@@ -1,4 +1,4 @@
-package api
+package apiserver
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -84,7 +85,7 @@ func TestAStoppingAgentAnswersWaitingEdges(t *testing.T) {
 	server := NewServer(f.store, f.reconciler, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
-	client := NewClientURL(httpServer.URL)
+	client := api.NewClientURL(httpServer.URL)
 	first, err := client.Routes(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)

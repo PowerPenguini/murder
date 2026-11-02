@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
@@ -102,10 +103,10 @@ func newNode(t *testing.T, name string) *node {
 	// the same engine, and that agent away from this test's objects.
 	n := &node{store: st, docker: runtime.NewDocker(runtime.DockerOptions{Socket: dockerSocket(), Node: name + "-it"}), volumes: volume.Dir{Root: filepath.Join(dir, "tenants")}, key: key, log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
 	n.reconciler = n.newReconciler()
-	apiServer := httptest.NewServer(api.NewServer(st, n.reconciler, n.docker, key, n.log).Handler())
+	apiServer := httptest.NewServer(apiserver.NewServer(st, n.reconciler, n.docker, key, n.log).Handler())
 	t.Cleanup(apiServer.Close)
 	n.client = api.NewClientURL(apiServer.URL)
-	edgeServer := httptest.NewServer(edge.NewProxy(baseDomain, api.Routes{Store: st}, n.log))
+	edgeServer := httptest.NewServer(edge.NewProxy(baseDomain, apiserver.Routes{Store: st}, n.log))
 	t.Cleanup(edgeServer.Close)
 	n.edgeURL = edgeServer.URL
 	return n

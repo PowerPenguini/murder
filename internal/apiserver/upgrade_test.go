@@ -1,4 +1,4 @@
-package api
+package apiserver
 
 import (
 	"bytes"
@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/PowerPenguini/murder/internal/api"
 )
 
 // Upgrades run code as root on every node: a member of the socket's group
@@ -29,14 +31,14 @@ func TestOnlyRootUpgrades(t *testing.T) {
 	server := &http.Server{Handler: f.handler, ConnContext: ConnContext}
 	go server.Serve(listener)
 	t.Cleanup(func() { _ = server.Close() })
-	client := NewClient(socket)
+	client := api.NewClient(socket)
 	ctx := context.Background()
 	for name, call := range map[string]func() error{
 		"freeze":  func() error { return client.Freeze(ctx, "upgrade") },
 		"thaw":    func() error { return client.Thaw(ctx) },
 		"install": func() error { return client.Install(ctx, "-", bytes.NewReader([]byte("x")), "abc") },
 	} {
-		var apiErr *Error
+		var apiErr *api.Error
 		if err := call(); !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
 			t.Errorf("%s by a non-root user: %v", name, err)
 		}

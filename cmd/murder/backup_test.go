@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -51,7 +51,7 @@ func TestBackupAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: api.NewServer(st, nil, nil, key, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler()}
+	server := &http.Server{Handler: apiserver.NewServer(st, nil, nil, key, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler()}
 	go server.Serve(listener)
 	defer server.Close()
 

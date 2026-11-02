@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -230,7 +231,7 @@ func TestTheEdgeFollowsTheAgentsRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	agent := httptest.NewServer(api.NewServer(st, nil, nil, nil, log).Handler())
+	agent := httptest.NewServer(apiserver.NewServer(st, nil, nil, nil, log).Handler())
 	routes := filepath.Join(dir, "edge-routes.json")
 	table := &edge.LiveTable{}
 	ctx, cancel := context.WithCancel(context.Background())

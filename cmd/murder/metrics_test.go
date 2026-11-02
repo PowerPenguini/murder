@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/reconcile"
@@ -64,7 +64,7 @@ func TestMetricsDescribeTheNode(t *testing.T) {
 	}
 	firewall := new(atomic.Int64)
 	firewall.Store(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC).UnixNano())
-	handler := &agentMetrics{store: st, reconciler: reconciler, api: api.NewServer(st, reconciler, nil, key, log), firewall: firewall}
+	handler := &agentMetrics{store: st, reconciler: reconciler, api: apiserver.NewServer(st, reconciler, nil, key, log), firewall: firewall}
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest("GET", "/metrics", nil))

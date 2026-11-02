@@ -1,6 +1,6 @@
-// Package api is the agent's local HTTP API on a unix socket, used by the CLI
-// and, later, by the panel.
-package api
+// Package apiserver serves the agent's local HTTP API on a unix socket,
+// used by the CLI and the panel through internal/api.
+package apiserver
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/reconcile"
@@ -24,90 +25,6 @@ import (
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
-
-// Tenant is what the API shows about a tenant. Secret values never appear.
-type Tenant struct {
-	// Spec is what the tenant runs: its app's spec with its overrides.
-	Spec      spec.Tenant    `json:"spec"`
-	App       string         `json:"app"`
-	Overrides spec.Overrides `json:"overrides"`
-	// Node runs the tenant. Address is reachable from there only; Status
-	// is asked of it when another node answers, and left out if it does
-	// not answer in time.
-	Node string `json:"node"`
-	// Elsewhere is set when another node than this one runs the tenant.
-	Elsewhere bool `json:"elsewhere,omitempty"`
-	// Replica is the node that keeps a copy of the tenant's data;
-	// ReplicaReady says the copy holds the whole data, so the tenant can
-	// fail over to it; ReplicaSyncedAt is when the copy last matched the
-	// data, as the node that runs the tenant knows it (asked of that node
-	// only).
-	Replica      string `json:"replica,omitempty"`
-	ReplicaReady bool   `json:"replicaReady,omitempty"`
-	// ReplicaNext is the node the copy moves to, to even out the copies
-	// the nodes keep, until its copy there is whole.
-	ReplicaNext     string    `json:"replicaNext,omitempty"`
-	ReplicaSyncedAt time.Time `json:"replicaSyncedAt,omitzero"`
-	Host            string    `json:"host"`
-	URL             string    `json:"url"`
-	// Address is where the tenant listens, reachable from this node only.
-	Address    string    `json:"address,omitempty"`
-	Generation int64     `json:"generation"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	// ArchivedAt is set for an archived tenant, which runs nothing until it
-	// is restored.
-	ArchivedAt time.Time         `json:"archivedAt,omitzero"`
-	Status     *reconcile.Status `json:"status,omitempty"`
-}
-
-// Archived reports whether the tenant is archived.
-func (t Tenant) Archived() bool { return !t.ArchivedAt.IsZero() }
-
-// TenantRequest creates a tenant (with Name) or reconfigures one.
-type TenantRequest struct {
-	Name      string         `json:"name,omitempty"`
-	App       string         `json:"app"`
-	Overrides spec.Overrides `json:"overrides"`
-	// Generation, when reconfiguring, is the generation the client read; a
-	// tenant changed since is refused with 409 instead of overwritten.
-	Generation int64 `json:"generation,omitempty"`
-}
-
-// Applied is the result of creating or reconfiguring a tenant.
-type Applied struct {
-	Tenant Tenant `json:"tenant"`
-	// Changed is false when the request matched what was stored.
-	Changed bool `json:"changed"`
-	// Note explains how an image was pinned when it fell back to a local
-	// image.
-	Note string `json:"note,omitempty"`
-}
-
-// App is what the API shows about an app.
-type App struct {
-	Name string      `json:"name"`
-	Spec spec.Tenant `json:"spec"`
-	// Tenants are the live tenants running the app.
-	Tenants   []string  `json:"tenants"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-}
-
-// AppApplied is the result of storing an app.
-type AppApplied struct {
-	App     App  `json:"app"`
-	Created bool `json:"created"`
-	Changed bool `json:"changed"`
-	// Tenants are the live tenants the change rolls out to.
-	Tenants []Tenant `json:"tenants"`
-	Note    string   `json:"note,omitempty"`
-}
-
-// SecretValue carries one secret to an operator.
-type SecretValue struct {
-	Value string `json:"value"`
-}
 
 // Server serves the API.
 type Server struct {
@@ -190,8 +107,8 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-func (s *Server) view(record store.Record) Tenant {
-	view := Tenant{
+func (s *Server) view(record store.Record) api.Tenant {
+	view := api.Tenant{
 		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node, Replica: record.Replica, ReplicaReady: record.ReplicaReady, ReplicaNext: record.ReplicaNext,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
@@ -212,8 +129,8 @@ func (s *Server) view(record store.Record) Tenant {
 	return view
 }
 
-func (s *Server) appView(app store.App) App {
-	view := App{Name: app.Name, Spec: app.Spec, Tenants: []string{}, CreatedAt: app.CreatedAt, UpdatedAt: app.UpdatedAt}
+func (s *Server) appView(app store.App) api.App {
+	view := api.App{Name: app.Name, Spec: app.Spec, Tenants: []string{}, CreatedAt: app.CreatedAt, UpdatedAt: app.UpdatedAt}
 	for _, record := range s.store.List() {
 		if record.App == app.Name && !record.Archived() {
 			view.Tenants = append(view.Tenants, record.Spec.Name)
@@ -224,7 +141,7 @@ func (s *Server) appView(app store.App) App {
 
 func (s *Server) listApps(w http.ResponseWriter, _ *http.Request) {
 	apps := s.store.Apps()
-	views := make([]App, 0, len(apps))
+	views := make([]api.App, 0, len(apps))
 	for _, app := range apps {
 		views = append(views, s.appView(app))
 	}
@@ -280,7 +197,7 @@ func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	result := AppApplied{App: s.appView(change.App), Created: change.Created, Changed: change.Changed, Tenants: []Tenant{}, Note: note}
+	result := api.AppApplied{App: s.appView(change.App), Created: change.Created, Changed: change.Changed, Tenants: []api.Tenant{}, Note: note}
 	for _, tenant := range change.Tenants {
 		if record, err := s.store.Get(tenant); err == nil {
 			result.Tenants = append(result.Tenants, s.view(record))
@@ -308,7 +225,7 @@ func (s *Server) deleteApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	records := s.store.List()
-	views := make([]Tenant, 0, len(records))
+	views := make([]api.Tenant, 0, len(records))
 	for _, record := range records {
 		views = append(views, s.view(record))
 	}
@@ -322,7 +239,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	views := []Tenant{s.view(record)}
+	views := []api.Tenant{s.view(record)}
 	s.remoteStatus(r.Context(), views)
 	writeJSON(w, http.StatusOK, views[0])
 }
@@ -335,7 +252,7 @@ const remoteStatusTimeout = 2 * time.Second
 // remoteStatus fills in the status of tenants other nodes run, asking for
 // all of them side by side, so that waiting for a tenant, or listing them,
 // works from any node.
-func (s *Server) remoteStatus(ctx context.Context, views []Tenant) {
+func (s *Server) remoteStatus(ctx context.Context, views []api.Tenant) {
 	if s.cluster == nil {
 		return
 	}
@@ -393,7 +310,7 @@ func (s *Server) prepareOverrides(r *http.Request, name, appName string, overrid
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
-	var request TenantRequest
+	var request api.TenantRequest
 	if !readJSON(w, r, &request) {
 		return
 	}
@@ -435,7 +352,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("tenant created", "tenant", request.Name, "app", request.App, "image", record.Spec.Image)
-	writeJSON(w, http.StatusCreated, Applied{Tenant: s.view(record), Changed: true, Note: note})
+	writeJSON(w, http.StatusCreated, api.Applied{Tenant: s.view(record), Changed: true, Note: note})
 }
 
 // configure gives a tenant, live or archived, another app or other
@@ -445,7 +362,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 // to what is stored changes nothing, not even the generation.
 func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	var request TenantRequest
+	var request api.TenantRequest
 	if !readJSON(w, r, &request) {
 		return
 	}
@@ -476,7 +393,7 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		s.log.Info("tenant updated", "tenant", name, "app", request.App, "generation", record.Generation, "image", record.Spec.Image)
 	}
-	writeJSON(w, http.StatusOK, Applied{Tenant: s.view(record), Changed: changed, Note: note})
+	writeJSON(w, http.StatusOK, api.Applied{Tenant: s.view(record), Changed: changed, Note: note})
 }
 
 func (s *Server) suspend(suspended bool) http.HandlerFunc {
@@ -561,7 +478,7 @@ func (s *Server) secret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("secret read", "tenant", name, "secret", key, "actor", actor(r))
-	writeJSON(w, http.StatusOK, SecretValue{Value: value})
+	writeJSON(w, http.StatusOK, api.SecretValue{Value: value})
 }
 
 // rotate gives one secret of the spec a new value; the container is
@@ -761,18 +678,16 @@ type statusError struct {
 }
 
 func (e statusError) Error() string { return e.err.Error() }
+
 func (e statusError) Unwrap() error { return e.err }
 
 func badRequest(err error) error { return statusError{http.StatusBadRequest, err} }
-func notFound(err error) error   { return statusError{http.StatusNotFound, err} }
+
+func notFound(err error) error { return statusError{http.StatusNotFound, err} }
 
 // clientGone marks work refused because the client disconnected: nginx's 499,
 // not a server failure.
 func clientGone(err error) error { return statusError{499, err} }
-
-type errorBody struct {
-	Error string `json:"error"`
-}
 
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
@@ -798,7 +713,7 @@ func writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, context.Canceled):
 		status = 499
 	}
-	writeJSON(w, status, errorBody{Error: err.Error()})
+	writeJSON(w, status, api.ErrorBody{Error: err.Error()})
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, out any) bool {
