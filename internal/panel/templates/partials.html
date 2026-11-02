@@ -58,12 +58,4 @@
 
 {{define "copy"}}{{if .Archived}}<span class="faint">—</span>{{else if not .Tenant.Replica}}{{if eq .Replica.Kind "bad"}}<span class="st bad">none</span>{{else}}<span class="faint">—</span>{{end}}{{else if .ReplicaNext}}{{.Tenant.Replica}} <span class="dim">→ {{.ReplicaNext}}, moving</span>{{else if .ReplicaReady}}{{.Tenant.Replica}}{{else}}{{.Tenant.Replica}} <span class="dim">· catching up</span>{{end}}{{end}}
 
-{{define "tenant-head"}}
-<nav class="crumbs" aria-label="where this is"><a href="/">Overview</a><span>/</span>{{if eq .On "overview"}}<span>{{.Name}}</span>{{else}}<a href="/tenants/{{.Name}}">{{.Name}}</a>{{end}}</nav>
-<div class="title"><h1>{{.Name}}</h1>{{with .State}}<span class="st {{.Kind}}">{{.Label}}</span>{{end}}</div>
-<nav class="tabs" aria-label="{{.Name}}'s pages">
-  <a href="/tenants/{{.Name}}" {{if eq .On "overview"}}class="on" aria-current="page"{{end}}>Overview</a>
-  {{if .Logs}}<a href="/tenants/{{.Name}}/logs" {{if eq .On "logs"}}class="on" aria-current="page"{{end}}>Logs</a>{{end}}
-  {{if .Settings}}<a href="/tenants/{{.Name}}/settings" {{if eq .On "settings"}}class="on" aria-current="page"{{end}}>Settings</a>{{end}}
-</nav>
-{{end}}
+{{define "tenant-head"}}<div class="title"><h1>{{.Name}}</h1>{{with .State}}<span class="st {{.Kind}}">{{.Label}}</span>{{end}}{{if ne .On "overview"}}<span class="caps dim">{{.On}}</span>{{end}}</div>{{end}}

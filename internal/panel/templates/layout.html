@@ -14,28 +14,37 @@
 {{template "content" .}}
 </main>
 {{else}}
-<header class="top">
+<div class="shell">
+<aside class="side">
   <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt="murder"></a>
-  <nav>
-    <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
+  <nav class="menu" aria-label="the panel">
+    <a href="/" {{if and (eq .Section "overview") (not .Here)}}class="on" aria-current="page"{{end}}>Overview</a>
+    {{with .Here}}
+    <div class="sub" role="group" aria-label="{{.Name}}'s pages">
+      <span class="sub-name" title="{{.Name}}">{{.Name}}</span>
+      <a href="/tenants/{{.Name}}" {{if eq .On "overview"}}class="on" aria-current="page"{{end}}>Overview</a>
+      {{if .Logs}}<a href="/tenants/{{.Name}}/logs" {{if eq .On "logs"}}class="on" aria-current="page"{{end}}>Logs</a>{{end}}
+      {{if .Settings}}<a href="/tenants/{{.Name}}/settings" {{if eq .On "settings"}}class="on" aria-current="page"{{end}}>Settings</a>{{end}}
+    </div>
+    {{end}}
     {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on"{{end}}>Apps</a>{{end}}
     <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
     <a href="/cluster" {{if eq .Section "cluster"}}class="on"{{end}}>Cluster</a>
     <a href="/access" {{if eq .Section "access"}}class="on"{{end}}>Access</a>
   </nav>
   <div class="who">
-    <span class="live" title="following the cluster, every few seconds"></span>
-    <span title="the node this panel asks{{with .Cluster.Leader}}; {{.}} leads{{end}}">{{.Cluster.Self}}</span>
-    {{with .User}}<span>{{.}}</span><form method="post" action="/auth/logout"><button type="submit">Sign out</button></form>{{end}}
+    <div class="node" title="the node this panel asks{{with .Cluster.Leader}}; {{.}} leads{{end}}"><span class="live" title="following the cluster, every few seconds"></span>{{.Cluster.Self}}</div>
+    {{with .User}}<div class="user"><span>{{.}}</span><form method="post" action="/auth/logout"><button type="submit">Sign out</button></form></div>{{end}}
   </div>
-</header>
-<div id="live">
+</aside>
+<div class="page" id="live">
 {{with .Cluster.Frozen}}<div class="frozen">Changes are frozen: {{.}}</div>{{end}}
 <main>
 {{with .Problem}}<div class="notice bad">{{.}}</div>{{end}}
 {{with .Done}}<div class="notice">{{.}}</div>{{end}}
 {{template "content" .}}
 </main>
+</div>
 </div>
 <script src="{{static "live.js"}}"></script>
 <script src="{{static "forms.js"}}"></script>

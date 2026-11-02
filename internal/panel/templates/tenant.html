@@ -1,8 +1,6 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}
+<header class="pagehead">
 {{template "tenant-head" (head $t.Spec.Name $d.State "overview" .Acts .Edits)}}
-{{with $d.Problem}}<div class="problem{{if $d.Broken}} bad{{end}}">{{.}}{{if and $d.MemoryHigh $.Edits}} <a href="/tenants/{{$t.Spec.Name}}/settings">Raise its memory limit</a>{{end}}</div>{{end}}
-<p class="lead">Of app <a href="/apps/{{$t.App}}">{{$t.App}}</a>, on {{$t.Node}}, at <a href="{{$t.URL}}">{{$t.Host}}</a></p>
-
 {{if or .Acts .Edits}}
 <div class="actions">
   {{if .Acts}}
@@ -51,6 +49,9 @@
   {{end}}
 </div>
 {{end}}
+</header>
+<p class="lead">Of app <a href="/apps/{{$t.App}}">{{$t.App}}</a>, on {{$t.Node}}, at <a href="{{$t.URL}}">{{$t.Host}}</a></p>
+{{with $d.Problem}}<div class="problem{{if $d.Broken}} bad{{end}}">{{.}}{{if and $d.MemoryHigh $.Edits}} <a href="/tenants/{{$t.Spec.Name}}/settings">Raise its memory limit</a>{{end}}</div>{{end}}
 
 <section class="near">
   <div class="stats">
