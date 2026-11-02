@@ -218,7 +218,6 @@ func addDevice(ctx context.Context, client *api.Client, name string, cfg config.
 	return nil
 }
 
-
 func nodeAddresses(nodes []tunnel.Node) string {
 	var out []string
 	for _, node := range nodes {
