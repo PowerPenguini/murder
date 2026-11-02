@@ -122,6 +122,22 @@ func (c *changes) note(data sqlite.SQLitePreUpdateData) {
 	}
 }
 
+// checkKeys refuses a schema in which a table read again by key does not
+// hold the key where the pre-update hook reads it: a migration that moved
+// it would leave the state in memory stale.
+func checkKeys(q querier) error {
+	for table, key := range keyed {
+		var column string
+		if err := q.QueryRow(`SELECT name FROM pragma_table_info(?) WHERE cid = ?`, table, key.index).Scan(&column); err != nil {
+			return fmt.Errorf("read the columns of %s: %w", table, err)
+		}
+		if column != key.column {
+			return fmt.Errorf("column %d of %s is %s, not %s: the store reads its rows again by %s", key.index, table, column, key.column, key.column)
+		}
+	}
+	return nil
+}
+
 // The operation codes the pre-update hook reports, as in sqlite3.h.
 const (
 	sqlite3Delete = 9

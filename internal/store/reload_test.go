@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -37,8 +38,31 @@ func TestAWriteReadsAgainWhatItChanged(t *testing.T) {
 		if err := c.write(); err != nil {
 			t.Fatalf("%s: %v", c.what, err)
 		}
-		if got := reloadsWhole.Load() > whole; got != c.whole || reloadsInPart.Load() == part && !c.whole {
-			t.Errorf("%s read the whole state: %v, want %v", c.what, got, c.whole)
+		readWhole, readInPart := reloadsWhole.Load() > whole, reloadsInPart.Load() > part
+		if readWhole != c.whole || readInPart == c.whole {
+			t.Errorf("%s read the whole state %v and in part %v; want whole %v", c.what, readWhole, readInPart, c.whole)
 		}
+	}
+}
+
+// A schema whose tenants are not keyed by their first column is refused:
+// the state would be read again by the wrong names.
+func TestKeysAreWhereTheHookReadsThem(t *testing.T) {
+	st, _ := openNew(t, options())
+	if err := checkKeys(st.db); err != nil {
+		t.Fatal(err)
+	}
+	keyed["tenants"] = struct {
+		index  int
+		column string
+	}{1, "name"}
+	defer func() {
+		keyed["tenants"] = struct {
+			index  int
+			column string
+		}{0, "name"}
+	}()
+	if err := checkKeys(st.db); err == nil || !strings.Contains(err.Error(), "column 1 of tenants is app") {
+		t.Fatalf("a key elsewhere: %v", err)
 	}
 }

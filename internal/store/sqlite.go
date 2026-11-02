@@ -222,6 +222,10 @@ func Open(path string, options Options) (*SQLite, error) {
 		_ = s.Close()
 		return nil, fmt.Errorf("database %s: upgrade the schema: %w", path, err)
 	}
+	if err := checkKeys(db); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("database %s: %w", path, err)
+	}
 	state, err := load(db)
 	if err != nil {
 		_ = s.Close()

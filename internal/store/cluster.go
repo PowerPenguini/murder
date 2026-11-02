@@ -428,7 +428,15 @@ func (s *SQLite) Nodes() []Node {
 	state := s.state.Load()
 	nodes := make([]Node, 0, len(state.nodes))
 	for _, name := range slices.Sorted(maps.Keys(state.nodes)) {
-		nodes = append(nodes, state.nodes[name])
+		// States share what a write did not change: a caller must not
+		// change the state through what it gets.
+		node := state.nodes[name]
+		node.Public = slices.Clone(node.Public)
+		if node.Tunnel != nil {
+			tunnel := *node.Tunnel
+			node.Tunnel = &tunnel
+		}
+		nodes = append(nodes, node)
 	}
 	return nodes
 }
