@@ -24,7 +24,13 @@ the audit log as `<person> via murder-panel`.
 - **Look:** black and white, quiet and sharp: lines instead of boxes, a
   state as a dot and a word, labels in light capitals, monospace for
   data (hashes, addresses, logs, YAML, figures), row actions in a
-  "⋯" menu and dangerous ones behind a typed name. The mark is a crow's head
+  "⋯" menu and dangerous ones behind a typed name. Charts are SVG drawn by
+  the server (`charts.go`) in one grey ramp, validated as an ordinal ramp on
+  the page, the brightest step kept for what needs attention: live tenants
+  by state, each node's tenants, copies and reserved memory, where each
+  tenant runs and keeps its copy (a column per node), the events of the
+  last day by hour, a tenant's of the last fortnight by day, and each
+  app's tenants. A tooltip names every mark; the tables stay beside them. The mark is a crow's head
   with two copies behind it, in one colour (`static/crow.svg`; the head
   alone for the tab icon, `static/icon.svg`). No JavaScript frameworks and
   nothing loaded from elsewhere (a strict CSP, so no inline styles); pages

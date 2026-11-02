@@ -18,3 +18,18 @@
   </tbody>
 </table>
 {{end}}
+
+{{define "activity"}}
+<svg class="activity" viewBox="0 -18 1000 108" role="img" aria-label="events per bucket, {{.Total}} in all">
+  <line x1="0" y1="64" x2="1000" y2="64" stroke="#262626" stroke-width="1"/>
+  {{if .Max}}<line x1="0" y1="0" x2="1000" y2="0" stroke="#1a1a1a" stroke-width="1"/><text x="0" y="-6" class="tick">{{.Max}}</text>{{end}}
+  {{range .Columns}}<g><title>{{.Title}}</title>
+    <rect x="{{.HitX}}" y="0" width="{{.HitW}}" height="64" fill="transparent"/>
+    {{if .Unknown}}<rect x="{{.X}}" y="62" width="{{.W}}" height="2" fill="#262626"/>{{else if .N}}<rect x="{{.X}}" y="{{.Y}}" width="{{.W}}" height="{{.H}}" fill="{{if .Now}}#ececec{{else}}#7a7a7a{{end}}"/>{{end}}</g>{{end}}
+  <text x="0" y="84" class="tick">{{.From}}</text>
+  <text x="500" y="84" class="tick" text-anchor="middle">{{.Mid}}</text>
+  <text x="1000" y="84" class="tick" text-anchor="end">{{.To}}</text>
+</svg>
+{{end}}
+
+{{define "swatch"}}<svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><rect x="1" y="4" width="12" height="6" fill="{{.}}"/></svg>{{end}}

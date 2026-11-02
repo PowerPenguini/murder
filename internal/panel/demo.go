@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -94,6 +95,7 @@ func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, 
 		{ID: 207, At: now.Add(-26 * time.Hour), Actor: "root", Action: "node.upgraded", Detail: "fsn-1 to a10e3bfb8220"},
 		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "anna via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "addhoc"},
 	}
+	all = withHistory(all, now)
 	var out []store.Event
 	for _, e := range all {
 		if (query.Tenant == "" || e.Tenant == query.Tenant) && (query.Before == 0 || e.ID < query.Before) {
@@ -104,4 +106,37 @@ func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, 
 		}
 	}
 	return out, nil
+}
+
+// withHistory adds a fortnight of the cluster's routine to the demo's
+// events, busier lately, the same every time: for the activity charts.
+// Every event is numbered anew, newest highest.
+func withHistory(events []store.Event, now time.Time) []store.Event {
+	tenants := []string{"iqtms", "acme-logistics", "baltic-freight", "kowalski-trans", "nordwind", "vistula-cargo", "test-staging"}
+	routine := []struct{ action, detail string }{
+		{"tenant.replica-ready", "the copy holds the whole data"},
+		{"tenant.rolled", ""},
+		{"tenant.replica", "copy kept"},
+		{"tenant.restarted", "exit 137 (most likely out of memory)"},
+	}
+	seed := uint32(7)
+	next := func(n int) int {
+		seed = seed*1664525 + 1013904223
+		return int(seed>>8) % n
+	}
+	for i := 0; i < 160; i++ {
+		// Most fall within the last day, the rest across the fortnight.
+		ago := time.Duration(next(24*60)) * time.Minute
+		if i%3 == 0 {
+			ago = time.Duration(next(14*24)) * time.Hour
+		}
+		r := routine[next(len(routine))]
+		tenant := tenants[next(len(tenants))]
+		events = append(events, store.Event{At: now.Add(-ago - time.Minute), Actor: "murder", Action: r.action, Tenant: tenant, App: "addhoc", Detail: r.detail})
+	}
+	slices.SortStableFunc(events, func(a, b store.Event) int { return b.At.Compare(a.At) })
+	for i := range events {
+		events[i].ID = int64(len(events) - i)
+	}
+	return events
 }

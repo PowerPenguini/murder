@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html/template"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -29,6 +30,10 @@ type nodeView struct {
 	State        tag
 	Tenants      int
 	Copies       int
+	// MemoryMB is what its serving tenants' limits reserve.
+	MemoryMB int
+	// The bars of the nodes' table, each against the largest node's.
+	TenantBar, CopyBar, MemoryBar meter
 }
 
 func nodeState(node api.NodeState, now time.Time) tag {
@@ -81,12 +86,18 @@ func replicaState(t api.Tenant, cluster bool) tag {
 type tenantRow struct {
 	api.Tenant
 	State, Replica tag
+	// Placements say, per node, what the tenant has there.
+	Placements []placement
 }
 
 type overviewData struct {
 	Nodes   []nodeView
 	Tenants []tenantRow
 	Events  []store.Event
+	// States splits the live tenants by what they need; Activity counts
+	// the events of the last day, by hour.
+	States   segmentedBar
+	Activity activity
 	// Counts of tenants: all live ones, those meant to run (not
 	// suspended), those running healthy, and those without a copy that
 	// could take over.
@@ -105,14 +116,18 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	if err := all(
 		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
 		func() (err error) { tenants, err = s.backend.List(ctx); return },
-		func() (err error) { events, err = s.backend.Events(ctx, store.EventQuery{Limit: 8}); return },
+		func() (err error) {
+			events, err = s.backend.Events(ctx, store.EventQuery{Limit: activityEvents})
+			return
+		},
 	); err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	now := s.now()
 	clustered := len(nodes.Nodes) > 1
-	data := overviewData{Events: events}
+	data := overviewData{Events: events[:min(len(events), 8)],
+		Activity: activityOf(events, now, 24*time.Hour, time.Hour, len(events) < activityEvents, hourLabel)}
 	byName := map[string]*nodeView{}
 	for _, node := range nodes.Nodes {
 		data.Nodes = append(data.Nodes, nodeView{NodeState: node, Leader: node.Name == nodes.Leader, Self: node.Name == nodes.Self, State: nodeState(node, now)})
@@ -139,11 +154,26 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		}
 		if n := byName[t.Node]; n != nil {
 			n.Tenants++
+			if !t.Spec.Suspended {
+				n.MemoryMB += t.Spec.Limits.MemoryMB
+			}
 		}
 		if n := byName[t.Replica]; n != nil {
 			n.Copies++
 		}
 	}
+	var most, mostMemory int
+	for _, n := range data.Nodes {
+		most, mostMemory = max(most, n.Tenants, n.Copies), max(mostMemory, n.MemoryMB)
+	}
+	for i := range data.Nodes {
+		n := &data.Nodes[i]
+		n.TenantBar, n.CopyBar, n.MemoryBar = meterOf(n.Tenants, most), meterOf(n.Copies, most), meterOf(n.MemoryMB, mostMemory)
+	}
+	for i := range data.Tenants {
+		data.Tenants[i].Placements = placementsOf(data.Tenants[i], data.Nodes)
+	}
+	data.States = stateBar(data.Tenants)
 	if s.Actions != nil {
 		if apps, err := s.Actions(s.actor(userOf(r))).Apps(ctx); err == nil {
 			for _, app := range apps {
@@ -154,11 +184,17 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	s.write(w, "overview", s.pageFor(w, r, "Overview", "overview", nodes, data), http.StatusOK)
 }
 
+// activityEvents is how many of the newest events the activity charts
+// read: the store's most.
+const activityEvents = 1000
+
 type tenantData struct {
 	Tenant         api.Tenant
 	State, Replica tag
 	Events         []store.Event
-	Env            []envVar
+	// Activity counts its events of the last fortnight, by day.
+	Activity activity
+	Env      []envVar
 	// Targets are the nodes the tenant may move to.
 	Targets []string
 }
@@ -175,7 +211,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	if err := all(
 		func() (err error) { t, err = s.backend.Get(ctx, name); return },
 		func() (err error) {
-			events, err = s.backend.Events(ctx, store.EventQuery{Tenant: name, Limit: 30})
+			events, err = s.backend.Events(ctx, store.EventQuery{Tenant: name, Limit: activityEvents})
 			return
 		},
 		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
@@ -183,7 +219,8 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	data := tenantData{Tenant: t, State: tenantState(t), Replica: replicaState(t, len(nodes.Nodes) > 1), Events: events}
+	data := tenantData{Tenant: t, State: tenantState(t), Replica: replicaState(t, len(nodes.Nodes) > 1), Events: events[:min(len(events), 30)],
+		Activity: activityOf(events, s.now(), 14*24*time.Hour, 24*time.Hour, len(events) < activityEvents, dayLabel)}
 	for key, value := range t.Spec.Env {
 		data.Env = append(data.Env, envVar{key, value})
 	}
@@ -247,6 +284,7 @@ func all(calls ...func() error) error {
 func (s *Server) funcs() template.FuncMap {
 	return template.FuncMap{
 		"static": staticURL,
+		"mem":    memory,
 		"lines":  func(text string) int { return strings.Count(text, "\n") + 1 },
 		"ago":    func(t time.Time) string { return ago(s.now(), t) },
 		"stamp": func(t time.Time) string {
@@ -310,4 +348,12 @@ func shortImage(image string) string {
 		return digest[:12]
 	}
 	return image
+}
+
+// memory says an amount of memory as people do: 768 MB, 1.5 GB.
+func memory(mb int) string {
+	if mb < 1024 {
+		return strconv.Itoa(mb) + " MB"
+	}
+	return strconv.FormatFloat(math.Round(float64(mb)/1024*10)/10, 'f', -1, 64) + " GB"
 }
