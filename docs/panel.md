@@ -78,5 +78,18 @@ Each stage is one PR, reviewed and tested before the next.
    stopped panel left are removed when it starts. Restoring a backup stays on a node (`murder backups
    restore`). Static files carry a hash of their content in their
    address, so a new release never runs an old page's script.
-6. **Apps and secrets:** edit app specs, a tenant's settings and secrets
-   (secrets are never shown whole).
+6. **Apps and secrets:** the Apps page lists apps and creates one; an
+   app's page edits its spec as its file (`spec.AppFile`: what `murder
+   app apply` reads, checked the same way; an app with no scratch mounts
+   says `tmpfs: {}`), refusing a save over a change made since the page
+   was read (the agent checks it as it stores: `PUT /v1/apps/NAME?if=`
+   the app's updatedAt, or `absent` to create only; `murder app apply`
+   stores unconditionally, as the files in git are what counts), and deletes an app no
+   tenant, live or archived, runs (its name typed). A tenant's settings page changes its app, image, env,
+   own secrets and limits (one form, refused if the tenant changed since
+   it was read; an env value that would not read back as itself, such as
+   one of several lines, is quoted as Go quotes it), and gives a live
+   tenant's secret a new value (its name typed). The
+   panel never asks for a secret's value: it shows names and kinds only.
+   A refused form comes back as typed, saying why. The events page also
+   filters by app.

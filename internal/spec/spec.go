@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"path"
 	"regexp"
 	"slices"
@@ -139,6 +140,9 @@ type Limits struct {
 // and stay far below what would overflow the byte counts made of them.
 func (l Limits) Problems() []string {
 	var problems []string
+	if math.IsNaN(l.CPUs) || math.IsInf(l.CPUs, 0) {
+		problems = append(problems, "cpus must be a number")
+	}
 	if l.MemoryMB < 0 || l.CPUs < 0 || l.PIDs < 0 || l.DiskGB < 0 {
 		problems = append(problems, "limits must not be negative")
 	}

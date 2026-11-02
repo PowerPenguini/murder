@@ -123,6 +123,16 @@ type NewTenant struct {
 	Node string
 }
 
+// AppIf conditions storing an app, so that a change made meanwhile is not
+// overwritten: the zero value stores whatever is stored.
+type AppIf struct {
+	// Absent stores it only as a new app.
+	Absent bool
+	// UpdatedAt, if set, stores it only over the app as it was changed last
+	// at that time.
+	UpdatedAt time.Time
+}
+
 // AppChange is the outcome of storing an app.
 type AppChange struct {
 	App     App
@@ -227,6 +237,9 @@ type Store interface {
 	// block it; live ones whose spec changes get a new generation. Archived
 	// tenants are checked when restored.
 	PutApp(app App, actor string) (AppChange, error)
+	// PutAppIf is PutApp only if the stored app is as cond expects:
+	// ErrConflict otherwise, with nothing changed.
+	PutAppIf(app App, cond AppIf, actor string) (AppChange, error)
 	// DeleteApp removes an app no tenant runs.
 	DeleteApp(name, actor string) error
 

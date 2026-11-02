@@ -197,8 +197,8 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 }
 
 type eventsData struct {
-	Events []store.Event
-	Tenant string
+	Events      []store.Event
+	Tenant, App string
 	// Older is the ID to page back from; zero when there are no more.
 	Older int64
 }
@@ -206,7 +206,7 @@ type eventsData struct {
 const eventsPage = 100
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	query := store.EventQuery{Tenant: r.URL.Query().Get("tenant"), Limit: eventsPage}
+	query := store.EventQuery{Tenant: r.URL.Query().Get("tenant"), App: r.URL.Query().Get("app"), Limit: eventsPage}
 	if before, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64); err == nil && before > 0 {
 		query.Before = before
 	}
@@ -217,7 +217,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	data := eventsData{Events: events, Tenant: query.Tenant}
+	data := eventsData{Events: events, Tenant: query.Tenant, App: query.App}
 	if len(events) == eventsPage {
 		data.Older = events[len(events)-1].ID
 	}
@@ -247,6 +247,7 @@ func all(calls ...func() error) error {
 func (s *Server) funcs() template.FuncMap {
 	return template.FuncMap{
 		"static": staticURL,
+		"lines":  func(text string) int { return strings.Count(text, "\n") + 1 },
 		"ago":    func(t time.Time) string { return ago(s.now(), t) },
 		"stamp": func(t time.Time) string {
 			if t.IsZero() {

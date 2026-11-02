@@ -26,6 +26,7 @@ func main() {
 	}
 	server.Actions = cluster.As
 	server.Cluster = cluster.AsCluster
+	server.Apps = cluster.AsApps
 	url := "http://" + *listen
 	if *signIn {
 		_, port, _ := net.SplitHostPort(*listen)

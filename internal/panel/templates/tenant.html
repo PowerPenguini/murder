@@ -2,7 +2,7 @@
 <div class="title">
   <h1>{{$t.Spec.Name}}</h1>
   <span class="tag {{$d.State.Kind}}">{{$d.State.Label}}</span>
-  <span class="sub">app {{$t.App}} · on {{$t.Node}} · <a href="{{$t.URL}}">{{$t.Host}}</a>{{if .Acts}} · <a href="/tenants/{{$t.Spec.Name}}/logs">logs</a>{{end}}</span>
+  <span class="sub">app {{$t.App}} · on {{$t.Node}} · <a href="{{$t.URL}}">{{$t.Host}}</a>{{if .Acts}} · <a href="/tenants/{{$t.Spec.Name}}/logs">logs</a>{{end}}{{if .Edits}} · <a href="/tenants/{{$t.Spec.Name}}/settings">settings</a>{{end}}</span>
 </div>
 
 {{if .Acts}}

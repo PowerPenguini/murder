@@ -799,3 +799,31 @@ func TestThePanelsPeopleThroughTheAPI(t *testing.T) {
 		t.Fatalf("the removal's actor: %+v", events)
 	}
 }
+
+// A conditional store of an app is refused, with a 409, when the app is
+// not as the client read it.
+func TestStoringAnAppOnlyAsRead(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutAppIf(ctx, "web", appSpec(), store.AppIf{Absent: true}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.client.PutAppIf(ctx, "web", appSpec(), store.AppIf{Absent: true})
+	checkStatus(t, "create over an app", err, 409)
+	read, err := f.client.App(ctx, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := appSpec()
+	next.HealthPath = "/ready"
+	_, err = f.client.PutAppIf(ctx, "web", next, store.AppIf{UpdatedAt: read.UpdatedAt.Add(-time.Millisecond)})
+	checkStatus(t, "store over a newer app", err, 409)
+	if changed, err := f.client.PutAppIf(ctx, "web", next, store.AppIf{UpdatedAt: read.UpdatedAt}); err != nil || !changed.Changed {
+		t.Fatalf("store over the app as read = %+v, %v", changed, err)
+	}
+	recorder := httptest.NewRecorder()
+	f.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/v1/apps/web?if=yesterday", strings.NewReader(`{"image":"x","user":"1:1"}`)))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "if must be") {
+		t.Fatalf("a bad if: %d %s", recorder.Code, recorder.Body)
+	}
+}

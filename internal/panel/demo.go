@@ -48,7 +48,7 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 	tenant := func(name, app, node, replica string, ready bool, status *reconcile.Status) api.Tenant {
 		return api.Tenant{
 			Spec: spec.Tenant{Name: name, Image: "sha256:c23c323553d0a47eedff01b1cfb4a83a8f9b1b03f7f75a454c9ebf1391201156", Port: 8080, HealthPath: "/health", DataPath: "/data", User: "1000:1000",
-				Env: map[string]string{"DATA_DIR": "/data", "TZ": "Europe/Warsaw"}, Secrets: spec.Secrets{"SESSION_KEY": {Kind: "random", Bytes: 32}},
+				Env: map[string]string{"DATA_DIR": "/data", "TZ": "Europe/Warsaw"}, Secrets: spec.Secrets{"SESSION_KEY": {Kind: "hex"}},
 				Limits: spec.Limits{MemoryMB: 256, CPUs: 1, PIDs: 256, DiskGB: 10}},
 			App: app, Node: node, Replica: replica, ReplicaReady: ready, ReplicaSyncedAt: now.Add(-9 * time.Second),
 			Host: name + ".iqtms.io", URL: "https://" + name + ".iqtms.io", Generation: 3,

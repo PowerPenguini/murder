@@ -27,6 +27,7 @@
 </header>
 <nav>
   <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
+  <a href="/apps" {{if eq .Section "apps"}}class="on"{{end}}>Apps</a>
   <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
   <a href="/cluster" {{if eq .Section "cluster"}}class="on"{{end}}>Cluster</a>
   <a href="/access" {{if eq .Section "access"}}class="on"{{end}}>Access</a>

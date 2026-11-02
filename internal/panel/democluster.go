@@ -21,6 +21,7 @@ type DemoCluster struct {
 	tenants map[string]api.Tenant
 	events  []store.Event
 	nodes   demoNodes
+	apps    map[string]api.App
 	// Pace is how long the demo's slow work takes, as an upgrade's install
 	// or a backup: for watching jobs; none in tests.
 	Pace time.Duration
@@ -33,6 +34,7 @@ func NewDemoCluster() *DemoCluster {
 		d.tenants[t.Spec.Name] = t
 	}
 	d.events, _ = d.Demo.Events(context.Background(), store.EventQuery{})
+	d.demoApps()
 	return d
 }
 
@@ -60,7 +62,7 @@ func (d *DemoCluster) Events(_ context.Context, query store.EventQuery) ([]store
 	defer d.mu.Unlock()
 	var out []store.Event
 	for _, e := range d.events {
-		if (query.Tenant == "" || e.Tenant == query.Tenant) && (query.Before == 0 || e.ID < query.Before) {
+		if (query.Tenant == "" || e.Tenant == query.Tenant) && (query.App == "" || e.App == query.App) && (query.Before == 0 || e.ID < query.Before) {
 			out = append(out, e)
 		}
 		if query.Limit > 0 && len(out) == query.Limit {
@@ -97,10 +99,6 @@ func (a *demoActor) change(name, action, detail string, change func(*api.Tenant)
 	a.tenants[name] = t
 	a.record(action, name, detail)
 	return t, nil
-}
-
-func (a *demoActor) Apps(context.Context) ([]api.App, error) {
-	return []api.App{{Name: "addhoc"}, {Name: "testapp"}}, nil
 }
 
 func (a *demoActor) Create(_ context.Context, request api.TenantRequest) (api.Applied, error) {

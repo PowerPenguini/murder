@@ -1,0 +1,43 @@
+{{define "content"}}{{$d := .Data}}{{$a := $d.App}}
+<div class="title">
+  <h1>{{$a.Name}}</h1>
+  <span class="sub">app · {{len $a.Tenants}} tenants · changed {{ago $a.UpdatedAt}} ago · <a href="/events?app={{$a.Name}}">events</a></span>
+</div>
+
+<section class="actions" data-still>
+  <h2>spec</h2>
+  <p class="dim">Saved, it rolls out to every live tenant of the app, one container after the other; a change that would make one invalid is refused whole. Keep the app's file in git in step.</p>
+  <form method="post" class="editor">
+    <input type="hidden" name="do" value="save">
+    <input type="hidden" name="updated" value="{{$d.Updated}}">
+    <textarea name="file" rows="{{add1 (lines $d.File)}}" spellcheck="false" aria-label="the app's spec">{{$d.File}}</textarea>
+    <div><button type="submit">save and roll out</button></div>
+  </form>
+</section>
+
+<section>
+  <h2>tenants</h2>
+  <table>
+    <tbody>
+    {{range $a.Tenants}}<tr><td><a href="/tenants/{{.}}">{{.}}</a></td><td class="actions"><a href="/tenants/{{.}}/settings">settings</a></td></tr>
+    {{else}}<tr><td class="empty">no live tenant runs it</td></tr>{{end}}
+    </tbody>
+  </table>
+</section>
+
+{{if $d.Archived}}
+<section>
+  <h2>archived tenants</h2>
+  <p class="dim">{{range $i, $n := $d.Archived}}{{if $i}}, {{end}}<a href="/tenants/{{$n}}">{{$n}}</a>{{end}}: they run the app's spec once restored, and keep it from being deleted.</p>
+</section>
+{{end}}
+
+{{if and (not $a.Tenants) (not $d.Archived)}}
+<section class="actions">
+  <h2>delete</h2>
+  <form method="post" class="inline"><input type="hidden" name="do" value="delete">
+    <input type="text" name="confirm" placeholder="type {{$a.Name}} to delete" aria-label="the app's name" autocomplete="off" required>
+    <button type="submit" class="danger">delete the app</button></form>
+</section>
+{{end}}
+{{end}}
