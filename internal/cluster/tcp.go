@@ -13,11 +13,12 @@ import (
 // a dead owner would keep its copy locked against promotion.
 //
 // Dialing is bounded, and the keepalive ends a connection that waits on a
-// silent peer: a receiver waiting for data, or a sender waiting for the
-// answer. A sender whose data the peer does not acknowledge is not ended
-// by TCP: a TCP user timeout would also end one to a live peer that merely
-// stops reading for a while, as a receive waiting for a dataset's lock
-// does. Such a sender instead pings the peer meanwhile (watchPeer).
+// silent peer with nothing of its own unacknowledged: a receiver waiting
+// for data. A connection whose data the peer does not acknowledge, a
+// request or a body, is not ended by TCP for many minutes: a TCP user
+// timeout would also end one to a live peer that merely stops reading for
+// a while, as a receive waiting for a dataset's lock does. Every request
+// to a node instead pings it meanwhile (watchPeer).
 const dialTimeout = 10 * time.Second
 
 var keepAlive = net.KeepAliveConfig{Enable: true, Idle: 15 * time.Second, Interval: 5 * time.Second, Count: 3}

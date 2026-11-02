@@ -586,7 +586,7 @@ type Replicas interface {
 
 // Ping reports whether node answers on the cluster port, within ctx.
 func (c *Cluster) Ping(ctx context.Context, node string) error {
-	return c.stream(ctx, node, http.MethodGet, "/cluster/v1/ping", nil, nil)
+	return c.request(ctx, node, http.MethodGet, "/cluster/v1/ping", nil, nil)
 }
 
 // SnapshotsOn lists the snapshots of the copy of tenant node keeps.
@@ -614,17 +614,21 @@ type moveRequest struct {
 }
 
 // stream sends a request with any body to node and decodes its answer.
-// A request with a body, which may stream data for a long time, is
-// cancelled once node has answered no ping for long.
+// It is cancelled once node has answered no ping for long: one that died
+// with the request unacknowledged would otherwise hold it for as long as
+// the kernel retransmits, many minutes, keepalive or not.
 func (c *Cluster) stream(ctx context.Context, node, method, path string, body io.Reader, out any) error {
+	ctx, stop := watchPeer(ctx, func(ctx context.Context) error { return c.Ping(ctx, node) }, peerPingEvery, peerSilentFor)
+	defer stop()
+	return c.request(ctx, node, method, path, body, out)
+}
+
+// request is stream without the watch: for pings, which their caller
+// bounds.
+func (c *Cluster) request(ctx context.Context, node, method, path string, body io.Reader, out any) error {
 	address, err := c.addressOf(node)
 	if err != nil {
 		return err
-	}
-	if body != nil {
-		var stop func()
-		ctx, stop = watchPeer(ctx, func(ctx context.Context) error { return c.Ping(ctx, node) }, peerPingEvery, peerSilentFor)
-		defer stop()
 	}
 	request, err := http.NewRequestWithContext(ctx, method, "https://"+address+path, body)
 	if err != nil {
