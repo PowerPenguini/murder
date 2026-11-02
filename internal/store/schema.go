@@ -86,7 +86,10 @@ CREATE TABLE nodes (
 	created_at TEXT NOT NULL,
 	-- Set when the node's tenants failed over to their replicas, until it
 	-- answers again: it is given no copies meanwhile.
-	failed_at  TEXT
+	failed_at  TEXT,
+	-- Until then the node restarts on purpose, its agent stopped cleanly:
+	-- it is not failed over for not answering.
+	away_until TEXT
 ) STRICT;
 
 -- Sealed secret values, kept until a purge deletes the tenant.
@@ -210,8 +213,13 @@ func upgrade(db *sql.DB) error {
 	}
 	// Version 9 marks the nodes whose tenants failed over.
 	if version == 8 {
-		if _, err := tx.Exec(`ALTER TABLE nodes ADD COLUMN failed_at TEXT`); err != nil {
-			return err
+		for _, statement := range []string{
+			`ALTER TABLE nodes ADD COLUMN failed_at TEXT`,
+			`ALTER TABLE nodes ADD COLUMN away_until TEXT`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

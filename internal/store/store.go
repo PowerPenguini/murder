@@ -157,6 +157,9 @@ type Node struct {
 	// FailedAt is set when the node's tenants failed over to their
 	// replicas, until it answers again; it keeps no copies meanwhile.
 	FailedAt time.Time `json:"failedAt,omitzero"`
+	// AwayUntil is set while the node restarts on purpose, its agent
+	// stopped cleanly: until then it is not failed over for not answering.
+	AwayUntil time.Time `json:"awayUntil,omitzero"`
 }
 
 // Failed reports whether the node's tenants failed over and it has not
@@ -241,6 +244,12 @@ type Store interface {
 	// stop moving; those moving to it stay where they are.
 	FailOver(node, actor string) (FailedOver, error)
 	NodeBack(node, actor string) error
+	// MarkFailed marks node failed, without moving its tenants: the copies
+	// it kept go elsewhere. It reports whether it changed anything.
+	MarkFailed(node, actor string) (bool, error)
+	// Away marks node as restarting on purpose until until; a zero until
+	// clears it.
+	Away(node string, until time.Time) error
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error

@@ -108,11 +108,12 @@ func TestAFailoverGivesTenantsToTheirReplicas(t *testing.T) {
 	if _, err := st.PlaceReplicas("murder"); err != nil {
 		t.Fatal(err)
 	}
-	// "lone" has no copy anywhere, as if replication never caught up.
-	if _, err := st.writeAs(schemaVersion, true, false, func(tx *recorder, _ *snapshot, _ time.Time) error {
-		return tx.Exec(`UPDATE tenants SET replica = '' WHERE name = 'lone'`)
-	}); err != nil {
-		t.Fatal(err)
+	// The copies of a and b hold the whole data; lone's never got there.
+	for _, name := range []string{"a", "b", "c"} {
+		record, _ := st.Get(name)
+		if err := st.ReplicaReady(name, record.Replica); err != nil {
+			t.Fatal(err)
+		}
 	}
 	before := map[string]Record{}
 	for _, record := range st.List() {
@@ -145,7 +146,9 @@ func TestAFailoverGivesTenantsToTheirReplicas(t *testing.T) {
 	if again, err := st.FailOver("nbg-1", "murder"); err != nil || len(again.Promoted) != 0 || st.state.Load().version != version {
 		t.Fatalf("a second failover: %+v, %v", again, err)
 	}
-	// No copies and no moves go to the failed node.
+	// No copies and no moves go to the failed node, and its stranded
+	// tenant gets no copy that could never be whole: a second failover
+	// still finds nothing to run it from.
 	if _, err := st.PlaceReplicas("murder"); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +156,12 @@ func TestAFailoverGivesTenantsToTheirReplicas(t *testing.T) {
 		if record.Replica == "nbg-1" {
 			t.Fatalf("tenant %s keeps its copy on the failed node", record.Spec.Name)
 		}
+	}
+	if lone, _ := st.Get("lone"); lone.Replica != "" && lone.ReplicaReady {
+		t.Fatalf("the stranded tenant: %+v", lone)
+	}
+	if again, err := st.FailOver("nbg-1", "murder"); err != nil || len(again.Promoted) != 0 {
+		t.Fatalf("a failover after placement: %+v, %v", again, err)
 	}
 	if _, err := st.StartMove("c", "nbg-1", "alice"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("a move to the failed node: %v", err)
@@ -165,6 +174,55 @@ func TestAFailoverGivesTenantsToTheirReplicas(t *testing.T) {
 		return event.Action == "tenant.failed-over" && event.Detail == "nbg-1 → "+before["a"].Replica
 	}) {
 		t.Fatalf("events of a: %+v", events)
+	}
+}
+
+// A node marked failed keeps no copies but keeps its tenants; one away is
+// marked until a time, and the mark is cleared.
+func TestNodesAreMarkedFailedAndAway(t *testing.T) {
+	st, _ := withApp(t, options())
+	for _, node := range []Node{{Name: "node-1", Address: "10.0.0.1:7400"}, {Name: "nbg-1", Address: "10.0.0.2:7400"}} {
+		if err := st.PutNode(node, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.Create(NewTenant{Name: "a", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(NewTenant{Name: "b", App: "web", Node: "nbg-1"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PlaceReplicas("murder"); err != nil {
+		t.Fatal(err)
+	}
+	if marked, err := st.MarkFailed("nbg-1", "murder"); err != nil || !marked {
+		t.Fatalf("marked %v, %v", marked, err)
+	}
+	if a, _ := st.Get("a"); a.Replica != "" {
+		t.Fatalf("a keeps its copy on a failed node: %+v", a)
+	}
+	if b, _ := st.Get("b"); b.Node != "nbg-1" {
+		t.Fatal("a tenant left the node marked failed")
+	}
+	if marked, err := st.MarkFailed("nbg-1", "murder"); err != nil || marked {
+		t.Fatalf("marked again: %v, %v", marked, err)
+	}
+	until := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	if err := st.Away("nbg-1", until); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range st.Nodes() {
+		if node.Name == "nbg-1" && !node.AwayUntil.Equal(until) {
+			t.Fatalf("away until %v", node.AwayUntil)
+		}
+	}
+	if err := st.Away("nbg-1", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range st.Nodes() {
+		if !node.AwayUntil.IsZero() {
+			t.Fatalf("still away: %+v", node)
+		}
 	}
 }
 

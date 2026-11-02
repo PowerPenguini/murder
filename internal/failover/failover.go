@@ -24,7 +24,9 @@ import (
 type Fencer interface {
 	// PowerOff powers node off and returns once the provider confirms it
 	// is off; an error means it is not known to be off.
-	PowerOff(ctx context.Context, node string) error
+	PowerOff(ctx context.Context, node store.Node) error
+	// Off reports whether the provider has node off now.
+	Off(ctx context.Context, node store.Node) (bool, error)
 }
 
 // Monitor watches the other nodes from the cluster's leader.
@@ -99,6 +101,10 @@ func (m *Monitor) Run(ctx context.Context) {
 // Check probes every other node once and starts the failover of one that
 // has been dead long enough. Only the leader acts; a new leader counts
 // from its first probe, as it knows nothing older.
+//
+// The leader acts only while it hears a majority of the nodes, itself
+// included: one that hears too few may be the node cut off, and would
+// otherwise power the others off one after the other.
 func (m *Monitor) Check(ctx context.Context) {
 	if !m.Leader() {
 		m.mu.Lock()
@@ -108,8 +114,9 @@ func (m *Monitor) Check(ctx context.Context) {
 	}
 	now := m.now()
 	self := m.Store.Node()
+	all := m.Store.Nodes()
 	var nodes []store.Node
-	for _, node := range m.Store.Nodes() {
+	for _, node := range all {
 		if node.Name != self {
 			nodes = append(nodes, node)
 		}
@@ -137,9 +144,19 @@ func (m *Monitor) Check(ctx context.Context) {
 		m.leading = true
 		m.Log.Info("leading the cluster: watching the other nodes")
 	}
+	// Nodes no longer in the cluster leave the metrics.
+	for name := range m.seen {
+		if !slices.ContainsFunc(nodes, func(node store.Node) bool { return node.Name == name }) {
+			delete(m.seen, name)
+			delete(m.blocked, name)
+			delete(m.retry, name)
+		}
+	}
+	heard := 1 // this node
 	var dead []store.Node
 	for i, node := range nodes {
 		if answered[i] {
+			heard++
 			m.seen[node.Name] = now
 			delete(m.blocked, node.Name)
 			delete(m.retry, node.Name)
@@ -152,24 +169,49 @@ func (m *Monitor) Check(ctx context.Context) {
 		if _, known := m.seen[node.Name]; !known {
 			m.seen[node.Name] = now // unanswered since this leader began
 		}
-		if !node.Failed() && now.Sub(m.seen[node.Name]) >= m.after() && !now.Before(m.retry[node.Name]) {
+		switch {
+		case now.Sub(m.seen[node.Name]) < m.after(), now.Before(m.retry[node.Name]):
+		case now.Before(node.AwayUntil):
+			m.note(node.Name, "it restarts on purpose (its agent stopped cleanly) until "+node.AwayUntil.Format(time.RFC3339))
+		case node.Failed() && len(m.promotable(node.Name)) == 0:
+			// Failed, with nothing left to run elsewhere.
+		default:
 			dead = append(dead, node)
 		}
 	}
-	start := ""
+	start := store.Node{}
 	if m.fencing == "" && len(dead) > 0 {
-		if frozen := m.Store.Frozen(); frozen != "" {
+		switch frozen := m.Store.Frozen(); {
+		case frozen != "":
 			m.note(dead[0].Name, "changes are frozen ("+frozen+"): nodes restart on purpose during an upgrade")
-		} else {
-			start = dead[0].Name
-			m.fencing = start
+		case heard < len(all)/2+1:
+			m.note(dead[0].Name, fmt.Sprintf("this leader hears only %d of %d nodes: it may be the one cut off", heard, len(all)))
+		default:
+			start = dead[0]
+			m.fencing = start.Name
 		}
 	}
-	lastSeen := m.seen[start]
+	lastSeen := m.seen[start.Name]
 	m.mu.Unlock()
-	if start != "" {
+	if start.Name != "" {
 		go m.failOver(context.WithoutCancel(ctx), start, lastSeen)
 	}
+}
+
+// promotable names the tenants of node a copy that holds their whole data
+// could run elsewhere.
+func (m *Monitor) promotable(node string) []string {
+	failed := map[string]bool{}
+	for _, n := range m.Store.Nodes() {
+		failed[n.Name] = n.Failed()
+	}
+	var names []string
+	for _, record := range m.Store.List() {
+		if record.Node == node && record.ReplicaReady && record.Replica != "" && record.Replica != node && !failed[record.Replica] {
+			names = append(names, record.Spec.Name)
+		}
+	}
+	return names
 }
 
 func (m *Monitor) back(node string) {
@@ -201,29 +243,45 @@ func (m *Monitor) note(node, why string) {
 	m.blocked[node] = why
 }
 
-// failOver powers node off and, once it is confirmed off and settle has
-// passed since it last answered, gives its tenants to their replicas.
-func (m *Monitor) failOver(ctx context.Context, node string, lastSeen time.Time) {
+// failOver marks node failed, so the copies it kept go elsewhere, and, if
+// any of its tenants could run from a copy, powers it off; once the power-
+// off is confirmed and settle has passed since it last answered, it gives
+// those tenants to their replicas, unless the node answered meanwhile or
+// is no longer off.
+func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.Time) {
 	defer func() {
 		m.mu.Lock()
 		m.fencing = ""
 		m.mu.Unlock()
 	}()
-	log := m.Log.With("node", node)
-	if m.Fence == nil {
+	log := m.Log.With("node", node.Name)
+	blocked := func(why string) {
 		m.mu.Lock()
-		m.block(node, "no provider to power it off is set up (cluster.failover); once it is off, run: murder cluster failover "+node+" -powered-off")
+		m.block(node.Name, why)
 		m.mu.Unlock()
+	}
+	if marked, err := m.Store.MarkFailed(node.Name, "murder (failover)"); err != nil {
+		blocked("it could not be marked failed: " + err.Error())
+		return
+	} else if marked {
+		log.Warn("a node does not answer: it keeps no copies until it does", "since", lastSeen)
+	}
+	tenants := m.promotable(node.Name)
+	if len(tenants) == 0 {
+		log.Warn("a node does not answer; none of its tenants has a copy to run from, so it is not powered off")
 		return
 	}
-	log.Warn("a node does not answer: powering it off", "since", lastSeen)
+	manual := "; once it is off, run: murder cluster failover " + node.Name + " -powered-off"
+	if m.Fence == nil {
+		blocked("no provider to power it off is set up (cluster.failover)" + manual)
+		return
+	}
+	log.Warn("a node does not answer: powering it off", "since", lastSeen, "tenants", tenants)
 	fenceCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	err := m.Fence.PowerOff(fenceCtx, node)
 	cancel()
 	if err != nil {
-		m.mu.Lock()
-		m.block(node, "its power-off is not confirmed: "+err.Error()+"; once it is off, run: murder cluster failover "+node+" -powered-off")
-		m.mu.Unlock()
+		blocked("its power-off is not confirmed: " + err.Error() + manual)
 		return
 	}
 	log.Warn("the node is powered off")
@@ -232,19 +290,31 @@ func (m *Monitor) failOver(ctx context.Context, node string, lastSeen time.Time)
 			return
 		}
 	}
+	m.mu.Lock()
+	answered := m.seen[node.Name].After(lastSeen)
+	m.mu.Unlock()
+	if answered {
+		log.Warn("the node answered again before its tenants ran elsewhere: they stay")
+		return
+	}
 	if !m.Leader() {
 		log.Warn("no longer leading: the new leader fails the node over")
 		return
 	}
-	outcome, err := m.Store.FailOver(node, "murder (failover)")
+	check, cancel := context.WithTimeout(ctx, 30*time.Second)
+	off, err := m.Fence.Off(check, node)
+	cancel()
+	if err != nil || !off {
+		blocked(fmt.Sprintf("it is no longer known to be off (off %v, %v)", off, err) + manual)
+		return
+	}
+	outcome, err := m.Store.FailOver(node.Name, "murder (failover)")
 	if err != nil {
-		m.mu.Lock()
-		m.block(node, "the failover was not written: "+err.Error())
-		m.mu.Unlock()
+		blocked("the failover was not written: " + err.Error())
 		return
 	}
 	m.mu.Lock()
-	delete(m.blocked, node)
+	delete(m.blocked, node.Name)
 	m.mu.Unlock()
 	log.Warn("the node's tenants run from their replicas", "promoted", outcome.Promoted, "stranded", outcome.Stranded)
 }

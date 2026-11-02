@@ -28,9 +28,13 @@ type fixture struct {
 	leader   bool
 	fenced   []string
 	fenceErr error
-	waited   []time.Duration
-	store    *store.SQLite
-	monitor  *Monitor
+	// on is a node the provider reports on again after its power-off.
+	on string
+	// onWait runs during the settle wait.
+	onWait  func()
+	waited  []time.Duration
+	store   *store.SQLite
+	monitor *Monitor
 }
 
 func (f *fixture) now() time.Time {
@@ -45,11 +49,17 @@ func (f *fixture) advance(d time.Duration) {
 	f.clock = f.clock.Add(d)
 }
 
-func (f *fixture) PowerOff(_ context.Context, node string) error {
+func (f *fixture) PowerOff(_ context.Context, node store.Node) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.fenced = append(f.fenced, node)
+	f.fenced = append(f.fenced, node.Name)
 	return f.fenceErr
+}
+
+func (f *fixture) Off(_ context.Context, node store.Node) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.on != node.Name, nil
 }
 
 // newFixture is node n1, leading a cluster of n1, n2 and n3; n2 runs
@@ -82,6 +92,13 @@ func newFixture(t *testing.T) *fixture {
 	if _, err := st.PlaceReplicas("test"); err != nil {
 		t.Fatal(err)
 	}
+	// Their copies hold the whole data, as n2 reports once it sent them.
+	for _, name := range []string{"a", "b"} {
+		record, _ := st.Get(name)
+		if err := st.ReplicaReady(name, record.Replica); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := st.Create(store.NewTenant{Name: "lone", App: "web", Node: "n2"}, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +118,11 @@ func newFixture(t *testing.T) *fixture {
 			f.mu.Lock()
 			f.waited = append(f.waited, d)
 			f.clock = f.clock.Add(d)
+			onWait := f.onWait
 			f.mu.Unlock()
+			if onWait != nil {
+				onWait()
+			}
 			return nil
 		},
 	}
@@ -307,13 +328,17 @@ func TestHetznerPowersOffAndConfirms(t *testing.T) {
 				_, _ = io.WriteString(w, `{"servers":[]}`)
 				return
 			}
-			fmt.Fprintf(w, `{"servers":[{"id":%d,"name":%q,"status":%q}]}`, ids[name], name, status[name])
+			fmt.Fprintf(w, `{"servers":[{"id":%d,"name":%q,"status":%q,"private_net":[{"ip":"10.0.0.%d"}]}]}`, ids[name], name, status[name], ids[name])
 		case strings.HasSuffix(r.URL.Path, "/actions/poweroff"):
 			status[names[strings.Split(r.URL.Path, "/")[2]]] = "stopping"
 			_, _ = io.WriteString(w, `{"action":{"id":1,"status":"running"}}`)
 		default:
 			name := names[strings.TrimPrefix(r.URL.Path, "/servers/")]
 			reads++
+			if reads == 2 {
+				w.WriteHeader(http.StatusServiceUnavailable) // once: tried again
+				return
+			}
 			if status[name] == "stopping" && reads >= 3 {
 				status[name] = "off"
 			}
@@ -322,21 +347,118 @@ func TestHetznerPowersOffAndConfirms(t *testing.T) {
 	}))
 	defer server.Close()
 	h := &Hetzner{Token: "secret", Endpoint: server.URL, Servers: map[string]string{"n2": "murder-n2", "n3": "murder-n3"}, Poll: time.Millisecond}
-	if err := h.PowerOff(context.Background(), "n2"); err != nil {
+	n2, n3 := store.Node{Name: "n2", Address: "10.0.0.2:7400"}, store.Node{Name: "n3", Address: "10.0.0.3:7400"}
+	if err := h.PowerOff(context.Background(), n2); err != nil {
 		t.Fatal(err)
 	}
 	if status["murder-n2"] != "off" || !slices.Contains(calls, "POST /servers/2/actions/poweroff") {
 		t.Fatalf("calls %v, status %v", calls, status)
 	}
 	calls = nil
-	if err := h.PowerOff(context.Background(), "n3"); err != nil || slices.Contains(calls, "POST /servers/3/actions/poweroff") {
+	if off, err := h.Off(context.Background(), n3); err != nil || !off {
+		t.Fatalf("off: %v, %v", off, err)
+	}
+	if err := h.PowerOff(context.Background(), n3); err != nil || slices.Contains(calls, "POST /servers/3/actions/poweroff") {
 		t.Fatalf("a server off already: %v, %v", calls, err)
 	}
-	if err := h.PowerOff(context.Background(), "n9"); err == nil {
+	if err := h.PowerOff(context.Background(), store.Node{Name: "n9", Address: "10.0.0.9:7400"}); err == nil {
 		t.Fatal("a node without a server was confirmed off")
 	}
+	// A server that does not have the node's address is not the node's.
+	calls = nil
+	if err := h.PowerOff(context.Background(), store.Node{Name: "n2", Address: "10.0.0.7:7400"}); err == nil || slices.ContainsFunc(calls, func(call string) bool { return strings.HasPrefix(call, "POST") }) {
+		t.Fatalf("another machine's server: %v, %v", err, calls)
+	}
 	wrong := &Hetzner{Token: "wrong", Endpoint: server.URL, Servers: h.Servers}
-	if err := wrong.PowerOff(context.Background(), "n2"); err == nil || !strings.Contains(err.Error(), "401") {
+	if err := wrong.PowerOff(context.Background(), n2); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("a wrong token: %v", err)
+	}
+}
+
+// A leader that hears too few nodes may be the one cut off: it powers no
+// one off, rather than every other node in turn.
+func TestALeaderThatHearsTooFewPowersNoOneOff(t *testing.T) {
+	f := newFixture(t)
+	f.check(t)
+	f.down["n2"], f.down["n3"] = true, true
+	f.advance(40 * time.Second)
+	f.check(t)
+	f.advance(40 * time.Second)
+	f.check(t)
+	if len(f.fenced) != 0 {
+		t.Fatalf("fenced %v while hearing only itself", f.fenced)
+	}
+	var page strings.Builder
+	f.monitor.WriteMetrics(metrics.NewWriter(&page))
+	if !strings.Contains(page.String(), `murder_failover_blocked{node="n2"} 1`) {
+		t.Fatalf("metrics:\n%s", page.String())
+	}
+}
+
+// A node restarting on purpose, its agent stopped cleanly, is left alone
+// until its away mark ends.
+func TestANodeAwayIsLeftAlone(t *testing.T) {
+	f := newFixture(t)
+	f.check(t)
+	if err := f.store.Away("n2", f.now().Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	f.down["n2"] = true
+	f.advance(5 * time.Minute)
+	f.check(t)
+	if len(f.fenced) != 0 {
+		t.Fatalf("a node away was powered off: %v", f.fenced)
+	}
+	f.advance(6 * time.Minute)
+	f.check(t)
+	if len(f.fenced) != 1 {
+		t.Fatalf("after its away mark: fenced %v", f.fenced)
+	}
+}
+
+// A node that answers again, or is no longer off, before its tenants run
+// elsewhere keeps them.
+func TestANodeBackInTimeKeepsItsTenants(t *testing.T) {
+	for name, back := range map[string]func(f *fixture){
+		"answers": func(f *fixture) {
+			f.down["n2"] = false
+			f.monitor.Check(context.Background())
+		},
+		"powered on": func(f *fixture) { f.on = "n2" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.check(t)
+			f.down["n2"] = true
+			f.onWait = func() { back(f) }
+			f.advance(30 * time.Second)
+			f.check(t)
+			if len(f.fenced) != 1 || f.nodeOf(t, "a") != "n2" {
+				t.Fatalf("fenced %v, a on %s", f.fenced, f.nodeOf(t, "a"))
+			}
+		})
+	}
+}
+
+// A dead node whose tenants have no whole copy is marked failed, so its
+// copies go elsewhere, but not powered off: nothing could run instead.
+func TestADeadNodeWithNothingToPromoteIsNotPoweredOff(t *testing.T) {
+	f := newFixture(t)
+	f.check(t)
+	f.down["n3"] = true // runs nothing; keeps a's or b's copy
+	f.advance(31 * time.Second)
+	f.check(t)
+	if len(f.fenced) != 0 {
+		t.Fatalf("fenced %v", f.fenced)
+	}
+	for _, node := range f.store.Nodes() {
+		if node.Name == "n3" && !node.Failed() {
+			t.Fatal("n3 is not marked failed")
+		}
+	}
+	for _, record := range f.store.List() {
+		if record.Replica == "n3" {
+			t.Fatalf("tenant %s keeps its copy on a node that does not answer", record.Spec.Name)
+		}
 	}
 }

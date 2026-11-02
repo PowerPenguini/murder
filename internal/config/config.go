@@ -298,6 +298,9 @@ func (a Agent) Validate() error {
 	if a.Backups != nil {
 		problems = append(problems, a.Backups.problems(a.Volumes.Driver)...)
 	}
+	if a.Cluster != nil && a.Cluster.Failover != nil && a.Volumes.Driver != "zfs" {
+		problems = append(problems, "cluster.failover needs the zfs volume driver: only ZFS nodes keep copies of tenants to run them from")
+	}
 	switch a.Volumes.Driver {
 	case "dir":
 		if !strings.HasPrefix(a.Volumes.Root, "/") {

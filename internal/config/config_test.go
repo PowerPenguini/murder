@@ -168,7 +168,7 @@ func TestBackupsFitTheirMode(t *testing.T) {
 // Failover needs a provider to power nodes off, and a delay long enough
 // that a busy node is not powered off; it waits 30 s by default.
 func TestFailoverNeedsAProvider(t *testing.T) {
-	base := "baseDomain: example.com\ncluster:\n  address: 10.0.0.2:7400\n  failover:\n"
+	base := "baseDomain: example.com\nvolumes: {driver: zfs, parent: tank/murder/tenants}\ncluster:\n  address: 10.0.0.2:7400\n  failover:\n"
 	agent, err := Parse([]byte(base + "    hetzner: {tokenFile: /etc/murder/hcloud.token, servers: {n1: murder-n1}}\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -184,5 +184,9 @@ func TestFailoverNeedsAProvider(t *testing.T) {
 		if _, err := Parse([]byte(base + extra)); err == nil || !strings.Contains(err.Error(), "failover") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+	dir := strings.Replace(base, "{driver: zfs, parent: tank/murder/tenants}", "{driver: dir}", 1)
+	if _, err := Parse([]byte(dir + "    hetzner: {tokenFile: /etc/murder/hcloud.token}\n")); err == nil || !strings.Contains(err.Error(), "zfs") {
+		t.Errorf("failover with the dir driver: %v", err)
 	}
 }

@@ -273,6 +273,11 @@ func runAgent(args []string) error {
 		if member != nil && !waitCaughtUp(ctx, member, log) {
 			return
 		}
+		if member != nil {
+			if err := st.Away(node, time.Time{}); err != nil {
+				log.Warn("mark this node back from a restart", "error", err)
+			}
+		}
 		reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
 	}()
 	if cfg.Firewall == config.FirewallNftables {
@@ -294,6 +299,13 @@ func runAgent(args []string) error {
 		log.Error("stopping the agent", "error", runErr)
 	case runErr = <-fatal:
 		log.Error("stopping the agent", "error", runErr)
+	}
+	// A clean stop, as for a reboot, marks the node away for a while: the
+	// leader does not power it off for not answering meanwhile.
+	if member != nil && runErr == nil {
+		if err := st.Away(node, time.Now().Add(awayFor)); err != nil {
+			log.Warn("mark this node away while it restarts", "error", err)
+		}
 	}
 	// Tenant containers keep running while the agent is down or restarting;
 	// only the agent's own listeners stop. A pass, also one an API call
@@ -346,6 +358,10 @@ func newMonitor(cfg *config.Cluster, st *store.SQLite, member *cluster.Cluster, 
 	}
 	return monitor
 }
+
+// awayFor is how long a node whose agent stopped cleanly is not failed over
+// for not answering: long enough for a reboot.
+const awayFor = 10 * time.Minute
 
 // waitCaughtUp returns once this node has applied what the cluster has, or
 // false when ctx ends first.
