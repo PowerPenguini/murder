@@ -419,6 +419,10 @@ func (a *Auth) enrollFinish(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, err, http.StatusBadGateway)
 		return
 	}
+	// It signed its person in already.
+	if err := a.agent.UsePasskey(r.Context(), key.ID, key.Data); err != nil {
+		a.log.Warn("record a passkey's use", "error", err)
+	}
 	writeJSON(w, answer)
 }
 
