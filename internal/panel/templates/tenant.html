@@ -55,12 +55,12 @@
 <section class="near">
   <div class="stats">
     {{with $d.Usage}}{{with .Memory}}
-    <div class="stat"><div class="caps">Memory</div><div class="v">{{.MemoryText}}{{with .MemoryLimit}} <small>of {{.}}</small>{{end}}</div>{{if .MemoryLimit}}{{template "bar" .Memory}}{{end}}</div>
-    <div class="stat"><div class="caps">CPU</div><div class="v">{{.CPUText}}{{with $d.Usage.CPULimit}} <small>of {{.}} {{if eq . "1"}}core{{else}}cores{{end}}</small>{{end}}</div>{{if $d.Usage.CPULimit}}{{template "bar" .CPU}}{{end}}</div>
+    <div class="stat{{if ge .Memory.Width 90.0}} hot{{end}}"><div class="caps">Memory</div><div class="v">{{.MemoryText}}{{with .MemoryLimit}} <small>of {{.}}</small>{{end}}</div>{{if .MemoryLimit}}{{template "bar" .Memory}}{{end}}</div>
+    <div class="stat{{if ge .CPU.Width 90.0}} hot{{end}}"><div class="caps">CPU</div><div class="v">{{.CPUText}}{{with $d.Usage.CPULimit}} <small>of {{.}} {{if eq . "1"}}core{{else}}cores{{end}}</small>{{end}}</div>{{if $d.Usage.CPULimit}}{{template "bar" .CPU}}{{end}}</div>
     {{end}}
-    <div class="stat"><div class="caps">Requests/min</div><div class="v">{{.Requests}}{{if ne .Errors "0"}} <small>{{.Errors}} {{if eq .Errors "1"}}error{{else}}errors{{end}}</small>{{end}}</div></div>
+    <div class="stat"><div class="caps">Requests/min</div><div class="v">{{.Requests}}{{if ne .Errors "0"}} <small class="bad">{{.Errors}} {{if eq .Errors "1"}}error{{else}}errors{{end}}</small>{{end}}</div></div>
     <div class="stat"><div class="caps">Response, p95</div><div class="v">{{.Wait}}</div></div>
-    {{with .DataText}}<div class="stat"><div class="caps">Data</div><div class="v">{{.}}{{with $d.Usage.DataLimit}} <small>of {{.}}</small>{{end}}</div>{{with $d.Usage.Data}}{{template "bar" .}}{{end}}</div>{{end}}
+    {{with .DataText}}<div class="stat{{with $d.Usage.Data}}{{if ge .Width 90.0}} hot{{end}}{{end}}"><div class="caps">Data</div><div class="v">{{.}}{{with $d.Usage.DataLimit}} <small>of {{.}}</small>{{end}}</div>{{with $d.Usage.Data}}{{template "bar" .}}{{end}}</div>{{end}}
     {{else}}
     <div class="stat"><div class="caps">Memory limit</div><div class="v">{{limit $t.Spec.Limits.MemoryMB}} <small>MB</small></div></div>
     <div class="stat"><div class="caps">CPU limit</div><div class="v">{{limit $t.Spec.Limits.CPUs}} <small>cores</small></div></div>

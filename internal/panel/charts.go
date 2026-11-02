@@ -19,6 +19,9 @@ const (
 	ink2 = "#b0b0b0"
 	ink3 = "#7a7a7a" // the calm majority
 	ink4 = "#4a4a4a" // what is at rest
+	// inkBad is the one colour, kept for what is wrong: a failure, an
+	// error, a limit nearly reached. 6.5:1 on #000.
+	inkBad = "#ff5147"
 )
 
 // chartWidth is the width the charts are drawn at; they scale to their box.
@@ -228,6 +231,8 @@ type lineSeries struct {
 type level struct {
 	Y     float64
 	Label string
+	// Hot says the measure's last value is near it.
+	Hot bool
 }
 
 type hoverStep struct {
@@ -310,6 +315,11 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 	}
 	if limit > 0 {
 		chart.Limit = &level{Y: y(limit), Label: "limit " + format(limit)}
+		if len(samples) > 0 {
+			for _, v := range samples[len(samples)-1].Values {
+				chart.Limit.Hot = chart.Limit.Hot || 100*v/limit >= memoryWarn
+			}
+		}
 	}
 	// The highest value names the top of the scale, unless the limit is it.
 	if limit <= 0 || top/1.08 > limit*1.05 {

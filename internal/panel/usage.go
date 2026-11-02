@@ -76,6 +76,8 @@ func (s *Server) tenantUsage(ctx context.Context, name string) *tenantUsage {
 			return []float64{perSecond(p.DiskRead, p), perSecond(p.DiskWrite, p)}
 		}), 0, now, usageStep, throughput),
 	}}
+	// Errors are drawn in the colour of what is wrong.
+	u.Charts[2].Series[1].Stroke = inkBad
 	u.Memory = tenantUse{MemoryText: size(float64(series.Now.Memory)), CPUText: cores(series.Now.CPU)}
 	if limit := series.Now.CPULimit; limit > 0 {
 		u.Memory.CPU, u.CPULimit = meterOf(int(series.Now.CPU*1000), int(limit*1000)), cores(limit)

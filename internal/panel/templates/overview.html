@@ -2,7 +2,7 @@
 <div class="figures">
   <div class="figure"><div class="n">{{template "upcount" $d.Nodes}}<small> / {{len $d.Nodes}}</small></div><div class="l">nodes up</div></div>
   <div class="figure"><div class="n">{{$d.Healthy}}<small> / {{$d.Serving}}</small></div><div class="l">tenants healthy</div></div>
-  <div class="figure"><div class="n">{{len $d.Attention}}</div><div class="l">need attention</div></div>
+  <div class="figure{{range $d.Attention}}{{if .Bad}} alarm{{break}}{{end}}{{end}}"><div class="n">{{len $d.Attention}}</div><div class="l">need attention</div></div>
 </div>
 
 <section class="near">

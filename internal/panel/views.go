@@ -63,7 +63,7 @@ func tenantState(t api.Tenant) tag {
 	case t.Status.Phase == "running" && t.Status.Healthy:
 		return tag{"running", "ok"}
 	case t.Status.Phase == "running":
-		return tag{"unhealthy", "warn"}
+		return tag{"unhealthy", "bad"}
 	case t.Status.Phase == "failed":
 		return tag{"failed", "bad"}
 	}

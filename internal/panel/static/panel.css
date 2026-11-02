@@ -8,6 +8,9 @@
   --faint: #555;
   --line: #191919;
   --line-strong: #333;
+  /* The one colour: what is wrong, and only that. */
+  --bad: #ff5147;
+  --bad-wash: #170706;
   --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -67,8 +70,8 @@ section { margin-top: 48px; }
 .st { white-space: nowrap; }
 .st::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 8px; vertical-align: 1px; background: var(--fg); }
 .st.warn::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--fg); }
-.st.bad { font-weight: 600; }
-.st.bad::before { width: 8px; height: 8px; vertical-align: 0; }
+.st.bad { font-weight: 600; color: var(--bad); }
+.st.bad::before { width: 8px; height: 8px; vertical-align: 0; background: var(--bad); }
 .st.mute { color: var(--dim); }
 .st.mute::before { background: transparent; box-shadow: inset 0 0 0 1px var(--faint); }
 
@@ -151,7 +154,7 @@ details.drop .pop { left: 0; right: auto; }
 
 /* ── notices ───────────────────────────────────────── */
 .notice { padding: 10px 14px; margin: 0 0 28px; border-left: 2px solid var(--fg); background: var(--raised); font-size: 13px; }
-.notice.bad { font-weight: 600; border-left-style: dashed; }
+.notice.bad { font-weight: 600; border-left-color: var(--bad); background: var(--bad-wash); }
 .frozen { padding: 9px 32px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--dim); }
 .frozen::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 10px; box-shadow: inset 0 0 0 1.5px var(--fg); }
 
@@ -181,12 +184,13 @@ main.gate { min-height: 100vh; display: grid; place-items: center; padding: 40px
 .gatebox .field input { width: 100%; }
 .wide { width: 100%; justify-content: center; padding: 10px 14px; }
 .status { font-size: 13px; color: var(--dim); margin: 14px 0 0; min-height: 20px; }
-.status.bad { color: var(--fg); font-weight: 600; }
+.status.bad { color: var(--bad); font-weight: 600; }
 .aside { margin-top: 28px; font-size: 13px; color: var(--dim); }
 
 /* ── error ─────────────────────────────────────────── */
 .fault { max-width: 640px; }
 .fault p { color: var(--dim); }
+.fault h1 { color: var(--bad); }
 
 @media (max-width: 760px) {
   .top { height: auto; padding: 14px 16px; gap: 14px; flex-wrap: wrap; }
@@ -238,7 +242,7 @@ ul.attention .st::before { margin-right: 12px; }
 p.calm { margin: 0; color: var(--dim); }
 p.calm .st::before { margin-right: 10px; }
 .problem { margin: 14px 0 0; padding: 12px 16px; border-left: 2px solid var(--fg); background: var(--raised); max-width: 80ch; }
-.problem.bad { font-weight: 600; }
+.problem.bad { font-weight: 600; border-left-color: var(--bad); background: var(--bad-wash); }
 
 /* ── where a page is ── */
 nav.crumbs { display: flex; gap: 8px; color: var(--dim); font-size: 13px; margin-bottom: 10px; }
@@ -266,7 +270,7 @@ input[type=number], input[type=search] {
   font: inherit; font-size: 13px; font-weight: 400; line-height: 1.4; text-transform: none; letter-spacing: normal;
 }
 input[type=number]:focus, input[type=search]:focus { outline: none; border-color: var(--fg); }
-input:invalid:not(:placeholder-shown) { border-color: var(--fg); border-style: dashed; }
+input:invalid:not(:placeholder-shown) { border-color: var(--bad); }
 button:disabled, button:disabled:hover { opacity: 0.4; cursor: not-allowed; background: transparent; color: var(--fg); border-color: var(--line-strong); }
 button.primary:disabled { background: var(--fg); color: var(--bg); }
 button.small, .button.small { padding: 3px 9px; font-size: 12.5px; }
@@ -279,7 +283,7 @@ label.check input { accent-color: var(--fg); }
 div.logs { margin: 0; padding: 14px 18px; background: var(--raised); border: 1px solid var(--line); font-family: var(--mono); font-size: 12.5px; line-height: 1.6; max-height: 75vh; overflow: auto; }
 div.logs > div { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); }
 div.logs > div.warn { color: var(--fg); }
-div.logs > div.error { color: var(--fg); font-weight: 700; border-left: 2px solid var(--fg); padding-left: 8px; margin-left: -10px; }
+div.logs > div.error { color: var(--bad); font-weight: 600; border-left: 2px solid var(--bad); padding-left: 8px; margin-left: -10px; }
 div.logs > div[hidden] { display: none; }
 table.tight td { white-space: nowrap; }
 table.tight svg.bar { width: 90px; }
@@ -297,3 +301,9 @@ dl.tiles > div { min-width: 0; }
 dl.tiles > div.span { grid-column: span 2; }
 dl.tiles dt { font-weight: 300; text-transform: uppercase; letter-spacing: 0.14em; font-size: 11px; color: var(--dim); margin-bottom: 4px; }
 dl.tiles dd { margin: 0; overflow-wrap: anywhere; }
+
+/* ── what is wrong, in its colour ── */
+.figure.alarm .n { color: var(--bad); }
+.stat.hot .v, .stat .v small.bad { color: var(--bad); }
+svg .tick.bad { fill: var(--bad); }
+ul.attention li:has(.st.bad) a { color: var(--bad); }
