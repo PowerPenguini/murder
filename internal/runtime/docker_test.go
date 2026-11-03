@@ -250,6 +250,74 @@ func TestPullSendsRegistryCredentials(t *testing.T) {
 	}
 }
 
+func TestPullSignsInWithTheConfiguredRegistries(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	dir := t.TempDir()
+	ghcrToken, hubToken := filepath.Join(dir, "ghcr.token"), filepath.Join(dir, "hub.token")
+	if err := os.WriteFile(ghcrToken, []byte("ghp_first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hubToken, []byte("dckr_pat"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A login comes before the auth file's entry for the same registry.
+	authFile := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(authFile, []byte(`{"auths":{"ghcr.io":{"auth":"`+base64.StdEncoding.EncodeToString([]byte("old:old"))+`"},"quay.io":{"auth":"`+base64.StdEncoding.EncodeToString([]byte("q:q"))+`"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docker.authFile = authFile
+	docker.registries = []RegistryLogin{{Host: "GHCR.io", Username: "bot", TokenFile: ghcrToken}, {Host: "docker.io", Username: "hubber", TokenFile: hubToken}}
+	var sent string
+	engine.handlers["POST /images/create"] = func(w http.ResponseWriter, r *http.Request) {
+		sent = r.Header.Get("X-Registry-Auth")
+		_, _ = w.Write([]byte(`{"status":"done"}`))
+	}
+	login := func(ref string) map[string]string {
+		t.Helper()
+		sent = ""
+		if err := docker.PullImage(context.Background(), ref); err != nil {
+			t.Fatal(err)
+		}
+		if sent == "" {
+			return nil
+		}
+		decoded, _ := base64.URLEncoding.DecodeString(sent)
+		var auth map[string]string
+		_ = json.Unmarshal(decoded, &auth)
+		return auth
+	}
+	if auth := login("ghcr.io/org/app@sha256:abc"); auth["username"] != "bot" || auth["password"] != "ghp_first" || auth["serveraddress"] != "ghcr.io" {
+		t.Fatalf("ghcr.io login = %v", auth)
+	}
+	// A new token in the file is used at the next pull.
+	if err := os.WriteFile(ghcrToken, []byte("ghp_second"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if auth := login("ghcr.io/org/app@sha256:abc"); auth["password"] != "ghp_second" {
+		t.Fatalf("after a new token = %v", auth)
+	}
+	for _, ref := range []string{"postgres@sha256:abc", "library/postgres@sha256:abc", "docker.io/library/postgres@sha256:abc", "index.docker.io/x/y@sha256:abc"} {
+		if auth := login(ref); auth["username"] != "hubber" || auth["serveraddress"] != "docker.io" {
+			t.Errorf("Docker Hub login for %s = %v", ref, auth)
+		}
+	}
+	// The auth file still serves the registries no login names.
+	if auth := login("quay.io/org/app@sha256:abc"); auth["username"] != "q" {
+		t.Fatalf("quay.io from the auth file = %v", auth)
+	}
+	if auth := login("registry.example.com/app@sha256:abc"); auth != nil {
+		t.Fatalf("credentials sent to a registry with none: %v", auth)
+	}
+	// A token that cannot be read fails the pull rather than pulling
+	// without it.
+	if err := os.Remove(ghcrToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.PullImage(context.Background(), "ghcr.io/org/app@sha256:abc"); err == nil || !strings.Contains(err.Error(), "read the token for GHCR.io") {
+		t.Fatalf("pull without its token = %v", err)
+	}
+}
+
 func TestEngineErrorsAreTyped(t *testing.T) {
 	engine, docker := newFakeEngine(t)
 	engine.handlers["POST /containers/c1/start"] = func(w http.ResponseWriter, _ *http.Request) {

@@ -111,7 +111,11 @@ func runAgent(args []string) error {
 	if cfg.Cluster == nil && (st.Cluster() != "" || len(st.Nodes()) > 0) {
 		return fmt.Errorf("the database belongs to cluster %s: give the node its cluster section back in %s", st.Cluster(), *configPath)
 	}
-	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: node, RegistryAuthFile: cfg.RegistryAuthFile})
+	logins := make([]runtime.RegistryLogin, 0, len(cfg.Registries))
+	for _, registry := range cfg.Registries {
+		logins = append(logins, runtime.RegistryLogin{Host: registry.Host, Username: registry.Username, TokenFile: registry.TokenFile})
+	}
+	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: node, Registries: logins, RegistryAuthFile: cfg.RegistryAuthFile})
 	volumes, err := newVolumes(cfg.Volumes)
 	if err != nil {
 		return err

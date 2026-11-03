@@ -6,7 +6,11 @@ masterKeyFile: /etc/murder/master.key
 socket: /run/murder/agent.sock
 socketGroup: murder                # members may run the murder CLI without root (they control every tenant)
 dockerSocket: /var/run/docker.sock
-registryAuthFile: /etc/murder/registry.json   # docker config.json with "auths" for private registries
+registries:                        # private registries: images are pulled with these logins
+  - host: ghcr.io                  # GitHub's container registry; another registry is another entry
+    username: powerpenguini
+    tokenFile: /etc/murder/ghcr.token   # a token that may only read packages (0600)
+# registryAuthFile: /etc/murder/registry.json   # or a docker config.json with "auths"
 networkPool: 10.240.0.0/16         # one /28 per tenant network (the tenant at .2); must not overlap host or Docker networks
 firewall: nftables                 # keeps tenants from the host and private networks; off only for development
 metrics: 127.0.0.1:9464            # /metrics for Prometheus or VictoriaMetrics (tenant names: keep it private); unset = off

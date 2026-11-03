@@ -40,18 +40,31 @@ type DockerOptions struct {
 	// Node labels every object this agent creates and limits List and
 	// ListNetworks to them.
 	Node string
+	// Registries sign in to private registries, before RegistryAuthFile.
+	Registries []RegistryLogin
 	// RegistryAuthFile, if set, is a Docker config.json whose "auths" entries
 	// hold registry credentials ("auth" is base64 of user:password).
 	// Credential helpers are not supported.
 	RegistryAuthFile string
 }
 
+// RegistryLogin signs in to one registry with a user and a token read from
+// a file at every pull.
+type RegistryLogin struct {
+	// Host is the registry's host, with its port if any; docker.io is
+	// Docker Hub.
+	Host      string
+	Username  string
+	TokenFile string
+}
+
 // Docker talks to the Docker Engine API over its unix socket.
 type Docker struct {
-	client   *http.Client
-	base     string
-	node     string
-	authFile string
+	client     *http.Client
+	base       string
+	node       string
+	registries []RegistryLogin
+	authFile   string
 
 	// exits holds what the event log said about each container's last
 	// exit.
@@ -67,7 +80,7 @@ func NewDocker(options DockerOptions) *Docker {
 			return dialer.DialContext(ctx, "unix", options.Socket)
 		},
 	}
-	return &Docker{client: &http.Client{Transport: transport}, base: "http://docker/" + apiVersion, node: options.Node, authFile: options.RegistryAuthFile}
+	return &Docker{client: &http.Client{Transport: transport}, base: "http://docker/" + apiVersion, node: options.Node, registries: options.Registries, authFile: options.RegistryAuthFile}
 }
 
 // newDockerForURL points the client at an HTTP server; tests use it.
@@ -328,9 +341,25 @@ func splitTag(ref string) (string, string) {
 }
 
 // registryAuth returns the X-Registry-Auth value for repository's registry,
-// or "" when no credentials are configured for it. The engine does not read
-// the credentials "docker login" saves; the client must send them.
+// or "" when no credentials are configured for it: a login in registries
+// first, then the auth file. The engine does not read the credentials
+// "docker login" saves; the client must send them.
 func (d *Docker) registryAuth(repository string) (string, error) {
+	registry := registryOf(repository)
+	for _, login := range d.registries {
+		if hubAlias(strings.ToLower(login.Host)) != registry {
+			continue
+		}
+		token, err := os.ReadFile(login.TokenFile)
+		if err != nil {
+			return "", fmt.Errorf("read the token for %s: %w", login.Host, err)
+		}
+		password := strings.TrimSpace(string(token))
+		if password == "" {
+			return "", fmt.Errorf("the token file for %s, %s, is empty", login.Host, login.TokenFile)
+		}
+		return encodeAuth(login.Username, password, registry), nil
+	}
 	if d.authFile == "" {
 		return "", nil
 	}
@@ -346,13 +375,9 @@ func (d *Docker) registryAuth(repository string) (string, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return "", fmt.Errorf("parse registry auth %s: %w", d.authFile, err)
 	}
-	registry := "docker.io"
-	if first, _, ok := strings.Cut(repository, "/"); ok && (strings.ContainsAny(first, ".:") || first == "localhost") {
-		registry = first
-	}
 	for host, entry := range config.Auths {
 		host = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://"), "/")
-		if host == registry || (registry == "docker.io" && strings.HasPrefix(host, "index.docker.io")) {
+		if hubAlias(strings.ToLower(strings.TrimSuffix(host, "/v1"))) == registry {
 			decoded, err := base64.StdEncoding.DecodeString(entry.Auth)
 			if err != nil {
 				return "", fmt.Errorf("registry auth for %s is not base64", host)
@@ -361,11 +386,33 @@ func (d *Docker) registryAuth(repository string) (string, error) {
 			if !ok {
 				return "", fmt.Errorf("registry auth for %s is not user:password", host)
 			}
-			encoded, _ := json.Marshal(map[string]string{"username": user, "password": password, "serveraddress": registry})
-			return base64.URLEncoding.EncodeToString(encoded), nil
+			return encodeAuth(user, password, registry), nil
 		}
 	}
 	return "", nil
+}
+
+// registryOf is the registry an image's repository is in: the first part
+// of its name when that names a host, Docker Hub otherwise.
+func registryOf(repository string) string {
+	if first, _, ok := strings.Cut(repository, "/"); ok && (strings.ContainsAny(first, ".:") || first == "localhost") {
+		return hubAlias(strings.ToLower(first))
+	}
+	return "docker.io"
+}
+
+// hubAlias gives Docker Hub's other host names as docker.io.
+func hubAlias(host string) string {
+	switch host {
+	case "index.docker.io", "registry-1.docker.io":
+		return "docker.io"
+	}
+	return host
+}
+
+func encodeAuth(user, password, registry string) string {
+	encoded, _ := json.Marshal(map[string]string{"username": user, "password": password, "serveraddress": registry})
+	return base64.URLEncoding.EncodeToString(encoded)
 }
 
 func (d *Docker) EnsureNetwork(ctx context.Context, name, subnet string, labels map[string]string) error {

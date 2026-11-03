@@ -57,22 +57,27 @@ defaults: {memoryMB: 768}
 
 func TestParseRejectsBadConfig(t *testing.T) {
 	for name, document := range map[string]string{
-		"empty":         "",
-		"unknown field": "baseDomain: example.com\nbaseDomian: typo.com\n",
-		"two documents": "baseDomain: example.com\n---\nnode: other\n",
-		"defaults":      "baseDomain: example.com\ndefaults: {diskGB: 9000000000}\n",
-		"firewall":      "baseDomain: example.com\nfirewall: iptables\n",
-		"edge port":     "baseDomain: example.com\nedge: {http: \"localhost\"}\n",
-		"bad driver":    "baseDomain: example.com\nvolumes: {driver: nfs}\n",
-		"zfs no parent": "baseDomain: example.com\nvolumes: {driver: zfs, mountRoot: /srv}\n",
-		"acme partial":  "baseDomain: example.com\nedge: {tls: {mode: acme}}\n",
-		"interval":      "baseDomain: example.com\nreconcileInterval: 10ms\n",
-		"duration":      "baseDomain: example.com\nreconcileInterval: soon\n",
-		"pool":          "baseDomain: example.com\nnetworkPool: 10.0.0.0/28\n",
-		"node":          "baseDomain: example.com\nnode: \"a b\"\n",
-		"dns provider":  "baseDomain: example.com\nedge: {tls: {mode: acme, email: a@b.c, dnsTokenFile: /t, dnsProvider: cloudflare}}\n",
-		"tls storage":   "baseDomain: example.com\nedge: {tls: {mode: internal, storage: \"\"}}\n",
-		"metrics":       "baseDomain: example.com\nmetrics: \":9464\"\n",
+		"empty":          "",
+		"unknown field":  "baseDomain: example.com\nbaseDomian: typo.com\n",
+		"two documents":  "baseDomain: example.com\n---\nnode: other\n",
+		"defaults":       "baseDomain: example.com\ndefaults: {diskGB: 9000000000}\n",
+		"firewall":       "baseDomain: example.com\nfirewall: iptables\n",
+		"edge port":      "baseDomain: example.com\nedge: {http: \"localhost\"}\n",
+		"bad driver":     "baseDomain: example.com\nvolumes: {driver: nfs}\n",
+		"zfs no parent":  "baseDomain: example.com\nvolumes: {driver: zfs, mountRoot: /srv}\n",
+		"acme partial":   "baseDomain: example.com\nedge: {tls: {mode: acme}}\n",
+		"interval":       "baseDomain: example.com\nreconcileInterval: 10ms\n",
+		"duration":       "baseDomain: example.com\nreconcileInterval: soon\n",
+		"pool":           "baseDomain: example.com\nnetworkPool: 10.0.0.0/28\n",
+		"node":           "baseDomain: example.com\nnode: \"a b\"\n",
+		"dns provider":   "baseDomain: example.com\nedge: {tls: {mode: acme, email: a@b.c, dnsTokenFile: /t, dnsProvider: cloudflare}}\n",
+		"tls storage":    "baseDomain: example.com\nedge: {tls: {mode: internal, storage: \"\"}}\n",
+		"metrics":        "baseDomain: example.com\nmetrics: \":9464\"\n",
+		"registry url":   "baseDomain: example.com\nregistries: [{host: \"https://ghcr.io\", username: u, tokenFile: /t}]\n",
+		"registry path":  "baseDomain: example.com\nregistries: [{host: ghcr.io/org, username: u, tokenFile: /t}]\n",
+		"registry user":  "baseDomain: example.com\nregistries: [{host: ghcr.io, tokenFile: /t}]\n",
+		"registry file":  "baseDomain: example.com\nregistries: [{host: ghcr.io, username: u, tokenFile: t}]\n",
+		"registry twice": "baseDomain: example.com\nregistries: [{host: ghcr.io, username: u, tokenFile: /t}, {host: GHCR.io, username: v, tokenFile: /v}]\n",
 	} {
 		if _, err := Parse([]byte(document)); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -87,8 +92,18 @@ func TestExampleConfigParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploy/agent.example.yaml: %v", err)
 	}
-	if agent.Volumes.Driver != "zfs" || agent.Edge.TLS.Mode != "acme" || agent.Metrics != "127.0.0.1:9464" {
+	if agent.Volumes.Driver != "zfs" || agent.Edge.TLS.Mode != "acme" || agent.Metrics != "127.0.0.1:9464" || len(agent.Registries) != 1 || agent.Registries[0].Host != "ghcr.io" {
 		t.Fatalf("example config = %+v", agent)
+	}
+}
+
+func TestRegistries(t *testing.T) {
+	agent, err := Parse([]byte("baseDomain: example.com\nregistries:\n  - {host: ghcr.io, username: bot, tokenFile: /etc/murder/ghcr.token}\n  - {host: \"registry.example.com:5000\", username: ci, tokenFile: /etc/murder/own.token}\n  - {host: localhost:5000, username: me, tokenFile: /t}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.Registries) != 3 || agent.Registries[1] != (Registry{Host: "registry.example.com:5000", Username: "ci", TokenFile: "/etc/murder/own.token"}) {
+		t.Fatalf("registries = %+v", agent.Registries)
 	}
 }
 
