@@ -128,15 +128,18 @@ type Recorder struct {
 	host    Host
 	hostAt  time.Time
 	// started is when the recorder started: an edge that started later
-	// tells it every request it counted. edges are when each edge last
-	// told its counts, by its ID.
-	started time.Time
-	edges   map[string]time.Time
+	// tells it every request it counted. edges are the edge processes
+	// that told their counts, by ID; forgotten is when the latest of those
+	// forgotten since started: an edge that started no later may have
+	// been counted before.
+	started   time.Time
+	edges     map[string]*edgeSeen
+	forgotten time.Time
 }
 
 // NewRecorder keeps node's use.
 func NewRecorder(node string) *Recorder {
-	return &Recorder{node: node, tenants: map[string]*history{}, started: time.Now(), edges: map[string]time.Time{}}
+	return &Recorder{node: node, tenants: map[string]*history{}, started: time.Now(), edges: map[string]*edgeSeen{}}
 }
 
 // EdgeInstance is one edge process. While one edge hands over to the next,
@@ -148,15 +151,26 @@ type EdgeInstance struct {
 	Started time.Time
 }
 
-// edgeRetired is how long an edge that told nothing is still waited for:
-// longer than any edge drains, so one that still serves is never taken
-// for a new one.
+// edgeSeen is what the recorder knows of an edge process.
+type edgeSeen struct {
+	started time.Time
+	told    time.Time
+}
+
+// edgeRetired is how long an edge that told nothing, and that a newer one
+// took over from, is still waited for: longer than any edge drains. The
+// newest edge is waited for however long it says nothing (its agent
+// unreachable, say): what it tells next carries on from what it told.
 const edgeRetired = time.Hour
+
+// maxEdges is how many edge processes are kept at most; past it, the
+// oldest are forgotten first. A node has one edge, and two while it hands
+// over.
+const maxEdges = 16
 
 // edgeCounts are an edge's counts of a tenant's requests as last told.
 type edgeCounts struct {
 	counts metrics.Counts
-	at     time.Time
 }
 
 // history is one tenant's kept minutes, the minute being measured, and
@@ -225,31 +239,61 @@ func (r *Recorder) Disk(tenant string, used, limit int64, at time.Time) {
 func (r *Recorder) Edge(from EdgeInstance, counts map[string]metrics.Counts, at time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for id, told := range r.edges {
-		if at.Sub(told) > edgeRetired {
-			delete(r.edges, id)
+	// The first counts of an edge that started since the recorder did are
+	// all requests the recorder has not seen, unless it may have been
+	// forgotten. Any other edge's first, and the first of a tenant an edge
+	// tells of later (one that moved away and back, say), may hold
+	// requests from before: what follows them is counted.
+	seen := r.edges[from.ID]
+	fresh := seen == nil && !from.Started.IsZero() && !from.Started.Before(r.started) && from.Started.After(r.forgotten)
+	if seen == nil {
+		seen = &edgeSeen{started: from.Started}
+		r.edges[from.ID] = seen
+	}
+	seen.told = at
+	r.retireEdges(at)
+	for tenant, c := range counts {
+		r.history(tenant, at).edge(from.ID, c, fresh)
+	}
+}
+
+// retireEdges forgets the edges that a newer one took over from and that
+// told nothing for edgeRetired, and the oldest past maxEdges.
+func (r *Recorder) retireEdges(at time.Time) {
+	var newest time.Time
+	for _, seen := range r.edges {
+		if seen.started.After(newest) {
+			newest = seen.started
 		}
 	}
-	// The first counts of an edge that started since the recorder did are
-	// all requests the recorder has not seen. Any other edge's first, and
-	// the first of a tenant an edge tells of later (one that moved away and
-	// back, say), may hold requests from before: what follows them is
-	// counted.
-	_, known := r.edges[from.ID]
-	r.edges[from.ID] = at
-	fresh := !known && !from.Started.IsZero() && !from.Started.Before(r.started)
-	for tenant, c := range counts {
-		r.history(tenant, at).edge(from.ID, c, fresh, at)
+	forget := func(id string) {
+		if started := r.edges[id].started; started.After(r.forgotten) {
+			r.forgotten = started
+		}
+		delete(r.edges, id)
+		for _, h := range r.tenants {
+			delete(h.edges, id)
+		}
+	}
+	for id, seen := range r.edges {
+		if seen.started.Before(newest) && at.Sub(seen.told) > edgeRetired {
+			forget(id)
+		}
+	}
+	for len(r.edges) > maxEdges {
+		var oldest string
+		var was *edgeSeen
+		for id, seen := range r.edges {
+			if was == nil || seen.started.Before(was.started) || seen.started.Equal(was.started) && seen.told.Before(was.told) {
+				oldest, was = id, seen
+			}
+		}
+		forget(oldest)
 	}
 }
 
 // edge counts the requests tenant's counts from edge id add.
-func (h *history) edge(id string, counts metrics.Counts, fresh bool, at time.Time) {
-	for other, told := range h.edges {
-		if at.Sub(told.at) > edgeRetired {
-			delete(h.edges, other)
-		}
-	}
+func (h *history) edge(id string, counts metrics.Counts, fresh bool) {
 	told := h.edges[id]
 	if told == nil {
 		told = &edgeCounts{}
@@ -258,7 +302,7 @@ func (h *history) edge(id string, counts metrics.Counts, fresh bool, at time.Tim
 		}
 		h.edges[id] = told
 		if !fresh {
-			told.counts, told.at = counts, at
+			told.counts = counts
 			return
 		}
 	}
@@ -286,7 +330,7 @@ func (h *history) edge(id string, counts metrics.Counts, fresh bool, at time.Tim
 			h.waits[i] += uint64(delta(int64(was), int64(counts.Waits[i])))
 		}
 	}
-	told.counts, told.at = counts, at
+	told.counts = counts
 }
 
 // Host records the node's own use.

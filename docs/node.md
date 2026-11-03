@@ -49,8 +49,9 @@ Every server runs the same processes: `murder agent`, `murder edge` and, if want
   starting it over (a 60 KB response after a click takes one round trip, not
   three); the edge warns at start when it is not set. A client must keep
   sending a request's body once its headers came: one that sends nothing
-  of it for 30 seconds is given up on (a slow upload that keeps moving is
-  not, nor is a response that streams). The edge holds at most 4096
+  of it for 30 seconds, counted from when the edge starts reading it (after
+  any wait for a moving tenant), is given up on, whatever its headers say
+  (a slow upload that keeps moving is not, nor is a response that streams). The edge holds at most 4096
   requests at once before passing them on, waiting for a moving tenant or
   for a small body to keep for another node's edge; past that, a request
   for a moving tenant is answered 503 at once, and a body streams through.
@@ -84,7 +85,7 @@ Every server runs the same processes: `murder agent`, `murder edge` and, if want
   host's CPU, memory and load. The edge counts the requests it passes to
   its own node's containers (each request once, however many edges it went
   through, and once while an edge hands over to the next, as both tell
-  their own counts) and tells the agent every 15 seconds: requests, errors (5xx and
+  their own counts, or after it could not tell for a while) and tells the agent every 15 seconds: requests, errors (5xx and
   requests it could not pass on) and the 95th percentile of the time to
   the response headers. A day is kept a minute at a time, in memory: a
   restarted agent starts the day again. `GET /v1/usage` is the cluster's

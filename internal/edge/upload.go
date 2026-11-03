@@ -14,20 +14,22 @@ const UploadIdle = 30 * time.Second
 
 // UploadDeadline gives up on a request whose client sent its headers but
 // stopped sending its body for idle: it would hold the request, and what
-// it buffered, for as long as it liked. Requests that switch protocols
-// (WebSockets) have no body to wait for; their connections are the
-// proxy's.
+// it buffered, for as long as it liked. Every request with a body is
+// watched, whatever its headers say: an Upgrade header alone switches
+// nothing. A protocol switch (a WebSocket) has no body to wait for, and
+// the server lifts every deadline from a connection taken over for one.
+//
+// The time counts from when the body is first read, not from when the
+// request came: a request may wait for its tenant to arrive first, and a
+// client that asked to be told to go on (Expect: 100-continue) sends
+// nothing until then.
 func UploadDeadline(next http.Handler, idle time.Duration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 || r.Header.Get("Upgrade") != "" || r.Method == http.MethodConnect {
+		if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 || r.Method == http.MethodConnect {
 			next.ServeHTTP(w, r)
 			return
 		}
 		body := &idleBody{ReadCloser: r.Body, controller: http.NewResponseController(w), idle: idle}
-		if !body.extend() {
-			next.ServeHTTP(w, r) // a writer that cannot tell
-			return
-		}
 		r.Body = body
 		defer body.finish()
 		next.ServeHTTP(w, r)
@@ -35,8 +37,9 @@ func UploadDeadline(next http.Handler, idle time.Duration) http.Handler {
 }
 
 // idleBody pushes the connection's read deadline on each time some of the
-// body arrives, and lifts it once the body is read: the server then reads
-// the connection for the next request, or to notice the client leave.
+// body arrives, starting with the first read, and lifts it once the body
+// is read: the server then reads the connection for the next request, or
+// to notice the client leave.
 type idleBody struct {
 	io.ReadCloser
 	controller *http.ResponseController
@@ -45,9 +48,13 @@ type idleBody struct {
 	// done is set once the handler returned: the connection may serve
 	// another request by then, whose deadlines are not the body's.
 	done bool
+	// lifted is set once the body was read whole.
+	lifted bool
 }
 
 func (b *idleBody) Read(p []byte) (int, error) {
+	// The client has until idle from now to send something.
+	b.extend()
 	n, err := b.ReadCloser.Read(p)
 	switch {
 	case err == io.EOF:
@@ -61,26 +68,33 @@ func (b *idleBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// extend gives the client idle more to send the rest; false if the
-// connection's deadlines cannot be set.
-func (b *idleBody) extend() bool {
+// extend gives the client idle more to send the rest. A writer that cannot
+// set deadlines leaves the body unwatched.
+func (b *idleBody) extend() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.done || b.controller.SetReadDeadline(time.Now().Add(b.idle)) == nil
+	if !b.done && !b.lifted {
+		_ = b.controller.SetReadDeadline(time.Now().Add(b.idle))
+	}
 }
 
 func (b *idleBody) lift() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.done {
+		b.lifted = true
 		_ = b.controller.SetReadDeadline(time.Time{})
 	}
 }
 
-// finish leaves the deadline as it is: a body not read yet is still read,
-// up to a limit, before the next request, and must not hang there.
+// finish gives what is left of a body not read whole idle to come: the
+// server still reads it, up to a limit, before the next request, and must
+// not hang there. The deadline is left as it is after that.
 func (b *idleBody) finish() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.done && !b.lifted {
+		_ = b.controller.SetReadDeadline(time.Now().Add(b.idle))
+	}
 	b.done = true
 }

@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -147,6 +148,55 @@ func TestAHandoverCountsEachEdgeOnce(t *testing.T) {
 	tell(child, 20, int((edgeRetired + time.Minute).Seconds()))
 	if edges := r.tenants["web"].edges; len(edges) != 1 || edges["child"] == nil || len(r.edges) != 1 {
 		t.Fatalf("edges kept: %v, %v", edges, r.edges)
+	}
+}
+
+// An edge that said nothing for long (its agent could not be reached,
+// say) carries on from what it told: its counts are never counted twice,
+// nor are those of an edge forgotten that tells again.
+func TestAQuietEdgeIsNotCountedTwice(t *testing.T) {
+	r := NewRecorder("n1")
+	r.started = t0.Add(-time.Hour)
+	tell := func(from EdgeInstance, n uint64, at time.Time) {
+		r.Edge(from, map[string]metrics.Counts{"web": {Count: n, ByClass: [5]uint64{0, n, 0, 0, 0}}}, at)
+	}
+	requests := func(at time.Time) int64 {
+		series, _ := r.Series("web", time.Minute, at.Add(time.Minute))
+		var n int64
+		for _, p := range series.Points {
+			if p.At.Equal(at.Truncate(time.Minute)) {
+				n += p.Requests
+			}
+		}
+		return n
+	}
+	edge := EdgeInstance{ID: "edge", Started: t0}
+	tell(edge, 100, t0)
+	quiet := t0.Add(2 * edgeRetired)
+	tell(edge, 110, quiet)
+	if n := requests(quiet); n != 10 {
+		t.Fatalf("after a quiet edge told again: %d requests", n)
+	}
+	// A newer edge took over; the older one is forgotten once it said
+	// nothing for long, and what it tells after is where counting starts.
+	newer := EdgeInstance{ID: "newer", Started: quiet.Add(time.Minute)}
+	tell(newer, 5, quiet.Add(time.Minute))
+	later := quiet.Add(edgeRetired + 2*time.Minute)
+	tell(newer, 5, later)
+	if r.edges["edge"] != nil {
+		t.Fatal("an edge taken over from is still kept")
+	}
+	tell(edge, 130, later.Add(time.Minute))
+	if n := requests(later.Add(time.Minute)); n != 0 {
+		t.Fatalf("a forgotten edge told again: %d requests", n)
+	}
+	// However many edges there were, only so many are kept.
+	for i := range 3 * maxEdges {
+		at := later.Add(time.Duration(2+i) * time.Minute)
+		tell(EdgeInstance{ID: fmt.Sprint(i), Started: at}, 1, at)
+	}
+	if len(r.edges) > maxEdges || len(r.tenants["web"].edges) > maxEdges {
+		t.Fatalf("%d edges kept, %d for a tenant", len(r.edges), len(r.tenants["web"].edges))
 	}
 }
 
