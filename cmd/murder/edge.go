@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -27,6 +28,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/upgrade"
+	measure "github.com/PowerPenguini/murder/internal/usage"
 )
 
 // slowStartSetting is the kernel setting deploy/murder-sysctl.conf turns off.
@@ -103,7 +105,7 @@ func runEdge(args []string) error {
 	following, stopFollowing := context.WithCancel(context.Background())
 	defer stopFollowing()
 	go followRoutes(following, api.NewClient(cfg.Socket), table, cfg.Edge.Routes, log)
-	go reportServed(following, api.NewClient(cfg.Socket), proxy.Served(), table, log)
+	go reportServed(following, api.NewClient(cfg.Socket), edgeInstance(), proxy.Served(), table, log)
 	if credentials != nil {
 		go keepWarm(following, proxy, table)
 	}
@@ -177,6 +179,7 @@ func runEdge(args []string) error {
 		if certificates = obtainTLS(ctx, cfg, log); certificates == nil {
 			return nil // stopped while waiting
 		}
+		defer certificates.Close()
 		if upgrader.HasParent() {
 			// Its certificate is loaded: plain HTTP redirects at once, as
 			// the edge before it did, instead of answering "starting".
@@ -305,10 +308,18 @@ const handoverGrace = 2 * time.Second
 // for long enough to close (the transport closes them after 90 s).
 const warmEvery = 30 * time.Second
 
+// edgeInstance names this edge process: while it hands over to the next,
+// both tell the agent their counts, each since it started.
+func edgeInstance() measure.EdgeInstance {
+	id := make([]byte, 8)
+	_, _ = rand.Read(id)
+	return measure.EdgeInstance{ID: fmt.Sprintf("%d-%x", os.Getpid(), id), Started: time.Now()}
+}
+
 // reportServed tells the agent, every so often, how many requests this
 // edge passed to its node's containers, and how they went: the agent
 // measures its tenants by them.
-func reportServed(ctx context.Context, client *api.Client, served *metrics.Edge, table *edge.LiveTable, log *slog.Logger) {
+func reportServed(ctx context.Context, client *api.Client, self measure.EdgeInstance, served *metrics.Edge, table *edge.LiveTable, log *slog.Logger) {
 	ticker := time.NewTicker(servedEvery)
 	defer ticker.Stop()
 	quiet := false
@@ -321,7 +332,7 @@ func reportServed(ctx context.Context, client *api.Client, served *metrics.Edge,
 		routes := table.Load()
 		served.Keep(func(tenant string) bool { _, ok := routes.Routes[tenant]; return ok })
 		request, cancel := context.WithTimeout(ctx, servedEvery)
-		err := client.EdgeUsage(request, served.Counts())
+		err := client.EdgeUsage(request, self, served.Counts())
 		cancel()
 		// Said once while it lasts: an agent restarting, or one of an
 		// older release, takes none for a while.
@@ -390,9 +401,13 @@ func (m *edgeMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // publicServer has no write timeout: tenants stream server-sent events.
+// A request's body must keep coming, however slowly, once its headers came.
 func publicServer(handler http.Handler) *http.Server {
-	return &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
+	return &http.Server{Handler: edge.UploadDeadline(handler, uploadIdle), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 }
+
+// uploadIdle is how long a client may send nothing of a request's body.
+var uploadIdle = edge.UploadIdle
 
 // obtainTLS retries until the certificate is available or ctx ends; the
 // reconciler and the plain listener keep working meanwhile.
