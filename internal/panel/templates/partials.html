@@ -8,7 +8,7 @@
     <tr>
       <td class="when" title="{{stamp .At}}">{{ago .At}}</td>
       <td class="dim">{{.Actor}}</td>
-      <td>{{.Action}}</td>
+      <td title="{{.Action}}">{{action .Action}}</td>
       <td>{{with .Tenant}}<a href="/tenants/{{.}}">{{.}}</a>{{else}}<span class="faint">—</span>{{end}}</td>
       <td class="dim hide-narrow">{{.Detail}}</td>
     </tr>
@@ -42,7 +42,7 @@
     <line x1="0" y1="150" x2="1000" y2="150" stroke="#262626" stroke-width="1" vector-effect="non-scaling-stroke"/>
     <line x1="0" y1="8" x2="1000" y2="8" stroke="#141414" stroke-width="1" vector-effect="non-scaling-stroke"/>
     {{with .Top}}<text x="0" y="2" class="tick">{{.}}</text>{{end}}
-    {{with .Limit}}<line x1="0" y1="{{.Y}}" x2="1000" y2="{{.Y}}" stroke="#4a4a4a" stroke-width="1" vector-effect="non-scaling-stroke"/><text x="1000" y="2" class="tick" text-anchor="end">{{.Label}}</text>{{end}}
+    {{with .Limit}}<line x1="0" y1="{{.Y}}" x2="1000" y2="{{.Y}}" stroke="{{if .Hot}}#ff5147{{else}}#4a4a4a{{end}}" stroke-width="1" vector-effect="non-scaling-stroke"{{if .Hot}} stroke-dasharray="4 3"{{end}}/><text x="1000" y="2" class="tick{{if .Hot}} bad{{end}}" text-anchor="end">{{.Label}}</text>{{end}}
     {{range .Series}}<path d="{{.Area}}" fill="{{.Stroke}}" fill-opacity="0.08"/><path d="{{.Line}}" fill="none" stroke="{{.Stroke}}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>{{end}}
     {{range .Hover}}<rect x="{{.X}}" y="0" width="{{.W}}" height="150" fill="transparent"><title>{{.Title}}</title></rect>{{end}}
     <text x="0" y="172" class="tick">{{.From}}</text>
@@ -53,3 +53,14 @@
   {{end}}
 </figure>
 {{end}}
+
+{{define "bar"}}<svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.Width}}" height="6" fill="{{if ge .Width 90.0}}#ff5147{{else}}#b0b0b0{{end}}"/></svg>{{end}}
+
+{{define "copy"}}{{if .Archived}}<span class="faint">—</span>{{else if not .Tenant.Replica}}{{if eq .Replica.Kind "bad"}}<span class="st bad">none</span>{{else}}<span class="faint">—</span>{{end}}{{else if .ReplicaNext}}{{.Tenant.Replica}} <span class="dim">→ {{.ReplicaNext}}, moving</span>{{else if .ReplicaReady}}{{.Tenant.Replica}}{{else}}{{.Tenant.Replica}} <span class="dim">· catching up</span>{{end}}{{end}}
+
+{{define "tenant-head"}}<div class="title"><h1>{{.Name}}</h1>{{with .State}}<span class="st {{.Kind}}">{{.Label}}</span>{{end}}</div>
+<nav class="tabs" aria-label="{{.Name}}'s pages">
+  <a href="/tenants/{{.Name}}" {{if eq .On "overview"}}class="on" aria-current="page"{{end}}>Overview</a>
+  {{if .Logs}}<a href="/tenants/{{.Name}}/logs" {{if eq .On "logs"}}class="on" aria-current="page"{{end}}>Logs</a>{{end}}
+  {{if .Settings}}<a href="/tenants/{{.Name}}/settings" {{if eq .On "settings"}}class="on" aria-current="page"{{end}}>Settings</a>{{end}}
+</nav>{{end}}

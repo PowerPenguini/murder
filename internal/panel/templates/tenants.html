@@ -1,0 +1,47 @@
+{{define "content"}}{{$d := .Data}}
+<h1>Tenants</h1>
+<p class="lead">{{$d.Live}} live{{if ne $d.Live $d.Serving}}, {{$d.Serving}} serving{{end}} · {{$d.Healthy}} healthy{{if $d.Unprotected}} · {{$d.Unprotected}} without a copy that could take over{{end}}</p>
+
+<section class="near">
+  <div class="head">
+    <input type="search" class="short" placeholder="Filter" aria-label="filter tenants" data-filter="tenants" autocomplete="off">
+    <div class="row">
+      {{if and .Acts $d.Apps}}
+      <details>
+        <summary class="button">New tenant</summary>
+        <div class="pop">
+          <form method="post" action="/tenants" class="stack">
+            <label class="field">Name <input type="text" name="name" placeholder="acme" aria-label="tenant name" required maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end" autocomplete="off" spellcheck="false"></label>
+            <label class="field">App <select name="app" aria-label="app">{{range $d.Apps}}<option>{{.}}</option>{{end}}</select></label>
+            <span class="hint">Its address is name.{{"{"}}base domain{{"}"}}. It starts on {{.Cluster.Self}}; move it after if you like.</span>
+            <div><button type="submit" class="primary">Create</button></div>
+          </form>
+        </div>
+      </details>
+      {{end}}
+    </div>
+  </div>
+  <div class="scroll">
+  <table id="tenants" class="rows tight">
+    <thead><tr><th>Tenant</th><th>State</th><th>Memory</th><th>CPU</th><th class="num">Requests/min</th><th>Runs on</th><th>Copy</th></tr></thead>
+    <tbody>
+    {{range $d.Tenants}}
+      <tr>
+        <td title="of app {{.App}}"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
+        <td><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
+        {{with .Use}}
+        <td class="barcell"><div class="barline">{{template "bar" .Memory}}<span class="num">{{.MemoryText}}</span></div></td>
+        <td class="barcell"><div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div></td>
+        <td class="num">{{.Requests}}</td>
+        {{else}}<td class="faint">—</td><td class="faint">—</td><td class="num faint">—</td>{{end}}
+        <td>{{if .Archived}}<span class="faint">{{.Node}}</span>{{else}}{{.Node}}{{end}}</td>
+        <td>{{template "copy" .}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="9" class="empty">No tenants yet. Create one of an app: “New tenant” above.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+</section>
+{{end}}

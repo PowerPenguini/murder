@@ -1,7 +1,10 @@
 {{define "content"}}{{$d := .Data}}
-<div class="title"><h1>{{$d.Tenant}}</h1><span class="sub">last {{$d.Tail}} lines</span></div>
-<p class="lead"><a href="/tenants/{{$d.Tenant}}">Back</a> · <a href="?tail=2000">More lines</a></p>
+<header class="pagehead">{{template "tenant-head" (head $d.Tenant nil "logs" true .Edits)}}</header>
+<p class="lead">Its container's last {{$d.Tail}} lines, as they were when this page was opened. {{if lt $d.Tail 2000}}<a href="?tail=2000">The last 2000</a> · {{end}}<a href="">Read again</a></p>
 <section data-still class="near">
-  <pre class="logs">{{if $d.Lines}}{{$d.Lines}}{{else}}Nothing written yet.{{end}}</pre>
+  {{with loglines $d.Lines}}
+  <div class="head"><input type="search" class="short" placeholder="Filter lines" aria-label="filter the lines" data-filter="log-lines" autocomplete="off"><span class="dim">errors and warnings stand out</span></div>
+  <div class="logs" id="log-lines">{{range .}}<div{{with .Level}} class="{{.}}"{{end}}>{{.Text}}</div>{{end}}</div>
+  {{else}}<pre class="logs">Nothing written yet.</pre>{{end}}
 </section>
 {{end}}

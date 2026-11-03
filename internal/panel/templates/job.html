@@ -1,4 +1,5 @@
 {{define "content"}}{{$j := .Data.Job}}
+<nav class="crumbs" aria-label="where this is"><a href="/cluster">Cluster</a><span>/</span><span>Jobs</span></nav>
 <div class="title">
   <h1>{{$j.Title}}</h1>
   {{if not $j.Done}}<span class="st warn">running</span>{{else if $j.Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}

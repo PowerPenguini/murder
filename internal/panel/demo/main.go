@@ -30,18 +30,19 @@ func main() {
 	server.Cluster = cluster.AsCluster
 	server.Apps = cluster.AsApps
 	url := "http://" + *listen
+	people := panel.NewMemoryAuth()
+	access := panel.NewDemoAccess(people)
+	access.Seed()
+	server.Access = func(string) panel.AccessAgent { return access }
+	server.TunnelNetwork = netip.MustParsePrefix("10.77.0.0/24")
 	if *signIn {
 		_, port, _ := net.SplitHostPort(*listen)
-		people := panel.NewMemoryAuth()
 		url = "http://localhost:" + port
 		if server.Auth, err = panel.NewAuthAt(people, "localhost", url, log); err != nil {
 			log.Error("panel", "error", err)
 			os.Exit(1)
 		}
-		access := panel.NewDemoAccess(people)
-		server.Access = func(string) panel.AccessAgent { return access }
-		server.TunnelNetwork = netip.MustParsePrefix("10.77.0.0/24")
-		log.Info("an invitation", "url", url+"/enroll#"+people.Invite("jan"))
+		log.Info("an invitation", "url", url+"/enroll#"+people.Invite("ewa"))
 	}
 	log.Info("the demo panel serves", "url", url)
 	if err := http.ListenAndServe(*listen, server.Handler()); err != nil {

@@ -209,7 +209,7 @@ func apiTenant(overrides spec.Overrides) api.Tenant { return api.Tenant{Override
 // runs is not offered for deletion.
 func TestArchivedTenantsInSettings(t *testing.T) {
 	_, server, client := newAppsPanel(t)
-	if _, page := get(t, server.URL+"/tenants/old-demo/settings"); strings.Contains(page, `value="rotate"`) || !strings.Contains(page, "once restored") {
+	if _, page := get(t, server.URL+"/tenants/old-demo/settings"); strings.Contains(page, `value="rotate"`) || !strings.Contains(page, "once it is restored") {
 		t.Fatalf("the settings of an archived tenant:\n%s", page)
 	}
 	if _, page := get(t, server.URL+"/apps/addhoc"); !strings.Contains(page, `href="/tenants/old-demo"`) || strings.Contains(page, `value="delete"`) {
