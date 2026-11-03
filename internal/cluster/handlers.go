@@ -40,6 +40,10 @@ func (c *Cluster) handler() http.Handler {
 	members("GET /cluster/v1/usage", c.handleUsage)
 	members("GET /cluster/v1/digest", c.handleDigest)
 	members("GET /cluster/v1/tenants/{name}/usage", c.handleTenantUsage)
+	members("GET /cluster/v1/keys", c.handleKeyRing)
+	members("POST /cluster/v1/keys", c.handleKeyAdd)
+	members("POST /cluster/v1/keys/{id}/use", c.handleKeyUse)
+	members("DELETE /cluster/v1/keys/{id}", c.handleKeyDrop)
 	return mux
 }
 

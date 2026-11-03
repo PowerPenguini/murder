@@ -39,6 +39,7 @@ func (r *Reconciler) URL(tenant string) string { return r.config.Scheme + "://" 
 func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtime.ContainerSpec, error) {
 	tenant := record.Spec
 	env := tenant.Render(spec.Values{Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Network: record.Subnet})
+	digests := map[string]string{}
 	for name := range tenant.Secrets {
 		sealed, ok := record.Sealed[name]
 		if !ok {
@@ -49,6 +50,7 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 			return runtime.ContainerSpec{}, fmt.Errorf("secret %s: %w", name, err)
 		}
 		env[name] = value
+		digests[name] = secrets.Digest(secrets.Context(tenant.Name, name), value)
 	}
 	pairs := make([]string, 0, len(env))
 	for _, name := range slices.Sorted(maps.Keys(env)) {
@@ -81,7 +83,7 @@ func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtim
 			runtime.LabelImage:  tenant.Image,
 		},
 	}
-	hash, err := r.inputsHash(record, dataPath)
+	hash, err := r.hashInputs(record, dataPath, digests)
 	if err != nil {
 		return runtime.ContainerSpec{}, err
 	}
@@ -104,12 +106,23 @@ type inputs struct {
 	Sealed   map[string]string `json:"sealed,omitempty"`
 	DataPath string            `json:"dataPath"`
 	Rollout  int64             `json:"rollout,omitempty"`
+	// Secrets are the digests of the secrets' values, in place of Sealed:
+	// a master key rotation seals every value again, and replaces nothing.
+	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
-// inputsHash fingerprints a tenant's inputs. A container whose label differs
+// inputsHash fingerprints a tenant's inputs as releases before master key
+// rotations did, with the sealed values of its secrets: a container they
+// made keeps it until it is replaced, or its secrets are sealed again.
+func (r *Reconciler) inputsHash(record store.Record, dataPath string) (string, error) {
+	return r.hashInputs(record, dataPath, nil)
+}
+
+// hashInputs fingerprints a tenant's inputs, with digests of its secrets'
+// values; none, with their sealed values. A container whose label differs
 // is replaced. JSON encodes maps in sorted key order, so equal inputs hash
 // alike.
-func (r *Reconciler) inputsHash(record store.Record, dataPath string) (string, error) {
+func (r *Reconciler) hashInputs(record store.Record, dataPath string, digests map[string]string) (string, error) {
 	tenant := record.Spec
 	tenant.Suspended = false // a resumed tenant gets a new container anyway
 	// Health checks, routing and the disk limit (set on the volume as it
@@ -128,12 +141,14 @@ func (r *Reconciler) inputsHash(record store.Record, dataPath string) (string, e
 		tenant.Secrets = nil
 	}
 	sealed := map[string]string{}
-	for name := range tenant.Secrets {
-		sealed[name] = record.Sealed[name]
+	if digests == nil {
+		for name := range tenant.Secrets {
+			sealed[name] = record.Sealed[name]
+		}
 	}
 	encoded, err := json.Marshal(inputs{
 		Spec: tenant, Limits: limits, Subnet: record.Subnet,
-		Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Sealed: sealed, DataPath: dataPath, Rollout: record.Rollout,
+		Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Sealed: sealed, DataPath: dataPath, Rollout: record.Rollout, Secrets: digests,
 	})
 	if err != nil {
 		return "", err

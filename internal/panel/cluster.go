@@ -32,6 +32,8 @@ type ClusterAgent interface {
 	RemoveNode(ctx context.Context, node string) error
 	FailOver(ctx context.Context, node string) (store.FailedOver, error)
 	RunBackups(ctx context.Context) ([]api.BackupResult, error)
+	// ThawIf takes changes again only if they are still frozen for reason.
+	ThawIf(ctx context.Context, reason string) error
 }
 
 // Job is work that outlasts a request, such as an upgrade: what it says,
@@ -245,6 +247,8 @@ type clusterData struct {
 	Mixed   bool
 	Nodes   []nodeRow
 	Frozen  string
+	// Rotating says a master key rotation holds the freeze.
+	Rotating bool
 	// Busy is the job that changes the cluster now, if one does;
 	// Upgrading the upgrade among them, which takes changes again.
 	Busy, Upgrading *Job
@@ -261,7 +265,7 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	data := clusterData{Frozen: nodes.Frozen, Self: nodes.Self}
+	data := clusterData{Frozen: nodes.Frozen, Self: nodes.Self, Rotating: strings.HasPrefix(nodes.Frozen, store.RotationFreeze)}
 	data.Nodes = make([]nodeRow, len(nodes.Nodes))
 	var wg sync.WaitGroup
 	for i, node := range nodes.Nodes {
@@ -353,11 +357,18 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", "type thaw to take changes again")
 			return
 		}
+		// The freeze the page showed, and that one alone: one taken since,
+		// a rotation's say, stays (checked as the thaw is written).
+		frozen := r.FormValue("frozen")
+		if strings.HasPrefix(frozen, store.RotationFreeze) {
+			back("problem", "a master key rotation holds the freeze: it takes changes again once it ends (sudo murder key rotate goes on with one that stopped)")
+			return
+		}
 		if busy := s.Jobs.Busy(); busy != nil && busy.Kind == JobUpgrade {
 			back("problem", fmt.Sprintf("%q runs now: it takes changes again once it ends", busy.Title))
 			return
 		}
-		if err := agent.Thaw(ctx); err != nil {
+		if err := agent.ThawIf(ctx, frozen); err != nil {
 			back("problem", err.Error())
 			return
 		}

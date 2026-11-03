@@ -1224,6 +1224,34 @@ func (s *SQLite) Rotate(name, secret, actor string) (Record, error) {
 	return next.tenants[name].clone(), nil
 }
 
+func (s *SQLite) ResealSecrets(reseal Resealer, actor string) (int, error) {
+	count := 0
+	// Under a rotation's freeze. Always a change, even of no secret: a
+	// batch made before it, with a value sealed by the old key, is stale
+	// after it and made again.
+	_, err := s.writeIf(false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+		count = 0
+		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
+			sealed := current.tenants[name].Sealed
+			for _, secret := range slices.Sorted(maps.Keys(sealed)) {
+				resealed, changed, err := reseal(name, secret, sealed[secret])
+				if err != nil {
+					return fmt.Errorf("tenant %s, secret %s: %w", name, secret, err)
+				}
+				if !changed {
+					continue
+				}
+				if err := tx.Exec(`UPDATE secrets SET sealed = ? WHERE tenant = ? AND name = ? AND sealed = ?`, resealed, name, secret, sealed[secret]); err != nil {
+					return err
+				}
+				count++
+			}
+		}
+		return event(tx, now, actor, "secrets.resealed", "", "", fmt.Sprintf("%d secrets sealed with the master key in use", count))
+	})
+	return count, err
+}
+
 func (s *SQLite) Roll(name, actor string) (Record, error) {
 	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)

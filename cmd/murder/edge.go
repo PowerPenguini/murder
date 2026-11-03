@@ -85,12 +85,12 @@ func runEdge(args []string) error {
 	// edges, proven part of the cluster by a certificate derived from the
 	// master key; this edge takes theirs on its relay port.
 	var credentials *cluster.Credentials
+	var key *secrets.Key
 	if cfg.Cluster != nil {
-		key, err := secrets.LoadKey(cfg.MasterKeyFile)
-		if err != nil {
+		if key, err = secrets.LoadKey(cfg.MasterKeyFile); err != nil {
 			return err
 		}
-		if credentials, err = cluster.NewCredentials(key.Derive(clusterSeed), "edge", time.Now()); err != nil {
+		if credentials, err = cluster.NewCredentials(key.DeriveAll(clusterSeed), "edge", time.Now()); err != nil {
 			return err
 		}
 		proxy.WithRelay(credentials.RelayClient())
@@ -98,6 +98,18 @@ func runEdge(args []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// A master key rotation changes the key file: the relay presents and
+	// trusts what it holds within a few seconds, ahead of the rotation's
+	// next step.
+	if key != nil {
+		go key.Watch(ctx, edgeKeyCheckEvery, func() {
+			if err := credentials.Update(key.DeriveAll(clusterSeed), time.Now()); err != nil {
+				log.Error("follow the master key ring", "error", err)
+				return
+			}
+			log.Info("the relay follows the master key ring", "keys", key.Ring())
+		}, log)
+	}
 	// Routes are followed until this edge has drained, not only until it
 	// handed over: a request held for a moving tenant still serves it.
 	following, stopFollowing := context.WithCancel(context.Background())
@@ -412,3 +424,7 @@ func obtainTLS(ctx context.Context, cfg config.Agent, log *slog.Logger) *edge.Ce
 		delay = min(2*delay, 10*time.Minute)
 	}
 }
+
+// edgeKeyCheckEvery is how often the edge reads the master key file again:
+// well within a rotation's wait between steps.
+const edgeKeyCheckEvery = 2 * time.Second
