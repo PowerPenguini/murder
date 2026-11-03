@@ -405,7 +405,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	// A tenant that moved here is served once it is healthy: until then,
 	// requests for it wait.
 	for i, record := range records {
-		if record.MoveHeld && !released[i] && (statuses[i].Phase == PhaseRunning && statuses[i].Healthy || statuses[i].Phase == PhaseSuspended) {
+		if record.MoveHeld && !released[i] && (statuses[i].Phase == PhaseRunning && statuses[i].Healthy && r.noteServed(record) || statuses[i].Phase == PhaseSuspended) {
 			if err := r.store.ReleaseHold(record.Spec.Name); err != nil {
 				errs = append(errs, fmt.Errorf("tenant %s: serve it: %w", record.Spec.Name, err))
 			}

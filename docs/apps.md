@@ -54,7 +54,9 @@ ran, and a restart, a move or a failover keeps it there too.
   revision before, **its data too**: its node rolls the ZFS dataset back to
   the snapshot taken when the old container stopped. Whatever it wrote
   since is lost; that is the point, as a failed upgrade may have half
-  migrated it. The rollout pauses. Its data goes back only if it never
+  migrated it. The rollout pauses. Until it does, a moved tenant takes no request (they wait, then get
+  503, as from any tenant that does not answer), so its data goes back
+  only if it took none: if it never
   passed a health check on the new revision (its node records that it did
   before it serves a request, so a new leader knows too), the leader that
   moved it looked at it every few seconds since with nothing changing the

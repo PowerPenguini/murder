@@ -874,3 +874,40 @@ func TestStoringAnAppOnlyAsRead(t *testing.T) {
 		t.Fatalf("a bad if: %d %s", recorder.Code, recorder.Body)
 	}
 }
+
+// A tenant a wave moved takes no request until it is known to serve on its
+// new revision, nor one whose data goes back: what it takes, its rollout
+// never takes back.
+func TestATenantAWaveMovedIsHeldUntilItServes(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Create(store.NewTenant{Name: "acme", App: "web"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	routes := Routes{Store: f.store}
+	if route, ok := routes.Route("acme"); !ok || route.Moving {
+		t.Fatalf("before: %+v", route)
+	}
+	next := appSpec()
+	next.Env = map[string]string{"MODE": "new"}
+	if _, err := f.client.PutApp(ctx, "web", next); err != nil {
+		t.Fatal(err)
+	}
+	rollout, _ := f.store.Rollout("web")
+	if err := f.store.AdvanceRollout("web", rollout.At(), []string{"acme"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if route, _ := routes.Route("acme"); !route.Moving {
+		t.Fatalf("moved, not yet serving: %+v", route)
+	}
+	moved, _ := f.store.Get("acme")
+	if err := f.store.Served("acme", moved.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if route, _ := routes.Route("acme"); route.Moving || route.Backend == "" {
+		t.Fatalf("serving: %+v", route)
+	}
+}

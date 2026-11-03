@@ -36,6 +36,14 @@ type Rollout struct {
 	Epoch int64 `json:"epoch"`
 }
 
+// AwaitsServing reports whether a tenant takes no request yet: one a wave
+// moved, until its new revision passed a health check and that is recorded,
+// and one whose data goes back, until it has. A rollout takes back the data
+// of a tenant that never served alone: one that took no request at all.
+func (r Record) AwaitsServing() bool {
+	return r.AppRevision == 0 && r.BeforeRevision != 0 && !r.Served || r.Restore != ""
+}
+
 // Active reports whether the rollout may still move tenants.
 func (r Rollout) Active() bool { return r.State == RolloutRunning || r.State == RolloutPaused }
 

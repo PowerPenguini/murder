@@ -781,9 +781,11 @@ func (r Routes) Route(tenant string) (edge.Route, bool) {
 	if record.Node != r.Store.Node() {
 		return r.relay(record)
 	}
-	// So does a tenant whose container is being replaced. Other nodes' edges
-	// pass its requests on to this one, which holds them.
-	if r.Replacing != nil && r.Replacing(tenant) {
+	// So does a tenant whose container is being replaced, and one a wave
+	// moved until it is known to serve on its new revision (or whose data
+	// goes back): what it takes then, its rollout never takes back. Other
+	// nodes' edges pass its requests on to this one, which holds them.
+	if r.Replacing != nil && r.Replacing(tenant) || record.AwaitsServing() {
 		return edge.Route{Moving: true, Suspended: record.Spec.Suspended}, true
 	}
 	backend, err := reconcile.Backend(record)
