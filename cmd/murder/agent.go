@@ -26,6 +26,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/failover"
 	"github.com/PowerPenguini/murder/internal/firewall"
+	"github.com/PowerPenguini/murder/internal/invite"
 	"github.com/PowerPenguini/murder/internal/move"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/records"
@@ -150,6 +151,8 @@ func runAgent(args []string) error {
 	var mover *move.Mover
 	var replicator *replicate.Replicator
 	var monitor *failover.Monitor
+	// Invitations for hosts to join the cluster, made on this node.
+	invites := &invite.Book{ConfigPath: *configPath, Store: st}
 	if cfg.Cluster != nil {
 		// Copies of other nodes' tenants, on ZFS only: requests for them may
 		// come as soon as the cluster listens, before it is returned here.
@@ -170,7 +173,7 @@ func runAgent(args []string) error {
 		member, err = cluster.Start(cluster.Config{
 			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
 			Seed: key.Derive(clusterSeed), Store: st, Log: log, Upgrade: upgrader, Moves: moves, Replicas: receiver,
-			Usage: peerUsage{recorder},
+			Usage: peerUsage{recorder}, Invites: invites,
 			Fatal: func(err error) {
 				select {
 				case fatal <- err:
@@ -184,6 +187,7 @@ func runAgent(args []string) error {
 		// Closed before the store, which the log applies to.
 		defer member.Close()
 		started.Store(member)
+		invites.Invitation = member.Invitation
 		upgrader.catchUp = member.CatchUp
 		mover = &move.Mover{Store: st, Reconciler: reconciler, Volumes: volumes, Peer: clusterPeer{member}, Log: log, CatchUp: member.CatchUp}
 		moves.setCluster(member, mover)
@@ -257,6 +261,7 @@ func runAgent(args []string) error {
 	if member != nil {
 		apiHandler.WithRelayPort(cfg.Edge.RelayPort)
 		apiHandler.WithCluster(member)
+		apiHandler.WithInvites(invites)
 	}
 	apiServer := &http.Server{Handler: apiHandler.Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: apiserver.ConnContext}
 	go serve("api", apiServer, apiListener)

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -32,6 +33,25 @@ func (c *Client) Bootstrap(ctx context.Context) (cluster.Status, error) {
 	var status cluster.Status
 	err := c.do(ctx, http.MethodPost, "/v1/cluster/bootstrap", nil, &status)
 	return status, err
+}
+
+// NodeInviteRequest asks for an invitation valid for ValidSeconds (an hour if
+// zero).
+type NodeInviteRequest struct {
+	ValidSeconds int64 `json:"validSeconds,omitempty"`
+}
+
+// NodeInvitation is a one-time invitation for a host to join as a node.
+type NodeInvitation struct {
+	Invitation string    `json:"invitation"`
+	Expires    time.Time `json:"expires"`
+}
+
+// Invite makes an invitation for a host to join the cluster as a node.
+func (c *Client) Invite(ctx context.Context, valid time.Duration) (NodeInvitation, error) {
+	var invitation NodeInvitation
+	err := c.do(ctx, http.MethodPost, "/v1/cluster/invites", NodeInviteRequest{ValidSeconds: int64(valid / time.Second)}, &invitation)
+	return invitation, err
 }
 
 // Join adds the node to the cluster of the node at peer.

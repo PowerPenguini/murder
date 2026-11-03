@@ -27,8 +27,9 @@ const (
 
 // Credentials are what a node presents to, and expects of, other nodes.
 type Credentials struct {
-	ca   *x509.CertPool
-	cert tls.Certificate
+	ca    *x509.CertPool
+	caKey ed25519.PublicKey
+	cert  tls.Certificate
 }
 
 // NewCredentials derives the cluster's certificate authority from seed, so
@@ -82,18 +83,37 @@ func NewCredentials(seed []byte, node string, now time.Time) (*Credentials, erro
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(ca)
-	return &Credentials{ca: pool, cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}}, nil
+	return &Credentials{ca: pool, caKey: caKey.Public().(ed25519.PublicKey), cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}}, nil
 }
 
-// server accepts nodes of the cluster only.
-func (c *Credentials) server() *tls.Config {
+// nodesOnly accepts nodes of the cluster only, for protocols.
+func (c *Credentials) nodesOnly(protocols ...string) *tls.Config {
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{c.cert},
 		ClientCAs:    c.ca,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
-		NextProtos:   []string{protocolRaft, protocolHTTP},
+		NextProtos:   protocols,
 	}
+}
+
+// server accepts, on the cluster port, nodes of the cluster, and hosts
+// that bring an invitation, for the invitation alone.
+func (c *Credentials) server() *tls.Config {
+	nodes := c.nodesOnly(protocolRaft, protocolHTTP)
+	invited := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{c.cert},
+		NextProtos:   []string{protocolJoin},
+	}
+	config := nodes.Clone()
+	config.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+		if len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == protocolJoin {
+			return invited, nil
+		}
+		return nodes, nil
+	}
+	return config
 }
 
 // client dials nodes of the cluster only, for one protocol.
@@ -110,9 +130,7 @@ func (c *Credentials) client(protocol string) *tls.Config {
 // RelayServer accepts other nodes' edges passing requests on to this
 // node's tenants: over HTTP/2, or HTTP/1.1 for protocol switches.
 func (c *Credentials) RelayServer() *tls.Config {
-	config := c.server()
-	config.NextProtos = []string{"h2", protocolHTTP}
-	return config
+	return c.nodesOnly("h2", protocolHTTP)
 }
 
 // RelayClient passes requests on to another node's edge.

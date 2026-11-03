@@ -4,6 +4,30 @@ Nodes that share one replicated state, keep a copy of each other's tenants, take
 
 ## Join nodes into a cluster
 
+On a node of the cluster, make an invitation; on the new server, with
+Docker, nftables and a ZFS pool, set up with it:
+
+```bash
+sudo murder cluster invite                 # valid an hour, once (-valid up to 24h)
+sudo murder setup -join 10.0.0.2:7400/…    # on the new server
+```
+
+The new server reaches the node on the private network and checks, with
+the key the invitation names, that it talks to the cluster. It hands over
+the invitation's secret and takes the master key, the node's config and
+the tokens the config names (files in `/etc/murder` only). It makes the
+config its own: its name (the host name, or `-node`), its address on the
+private network (the one on the node's network, or `-cluster-address`),
+its public addresses, its ZFS pool and its address in the panel's tunnel.
+Then it installs and starts everything as `murder setup` does, and joins.
+An invitation is used once, and only when the server is ready for it:
+setup checks the server first. It hands the master key to whoever brings
+it, so only root makes one, and each one made and used is in the audit
+log. A restarted agent forgets the invitations it made.
+
+To join by hand instead, as below: copy the master key, give the node a
+`cluster:` section, then join.
+
 A cluster keeps the same state (apps, tenants, sealed secrets, the audit
 log and its nodes) on every node, replicated with Raft: a change made on any
 node is applied on every node, in the same order, and a node that was down

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
@@ -28,6 +29,17 @@ type Cluster interface {
 	CatchUp() error
 }
 
+// Invites makes invitations for hosts to join the cluster as nodes.
+type Invites interface {
+	Create(valid time.Duration, actor string) (cluster.Invite, time.Time, error)
+}
+
+// WithInvites makes invitations to this node.
+func (s *Server) WithInvites(invites Invites) *Server {
+	s.invites = invites
+	return s
+}
+
 // WithCluster serves the cluster's commands from this node.
 func (s *Server) WithCluster(c Cluster) *Server {
 	s.cluster = c
@@ -40,6 +52,30 @@ func (s *Server) clusterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/cluster/join", s.join)
 	mux.HandleFunc("DELETE /v1/cluster/nodes/{name}", s.removeNode)
 	mux.HandleFunc("POST /v1/cluster/nodes/{name}/failover", rootOnly(s.failOver))
+	mux.HandleFunc("POST /v1/cluster/invites", rootOnly(s.invite))
+}
+
+// invite makes an invitation: it hands the master key to whoever brings
+// it, so only root makes one.
+func (s *Server) invite(w http.ResponseWriter, r *http.Request) {
+	if s.invites == nil || s.cluster == nil {
+		writeError(w, errNoCluster)
+		return
+	}
+	var request api.NodeInviteRequest
+	if !readJSON(w, r, &request) {
+		return
+	}
+	valid := time.Duration(request.ValidSeconds) * time.Second
+	if valid == 0 {
+		valid = time.Hour
+	}
+	invite, expires, err := s.invites.Create(valid, actor(r))
+	if err != nil {
+		writeError(w, statusError{http.StatusConflict, err})
+		return
+	}
+	writeJSON(w, http.StatusCreated, api.NodeInvitation{Invitation: invite.String(), Expires: expires})
 }
 
 var errNoCluster = statusError{http.StatusConflict, errors.New(`this node is not set up for a cluster: add "cluster:" to its config and restart the agent`)}
