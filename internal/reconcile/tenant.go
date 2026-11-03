@@ -325,7 +325,7 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, dataPath 
 	}
 	gate := ""
 	if record.DataImage != "" && record.DataImage != tenant.Image {
-		name, err := r.volumes.Snapshot(ctx, tenant.Name, "image-change")
+		name, err := r.snapshotImage(ctx, tenant.Name, record.DataImage)
 		switch {
 		case errors.Is(err, volume.ErrSnapshotsUnsupported):
 		case err != nil:
@@ -350,11 +350,9 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, dataPath 
 	}
 	// With no old container running, the first snapshot holds every write.
 	if gate != "" && slices.ContainsFunc(outdated, func(c runtime.Container) bool { return c.Running }) {
-		r.finalSnapshot(ctx, tenant.Name, gate)
+		r.finalSnapshot(ctx, record, gate)
 	} else if gate != "" {
-		if err := r.volumes.Prune(ctx, tenant.Name, "image-change", snapshotsKept); err != nil {
-			r.log.Warn("prune old snapshots", "tenant", tenant.Name, "error", err)
-		}
+		r.pruneSnapshots(ctx, record)
 	}
 	// Checked again with no container of the tenant left to change them.
 	if err := volumeDirs(dataPath, volumes, uid, gid); err != nil {
@@ -385,11 +383,44 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, dataPath 
 	return id, true, nil
 }
 
-// snapshotRestorer puts a tenant's data back to its newest snapshot taken
-// for reason, destroying the newer ones; ZFS can. It reports
-// volume.ErrSnapshotsUnsupported when there is none to go back to.
-type snapshotRestorer interface {
-	RestoreSnapshot(ctx context.Context, tenant, reason string) (string, error)
+// imageSnapshots records on each snapshot the image whose data it holds,
+// puts a tenant's data back to the newest snapshot holding an image's,
+// destroying the newer ones, and prunes keeping that one; ZFS can.
+// RestoreSnapshot reports volume.ErrNoSnapshot when there is none.
+type imageSnapshots interface {
+	SnapshotImage(ctx context.Context, tenant, reason, image string) (string, error)
+	RestoreSnapshot(ctx context.Context, tenant, reason, image string) (string, error)
+	PruneKeeping(ctx context.Context, tenant, reason string, keep int, image string) error
+}
+
+// snapshotImage snapshots a tenant's data, that of image, as its image
+// changes.
+func (r *Reconciler) snapshotImage(ctx context.Context, tenant, image string) (string, error) {
+	if snapshots, ok := r.volumes.(imageSnapshots); ok {
+		return snapshots.SnapshotImage(ctx, tenant, "image-change", image)
+	}
+	return r.volumes.Snapshot(ctx, tenant, "image-change")
+}
+
+// pruneSnapshots keeps a tenant's newest snapshotsKept snapshots taken as
+// its image changed, and the newest of the image its data would go back
+// to, however old: its pending restore's, or the revision before its
+// rollout's.
+func (r *Reconciler) pruneSnapshots(ctx context.Context, record store.Record) {
+	tenant := record.Spec.Name
+	var err error
+	if snapshots, ok := r.volumes.(imageSnapshots); ok {
+		keep := record.Restore
+		if keep == "" {
+			keep = record.BeforeImage
+		}
+		err = snapshots.PruneKeeping(ctx, tenant, "image-change", snapshotsKept, keep)
+	} else {
+		err = r.volumes.Prune(ctx, tenant, "image-change", snapshotsKept)
+	}
+	if err != nil {
+		r.log.Warn("prune old snapshots", "tenant", tenant, "error", err)
+	}
 }
 
 // restoreData takes a tenant's data back to the snapshot taken as its image
@@ -403,10 +434,10 @@ func (r *Reconciler) restoreData(ctx context.Context, record store.Record, exist
 		return err
 	}
 	if record.DataImage != record.Restore {
-		restorer, ok := r.volumes.(snapshotRestorer)
+		restorer, ok := r.volumes.(imageSnapshots)
 		snapshot, err := "", volume.ErrSnapshotsUnsupported
 		if ok {
-			snapshot, err = restorer.RestoreSnapshot(ctx, tenant, "image-change")
+			snapshot, err = restorer.RestoreSnapshot(ctx, tenant, "image-change", record.Restore)
 		}
 		switch {
 		case errors.Is(err, volume.ErrSnapshotsUnsupported):
@@ -501,8 +532,9 @@ type snapshotDestroyer interface {
 // stopped, every write of the old image in, and destroys gate, the one
 // taken while it ran; then it keeps the newest snapshotsKept. Requests
 // wait meanwhile: a ZFS snapshot takes milliseconds.
-func (r *Reconciler) finalSnapshot(ctx context.Context, tenant, gate string) {
-	name, err := r.volumes.Snapshot(ctx, tenant, "image-change")
+func (r *Reconciler) finalSnapshot(ctx context.Context, record store.Record, gate string) {
+	tenant := record.Spec.Name
+	name, err := r.snapshotImage(ctx, tenant, record.DataImage)
 	if err != nil {
 		r.log.Warn("snapshot after the old container stopped; going back would lose what it wrote since the one taken while it ran", "tenant", tenant, "snapshot", gate, "error", err)
 	} else {
@@ -514,9 +546,7 @@ func (r *Reconciler) finalSnapshot(ctx context.Context, tenant, gate string) {
 			}
 		}
 	}
-	if err := r.volumes.Prune(ctx, tenant, "image-change", snapshotsKept); err != nil {
-		r.log.Warn("prune old snapshots", "tenant", tenant, "error", err)
-	}
+	r.pruneSnapshots(ctx, record)
 }
 
 // image returns nil once image is present. Until then a pull runs in the

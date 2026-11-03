@@ -335,18 +335,22 @@ func (f *fakeRuntime) takeEvents() []string {
 type fakeVolumes struct {
 	volume.Dir
 	// runtime, if set, logs snapshots among the container events.
-	runtime      *fakeRuntime
-	destroyed    []string
-	restored     []string
-	failFinal    bool
-	snapshots    []string
+	runtime   *fakeRuntime
+	destroyed []string
+	restored  []string
+	failFinal bool
+	snapshots []string
+	// images holds the image whose data each snapshot holds, as recorded.
+	images       map[string]string
 	removed      []string
 	failSnapshot error
 	failPrune    error
 	pruned       []string
-	notServing   bool
-	diskGB       map[string]int
-	limitErr     error
+	// prunedKeeping names the tenant and image each prune kept a snapshot of.
+	prunedKeeping []string
+	notServing    bool
+	diskGB        map[string]int
+	limitErr      error
 }
 
 func (f *fakeVolumes) LateMounts() bool { return true }
@@ -369,7 +373,11 @@ func (f *fakeVolumes) Ensure(ctx context.Context, tenant string, uid, gid, diskG
 	return path, err
 }
 
-func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string, error) {
+func (f *fakeVolumes) Snapshot(ctx context.Context, tenant, reason string) (string, error) {
+	return f.SnapshotImage(ctx, tenant, reason, "")
+}
+
+func (f *fakeVolumes) SnapshotImage(_ context.Context, tenant, reason, image string) (string, error) {
 	if f.failSnapshot != nil {
 		return "", f.failSnapshot
 	}
@@ -378,6 +386,10 @@ func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string
 	}
 	name := fmt.Sprintf("%s@murder-%s-%d", tenant, reason, len(f.snapshots)+1)
 	f.snapshots = append(f.snapshots, name)
+	if f.images == nil {
+		f.images = map[string]string{}
+	}
+	f.images[name] = image
 	if f.runtime != nil {
 		f.runtime.mu.Lock()
 		f.runtime.record("snapshot " + name)
@@ -386,10 +398,10 @@ func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string
 	return name, nil
 }
 
-func (f *fakeVolumes) RestoreSnapshot(_ context.Context, tenant, reason string) (string, error) {
+func (f *fakeVolumes) RestoreSnapshot(_ context.Context, tenant, reason, image string) (string, error) {
 	var newest string
 	for _, name := range f.snapshots {
-		if strings.HasPrefix(name, tenant+"@murder-"+reason+"-") && !slices.Contains(f.destroyed, name) {
+		if strings.HasPrefix(name, tenant+"@murder-"+reason+"-") && !slices.Contains(f.destroyed, name) && image != "" && f.images[name] == image {
 			newest = name
 		}
 	}
@@ -413,6 +425,13 @@ func (f *fakeVolumes) DestroySnapshot(_ context.Context, tenant, snapshot string
 func (f *fakeVolumes) Prune(_ context.Context, tenant, reason string, keep int) error {
 	f.pruned = append(f.pruned, fmt.Sprintf("%s@%s keep %d", tenant, reason, keep))
 	return f.failPrune
+}
+
+func (f *fakeVolumes) PruneKeeping(ctx context.Context, tenant, reason string, keep int, image string) error {
+	if image != "" {
+		f.prunedKeeping = append(f.prunedKeeping, tenant+" "+image)
+	}
+	return f.Prune(ctx, tenant, reason, keep)
 }
 
 // IsReplica says a tenant's data is a copy while a file "replica" marks it.
@@ -2135,6 +2154,54 @@ func TestARestoredTenantGetsItsDataBack(t *testing.T) {
 	// Going back took no snapshot of its own: the data is the old image's.
 	if len(f.volumes.snapshots) != 2 {
 		t.Fatalf("snapshots %v", f.volumes.snapshots)
+	}
+}
+
+// A tenant whose image changed again after its rollout moved it gets the
+// data of the image it goes back to: rolled out from A to B, configured to
+// C and back to B, it goes back to A on the snapshot holding A's data, not
+// the newest, which holds C's.
+func TestARestoredTenantGetsItsOwnImagesData(t *testing.T) {
+	const imageC = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	app, _ := f.store.App("acme")
+	app.Spec.Image = imageB
+	if _, err := f.store.PutApp(app, "test"); err != nil {
+		t.Fatal(err)
+	}
+	rollout, _ := f.store.Rollout("acme")
+	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	for _, image := range []string{imageC, ""} {
+		record, _ := f.store.Get("acme")
+		if _, _, err := f.store.Configure("acme", "acme", spec.Overrides{Image: image}, record.Generation, "test"); err != nil {
+			t.Fatal(err)
+		}
+		f.reconcile(t)
+	}
+	if c := f.runtime.only(t); c.spec.Image != imageB || !c.Running {
+		t.Fatalf("after configuring it back: %+v", c)
+	}
+	if len(f.volumes.snapshots) != 6 {
+		t.Fatalf("snapshots %v", f.volumes.snapshots)
+	}
+	// Pruned keeping the snapshot it may go back to.
+	if !slices.Contains(f.volumes.prunedKeeping, "acme "+imageA) {
+		t.Fatalf("pruned keeping %v", f.volumes.prunedKeeping)
+	}
+	if _, err := f.store.RestoreTenants("acme", nil, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if c := f.runtime.only(t); c.spec.Image != imageA || !c.Running {
+		t.Fatalf("after going back: %+v", c)
+	}
+	if !slices.Equal(f.volumes.restored, []string{"acme@murder-image-change-2"}) {
+		t.Fatalf("restored %v, snapshots %v, images %v", f.volumes.restored, f.volumes.snapshots, f.volumes.images)
 	}
 }
 

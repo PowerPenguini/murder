@@ -132,6 +132,9 @@ type Record struct {
 	// MovedOn is the node it ran on as its rollout moved it: the one that
 	// keeps the snapshot its data can go back to.
 	MovedOn string `json:"movedOn,omitempty"`
+	// BeforeImage is the image of BeforeRevision, as the tenant composes
+	// it: the one its data would go back to. Derived, not stored.
+	BeforeImage string `json:"-"`
 	// Generation counts changes of the desired state.
 	Generation int64     `json:"generation"`
 	CreatedAt  time.Time `json:"createdAt"`

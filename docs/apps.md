@@ -48,7 +48,11 @@ waves, driven by the cluster's leader:
    healthy for a minute before the next moves.
 
 A tenant is through when it runs the new revision, healthy, without its
-container restarting. Until its wave moves, a tenant keeps the revision it
+container restarting. A soak is timed on the leader's own clock, from
+the first look at which it sees the tenant healthy on a fresh health check,
+and counts only while the tenant's node keeps checking it: a result that
+was already old when the leader first saw it (a new leader, say) starts
+no soak. Until its wave moves, a tenant keeps the revision it
 ran, and a restart, a move or a failover keeps it there too.
 
 Murder never takes a tenant back by itself. Anything that goes wrong
@@ -67,8 +71,11 @@ From a paused rollout there are two ways back (and `resume`, to go on):
   revision reads what the new one wrote.
 - `murder app rollout restore web -yes` takes them back to the revision
   before **with their data from before they moved**: each tenant's node
-  rolls its ZFS dataset back to the snapshot taken when the old container
-  stopped, and the old image starts on that. Every write to those tenants
+  rolls its ZFS dataset back to the newest snapshot holding the old image's
+  data, taken when that image's container stopped (each such snapshot
+  records the image in its `io.murder:image` property), and the old image
+  starts on that. A tenant whose image changed again since its wave goes
+  back to the old image's data all the same, not to the newest snapshot. Every write to those tenants
   since they moved is lost; that is the point when a failed upgrade half
   migrated the data. `-tenant NAME` (repeatable) takes only those named
   back. Without `-yes` it only says which tenants it would take back and
@@ -83,7 +90,10 @@ not change (no snapshot was taken as it moved): abort takes those back as
 they are. Without ZFS there is no snapshot, and the old image starts on the
 data as it is. A node that should take the data back but no longer has the
 snapshot keeps the tenant stopped; `murder app rollout abort` then starts it
-on its data as it is.
+on its data as it is, even once the rollout is over. Snapshots taken by
+releases before the image was recorded are never gone back to: which
+image's data they hold is not known. Pruning keeps the newest snapshot a
+tenant may go back to, however old.
 
 - A held tenant (`-hold true`) stays on the revision it runs, out of every
   rollout, until `-hold false`; then it takes the newest revision.
@@ -103,7 +113,8 @@ murder app apply apps/web.yaml -now   # no waves: every tenant now, ending a rol
 
 `-now` (on `apply`, `update` and `rollback`) is for a fix that cannot wait,
 or for an app with one tenant; applying the same spec again with `-now`
-moves what its rollout has yet to move. `-wait` waits for the rollout of
+moves what its rollout has yet to move. While a tenant's data waits to go
+back, `-now` is refused: let the restore finish, or abort the rollout. `-wait` waits for the rollout of
 the app's newest revision, changed by this apply or an earlier one. A newer change while a rollout runs starts
 it again from the first wave, with the tenants already moved kept where
 they are until their wave. The audit log names each tenant a wave moves

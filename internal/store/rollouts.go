@@ -241,16 +241,49 @@ func (s *SQLite) setRollout(app string, at *RolloutAt, state, reason, actor stri
 	return err
 }
 
+// pendingRestores names the tenants of app whose data still waits to go
+// back, as a restore asked.
+func pendingRestores(state *snapshot, app string) []string {
+	var names []string
+	for _, name := range slices.Sorted(maps.Keys(state.tenants)) {
+		if record := state.tenants[name]; record.App == app && record.Restore != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// noPendingRestore refuses a change of app at once while a tenant of it
+// waits for its data to go back: that would leave it waiting, stopped,
+// with no rollout left to abort.
+func noPendingRestore(state *snapshot, app string) error {
+	if names := pendingRestores(state, app); len(names) > 0 {
+		return fmt.Errorf("%w: the data of %s of app %s is still going back, as a restore asked; let it finish, or `murder app rollout abort %s` starts them on their data as it is, then change the app", ErrConflict, strings.Join(names, ", "), app, app)
+	}
+	return nil
+}
+
 // AbortRollout ends app's rollout and takes every tenant it moved back to
 // the revision it ran before; their data stays as it is, that of tenants
-// still waiting for theirs to go back too.
+// still waiting for theirs to go back too. With the rollout over, it
+// still ends the waits of tenants whose data waits to go back.
 func (s *SQLite) AbortRollout(app, reason, actor string) ([]string, error) {
 	var back []string
 	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
-		if _, err := rolloutOf(current, app, nil); err != nil {
-			return err
-		}
 		back = nil
+		pending := pendingRestores(current, app)
+		if _, err := rolloutOf(current, app, nil); err != nil {
+			if len(pending) == 0 {
+				return err
+			}
+			// Over, but tenants wait, stopped, for data that may never go
+			// back: they start on it as it is.
+			if err := tx.Exec(`UPDATE tenants SET restore = '' WHERE app = ? AND restore != ''`, app); err != nil {
+				return err
+			}
+			back = pending
+			return event(tx, now, actor, "rollout.aborted", "", app, fmt.Sprintf("the data of %s stays as it is: %s", strings.Join(pending, ", "), reason))
+		}
 		stamp := formatTime(now)
 		if err := tx.Exec(`UPDATE tenants SET restore = '' WHERE app = ? AND restore != ''`, app); err != nil {
 			return err

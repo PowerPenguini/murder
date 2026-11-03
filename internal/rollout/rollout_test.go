@@ -403,3 +403,32 @@ func TestARolloutGoesThroughWithClocksApart(t *testing.T) {
 		}
 	}
 }
+
+// A new leader's first look cannot tell how old a healthy result is: one
+// its node made minutes ago starts no soak, and the canary soaks its whole
+// two minutes on the leader's clock from the first fresh check it sees.
+func TestANewLeaderSoaksFromItsOwnFirstFreshLook(t *testing.T) {
+	f := newFixture(t, 10, "t07")
+	f.step(time.Second)
+	if got := f.onNewest(); !slices.Equal(got, []string{"t07"}) {
+		t.Fatalf("first wave %v", got)
+	}
+	// The leader changes; the canary's node answers with a check made
+	// three minutes ago, then checks it again.
+	f.driver.watches = nil
+	f.stuck["t07"], f.stuckAt["t07"] = true, f.clock.Add(-3*time.Minute)
+	f.step(time.Second)
+	f.stuck["t07"] = false
+	f.step(5 * time.Second)
+	if got := f.onNewest(); len(got) != 1 {
+		t.Fatalf("moved on by an old result's time: %v", got)
+	}
+	f.step(time.Minute + 50*time.Second)
+	if got := f.onNewest(); len(got) != 1 {
+		t.Fatalf("moved on before two minutes watched: %v", got)
+	}
+	f.step(15 * time.Second)
+	if got := f.onNewest(); len(got) != 2 {
+		t.Fatalf("not moved on after a whole soak: %v", got)
+	}
+}

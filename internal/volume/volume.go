@@ -407,48 +407,95 @@ func unescapeMount(value string) string {
 	return out.String()
 }
 
+// imageProperty records on a snapshot taken as a tenant's image changed
+// the image whose data it holds: the one to go back to it with. Snapshots
+// taken before Murder recorded it have none, and are not gone back to.
+const imageProperty = "io.murder:image"
+
 // Snapshot names snapshots "murder-<reason>-<UTC time>" so they sort by time.
 func (z ZFS) Snapshot(ctx context.Context, tenant, reason string) (string, error) {
+	return z.SnapshotImage(ctx, tenant, reason, "")
+}
+
+// SnapshotImage is Snapshot, recording on the snapshot image, the image
+// whose data it holds (none if empty).
+func (z ZFS) SnapshotImage(ctx context.Context, tenant, reason, image string) (string, error) {
 	if err := checkTenant(tenant); err != nil {
 		return "", err
 	}
 	if !snapshotReason(reason) {
 		return "", fmt.Errorf("snapshot reason %q must be lowercase letters and hyphens", reason)
 	}
+	if strings.ContainsAny(image, "\t\n") || image == "-" {
+		return "", fmt.Errorf("snapshot image %q", image)
+	}
 	name := z.dataset(tenant) + "@murder-" + reason + "-" + z.now().UTC().Format("20060102T150405.000Z")
-	if _, err := z.Run(ctx, "zfs", "snapshot", name); err != nil {
+	args := []string{"snapshot"}
+	if image != "" {
+		args = append(args, "-o", imageProperty+"="+image)
+	}
+	if _, err := z.Run(ctx, "zfs", append(args, name)...); err != nil {
 		return "", err
 	}
 	return name, nil
 }
 
+// snapshotsOf lists the dataset's own snapshots Murder took for reason,
+// oldest first, each with the image whose data it holds ("" if none was
+// recorded).
+func (z ZFS) snapshotsOf(ctx context.Context, dataset, reason string) (names, images []string, err error) {
+	output, err := z.Run(ctx, "zfs", "list", "-H", "-o", "name,"+imageProperty, "-t", "snapshot", "-d", "1", dataset)
+	if err != nil {
+		return nil, nil, err
+	}
+	prefix := dataset + "@murder-" + reason + "-"
+	byName := map[string]string{}
+	for _, line := range strings.Split(string(output), "\n") {
+		name, image, _ := strings.Cut(line, "\t")
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		if image == "-" {
+			image = ""
+		}
+		names, byName[name] = append(names, name), image
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		images = append(images, byName[name])
+	}
+	return names, images, nil
+}
+
 // RestoreSnapshot rolls the tenant's dataset back to its newest snapshot
-// Murder took for reason, destroying the snapshots after it, and returns
-// its name. It reports ErrSnapshotsUnsupported when there is none.
-func (z ZFS) RestoreSnapshot(ctx context.Context, tenant, reason string) (string, error) {
+// Murder took for reason that holds image's data, destroying the snapshots
+// after it, and returns its name. It reports ErrNoSnapshot when there is
+// none: one taken without the image recorded is not gone back to, as the
+// data it holds may be another image's.
+func (z ZFS) RestoreSnapshot(ctx context.Context, tenant, reason, image string) (string, error) {
 	if err := checkTenant(tenant); err != nil {
 		return "", err
 	}
 	if !snapshotReason(reason) {
 		return "", fmt.Errorf("snapshot reason %q must be lowercase letters and hyphens", reason)
 	}
+	if image == "" {
+		return "", fmt.Errorf("%w: no image to go back to", ErrNoSnapshot)
+	}
 	dataset := z.dataset(tenant)
-	output, err := z.Run(ctx, "zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-d", "1", dataset)
+	names, images, err := z.snapshotsOf(ctx, dataset, reason)
 	if err != nil {
 		return "", err
 	}
-	prefix := dataset + "@murder-" + reason + "-"
-	var taken []string
-	for _, name := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(name, prefix) {
-			taken = append(taken, name)
+	newest := ""
+	for i, name := range names {
+		if images[i] == image {
+			newest = name
 		}
 	}
-	if len(taken) == 0 {
-		return "", fmt.Errorf("%w: %s has no %s snapshot", ErrNoSnapshot, dataset, reason)
+	if newest == "" {
+		return "", fmt.Errorf("%w: %s has no %s snapshot of image %s's data", ErrNoSnapshot, dataset, reason, image)
 	}
-	sort.Strings(taken)
-	newest := taken[len(taken)-1]
 	if _, err := z.Run(ctx, "zfs", "rollback", "-r", newest); err != nil {
 		return "", err
 	}
@@ -460,27 +507,33 @@ func (z ZFS) RestoreSnapshot(ctx context.Context, tenant, reason string) (string
 // as an operator's, are never touched. One that cannot be destroyed (held,
 // or cloned) does not stop the others.
 func (z ZFS) Prune(ctx context.Context, tenant, reason string, keep int) error {
+	return z.PruneKeeping(ctx, tenant, reason, keep, "")
+}
+
+// PruneKeeping is Prune, keeping besides the newest snapshot that holds
+// image's data (none if empty): the one a tenant may yet go back to.
+func (z ZFS) PruneKeeping(ctx context.Context, tenant, reason string, keep int, image string) error {
 	if err := checkTenant(tenant); err != nil {
 		return err
 	}
 	if !snapshotReason(reason) || keep < 1 {
 		return fmt.Errorf("prune %s: reason %q, keep %d", tenant, reason, keep)
 	}
-	dataset := z.dataset(tenant)
-	output, err := z.Run(ctx, "zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-d", "1", dataset)
+	names, images, err := z.snapshotsOf(ctx, z.dataset(tenant), reason)
 	if err != nil {
 		return err
 	}
-	prefix := dataset + "@murder-" + reason + "-"
-	var taken []string
-	for _, name := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(name, prefix) {
-			taken = append(taken, name)
+	kept := ""
+	for i, name := range names {
+		if image != "" && images[i] == image {
+			kept = name
 		}
 	}
-	sort.Strings(taken)
 	var errs []error
-	for _, name := range taken[:max(0, len(taken)-keep)] {
+	for _, name := range names[:max(0, len(names)-keep)] {
+		if name == kept {
+			continue
+		}
 		if _, err := z.Run(ctx, "zfs", "destroy", name); err != nil {
 			errs = append(errs, err)
 		}

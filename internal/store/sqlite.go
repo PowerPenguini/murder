@@ -467,6 +467,9 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 			return fmt.Errorf("tenant %s: %w", name, err)
 		}
 		record.Spec = spec.Compose(revisionSpec(state, record.App, record.AppRevision), name, record.Overrides)
+		if record.BeforeRevision != 0 {
+			record.BeforeImage = spec.Compose(revisionSpec(state, record.App, record.BeforeRevision), name, record.Overrides).Image
+		}
 		record.Spec.Suspended = suspended
 		record.Sealed = sealed[name]
 		record.CreatedAt, record.UpdatedAt = parseTime(created), parseTime(updated)
@@ -853,6 +856,11 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			return fmt.Errorf("%w: app %s was deleted meanwhile", ErrConflict, app.Name)
 		case !cond.UpdatedAt.IsZero() && !existing.UpdatedAt.Equal(cond.UpdatedAt):
 			return fmt.Errorf("%w: app %s was changed at %s, after the version read; read it again", ErrConflict, app.Name, formatTime(existing.UpdatedAt))
+		}
+		if found && app.AllAtOnce {
+			if err := noPendingRestore(current, app.Name); err != nil {
+				return err
+			}
 		}
 		// A stale attempt's result is discarded with its batch.
 		result, unchanged = AppChange{Created: !found}, App{}

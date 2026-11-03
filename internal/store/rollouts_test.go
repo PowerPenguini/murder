@@ -384,3 +384,66 @@ func TestAnAppWithARolloutIsDeleted(t *testing.T) {
 		t.Fatalf("its rollout stayed: %v", err)
 	}
 }
+
+// While a tenant waits for its data to go back, a change at once is
+// refused: it would end the rollout with the tenant still waiting. Abort
+// ends the wait, whatever became of the rollout.
+func TestAPendingRestoreHoldsChangesAtOnce(t *testing.T) {
+	st, _ := rolling(t)
+	if err := st.AdvanceRollout("web", at(t, st), []string{"a"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RestoreTenants("web", []string{"a"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := st.App("web")
+	third := appSpec()
+	third.Env = map[string]string{"MODE": "prod"}
+	for _, change := range []App{
+		{Name: "web", Spec: app.Spec, Tag: app.Tag, AllAtOnce: true},
+		{Name: "web", Spec: third, AllAtOnce: true},
+	} {
+		if _, err := st.PutApp(change, "bob"); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "`murder app rollout abort web`") {
+			t.Fatalf("at once with a restore pending: %v", err)
+		}
+	}
+	if _, err := st.RestoreRevision("web", 1, AppIf{}, true, "bob"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a rollback at once with a restore pending: %v", err)
+	}
+	if record, _ := st.Get("a"); record.Restore != image || record.AppRevision != 1 {
+		t.Fatalf("a: %+v", record)
+	}
+	if rollout, _ := st.Rollout("web"); rollout.State != RolloutPaused {
+		t.Fatalf("rollout %+v", rollout)
+	}
+	// The rollout moves a again and ends, its data still waiting.
+	if err := st.ResumeRollout("web", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AdvanceRollout("web", at(t, st), []string{"a", "b", "c"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishRollout("web", at(t, st), "murder"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := st.Get("a"); record.Restore == "" {
+		t.Fatal("the restore no longer waits")
+	}
+	back, err := st.AbortRollout("web", "start it as it is", "alice")
+	if err != nil || !slices.Equal(back, []string{"a"}) {
+		t.Fatalf("abort with the rollout done: %v, %v", back, err)
+	}
+	if record, _ := st.Get("a"); record.Restore != "" {
+		t.Fatalf("a: %+v", record)
+	}
+	if rollout, _ := st.Rollout("web"); rollout.State != RolloutDone {
+		t.Fatalf("rollout %+v", rollout)
+	}
+	if _, err := st.AbortRollout("web", "again", "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("abort with nothing waiting: %v", err)
+	}
+	// Nothing waits now: at once goes.
+	if _, err := st.PutApp(App{Name: "web", Spec: third, AllAtOnce: true}, "bob"); err != nil {
+		t.Fatal(err)
+	}
+}

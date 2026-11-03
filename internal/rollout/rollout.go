@@ -89,6 +89,9 @@ type watch struct {
 	// and checkedChanged when this driver saw it change: a result that does
 	// not change for long is old, whatever the two clocks say.
 	checkedAt, checkedChanged time.Time
+	// soakChecked is checkedAt as its soak started: a soak is through
+	// only on a check made since.
+	soakChecked time.Time
 	// unknownSince is when its node stopped saying how it runs.
 	unknownSince   time.Time
 	container      string
@@ -197,9 +200,11 @@ func (d *Driver) drive(ctx context.Context, rollout store.Rollout, records []sto
 	if d.watches == nil {
 		d.watches = map[string]*watch{}
 	}
-	// The store took the wave as one more change of the rollout.
+	// The store took the wave as one more change of the rollout. Looked at
+	// from now, with no check seen: a check of the new generation, made
+	// after the move, is fresh at the first look.
 	for _, name := range next {
-		d.watches[name] = &watch{generation: generations[name] + 1, lastSeen: now, epoch: rollout.Epoch + 1}
+		d.watches[name] = &watch{generation: generations[name] + 1, lastSeen: now, epoch: rollout.Epoch + 1, checkedChanged: now}
 	}
 	return nil
 }
@@ -278,20 +283,30 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 		}
 		d.mu.Unlock()
 		now := d.now()
-		if !w.lastSeen.IsZero() && now.Sub(w.lastSeen) > coverage || w.epoch != rollout.Epoch {
-			// Not looked at for long, or the rollout changed meanwhile (a
-			// pause and resume, say): its soak starts over.
+		if !w.lastSeen.IsZero() && now.Sub(w.lastSeen) > coverage {
+			// Not looked at for long: its soak starts over, and a check
+			// made meanwhile may be as old as the gap.
+			w.healthySince, w.checkedChanged = time.Time{}, time.Time{}
+		}
+		if w.epoch != rollout.Epoch {
+			// The rollout changed meanwhile (a pause and resume, say): its
+			// soak starts over.
 			w.healthySince = time.Time{}
 		}
 		w.lastSeen, w.epoch = now, rollout.Epoch
 		status, known := d.Status(ctx, record)
 		// A result its node has not checked again for long says nothing
 		// of now: measured by when this driver saw it change, so the two
-		// nodes' clocks need not agree.
+		// nodes' clocks need not agree. A result is fresh once it changed
+		// since an earlier look: the first look cannot tell how old it is.
+		fresh := false
 		if known {
-			if !status.CheckedAt.Equal(w.checkedAt) || w.checkedChanged.IsZero() {
+			switch {
+			case w.checkedChanged.IsZero():
 				w.checkedAt, w.checkedChanged = status.CheckedAt, now
-			} else if now.Sub(w.checkedChanged) > coverage {
+			case !status.CheckedAt.Equal(w.checkedAt):
+				w.checkedAt, w.checkedChanged, fresh = status.CheckedAt, now, true
+			case now.Sub(w.checkedChanged) > coverage:
 				known = false
 			}
 		}
@@ -340,13 +355,16 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 		}
 		switch {
 		case healthy:
-			// Soaked by the checks its node made, as they were made: the
-			// same result read again is no more time healthy.
-			if w.healthySince.IsZero() {
-				w.healthySince = status.CheckedAt
+			// Soaked on this driver's clock, from the look that saw it
+			// healthy on a fresh check, its node checking it again all
+			// along: a result already old at the first look starts
+			// nothing, and the same result read again is no more time
+			// healthy.
+			if w.healthySince.IsZero() && fresh {
+				w.healthySince, w.soakChecked = now, status.CheckedAt
 			}
 			w.everHealthy, w.unhealthySince = true, time.Time{}
-			if status.CheckedAt.Sub(w.healthySince) < soak {
+			if w.healthySince.IsZero() || now.Sub(w.healthySince) < soak || !status.CheckedAt.After(w.soakChecked) {
 				through = false
 			}
 		case w.everHealthy:
