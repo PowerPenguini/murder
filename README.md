@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/murder-dark.svg">
+    <img src="docs/assets/murder-light.svg" alt="Murder's mark: three crows' heads, one behind the other" width="180">
+  </picture>
+</p>
+
 # Murder
 
 Murder runs single-tenant web apps on a few servers: one container per
