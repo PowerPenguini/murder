@@ -245,6 +245,8 @@ type clusterData struct {
 	Mixed   bool
 	Nodes   []nodeRow
 	Frozen  string
+	// Rotating says a master key rotation holds the freeze.
+	Rotating bool
 	// Busy is the job that changes the cluster now, if one does;
 	// Upgrading the upgrade among them, which takes changes again.
 	Busy, Upgrading *Job
@@ -261,7 +263,7 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	data := clusterData{Frozen: nodes.Frozen, Self: nodes.Self}
+	data := clusterData{Frozen: nodes.Frozen, Self: nodes.Self, Rotating: strings.HasPrefix(nodes.Frozen, store.RotationFreeze)}
 	data.Nodes = make([]nodeRow, len(nodes.Nodes))
 	var wg sync.WaitGroup
 	for i, node := range nodes.Nodes {
@@ -351,6 +353,10 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	case "thaw":
 		if confirmed != "thaw" {
 			back("problem", "type thaw to take changes again")
+			return
+		}
+		if nodes, err := agent.Nodes(ctx); err == nil && strings.HasPrefix(nodes.Frozen, store.RotationFreeze) {
+			back("problem", "a master key rotation holds the freeze: it takes changes again once it ends (sudo murder key rotate goes on with one that stopped)")
 			return
 		}
 		if busy := s.Jobs.Busy(); busy != nil && busy.Kind == JobUpgrade {

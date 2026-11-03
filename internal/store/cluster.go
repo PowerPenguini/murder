@@ -516,6 +516,9 @@ func (s *SQLite) Frozen() string { return s.state.Load().frozen }
 // UpgradeFreeze begins the reason of an upgrade's freeze.
 const UpgradeFreeze = "upgrade to "
 
+// RotationFreeze begins the reason of a master key rotation's freeze.
+const RotationFreeze = "master key rotation from node "
+
 // Freeze refuses changes from now on, on every node, and says why. A freeze
 // for the same reason again is no change: an upgrade that stopped resumes
 // under its own freeze. Freezes, thaws and notes are written as of the
@@ -549,8 +552,18 @@ func (s *SQLite) Freeze(reason, actor string) error {
 
 // Thaw takes changes again.
 func (s *SQLite) Thaw(actor string) error {
+	return s.thaw("", actor)
+}
+
+// ThawOwn takes changes again only if the freeze is still the one for
+// reason: one someone else took meanwhile stays.
+func (s *SQLite) ThawOwn(reason, actor string) error {
+	return s.thaw(reason, actor)
+}
+
+func (s *SQLite) thaw(reason, actor string) error {
 	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
-		if current.frozen == "" {
+		if current.frozen == "" || reason != "" && current.frozen != reason {
 			return errUnchanged
 		}
 		if err := tx.Exec(`DELETE FROM meta WHERE key = 'frozen'`); err != nil {

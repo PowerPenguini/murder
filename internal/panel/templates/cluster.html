@@ -52,14 +52,16 @@
 {{if $d.Frozen}}
 <section>
   <div class="head"><h2>Changes are frozen</h2></div>
-  {{with $d.Upgrading}}
+  {{if $d.Rotating}}
+  <p class="lead">A {{$d.Frozen}} runs: it takes changes again once it ends, in a minute or less. One that stopped goes on with <code>sudo murder key rotate</code> on that node.</p>
+  {{else}}{{with $d.Upgrading}}
   <p class="lead">{{$d.Frozen}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>, begun by {{.By}}, runs now and takes changes again once it ends.</p>
   {{else}}
   <p class="lead">{{$d.Frozen}}. An upgrade that stopped leaves it so; once every node runs one release, take changes again.</p>
   <form method="post" class="row spaced"><input type="hidden" name="do" value="thaw">
     <input type="text" name="confirm" placeholder="type thaw" data-confirm="thaw" aria-label="type thaw" autocomplete="off" required class="short">
     <button type="submit" class="danger">Take changes again</button></form>
-  {{end}}
+  {{end}}{{end}}
 </section>
 {{end}}
 

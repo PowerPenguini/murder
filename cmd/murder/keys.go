@@ -165,9 +165,6 @@ func (k *keyRotator) Rings(ctx context.Context) []api.NodeKeys {
 	return out
 }
 
-// rotationFreeze begins the reason of a rotation's freeze.
-const rotationFreeze = "master key rotation from node "
-
 func (k *keyRotator) Rotate(ctx context.Context, actor string) (rotation.Result, error) {
 	if !k.mu.TryLock() {
 		return rotation.Result{}, errors.New("a rotation runs on this node already")
@@ -177,12 +174,12 @@ func (k *keyRotator) Rotate(ctx context.Context, actor string) (rotation.Result,
 	// another node, no node joining, no secret sealed with a key on its
 	// way out. A rotation that stopped on this node takes its own freeze
 	// over.
-	reason := rotationFreeze + k.node
+	reason := store.RotationFreeze + k.node
 	if err := k.store.Freeze(reason, actor); err != nil {
 		return rotation.Result{}, fmt.Errorf("%w (a rotation from another node runs there to its end; `murder upgrade -thaw` ends a freeze no one ends)", err)
 	}
 	defer func() {
-		if err := k.store.Thaw(actor); err != nil {
+		if err := k.store.ThawOwn(reason, actor); err != nil {
 			k.log.Warn("take changes again after the rotation", "error", err)
 		}
 	}()

@@ -3,6 +3,7 @@ package panel
 import (
 	"bytes"
 	"context"
+	"github.com/PowerPenguini/murder/internal/store"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -307,5 +308,18 @@ func TestJobsAreKeptWhileTheyRun(t *testing.T) {
 	}
 	if _, err := jobs.Start(JobBackups, "backup", "jan", time.Now, log, func(context.Context, io.Writer) error { return nil }); err == nil {
 		t.Fatal("a closed panel began a job")
+	}
+}
+
+func TestARotationsFreezeIsNotThawedFromThePanel(t *testing.T) {
+	cluster, _, server, client := newClusterPanel(t)
+	_ = cluster.AsCluster("test").Freeze(context.Background(), store.RotationFreeze+"fsn-1")
+	_, page := get(t, server.URL+"/cluster")
+	if !strings.Contains(page, "master key rotation from node fsn-1 runs") || strings.Contains(page, `placeholder="type thaw"`) {
+		t.Fatalf("the cluster page during a rotation:\n%s", page)
+	}
+	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}}, server.URL)
+	if nodes, _ := cluster.Nodes(context.Background()); nodes.Frozen == "" || !strings.Contains(body, "a master key rotation holds the freeze") {
+		t.Fatalf("thawed a rotation:\n%s", body)
 	}
 }

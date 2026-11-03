@@ -869,3 +869,22 @@ func TestSecretsAreSealedAgainInOneChange(t *testing.T) {
 		t.Fatalf("a value that does not open: %v", err)
 	}
 }
+
+func TestARotationThawsOnlyItsOwnFreeze(t *testing.T) {
+	st, _ := openNew(t, options())
+	if err := st.Freeze("upgrade to abc", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ThawOwn(RotationFreeze+"n1", "root"); err != nil || st.Frozen() != "upgrade to abc" {
+		t.Fatalf("thawed another's freeze: %q, %v", st.Frozen(), err)
+	}
+	if err := st.Thaw("root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Freeze(RotationFreeze+"n1", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ThawOwn(RotationFreeze+"n1", "root"); err != nil || st.Frozen() != "" {
+		t.Fatalf("own freeze: %q, %v", st.Frozen(), err)
+	}
+}

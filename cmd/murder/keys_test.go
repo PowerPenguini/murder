@@ -50,7 +50,7 @@ func TestARotationOnOneNodeFreezesAndSealsAgain(t *testing.T) {
 	old := key.Current()
 
 	// Another node's rotation holds the cluster: none here.
-	if err := st.Freeze(rotationFreeze+"node-2", "root"); err != nil {
+	if err := st.Freeze(store.RotationFreeze+"node-2", "root"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := rotator.Rotate(context.Background(), "root"); err == nil || !strings.Contains(err.Error(), "node-2") {
