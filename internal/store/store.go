@@ -406,11 +406,13 @@ type Store interface {
 
 	// Nodes lists the nodes of the cluster by name; a node outside a
 	// cluster has none. PutNode adds a node or changes its address;
+	// AddNode adds one, refusing a node of that name at another address;
 	// RemoveNode removes one that runs no tenant, archived or not.
 	Nodes() []Node
 	// Cluster names the cluster the state belongs to; empty outside one.
 	Cluster() string
 	PutNode(node Node, actor string) error
+	AddNode(node Node, actor string) error
 	RemoveNode(name, actor string) error
 
 	// Frozen says why changes are refused, while an upgrade runs; empty

@@ -220,6 +220,10 @@ cluster:
     ttl: 60s                          # the default, and the least allowed
 ```
 
+With namecheap, `publicAddresses` must hold the node's IPv4 address:
+Namecheap answers calls from addresses on the account's allow list only,
+and the node says which one it calls from.
+
 - **Leaving:** a node that has not answered for 30 s leaves the records,
   unless its agent stopped cleanly (a reboot) or an upgrade freezes
   changes: its edge keeps serving meanwhile.

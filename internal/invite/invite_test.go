@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +77,7 @@ func TestAnInvitationIsTakenOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bundle.Cluster != "acme" || string(bundle.Key) != "a2V5\n" || !strings.Contains(string(bundle.Config), "baseDomain: example.com") || bundle.TunnelAddress != "10.77.0.2" {
+	if bundle.Cluster != "acme" || string(bundle.Key) != "a2V5\n" || !strings.Contains(string(bundle.Config), "baseDomain: example.com") || !tunnelAddress(bundle.TunnelAddress, "10.77.0.1") {
 		t.Fatalf("bundle %+v", bundle)
 	}
 	if len(bundle.Files) != 2 || string(bundle.Files[dir+"/hetzner.token"]) != "hcloud\n" || string(bundle.Files[dir+"/ghcr.token"]) != "ghp\n" {
@@ -90,7 +92,7 @@ func TestAnInvitationIsTakenOnce(t *testing.T) {
 	// The next host gets the next address in the tunnel.
 	second, _, _ := b.Create(time.Hour, "root")
 	next, err := b.Redeem(context.Background(), second.Secret, "n3")
-	if err != nil || next.TunnelAddress != "10.77.0.3" {
+	if err != nil || !tunnelAddress(next.TunnelAddress, "10.77.0.1", bundle.TunnelAddress) {
 		t.Fatalf("second host %q, %v", next.TunnelAddress, err)
 	}
 }
@@ -139,10 +141,22 @@ func TestOnlyFilesBesideTheConfigGo(t *testing.T) {
 
 func TestTunnelAddressesSkipThoseInUse(t *testing.T) {
 	b, st, _ := book(t, "")
-	st.nodes = append(st.nodes, store.Node{Name: "n2", Tunnel: &store.Tunnel{Address: netip.MustParseAddr("10.77.0.2")}})
+	// Every address but one is taken: that one is given.
+	for i := 2; i < 100; i++ {
+		if i != 57 {
+			st.nodes = append(st.nodes, store.Node{Name: fmt.Sprintf("taken-%d", i), Tunnel: &store.Tunnel{Address: netip.MustParseAddr(fmt.Sprintf("10.77.0.%d", i))}})
+		}
+	}
 	invite, _, _ := b.Create(time.Hour, "root")
 	bundle, err := b.Redeem(context.Background(), invite.Secret, "n3")
-	if err != nil || bundle.TunnelAddress != "10.77.0.3" {
+	if err != nil || bundle.TunnelAddress != "10.77.0.57" {
 		t.Fatalf("address %q, %v", bundle.TunnelAddress, err)
 	}
+}
+
+// tunnelAddress reports whether address is a node's in the tunnel's
+// network, below devices', and none of taken.
+func tunnelAddress(address string, taken ...string) bool {
+	a, err := netip.ParseAddr(address)
+	return err == nil && netip.MustParsePrefix("10.77.0.0/24").Contains(a) && a.As4()[3] >= 2 && a.As4()[3] < 100 && !slices.Contains(taken, address)
 }

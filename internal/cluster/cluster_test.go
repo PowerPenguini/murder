@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -810,4 +811,282 @@ func TestTheLeaderFindsAStateThatDrifted(t *testing.T) {
 		}
 	}()
 	eventually(t, "the watch finds the drift", func() bool { return watched.Diverged()[drifted.name] })
+}
+
+// stalled is a Raft future that never ends.
+type stalled struct{}
+
+func (stalled) Error() error { select {} }
+
+// A log that stalls does not hold a write for good.
+func TestAFutureThatNeverEndsIsGivenUp(t *testing.T) {
+	start := time.Now()
+	if err := waitFuture(stalled{}, 50*time.Millisecond); !errors.Is(err, errStalled) {
+		t.Fatalf("waited: %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("waited too long")
+	}
+}
+
+type answered struct{}
+
+func (answered) Error() error { return nil }
+
+// A VerifyLeader that Raft does not take, as its queue is full, holds
+// neither its caller nor more than one goroutine.
+func TestAVerifyLeaderRaftDoesNotTakeIsGivenUp(t *testing.T) {
+	slot := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+	var calls atomic.Int32
+	blocked := func() raft.Future {
+		calls.Add(1)
+		<-unblock
+		return answered{}
+	}
+	for range 3 {
+		start := time.Now()
+		if err := verifyLeader(slot, blocked, 50*time.Millisecond); !errors.Is(err, errStalled) {
+			t.Fatalf("verified: %v", err)
+		}
+		if time.Since(start) > time.Second {
+			t.Fatal("waited too long")
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("%d calls wait on Raft, want 1", n)
+	}
+	// Once Raft takes it, the next caller goes through.
+	close(unblock)
+	eventually(t, "the slot is free", func() bool {
+		return verifyLeader(slot, func() raft.Future { return answered{} }, time.Second) == nil
+	})
+	if err := verifyLeader(slot, func() raft.Future { return stalled{} }, 50*time.Millisecond); !errors.Is(err, errStalled) {
+		t.Fatalf("an answer that never comes: %v", err)
+	}
+}
+
+// A join keeps to the term it started in: a leader that lost its
+// leadership and won it back, while the leader between removed the node,
+// does not make a voter the state does not know. The host asks again and
+// joins whole.
+func TestAJoinAcrossTwoLeadershipChangesMakesNoUnknownVoter(t *testing.T) {
+	for _, stage := range []string{joinVote, joinAdd} {
+		t.Run(stage, func(t *testing.T) {
+			nodes := threeNodes(t)
+			var old, next *node
+			eventually(t, "a leader", func() bool {
+				for _, n := range nodes {
+					if n.cluster.Leader() {
+						old = n
+					}
+				}
+				return old != nil
+			})
+			for _, n := range nodes {
+				if n != old {
+					next = n
+					break
+				}
+			}
+			paused, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			var reached atomic.Int32
+			hook := func(at, name string) {
+				if at == stage {
+					reached.Add(1)
+					once.Do(func() { close(paused); <-release })
+				}
+			}
+			old.cluster.joinHook.Store(&hook)
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+
+			x := newNode(t, "x-1")
+			joined := make(chan error, 1)
+			go func() { joined <- x.cluster.Join(ctx(t), old.address, "alice") }()
+			select {
+			case <-paused:
+			case <-time.After(20 * time.Second):
+				t.Fatal("the join never got to stage " + stage)
+			}
+			if err := old.cluster.raft.LeadershipTransferToServer(raft.ServerID(next.name), raft.ServerAddress(next.address)).Error(); err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, next.name+" leads", next.cluster.Leader)
+			if err := next.cluster.Remove(ctx(t), "x-1", "bob"); err != nil {
+				t.Fatalf("remove x-1: %v", err)
+			}
+			eventually(t, old.name+" applied the removal", func() bool {
+				_, known := nodeNamed(old.store.Nodes(), "x-1")
+				return !known
+			})
+			if err := next.cluster.raft.LeadershipTransferToServer(raft.ServerID(old.name), raft.ServerAddress(old.address)).Error(); err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, old.name+" leads again", old.cluster.Leader)
+			close(release)
+			if err := <-joined; err != nil {
+				t.Fatalf("the join, resumed: %v", err)
+			}
+			if reached.Load() < 2 {
+				t.Fatal("the join was not asked again")
+			}
+			for _, n := range append(nodes, x) {
+				eventually(t, n.name+" names x-1 in the state and the voters at one address", func() bool {
+					node, member := nodeNamed(n.store.Nodes(), "x-1")
+					voter, isVoter := n.cluster.voterAddress("x-1")
+					return member && isVoter && node.Address == x.address && voter == x.address
+				})
+			}
+			sameState(t, append(nodes, x))
+		})
+	}
+}
+
+// A join that waited while leadership moved does not move a node the next
+// leader added meanwhile: the state and the voters keep naming one
+// address.
+func TestAJoinAcrossALeadershipChangeKeepsOneAddress(t *testing.T) {
+	nodes := threeNodes(t)
+	var old, next *node
+	eventually(t, "a leader", func() bool {
+		for _, n := range nodes {
+			if n.cluster.Leader() {
+				old = n
+			}
+		}
+		return old != nil
+	})
+	for _, n := range nodes {
+		if n != old {
+			next = n
+			break
+		}
+	}
+	paused, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	hook := func(stage, name string) {
+		if stage == joinWrite {
+			once.Do(func() { close(paused); <-release })
+		}
+	}
+	old.cluster.joinHook.Store(&hook)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+
+	first, second := newNode(t, "x-1"), newNode(t, "x-1")
+	joined := make(chan error, 1)
+	go func() { joined <- first.cluster.Join(ctx(t), old.address, "mallory") }()
+	select {
+	case <-paused:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the first join never got to its write")
+	}
+	if err := old.cluster.raft.LeadershipTransferToServer(raft.ServerID(next.name), raft.ServerAddress(next.address)).Error(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, next.name+" leads", next.cluster.Leader)
+	if err := second.cluster.Join(ctx(t), next.address, "alice"); err != nil {
+		t.Fatalf("the second join: %v", err)
+	}
+	close(release)
+	if err := <-joined; err == nil || !strings.Contains(err.Error(), "already a member at "+second.address) {
+		t.Fatalf("the first join, resumed: %v", err)
+	}
+	for _, n := range nodes {
+		eventually(t, n.name+" names x-1 at the second's address", func() bool {
+			address, member := n.cluster.memberAddress("x-1")
+			voter, isVoter := n.cluster.voterAddress("x-1")
+			return member && isVoter && address == second.address && voter == second.address
+		})
+	}
+	sameState(t, nodes)
+}
+
+// A join that waited across two leadership changes, while its node was
+// removed and another of the same name joined at another address, leaves
+// that other one where it is, in the state and the voters.
+func TestAStaleJoinLeavesAReplacementInPlace(t *testing.T) {
+	nodes := threeNodes(t)
+	var old, next *node
+	eventually(t, "a leader", func() bool {
+		for _, n := range nodes {
+			if n.cluster.Leader() {
+				old = n
+			}
+		}
+		return old != nil
+	})
+	for _, n := range nodes {
+		if n != old {
+			next = n
+			break
+		}
+	}
+	paused, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	hook := func(at, name string) {
+		if at == joinAdd {
+			once.Do(func() { close(paused); <-release })
+		}
+	}
+	old.cluster.joinHook.Store(&hook)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	stale := newNode(t, "x-1")
+	joined := make(chan error, 1)
+	go func() { joined <- stale.cluster.Join(ctx(t), old.address, "alice") }()
+	select {
+	case <-paused:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the join never got to adding the voter")
+	}
+	if err := old.cluster.raft.LeadershipTransferToServer(raft.ServerID(next.name), raft.ServerAddress(next.address)).Error(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, next.name+" leads", next.cluster.Leader)
+	if err := next.cluster.Remove(ctx(t), "x-1", "bob"); err != nil {
+		t.Fatalf("remove x-1: %v", err)
+	}
+	// Another host joins as x-1, through the new leader.
+	replacement := newNode(t, "x-1")
+	if err := replacement.cluster.Join(ctx(t), next.address, "bob"); err != nil {
+		t.Fatalf("the replacement joins: %v", err)
+	}
+	eventually(t, old.name+" knows the replacement", func() bool {
+		node, known := nodeNamed(old.store.Nodes(), "x-1")
+		return known && node.Address == replacement.address
+	})
+	if err := next.cluster.raft.LeadershipTransferToServer(raft.ServerID(old.name), raft.ServerAddress(old.address)).Error(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, old.name+" leads again", old.cluster.Leader)
+	close(release)
+	select {
+	case <-joined:
+	case <-time.After(60 * time.Second):
+	}
+	for _, n := range nodes {
+		eventually(t, n.name+" names the replacement in the state and the voters", func() bool {
+			node, member := nodeNamed(n.store.Nodes(), "x-1")
+			voter, isVoter := n.cluster.voterAddress("x-1")
+			return member && isVoter && node.Address == replacement.address && voter == replacement.address
+		})
+	}
 }
