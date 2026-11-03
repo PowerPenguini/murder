@@ -417,6 +417,7 @@ type Store interface {
 	AddPasskey(hash string, key Passkey) error
 	SetRecoveryCodes(name string, hashes []string, actor string) error
 	UsePasskey(id, data string) error
+	UsePasskeyIf(id, previous, data string) error
 	RemovePasskey(id, actor string) error
 	RemovePanelUser(name, actor string) error
 	StartPanelSession(session PanelSession) error

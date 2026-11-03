@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -130,5 +131,65 @@ func TestThePanelsPeople(t *testing.T) {
 	}
 	if len(st.PanelUsers()) != 1 {
 		t.Fatalf("people %+v", st.PanelUsers())
+	}
+}
+
+// Sessions go by when they end, not by how their times sort as text: one
+// ending half a second after a whole second outlives that second.
+func TestSessionsGoWhenTheyEnd(t *testing.T) {
+	st, _ := openNew(t, options())
+	now := time.Now().UTC().Truncate(time.Second)
+	st.now = func() time.Time { return now }
+	hash := strings.Repeat("a", 64)
+	if _, err := st.InvitePanelUser("alice", hash, now.Add(time.Hour), "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddPasskey(hash, Passkey{ID: "key", User: "alice", Data: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.StartPanelSession(PanelSession{Hash: strings.Repeat("b", 64), User: "alice", Passkey: "key", Challenge: "one", ExpiresAt: now.Add(500 * time.Millisecond)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.StartPanelSession(PanelSession{Hash: strings.Repeat("c", 64), User: "alice", Passkey: "key", Challenge: "two", ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.state.Load().panel.sessions) != 2 {
+		t.Fatal("a session that had not ended went")
+	}
+	// Signed out, a session ends but stays a while: its challenge is used.
+	if err := st.EndPanelSession(strings.Repeat("c", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PanelSession(strings.Repeat("c", 64)); err == nil {
+		t.Fatal("a session signed out of still signs in")
+	}
+	if err := st.StartPanelSession(PanelSession{Hash: strings.Repeat("d", 64), User: "alice", Passkey: "key", Challenge: "two", ExpiresAt: now.Add(time.Hour)}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a challenge used before, signed out of: %v", err)
+	}
+	// Long after, it goes.
+	now = now.Add(time.Hour)
+	if err := st.StartPanelSession(PanelSession{Hash: strings.Repeat("e", 64), User: "alice", Passkey: "key", Challenge: "three", ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.state.Load().panel.sessions[strings.Repeat("c", 64)]; ok {
+		t.Fatal("an ended session stayed for good")
+	}
+}
+
+// A passkey's use is written only over the credential its sign-in read.
+func TestAPasskeysCounterIsNotTakenBack(t *testing.T) {
+	st, _ := openNew(t, options())
+	hash := strings.Repeat("a", 64)
+	if _, err := st.InvitePanelUser("alice", hash, time.Now().Add(time.Hour), "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddPasskey(hash, Passkey{ID: "key", User: "alice", Data: `{"n":10}`}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UsePasskeyIf("key", `{"n":10}`, `{"n":12}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UsePasskeyIf("key", `{"n":10}`, `{"n":11}`); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a sign-in that read 10 wrote over 12: %v", err)
 	}
 }

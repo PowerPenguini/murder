@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -229,6 +230,34 @@ func TestTLSConfigRejectsIncompleteACME(t *testing.T) {
 	if _, err := NewTLS(context.Background(), TLSConfig{Mode: "magic"}, "example.com", quietLog()); err == nil {
 		t.Fatal("unknown mode accepted")
 	}
+}
+
+// An attempt to get the certificate that failed leaves nothing running:
+// the edge tries again and again until one succeeds.
+func TestAFailedACMEAttemptLeavesNothingRunning(t *testing.T) {
+	dir := t.TempDir()
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	renewing := func() int {
+		stacks := make([]byte, 1<<20)
+		return strings.Count(string(stacks[:runtime.Stack(stacks, true)]), "certmagic.(*Cache).maintainAssets(")
+	}
+	before := renewing()
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	for range 3 {
+		if _, err := NewTLS(stopped, TLSConfig{Mode: TLSACME, Email: "admin@example.com", Storage: dir, DNSProvider: "hetzner", DNSTokenFile: token}, "example.com", quietLog()); err == nil {
+			t.Fatal("a certificate without asking for one")
+		}
+	}
+	if after := renewing(); after != before {
+		t.Fatalf("%d caches renewing after three failed attempts, %d before", after, before)
+	}
+	// Without a certificate there is nothing to stop.
+	var none *Certificates
+	none.Close()
 }
 
 // Over HTTPS the edge adds Strict-Transport-Security unless the app sets

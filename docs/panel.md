@@ -91,7 +91,8 @@ murder admin connect -device laptop.conf     # then open https://panel.example.c
 ```
 
 It listens on 127.0.0.1:8443 and passes connections through the tunnel; add
-`127.0.0.1 panel.example.com` to the hosts file. As a last resort, root on a
+`127.0.0.1 panel.example.com` to the hosts file. `-listen` takes another
+address, but port 8443 only: passkeys sign in at that port alone. As a last resort, root on a
 node reaches the panel on its unix socket (`panel.socket`) through SSH:
 `ssh -L 7480:/run/murder/panel.sock root@node`, then http://localhost:7480.
 

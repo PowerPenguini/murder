@@ -114,7 +114,9 @@ func (s *Server) Handler() http.Handler {
 	s.panelRoutes(mux)
 	s.panelAuthRoutes(mux)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
-	mux.HandleFunc("GET /v1/backup", s.backup)
+	// The whole database: panel secrets and sign-in state too, which only
+	// root reads.
+	mux.HandleFunc("GET /v1/backup", rootOnly(s.backup))
 	mux.HandleFunc("POST /v1/backups/run", rootOnly(s.runBackups))
 	mux.HandleFunc("POST /v1/backups/replace", rootOnly(s.replaceTenant))
 	return mux
@@ -504,7 +506,8 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 // bounds the work itself.
 func CreateHere(ctx, asked context.Context, st store.Store, reconciler *reconcile.Reconciler, tenant store.NewTenant, actor string) (store.Record, error) {
 	var record store.Record
-	err := reconciler.Exclusive(func() error {
+	// Waited for only while the client waits.
+	err := reconciler.ExclusiveContext(asked, func() error {
 		if err := asked.Err(); err != nil {
 			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err))
 		}
@@ -520,10 +523,17 @@ func CreateHere(ctx, asked context.Context, st store.Store, reconciler *reconcil
 		if exists {
 			return fmt.Errorf("%w: data of an earlier tenant %s is on node %s but not in the archive; purge it there first, or create the tenant on another node", store.ErrConflict, tenant.Name, st.Node())
 		}
+		// The look for data may have taken long.
+		if err := asked.Err(); err != nil {
+			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err))
+		}
 		tenant.Node = st.Node()
 		record, err = st.Create(tenant, actor)
 		return err
 	})
+	if gaveUp := asked.Err(); gaveUp != nil && errors.Is(err, gaveUp) {
+		return record, clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err))
+	}
 	return record, err
 }
 
@@ -577,8 +587,8 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := r.Context().Err(); err != nil {
-		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
+	if err := gaveUp(r, "changed"); err != nil {
+		writeError(w, err)
 		return
 	}
 	record, changed, err := s.store.Configure(name, request.App, overrides, request.Generation, actor(r))
@@ -594,6 +604,10 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) suspend(suspended bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := gaveUp(r, "changed"); err != nil {
+			writeError(w, err)
+			return
+		}
 		record, err := s.store.SetSuspended(r.PathValue("name"), suspended, actor(r))
 		if err != nil {
 			writeError(w, err)
@@ -609,6 +623,10 @@ func (s *Server) suspend(suspended bool) http.HandlerFunc {
 // pass, which the change starts, removes its container and network.
 func (s *Server) archive(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if err := gaveUp(r, "archived"); err != nil {
+		writeError(w, err)
+		return
+	}
 	if err := s.store.Archive(name, actor(r)); err != nil {
 		writeError(w, err)
 		return
@@ -620,7 +638,12 @@ func (s *Server) archive(w http.ResponseWriter, r *http.Request) {
 func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var record store.Record
-	err := s.reconciler.Exclusive(func() error {
+	// A client that gave up while waiting for a reconcile pass restores
+	// nothing.
+	err := s.exclusive(r, "restored", func() error {
+		if err := gaveUp(r, "restored"); err != nil {
+			return err
+		}
 		var err error
 		record, err = s.store.Restore(name, actor(r))
 		return err
@@ -640,14 +663,43 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(err))
 		return
 	}
-	ctx, cancel := detached(r)
-	defer cancel()
-	if err := s.reconciler.Purge(ctx, name, actor(r)); err != nil {
-		writeError(w, err)
+	// Given up while it waits for a pass, or before it begins, the purge
+	// deletes nothing; once begun it runs to its end (Purge detaches it).
+	if err := s.reconciler.Purge(r.Context(), name, actor(r)); err != nil {
+		writeError(w, gone(r, "purged", err))
 		return
 	}
 	s.log.Info("tenant purged", "tenant", name)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// A client that gives up is not changed for: once a handler holds what it
+// waits for (the reconciler's lock), it checks, right before the change is
+// committed, that its client still waits. The store's writes take no
+// context, so a client that gives up while a write waits for the writer's
+// lock, or for this node to catch up with the cluster, still has it made.
+
+// gaveUp refuses a change for a client that gave up; nothing names what
+// was then not done.
+func gaveUp(r *http.Request, nothing string) error {
+	if err := r.Context().Err(); err != nil {
+		return clientGone(fmt.Errorf("the client gave up while waiting; nothing was %s: %w", nothing, err))
+	}
+	return nil
+}
+
+// gone reports err, the client's giving up as such.
+func gone(r *http.Request, nothing string, err error) error {
+	if gaveUp := r.Context().Err(); gaveUp != nil && errors.Is(err, gaveUp) {
+		return clientGone(fmt.Errorf("the client gave up while waiting; nothing was %s: %w", nothing, err))
+	}
+	return err
+}
+
+// exclusive runs fn under the reconciler's lock, waited for only while the
+// client waits.
+func (s *Server) exclusive(r *http.Request, nothing string, fn func() error) error {
+	return gone(r, nothing, s.reconciler.ExclusiveContext(r.Context(), fn))
 }
 
 // detached gives work that changes the runtime its own deadline, so a client
@@ -929,11 +981,16 @@ func writeError(w http.ResponseWriter, err error) {
 	writeJSON(w, status, api.ErrorBody{Error: err.Error()})
 }
 
+// readJSON reads one JSON value of at most 1 MiB, and nothing after it.
 func readJSON(w http.ResponseWriter, r *http.Request, out any) bool {
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
 		writeError(w, badRequest(fmt.Errorf("request body: %w", err)))
+		return false
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		writeError(w, badRequest(errors.New("request body: more than one JSON value")))
 		return false
 	}
 	return true

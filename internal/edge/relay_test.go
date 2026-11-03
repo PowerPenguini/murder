@@ -153,8 +153,17 @@ func TestRequestsWaitWhileTheirTenantMoves(t *testing.T) {
 	if got := <-done; got != "200 OK arrived" || time.Since(start) < 300*time.Millisecond {
 		t.Fatalf("after %v: %s", time.Since(start), got)
 	}
+	// Its time to the response counts the wait: over 250 ms.
+	counts := proxy.Stats().Counts()["acme"]
+	var faster uint64
+	for _, n := range counts.Waits[:6] {
+		faster += n
+	}
+	if counts.Count != 1 || faster != 0 {
+		t.Fatalf("a request that waited for its tenant: %+v", counts)
+	}
 	// One that does not arrive in time is answered, not left hanging.
-	proxy.hold = 100 * time.Millisecond
+	proxy.holdMoving = 100 * time.Millisecond
 	table.Set(NewTable(map[string]Route{"acme": {Moving: true}}))
 	request, _ := http.NewRequest("GET", server.URL, nil)
 	request.Host = "acme.example.com"
@@ -646,4 +655,131 @@ func TestARelayedRequestIsServedOnce(t *testing.T) {
 	if pair.frontProxy.Stats().Counts()["acme"].Count != 1 {
 		t.Fatal("the front edge's own counts lost the request")
 	}
+}
+
+// Only so many requests are held for a moving tenant at once; the rest
+// are answered at once.
+func TestHeldRequestsAreBounded(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "arrived")
+	}))
+	defer backend.Close()
+	table := &LiveTable{}
+	table.Set(NewTable(map[string]Route{"acme": {Moving: true}}))
+	proxy := NewProxy("example.com", table, quietLog())
+	proxy.held = make(chan struct{}, 1)
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+	get := func() (int, error) {
+		request, _ := http.NewRequest("GET", server.URL, nil)
+		request.Host = "acme.example.com"
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			return 0, err
+		}
+		response.Body.Close()
+		return response.StatusCode, nil
+	}
+	first := make(chan int, 1)
+	go func() { status, _ := get(); first <- status }()
+	for len(proxy.held) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	start := time.Now()
+	if status, err := get(); err != nil || status != http.StatusServiceUnavailable || time.Since(start) > time.Second {
+		t.Fatalf("a request beyond the bound: %d, %v after %v", status, err, time.Since(start))
+	}
+	table.Set(NewTable(map[string]Route{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}}))
+	if status := <-first; status != http.StatusOK {
+		t.Fatalf("the request held: %d", status)
+	}
+	if len(proxy.held) != 0 {
+		t.Fatalf("%d places still taken", len(proxy.held))
+	}
+}
+
+// A client cannot pass a request for its tenant off as another edge
+// keeping its connection warm: the header goes, and only the request Warm
+// sends is taken for one.
+func TestAClientCannotPassForAWarmUp(t *testing.T) {
+	pair := newRelayPair(t)
+	request, _ := http.NewRequest(http.MethodHead, pair.front.URL+"/private", nil)
+	request.Host = "acme.example.com"
+	request.Header.Set(warmHeader, "1")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("a client's HEAD with the warm-up header: %s", response.Status)
+	}
+	select {
+	case headers := <-pair.seen:
+		if headers.Get(warmHeader) != "" {
+			t.Fatalf("the warm-up header reached the app: %v", headers)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the app was not asked")
+	}
+	// Nor is a request for a tenant one on the relay, however it came.
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: credentials(t, 7).RelayClient()}}
+	request, _ = http.NewRequest(http.MethodHead, pair.back.URL+"/", nil)
+	request.Host = "acme.example.com"
+	request.Header.Set(warmHeader, "1")
+	if response, err = client.Do(request); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || len(pair.seen) != 1 {
+		t.Fatalf("a request for a tenant with the warm-up header: %s", response.Status)
+	}
+	<-pair.seen
+	// Warm's own is answered by the relay, and goes no further.
+	pair.frontProxy.Warm(context.Background(), []string{strings.TrimPrefix(pair.back.URL, "https://")})
+	if len(pair.seen) != 0 {
+		t.Fatal("a warm-up reached the app")
+	}
+}
+
+// An edge gives up on a body for another node that stopped coming, and
+// gives back what it held for it; a body that keeps coming, however
+// slowly, is passed on.
+func TestAStalledUploadIsGivenUp(t *testing.T) {
+	pair := newRelayPair(t)
+	server := httptest.NewServer(UploadDeadline(pair.frontProxy, 200*time.Millisecond))
+	defer server.Close()
+	send := func(parts ...string) (*http.Response, time.Duration) {
+		t.Helper()
+		conn, err := net.Dial("tcp", server.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		start := time.Now()
+		fmt.Fprint(conn, "POST /upload HTTP/1.1\r\nHost: acme.example.com\r\nContent-Length: 10\r\n\r\n")
+		for _, part := range parts {
+			time.Sleep(100 * time.Millisecond)
+			fmt.Fprint(conn, part)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return response, time.Since(start)
+	}
+	// One byte of ten, then nothing.
+	if response, took := send("x"); response.StatusCode != http.StatusRequestTimeout || took > 2*time.Second {
+		t.Fatalf("a body that stopped: %s after %v", response.Status, took)
+	}
+	if len(pair.seen) != 0 || len(pair.frontProxy.held) != 0 || replayKept.Load() != 0 {
+		t.Fatalf("after a body that stopped: app asked %d times, %d held, %d bytes kept", len(pair.seen), len(pair.frontProxy.held), replayKept.Load())
+	}
+	// Ten bytes over a second, a tenth of a second apart.
+	if response, _ := send(strings.Split("xxxxxxxxxx", "")...); response.StatusCode != http.StatusOK {
+		t.Fatalf("a slow body: %s", response.Status)
+	}
+	<-pair.seen
 }

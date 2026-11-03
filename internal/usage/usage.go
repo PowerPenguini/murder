@@ -17,8 +17,6 @@ import (
 // Kept is how long a tenant's minutes are kept.
 const Kept = 24 * time.Hour
 
-const minutes = int(Kept / time.Minute)
-
 // Raw is one reading of a tenant's container: counters since it started,
 // and its memory now.
 type Raw struct {
@@ -129,17 +127,56 @@ type Recorder struct {
 	tenants map[string]*history
 	host    Host
 	hostAt  time.Time
+	// started is when the recorder started: an edge that started later
+	// tells it every request it counted. edges are the edge processes
+	// that told their counts, by ID; forgotten is when the latest of those
+	// forgotten since started: an edge that started no later may have
+	// been counted before.
+	started   time.Time
+	edges     map[string]*edgeSeen
+	forgotten time.Time
 }
 
 // NewRecorder keeps node's use.
 func NewRecorder(node string) *Recorder {
-	return &Recorder{node: node, tenants: map[string]*history{}}
+	return &Recorder{node: node, tenants: map[string]*history{}, started: time.Now(), edges: map[string]*edgeSeen{}}
+}
+
+// EdgeInstance is one edge process. While one edge hands over to the next,
+// both serve and both tell their counts, each since it started.
+type EdgeInstance struct {
+	ID string
+	// Started is when it started; zero if it did not say, as an edge of
+	// an older release does (which says no ID either).
+	Started time.Time
+}
+
+// edgeSeen is what the recorder knows of an edge process.
+type edgeSeen struct {
+	started time.Time
+	told    time.Time
+}
+
+// edgeRetired is how long an edge that told nothing, and that a newer one
+// took over from, is still waited for: longer than any edge drains. The
+// newest edge is waited for however long it says nothing (its agent
+// unreachable, say): what it tells next carries on from what it told.
+const edgeRetired = time.Hour
+
+// maxEdges is how many edge processes are kept at most; past it, the
+// oldest are forgotten first. A node has one edge, and two while it hands
+// over.
+const maxEdges = 16
+
+// edgeCounts are an edge's counts of a tenant's requests as last told.
+type edgeCounts struct {
+	counts metrics.Counts
 }
 
 // history is one tenant's kept minutes, the minute being measured, and
 // what its counters said last.
 type history struct {
-	points []Point // oldest first, at most minutes
+	points []Point // oldest first, of the last Kept
 	cur    Point
 	// samples and cpuSum measure cur's CPU mean; read says its
 	// container was read at all.
@@ -147,10 +184,9 @@ type history struct {
 	cpuSum  float64
 	read    bool
 	last    Raw
-	// edge is the edge's counts as last told; requests and waits are
+	// edges are each edge's counts as last told, by its ID; waits are
 	// cur's.
-	edge     metrics.Counts
-	edgeSeen bool
+	edges    map[string]*edgeCounts
 	waits    [len(metrics.Buckets) + 1]uint64
 	now      Now
 	limitCPU float64
@@ -198,20 +234,81 @@ func (r *Recorder) Disk(tenant string, used, limit int64, at time.Time) {
 	h.now.DiskUsed, h.now.DiskLimit = used, limit
 }
 
-// Edge records the edge's counts of tenant's requests, as they stand.
-func (r *Recorder) Edge(tenant string, counts metrics.Counts, at time.Time) {
+// Edge records an edge's counts of the requests it passed to the node's
+// tenants, as they stand.
+func (r *Recorder) Edge(from EdgeInstance, counts map[string]metrics.Counts, at time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	h := r.history(tenant, at)
-	// The first counts told hold everything since the edge started: what
-	// follows them is counted, as the agent did not see the rest.
-	if !h.edgeSeen {
-		h.edge, h.edgeSeen = counts, true
-		return
+	// The first counts of an edge that started since the recorder did are
+	// all requests the recorder has not seen, unless it may have been
+	// forgotten. Any other edge's first, and the first of a tenant an edge
+	// tells of later (one that moved away and back, say), may hold
+	// requests from before: what follows them is counted.
+	seen := r.edges[from.ID]
+	fresh := seen == nil && !from.Started.IsZero() && !from.Started.Before(r.started) && from.Started.After(r.forgotten)
+	if seen == nil {
+		seen = &edgeSeen{started: from.Started}
+		r.edges[from.ID] = seen
 	}
-	// Counts that went back belong to an edge that restarted: they all
-	// count anew.
-	before := h.edge
+	seen.told = at
+	r.retireEdges(at)
+	for tenant, c := range counts {
+		r.history(tenant, at).edge(from.ID, c, fresh)
+	}
+}
+
+// retireEdges forgets the edges that a newer one took over from and that
+// told nothing for edgeRetired, and the oldest past maxEdges.
+func (r *Recorder) retireEdges(at time.Time) {
+	var newest time.Time
+	for _, seen := range r.edges {
+		if seen.started.After(newest) {
+			newest = seen.started
+		}
+	}
+	forget := func(id string) {
+		if started := r.edges[id].started; started.After(r.forgotten) {
+			r.forgotten = started
+		}
+		delete(r.edges, id)
+		for _, h := range r.tenants {
+			delete(h.edges, id)
+		}
+	}
+	for id, seen := range r.edges {
+		if seen.started.Before(newest) && at.Sub(seen.told) > edgeRetired {
+			forget(id)
+		}
+	}
+	for len(r.edges) > maxEdges {
+		var oldest string
+		var was *edgeSeen
+		for id, seen := range r.edges {
+			if was == nil || seen.started.Before(was.started) || seen.started.Equal(was.started) && seen.told.Before(was.told) {
+				oldest, was = id, seen
+			}
+		}
+		forget(oldest)
+	}
+}
+
+// edge counts the requests tenant's counts from edge id add.
+func (h *history) edge(id string, counts metrics.Counts, fresh bool) {
+	told := h.edges[id]
+	if told == nil {
+		told = &edgeCounts{}
+		if h.edges == nil {
+			h.edges = map[string]*edgeCounts{}
+		}
+		h.edges[id] = told
+		if !fresh {
+			told.counts = counts
+			return
+		}
+	}
+	// Counts that went back belong to an edge that restarted (of an older
+	// release, which says no ID): they all count anew.
+	before := told.counts
 	if counts.Count < before.Count {
 		before = metrics.Counts{}
 	}
@@ -233,7 +330,7 @@ func (r *Recorder) Edge(tenant string, counts metrics.Counts, at time.Time) {
 			h.waits[i] += uint64(delta(int64(was), int64(counts.Waits[i])))
 		}
 	}
-	h.edge = counts
+	told.counts = counts
 }
 
 // Host records the node's own use.
@@ -298,11 +395,16 @@ func (h *history) roll(at time.Time) {
 			next.DiskRead, next.DiskWrite = h.cur.DiskRead, h.cur.DiskWrite
 		}
 		h.points = append(h.points, h.cur)
-		if len(h.points) > minutes {
-			h.points = slices.Delete(h.points, 0, len(h.points)-minutes)
-		}
 		h.now = next
 	}
+	// The day kept ends with the minute now measured, however few minutes
+	// were measured in it.
+	cutoff := minute.Add(-Kept)
+	old := 0
+	for old < len(h.points) && h.points[old].At.Before(cutoff) {
+		old++
+	}
+	h.points = slices.Delete(h.points, 0, old)
 	h.cur, h.samples, h.cpuSum, h.read, h.waits = Point{At: minute}, 0, 0, false, [len(metrics.Buckets) + 1]uint64{}
 }
 

@@ -283,3 +283,70 @@ func TestSlowStartsAfterIdle(t *testing.T) {
 		t.Error("a setting that cannot be read is reported")
 	}
 }
+
+// The edge's servers give up on a request whose body stopped coming, over
+// HTTP/1.1 and HTTP/2; a body that keeps coming, however slowly, and a
+// response that streams on after the body are not cut off.
+func TestTheEdgeGivesUpOnABodyThatStopped(t *testing.T) {
+	defer func(was time.Duration) { uploadIdle = was }(uploadIdle)
+	uploadIdle = 200 * time.Millisecond
+	read := make(chan error, 10)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, err := io.Copy(io.Discard, r.Body)
+		read <- err
+		if err != nil {
+			return
+		}
+		// Then a stream, longer than the body may stop.
+		for range 5 {
+			fmt.Fprintf(w, "%d\n", n)
+			http.NewResponseController(w).Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
+	for _, http2 := range []bool{false, true} {
+		server := httptest.NewUnstartedServer(nil)
+		server.Config = publicServer(handler)
+		server.EnableHTTP2 = http2
+		server.StartTLS()
+		client := server.Client()
+		post := func(body io.Reader) (string, error) {
+			response, err := client.Post(server.URL, "text/plain", body)
+			if err != nil {
+				return "", err
+			}
+			defer response.Body.Close()
+			got, err := io.ReadAll(response.Body)
+			return string(got), err
+		}
+		// One byte, then nothing.
+		stalled, stall := io.Pipe()
+		go func() { _, _ = stall.Write([]byte("x")) }()
+		go func() { _, _ = post(stalled) }()
+		select {
+		case err := <-read:
+			if err == nil {
+				t.Errorf("HTTP/2 %v: a body that stopped was read whole", http2)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("HTTP/2 %v: a body that stopped is still waited for", http2)
+		}
+		stall.Close()
+		// Ten bytes over a second, then a stream of half a second.
+		slow, write := io.Pipe()
+		go func() {
+			for range 10 {
+				time.Sleep(100 * time.Millisecond)
+				_, _ = write.Write([]byte("x"))
+			}
+			write.Close()
+		}()
+		if got, err := post(slow); err != nil || got != strings.Repeat("10\n", 5) {
+			t.Errorf("HTTP/2 %v: a slow body: %q, %v", http2, got, err)
+		}
+		if err := <-read; err != nil {
+			t.Errorf("HTTP/2 %v: a slow body: %v", http2, err)
+		}
+		server.Close()
+	}
+}

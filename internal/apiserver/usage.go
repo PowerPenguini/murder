@@ -18,7 +18,7 @@ import (
 
 // Usage is what this node measured of its tenants and itself.
 type Usage interface {
-	Edge(tenant string, counts metrics.Counts, at time.Time)
+	Edge(from usage.EdgeInstance, counts map[string]metrics.Counts, at time.Time)
 	Report(at time.Time) usage.Report
 	Series(tenant string, step time.Duration, at time.Time) (usage.Series, bool)
 }
@@ -55,14 +55,19 @@ func (s *Server) edgeUsage(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &counts) {
 		return
 	}
+	// An edge of an older release says neither.
+	from := usage.EdgeInstance{ID: r.URL.Query().Get("edge")}
+	if started, err := time.Parse(time.RFC3339Nano, r.URL.Query().Get("started")); err == nil {
+		from.Started = started
+	}
 	if s.usage != nil {
-		now := time.Now()
-		for tenant, c := range counts {
-			// Only this node's tenants are measured here.
-			if record, err := s.store.Live(tenant); err == nil && record.Node == s.store.Node() {
-				s.usage.Edge(tenant, c, now)
+		// Only this node's tenants are measured here.
+		for tenant := range counts {
+			if record, err := s.store.Live(tenant); err != nil || record.Node != s.store.Node() {
+				delete(counts, tenant)
 			}
 		}
+		s.usage.Edge(from, counts, time.Now())
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -3,15 +3,11 @@ package backup
 import (
 	"archive/tar"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -396,9 +392,11 @@ type Verified struct {
 }
 
 // Verify reads a tenant's newest backup through: decrypted (age checks
-// every chunk), decompressed (zstd checks its frames) and every file of
-// it; and, when the snapshot it was made of is still here, checks that
-// it holds the same files with the same content.
+// every chunk), decompressed (zstd checks its frames) and every entry of
+// it, by the rules a restore unpacks it by (each path once, in a directory
+// an entry made, of a type a restore puts back); and, when the snapshot it
+// was made of is still here, checks that it holds what the snapshot does:
+// the same entries, types, owners, modes, times, symlinks and content.
 func (b *Backups) Verify(ctx context.Context, tenant, dataset string, identity age.Identity) (Verified, error) {
 	backups, err := b.List(ctx, tenant)
 	if err != nil {
@@ -413,28 +411,18 @@ func (b *Backups) Verify(ctx context.Context, tenant, dataset string, identity a
 		return Verified{}, err
 	}
 	defer content.Close()
-	sums := map[string]string{}
 	result := Verified{Backup: newest}
-	archive := tar.NewReader(content)
-	for {
-		header, err := archive.Next()
-		if errors.Is(err, io.EOF) {
-			break
+	// Read by the rules a restore unpacks by, so a backup verified is one
+	// that restores.
+	entries, err := volume.ScanTar(ctx, content)
+	if err != nil {
+		return result, fmt.Errorf("read %s: %w", newest.Key, err)
+	}
+	for _, entry := range entries {
+		if entry.Type == tar.TypeReg {
+			result.Files++
+			result.Bytes += entry.Size
 		}
-		if err != nil {
-			return result, fmt.Errorf("read %s: %w", newest.Key, err)
-		}
-		if header.Typeflag != tar.TypeReg {
-			continue
-		}
-		hash := sha256.New()
-		n, err := io.Copy(hash, archive)
-		if err != nil {
-			return result, fmt.Errorf("read %s from %s: %w", header.Name, newest.Key, err)
-		}
-		sums[filepath.Clean(header.Name)] = hex.EncodeToString(hash.Sum(nil))
-		result.Files++
-		result.Bytes += n
 	}
 	// Read to the end, so age and zstd check what follows the archive too.
 	if err := drained(content); err != nil {
@@ -448,34 +436,8 @@ func (b *Backups) Verify(ctx context.Context, tenant, dataset string, identity a
 	if _, err := os.Stat(dir); err != nil {
 		return result, nil
 	}
-	here := map[string]string{}
-	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || !entry.Type().IsRegular() {
-			return err
-		}
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		hash := sha256.New()
-		if _, err := io.Copy(hash, file); err != nil {
-			return err
-		}
-		relative, _ := filepath.Rel(dir, path)
-		here[relative] = hex.EncodeToString(hash.Sum(nil))
-		return nil
-	})
-	if err != nil {
-		return result, fmt.Errorf("read snapshot %s: %w", snapshot, err)
-	}
-	if len(here) != len(sums) {
-		return result, fmt.Errorf("the backup holds %d files, its snapshot %d", len(sums), len(here))
-	}
-	for name, sum := range here {
-		if sums[name] != sum {
-			return result, fmt.Errorf("%s differs from its snapshot in the backup", name)
-		}
+	if err := volume.CompareTar(ctx, dir, entries); err != nil {
+		return result, fmt.Errorf("compare %s with snapshot %s: %w", newest.Key, snapshot, err)
 	}
 	result.Compared = true
 	return result, nil

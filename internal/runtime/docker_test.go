@@ -73,6 +73,34 @@ func TestImagePresenceAndPull(t *testing.T) {
 	}
 }
 
+// The volumes an image declares are read from its configuration, and a
+// container whose image declares one that nothing covers is never made.
+func TestCreateRefusesAnUncoveredImageVolume(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	engine.handlers["GET /images/sha256:img/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Config":{"Volumes":{"/data/child":{},"/tmp":{},"/data":{}}}}`))
+	}
+	engine.handlers["POST /containers/create"] = func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&engine.created)
+		_, _ = w.Write([]byte(`{"Id":"c1"}`))
+	}
+	ctx := context.Background()
+	if volumes, err := docker.ImageVolumes(ctx, "sha256:img"); err != nil || strings.Join(volumes, ",") != "/data,/data/child,/tmp" {
+		t.Fatalf("ImageVolumes = %v, %v", volumes, err)
+	}
+	spec := ContainerSpec{Name: "murder-acme", Image: "sha256:img", Mounts: []Mount{{Source: "/srv/acme", Target: "/data"}}, Tmpfs: map[string]string{"/tmp": "size=64m"}}
+	if _, err := docker.Create(ctx, spec); !errors.Is(err, ErrUncoveredVolume) || !strings.Contains(err.Error(), "/data/child") {
+		t.Fatalf("Create = %v", err)
+	}
+	if engine.created != nil {
+		t.Fatal("the container was made")
+	}
+	spec.Mounts = append(spec.Mounts, Mount{Source: "/srv/acme/child", Target: "/data/child"})
+	if id, err := docker.Create(ctx, spec); err != nil || id != "c1" {
+		t.Fatalf("Create = %q, %v", id, err)
+	}
+}
+
 func TestCreateSendsHardenedContainer(t *testing.T) {
 	engine, docker := newFakeEngine(t)
 	engine.handlers["POST /containers/create"] = func(w http.ResponseWriter, r *http.Request) {

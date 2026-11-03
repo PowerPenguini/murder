@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -50,6 +51,7 @@ type fakeRuntime struct {
 	failCreate error
 	failPull   error
 	failRemove error
+	failStart  error
 	// removedImages are the images RemoveImage deleted; aliases gives a
 	// name the ID of an image known by another name.
 	removedImages []string
@@ -63,6 +65,8 @@ type fakeRuntime struct {
 	// exitBeforeInspect makes the next Inspect call see the container's
 	// process gone, as if it exited between List and the inspection.
 	exitBeforeInspect bool
+	// volumes are the paths images declare as volumes (VOLUME).
+	volumes map[string][]string
 	// state is what Inspect reports beyond the PID: restarts and the last
 	// exit. onStop runs when Stop is called.
 	state  runtime.ContainerState
@@ -95,6 +99,12 @@ func (f *fakeRuntime) imageID(ref string) string {
 		return id
 	}
 	return ref
+}
+
+func (f *fakeRuntime) ImageVolumes(_ context.Context, ref string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.volumes[ref]), nil
 }
 
 func (f *fakeRuntime) ImageID(_ context.Context, ref string) (string, error) {
@@ -206,6 +216,14 @@ func (f *fakeRuntime) Create(_ context.Context, spec runtime.ContainerSpec) (str
 	if !f.images[spec.Image] {
 		return "", fmt.Errorf("image %s not present", spec.Image)
 	}
+	// Like Docker: an image volume nothing covers is refused.
+	for _, volume := range f.volumes[spec.Image] {
+		volume = path.Clean(volume)
+		_, tmpfs := spec.Tmpfs[volume]
+		if !tmpfs && !slices.ContainsFunc(spec.Mounts, func(m runtime.Mount) bool { return m.Target == volume }) {
+			return "", fmt.Errorf("volume %s: %w", volume, runtime.ErrUncoveredVolume)
+		}
+	}
 	f.next++
 	id := fmt.Sprintf("c%d", f.next)
 	f.containers[id] = &fakeContainer{Container: runtime.Container{ID: id, Name: spec.Name, State: "created", Labels: spec.Labels}, spec: spec}
@@ -217,6 +235,9 @@ func (f *fakeRuntime) Create(_ context.Context, spec runtime.ContainerSpec) (str
 func (f *fakeRuntime) Start(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failStart != nil {
+		return f.failStart
+	}
 	f.containers[id].Running, f.containers[id].State = true, "running"
 	f.record("start " + id)
 	return nil
@@ -1882,6 +1903,154 @@ func TestAnExitedAppIsStartedAgainAndReported(t *testing.T) {
 	}
 }
 
+// A volume the image declares inside the tenant's data is bound from the
+// matching directory of the data, so its files stay in the tenant's
+// dataset, with its snapshots, copies and backups.
+func TestImageVolumesInsideTheDataAreBoundFromIt(t *testing.T) {
+	f := newFixture(t)
+	f.runtime.volumes = map[string][]string{imageA: {"/data/child/", "/data", "/tmp"}}
+	f.create(t, "acme")
+	f.reconcile(t)
+	container := f.runtime.only(t)
+	data := filepath.Join(f.volumes.Root, "acme")
+	want := []runtime.Mount{{Source: data, Target: "/data"}, {Source: filepath.Join(data, "child"), Target: "/data/child"}}
+	if !slices.Equal(container.spec.Mounts, want) {
+		t.Fatalf("mounts = %v, want %v", container.spec.Mounts, want)
+	}
+	if info, err := os.Lstat(filepath.Join(data, "child")); err != nil || !info.IsDir() {
+		t.Fatalf("the volume's directory: %v, %v", info, err)
+	}
+}
+
+// An image with a volume outside the tenant's data is refused before the
+// old container stops: the tenant keeps running on its old image. A
+// running container of such an image is adopted as it is.
+func TestAnImageVolumeOutsideTheDataIsRefused(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	f.runtime.mu.Lock()
+	f.runtime.images[imageB] = true
+	f.runtime.volumes = map[string][]string{imageA: {"/var/lib/app"}, imageB: {"/var/lib/app"}}
+	f.runtime.mu.Unlock()
+	// The running container's image declares one too: it stays, untouched.
+	f.runtime.takeEvents()
+	f.reconcile(t)
+	if events := f.runtime.takeEvents(); len(events) != 0 {
+		t.Fatalf("a running container whose image declares a volume was touched: %v", events)
+	}
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	err := f.reconciler.Reconcile(context.Background())
+	if !errors.Is(err, runtime.ErrUncoveredVolume) || !strings.Contains(err.Error(), "set dataPath to /var/lib/app") {
+		t.Fatalf("Reconcile = %v", err)
+	}
+	if container := f.runtime.only(t); container.ID != old || !container.Running {
+		t.Fatalf("the old container after a refused image: %+v", container)
+	}
+	if events := f.runtime.takeEvents(); len(events) != 0 || len(f.volumes.snapshots) != 0 {
+		t.Fatalf("a refused image touched the tenant: events %v, snapshots %v", events, f.volumes.snapshots)
+	}
+	if record, _ := f.store.Get("acme"); record.DataImage != imageA {
+		t.Fatalf("data image = %q", record.DataImage)
+	}
+	// With the data there, the image runs, its volume bound from the data.
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.DataPath = "/var/lib/app" })
+	f.reconcile(t)
+	if container := f.runtime.only(t); container.ID == old || container.spec.Image != imageB {
+		t.Fatalf("container = %+v", container)
+	}
+}
+
+// A symlink where an image volume's directory belongs, which the engine
+// would follow out of the data, is refused, before the old container
+// stops.
+func TestAnImageVolumeIsNotBoundThroughASymlink(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	data := filepath.Join(f.volumes.Root, "acme")
+	if err := os.Symlink("/etc", filepath.Join(data, "child")); err != nil {
+		t.Fatal(err)
+	}
+	f.runtime.mu.Lock()
+	f.runtime.images[imageB] = true
+	f.runtime.volumes = map[string][]string{imageB: {"/data/child/cache"}}
+	f.runtime.mu.Unlock()
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "child in the tenant's data is not a directory") {
+		t.Fatalf("Reconcile = %v", err)
+	}
+	if container := f.runtime.only(t); container.ID != old || !container.Running {
+		t.Fatalf("the old container: %+v", container)
+	}
+}
+
+// One exit is counted once, however many passes fail to start the app
+// again after it.
+func TestAnExitIsCountedOnceThoughStartsFail(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	container := f.runtime.only(t)
+	f.runtime.mu.Lock()
+	container.Running, container.State = false, "exited"
+	f.runtime.failStart = errors.New("the engine is busy")
+	f.runtime.state = runtime.ContainerState{ExitKnown: true, ExitCode: 137, OOMKilled: true, ExitedAt: time.Now()}
+	f.runtime.mu.Unlock()
+	for range 3 {
+		if err := f.reconciler.Reconcile(context.Background()); err == nil {
+			t.Fatal("a pass whose start failed reported success")
+		}
+	}
+	f.runtime.mu.Lock()
+	f.runtime.failStart = nil
+	f.runtime.mu.Unlock()
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.Restarts != 1 || !strings.HasPrefix(status.LastExit, "killed for using more than its 256 MB") {
+		t.Fatalf("after one exit and three failed starts: %+v", status)
+	}
+}
+
+// A pass that stops the old container of an image change but cannot remove
+// it leaves the data's image as it was: the next pass, with the old
+// container stopped, takes the snapshot to go back to, every write in.
+func TestAFailedRemovalStillGetsTheFinalSnapshot(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	f.runtime.images[imageB] = true
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.runtime.failRemove = errors.New("the engine is busy")
+	f.runtime.takeEvents()
+	if err := f.reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("a pass that could not remove the old container reported success")
+	}
+	if record, _ := f.store.Get("acme"); record.DataImage != imageA {
+		t.Fatalf("data image %q with the old container not removed", record.DataImage)
+	}
+	f.runtime.failRemove = nil
+	f.reconcile(t)
+	if container := f.runtime.only(t); container.spec.Image != imageB || !container.Running {
+		t.Fatalf("container = %+v", container)
+	}
+	events := f.runtime.takeEvents()
+	stopped, final := slices.Index(events, "stop "+old), -1
+	for i, event := range events {
+		if strings.HasPrefix(event, "snapshot ") {
+			final = i
+		}
+	}
+	if stopped < 0 || final < stopped {
+		t.Fatalf("events = %v, want a snapshot after the old container stopped", events)
+	}
+	if record, _ := f.store.Get("acme"); record.DataImage != imageB {
+		t.Fatalf("data image = %q", record.DataImage)
+	}
+}
+
 // A tenant that ran before is not started on empty data when its data is
 // missing, as when a copy that should have taken over holds nothing; a
 // copy of an earlier tenant of the same name is not taken for a new one's.
@@ -2022,6 +2191,88 @@ func (f *fixture) reconcileOnce(t *testing.T) {
 		default:
 			return
 		}
+	}
+}
+
+// A caller waiting for the lock with a context waits in line: a pass that
+// comes after it does not go first, so passes one after another cannot
+// keep it out.
+func TestExclusiveContextWaitsInLine(t *testing.T) {
+	f := newFixture(t)
+	var mu sync.Mutex
+	var order []string
+	note := func(what string) { mu.Lock(); order = append(order, what); mu.Unlock() }
+	f.reconciler.pass.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	waited := make(chan error, 1)
+	go func() {
+		waited <- f.reconciler.ExclusiveContext(ctx, func() error { note("the caller"); return nil })
+	}()
+	time.Sleep(50 * time.Millisecond)
+	passed := make(chan struct{})
+	go func() {
+		defer close(passed)
+		f.reconciler.pass.Lock()
+		note("a later pass")
+		time.Sleep(100 * time.Millisecond)
+		f.reconciler.pass.Unlock()
+	}()
+	time.Sleep(50 * time.Millisecond)
+	f.reconciler.pass.Unlock()
+	if err := <-waited; err != nil {
+		t.Fatal(err)
+	}
+	<-passed
+	if order[0] != "the caller" {
+		t.Fatalf("a pass that came later went first: %v", order)
+	}
+}
+
+// A caller that gave up waiting runs nothing, and the lock it would have
+// had is given back.
+func TestExclusiveContextGivenUpGivesTheLockBack(t *testing.T) {
+	f := newFixture(t)
+	f.reconciler.pass.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := f.reconciler.ExclusiveContext(ctx, func() error { t.Error("ran after giving up"); return nil }); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("given up: %v", err)
+	}
+	f.reconciler.pass.Unlock()
+	locked := make(chan struct{})
+	go func() { f.reconciler.pass.Lock(); close(locked) }()
+	select {
+	case <-locked:
+		f.reconciler.pass.Unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("the lock was kept by a caller that gave up")
+	}
+}
+
+// A purge given up while it waits for a pass deletes nothing.
+func TestAPurgeGivenUpWhileWaitingDeletesNothing(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.archive(t, "acme")
+	f.reconciler.pass.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.reconciler.Purge(ctx, "acme", "test") }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	// The pass ends; a purge that kept waiting would now go on.
+	time.Sleep(20 * time.Millisecond)
+	f.reconciler.pass.Unlock()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("a purge given up: %v", err)
+	}
+	if exists, err := f.volumes.Exists(context.Background(), "acme"); err != nil || !exists {
+		t.Fatalf("data deleted by a purge given up: %v %v", exists, err)
+	}
+	if _, err := f.store.Get("acme"); err != nil {
+		t.Fatalf("the archived tenant was forgotten: %v", err)
 	}
 }
 

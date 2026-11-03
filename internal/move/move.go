@@ -79,6 +79,11 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 	// it: its copy, which may still take over, is never dropped. Asked
 	// before the move begins: the target takes no more changes after.
 	base := m.replicaBase(ctx, tenant, target)
+	// A lookup cut short because the caller gave up: nothing has begun,
+	// and nothing does.
+	if ctx.Err() != nil {
+		return fmt.Errorf("the move was given up before it began: %w", context.Cause(ctx))
+	}
 	record, err := m.Store.StartMove(tenant, target, actor)
 	if err != nil {
 		return err
