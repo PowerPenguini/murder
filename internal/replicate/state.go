@@ -18,11 +18,13 @@ type State interface {
 	// and evens out the copies the nodes keep (ReplicaNext); it reports how
 	// many it changed.
 	PlaceReplicas(actor string) (int, error)
-	// ReplicaReady records that the copy on replica holds the whole data.
-	ReplicaReady(name, replica, owner string, generation int64) error
+	// ReplicaReady records that the copy on replica holds the whole data,
+	// as owner, this node, sent it.
+	ReplicaReady(name, replica, owner string) error
 	// SwitchReplica makes next, the tenant's ReplicaNext, its replica once
-	// next holds the whole data; it reports whether it switched.
-	SwitchReplica(name, next string) (bool, error)
+	// next holds the whole data, as owner sent it; it reports whether it
+	// switched.
+	SwitchReplica(name, next, owner string) (bool, error)
 	// GiveUpCopy gives up the tenant's copy on node, for why; it reports
 	// whether it changed anything.
 	GiveUpCopy(name, node, why string) (bool, error)

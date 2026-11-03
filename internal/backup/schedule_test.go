@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -253,10 +254,9 @@ func TestABackupReplacesOnlyAnArchivedTenantOfThisNode(t *testing.T) {
 	if len(volumes.replaced) != 1 || exclusive != 3 {
 		t.Fatalf("replaced %v, under the reconciler's lock %d times", volumes.replaced, exclusive)
 	}
-	// Its copy on another node no longer matches: no failover takes it,
-	// nor a send begun before reports it whole (its generation moved on).
-	if replaced, _ := st.Get("acme"); replaced.ReplicaReady || replaced.Generation <= before.Generation {
-		t.Fatalf("after the replacement: ready %v, generation %d (was %d)", replaced.ReplicaReady, replaced.Generation, before.Generation)
+	// Its copy on another node no longer matches: no failover takes it.
+	if replaced, _ := st.Get("acme"); replaced.ReplicaReady {
+		t.Fatalf("after the replacement: ready %v (was %v)", replaced.ReplicaReady, before.ReplicaReady)
 	}
 	// A run under way holds the replacement off; a caller that gives up
 	// stops waiting.
@@ -273,6 +273,47 @@ func TestABackupReplacesOnlyAnArchivedTenantOfThisNode(t *testing.T) {
 	a.exclusive = func(fn func() error) error { cancel(); return fn() }
 	if _, err := a.ReplaceTenant(waiting, "acme", "murder-copy-acme-restore-3"); !errors.Is(err, context.Canceled) || len(volumes.replaced) != 1 {
 		t.Fatalf("given up under the lock: %v, replaced %v", err, volumes.replaced)
+	}
+}
+
+// A replacement holds the tenant's sends to its copies from before its
+// copy is marked stale until the data is replaced: none begun before
+// reports the old data whole after. A caller that gives up waiting for
+// the hold replaces nothing.
+func TestAReplacementHoldsTheTenantsSends(t *testing.T) {
+	acme := record("acme", "n1")
+	acme.ArchivedAt = time.Now()
+	state := &fakeState{node: "n1", records: []store.Record{acme}}
+	volumes := &replaceVolumes{}
+	var steps []string
+	a := NewScheduler(SchedulerConfig{
+		State: state, Log: discard(), Exclusive: func(fn func() error) error { return fn() },
+		Hold: func(ctx context.Context, tenant string) (func(), error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			steps = append(steps, fmt.Sprintf("hold %s, stale %d, replaced %d", tenant, len(state.stale), len(volumes.replaced)))
+			return func() {
+				steps = append(steps, fmt.Sprintf("release %s, stale %d, replaced %d", tenant, len(state.stale), len(volumes.replaced)))
+			}, nil
+		},
+	})
+	a.backups = &Backups{Volumes: volumes}
+	if _, err := a.ReplaceTenant(context.Background(), "acme", "murder-copy-acme-restore-1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"hold acme, stale 0, replaced 0", "release acme, stale 1, replaced 1"}
+	if !slices.Equal(steps, want) {
+		t.Fatalf("steps %v, want %v", steps, want)
+	}
+	gaveUp, cancel := context.WithCancel(context.Background())
+	a.exclusive = func(fn func() error) error { return fn() }
+	a.hold = func(ctx context.Context, tenant string) (func(), error) {
+		cancel()
+		return nil, ctx.Err()
+	}
+	if _, err := a.ReplaceTenant(gaveUp, "acme", "murder-copy-acme-restore-2"); !errors.Is(err, context.Canceled) || len(volumes.replaced) != 1 || len(state.stale) != 1 {
+		t.Fatalf("given up while held off: %v, replaced %v, stale %v", err, volumes.replaced, state.stale)
 	}
 }
 

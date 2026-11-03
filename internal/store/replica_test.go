@@ -353,11 +353,15 @@ func TestCopiesMoveToANodeThatCameBack(t *testing.T) {
 		if again, _ := st.PlaceReplicas("murder"); again != 0 {
 			t.Fatal("a second copy moves at once")
 		}
-		// A stale switch changes nothing; the real one does.
-		if switched, err := st.SwitchReplica(next[0].Spec.Name, "n3x"); err != nil || switched {
+		// A stale switch changes nothing, nor one from a node that does
+		// not run the tenant; the real one does.
+		if switched, err := st.SwitchReplica(next[0].Spec.Name, "n3x", next[0].Node); err != nil || switched {
 			t.Fatalf("a stale switch: %v, %v", switched, err)
 		}
-		if switched, err := st.SwitchReplica(next[0].Spec.Name, "n4"); err != nil || !switched {
+		if switched, err := st.SwitchReplica(next[0].Spec.Name, "n4", "n4"); err != nil || switched {
+			t.Fatalf("a switch from another node: %v, %v", switched, err)
+		}
+		if switched, err := st.SwitchReplica(next[0].Spec.Name, "n4", next[0].Node); err != nil || !switched {
 			t.Fatalf("the switch: %v, %v", switched, err)
 		}
 		switched, _ := st.Get(next[0].Spec.Name)
@@ -579,11 +583,11 @@ func TestADeviceIsRemovedDuringAFreeze(t *testing.T) {
 // markReady reports name's copy on replica whole, as its node would.
 func markReady(st interface {
 	Get(string) (Record, error)
-	ReplicaReady(string, string, string, int64) error
+	ReplicaReady(string, string, string) error
 }, name, replica string) error {
 	record, err := st.Get(name)
 	if err != nil {
 		return err
 	}
-	return st.ReplicaReady(name, replica, record.Node, record.Generation)
+	return st.ReplicaReady(name, replica, record.Node)
 }

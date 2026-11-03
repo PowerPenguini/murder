@@ -533,11 +533,11 @@ func TestABlockedFailoverStaysBlockedWhileItsTenantsAreStuck(t *testing.T) {
 // markReady reports name's copy on replica whole, as its node would.
 func markReady(st interface {
 	Get(string) (store.Record, error)
-	ReplicaReady(string, string, string, int64) error
+	ReplicaReady(string, string, string) error
 }, name, replica string) error {
 	record, err := st.Get(name)
 	if err != nil {
 		return err
 	}
-	return st.ReplicaReady(name, replica, record.Node, record.Generation)
+	return st.ReplicaReady(name, replica, record.Node)
 }

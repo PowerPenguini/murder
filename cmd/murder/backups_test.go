@@ -60,14 +60,14 @@ func TestBackupsThatCannotBeSetUpWaitForAFix(t *testing.T) {
 		}
 	}
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if _, err := newAgentBackups(agentConfig("age1notavalidkey"), nil, nil, nil, discard); err == nil {
+	if _, err := newAgentBackups(agentConfig("age1notavalidkey"), nil, nil, nil, nil, discard); err == nil {
 		t.Fatal("a recipient that is no age key accepted")
 	}
 	identity, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := newAgentBackups(agentConfig(identity.Recipient().String()), nil, nil, nil, discard)
+	a, err := newAgentBackups(agentConfig(identity.Recipient().String()), nil, nil, nil, nil, discard)
 	if err != nil {
 		t.Fatal(err)
 	}

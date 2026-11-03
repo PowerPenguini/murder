@@ -1076,9 +1076,11 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 			node = current.node
 		}
 		// Outside a cluster, this node alone; in one, its members alone:
-		// this node too, which may be leaving it.
+		// this node too, which may be leaving it. A cluster is known by its
+		// name, which stays when its last member is removed.
 		member, isMember := current.nodes[node]
-		if len(current.nodes) > 0 && !isMember || len(current.nodes) == 0 && node != current.node {
+		inCluster := current.cluster != "" || len(current.nodes) > 0
+		if inCluster && !isMember || !inCluster && node != current.node {
 			return fmt.Errorf("node %s: %w", node, ErrNotFound)
 		}
 		if member.Failed() {

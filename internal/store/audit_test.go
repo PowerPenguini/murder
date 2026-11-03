@@ -2,6 +2,7 @@ package store
 
 import (
 	"testing"
+	"time"
 )
 
 // clustered is a store of a named cluster of three nodes, this node
@@ -24,18 +25,17 @@ func clustered(t *testing.T) *SQLite {
 }
 
 // A send's report, late, proves nothing of a copy a move now changes, or of
-// a tenant another node runs now, or one changed since the send began.
+// a tenant another node runs now; a copy marked stale is not whole.
 func TestALateReportMakesNoCopyWhole(t *testing.T) {
 	st := clustered(t)
 	if _, err := st.PlaceReplicas("test"); err != nil {
 		t.Fatal(err)
 	}
 	r, _ := st.Get("acme")
-	sentAt := r.Generation
 	if _, err := st.StartMove("acme", r.Replica, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ReplicaReady("acme", r.Replica, r.Node, sentAt); err != nil {
+	if err := st.ReplicaReady("acme", r.Replica, r.Node); err != nil {
 		t.Fatal(err)
 	}
 	if moving, _ := st.Get("acme"); moving.ReplicaReady {
@@ -44,37 +44,59 @@ func TestALateReportMakesNoCopyWhole(t *testing.T) {
 	if _, err := st.CancelMove("acme", "test"); err != nil {
 		t.Fatal(err)
 	}
-	// From a node that does not run it.
-	if err := st.ReplicaReady("acme", r.Replica, "node-3", sentAt); err != nil {
-		t.Fatal(err)
+	// From a node that does not run it, or none.
+	for _, owner := range []string{"node-3", ""} {
+		if err := st.ReplicaReady("acme", r.Replica, owner); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := st.Get("acme"); got.ReplicaReady {
+			t.Fatalf("a report from node %q made the copy whole", owner)
+		}
 	}
-	if got, _ := st.Get("acme"); got.ReplicaReady {
-		t.Fatal("a report from another node made the copy whole")
-	}
-	// Data replaced since the send began.
-	if err := st.ReplicaStale("acme", "its data was replaced", "test"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.ReplicaReady("acme", r.Replica, r.Node, sentAt); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := st.Get("acme"); got.ReplicaReady {
-		t.Fatal("a send from before the data was replaced made the copy whole")
-	}
-	// A send of now does.
-	now, _ := st.Get("acme")
-	if err := st.ReplicaReady("acme", now.Replica, now.Node, now.Generation); err != nil {
+	// From its node, it does.
+	if err := st.ReplicaReady("acme", r.Replica, r.Node); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := st.Get("acme"); !got.ReplicaReady {
-		t.Fatal("a send of now did not make the copy whole")
+		t.Fatal("a report from the tenant's node did not make the copy whole")
 	}
-	// Stale again, it is not whole.
+	// Stale, it is not whole.
 	if err := st.ReplicaStale("acme", "its data was replaced", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := st.Get("acme"); got.ReplicaReady {
 		t.Fatal("a stale copy stayed whole")
+	}
+}
+
+// A copy that moves to another node is not switched to by a send's report
+// from a node that does not run the tenant, nor while the tenant moves.
+func TestALateReportSwitchesNoCopy(t *testing.T) {
+	st := clustered(t)
+	if _, err := st.PlaceReplicas("test"); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := st.Get("acme")
+	next := "node-3"
+	if r.Replica == next {
+		next = "node-2"
+	}
+	if _, err := st.write(false, func(tx *recorder, _ *snapshot, _ time.Time) error {
+		return tx.Exec(`UPDATE tenants SET replica_ready = 1, replica_next = ? WHERE name = 'acme'`, next)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if switched, err := st.SwitchReplica("acme", next, next); err != nil || switched {
+		t.Fatalf("switched by another node: %v, %v", switched, err)
+	}
+	if _, err := st.StartMove("acme", r.Replica, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if switched, err := st.SwitchReplica("acme", next, r.Node); err != nil || switched {
+		t.Fatalf("switched while moving: %v, %v", switched, err)
+	}
+	if got, _ := st.Get("acme"); got.Replica != r.Replica {
+		t.Fatalf("the copy is kept on %s", got.Replica)
 	}
 }
 
@@ -110,6 +132,15 @@ func TestNoTenantIsCreatedOnANodeOutOfTheCluster(t *testing.T) {
 	}
 	if r, err := st.Create(NewTenant{Name: "new", App: "web"}, "test"); err == nil {
 		t.Fatalf("created on node %s, out of the cluster", r.Node)
+	}
+	// With its last member removed, the cluster is still one.
+	for _, node := range []string{"node-2", "node-3"} {
+		if err := st.RemoveNode(node, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r, err := st.Create(NewTenant{Name: "new", App: "web"}, "test"); err == nil {
+		t.Fatalf("created on node %s, of a cluster with no members", r.Node)
 	}
 }
 

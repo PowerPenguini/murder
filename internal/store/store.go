@@ -326,13 +326,17 @@ type Store interface {
 	// another to that other (ReplicaNext). It reports how many it changed.
 	PlaceReplicas(actor string) (int, error)
 	// ReplicaReady records that the copy of a tenant on replica holds its
-	// whole data; nothing changes unless replica is still its replica.
-	ReplicaReady(name, replica, owner string, generation int64) error
+	// whole data, as owner sent it; nothing changes unless replica is
+	// still its replica, and owner still runs it and it is not moving.
+	ReplicaReady(name, replica, owner string) error
+	// ReplicaStale records that a tenant's copy no longer matches its
+	// data, replaced from a backup: it is not ready until sent again.
 	ReplicaStale(name, why, actor string) error
 	// SwitchReplica makes next, the tenant's ReplicaNext, its replica,
-	// ready, once next holds the whole data; nothing changes unless next
-	// is still its ReplicaNext. It reports whether it switched.
-	SwitchReplica(name, next string) (bool, error)
+	// ready, once next holds the whole data as owner sent it; nothing
+	// changes unless next is still its ReplicaNext, and owner still runs
+	// it and it is not moving. It reports whether it switched.
+	SwitchReplica(name, next, owner string) (bool, error)
 	// GiveUpCopy gives up the tenant's copy on node, for why: its
 	// ReplicaNext, or its replica while that copy is not whole yet. No
 	// copy goes to node for a while. It reports whether it changed

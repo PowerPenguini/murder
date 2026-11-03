@@ -128,10 +128,13 @@ func rebalance(current *snapshot, now time.Time) (string, string) {
 	return "", ""
 }
 
-func (s *SQLite) SwitchReplica(name, next string) (bool, error) {
+// SwitchReplica makes next, the tenant's ReplicaNext, its replica, ready,
+// as owner sent it the whole data; like ReplicaReady, it changes nothing
+// unless owner still runs the tenant and it is not moving.
+func (s *SQLite) SwitchReplica(name, next, owner string) (bool, error) {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
-		if !ok || next == "" || record.ReplicaNext != next {
+		if !ok || next == "" || record.ReplicaNext != next || !reportedByOwner(record, owner) {
 			return errUnchanged
 		}
 		if err := tx.Exec(`UPDATE tenants SET replica = replica_next, replica_ready = 1, replica_next = '' WHERE name = ? AND replica_next = ?`, name, next); err != nil {
@@ -181,18 +184,26 @@ func (s *SQLite) GiveUpCopy(name, node, why string) (bool, error) {
 	return err == nil, err
 }
 
+// reportedByOwner reports whether a send's report, by owner, may change
+// the readiness of record's copies: a report from a node that no longer
+// runs the tenant, or of a tenant moving, proves nothing of a copy now. A
+// send begun before its data was replaced from a backup cannot report
+// either: the replacement holds the tenant's sends off on its node, the
+// only one that sends it, and ends any under way first (see
+// replicate.Replicator.Hold). Other changes of the tenant, to its
+// settings, image or containers, leave its data, and its copies, as they
+// are.
+func reportedByOwner(record Record, owner string) bool {
+	return owner != "" && record.Node == owner && record.MoveTo == ""
+}
+
 // ReplicaReady records that the copy of name on replica holds the whole
-// data, as owner sent it while the tenant was at generation. A report from
-// a node that no longer runs the tenant, of a tenant moving, or from before
-// a change of the tenant (its data replaced from a backup, say) proves
-// nothing of the copy now, and changes nothing: the next send reports again.
-func (s *SQLite) ReplicaReady(name, replica, owner string, generation int64) error {
+// data, as owner sent it. A report reportedByOwner refuses changes
+// nothing: the next send reports again.
+func (s *SQLite) ReplicaReady(name, replica, owner string) error {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
-		if !ok || record.Replica != replica || replica == "" || record.ReplicaReady {
-			return errUnchanged
-		}
-		if record.Node != owner || record.MoveTo != "" || record.Generation != generation {
+		if !ok || record.Replica != replica || replica == "" || record.ReplicaReady || !reportedByOwner(record, owner) {
 			return errUnchanged
 		}
 		if err := tx.Exec(`UPDATE tenants SET replica_ready = 1 WHERE name = ? AND replica = ?`, name, replica); err != nil {
@@ -208,14 +219,17 @@ func (s *SQLite) ReplicaReady(name, replica, owner string, generation int64) err
 
 // ReplicaStale records that the copy of name no longer matches its data,
 // replaced from a backup say: no failover takes it until a send makes it
-// whole again, and a send begun before cannot report it whole.
+// whole again. The caller holds the tenant's sends off meanwhile, so none
+// begun before reports it whole. It writes even when the copy is not
+// ready: a report still on its way, computed against the state before,
+// is then refused as stale.
 func (s *SQLite) ReplicaStale(name, why, actor string) error {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
 		if !ok {
 			return fmt.Errorf("tenant %s: %w", name, ErrNotFound)
 		}
-		if err := tx.Exec(`UPDATE tenants SET replica_ready = 0, generation = generation + 1 WHERE name = ?`, name); err != nil {
+		if err := tx.Exec(`UPDATE tenants SET replica_ready = 0 WHERE name = ?`, name); err != nil {
 			return err
 		}
 		if record.Replica == "" {
