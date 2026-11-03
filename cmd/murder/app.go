@@ -7,18 +7,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
 const appUsage = `Usage: murder app <command> [options]
 
-  apply FILE... [-wait 3m] [-update]
+  apply FILE... [-wait 10m] [-update] [-now]
                              store app specs and roll them out to their tenants;
                              an app is named after its file (apps/web.yaml is "web").
                              A tag the app has already keeps the image it is pinned
@@ -26,12 +29,29 @@ const appUsage = `Usage: murder app <command> [options]
   list                       list apps, how many tenants run each, and newer images
   show NAME                  print an app as JSON
   check [NAME...]            ask the registry now for newer images of the apps' tags
-  update NAME [-wait 3m]     take the newest image of the app's tag and roll it out
+  update NAME [-wait 10m] [-now]
+                             take the newest image of the app's tag and roll it out
   history NAME               the app's recent revisions
-  rollback NAME [-to N] [-wait 3m]
+  rollback NAME [-to N] [-wait 10m] [-now]
                              store an earlier revision again (by default the one
                              before the current) and roll it out
+  rollout NAME               how the app's rollout goes: its waves and tenants
+  rollout pause|resume|abort|promote NAME
+                             stop it moving tenants; let it go on; take every
+                             tenant it moved back to the revision before, their
+                             data as it is; move every waiting tenant now
+  rollout restore NAME [-tenant T ...] -yes
+                             take the tenants it moved (or those named) back to
+                             the revision before with their data from before
+                             they moved: what they wrote since is lost
   delete NAME                delete an app no tenant runs
+
+A change rolls out in waves: canary tenants first (murder tenant set NAME
+-canary true), then a tenth of the tenants, half, and the rest, each wave
+healthy for a while before the next; held tenants (-hold true) stay. A tenant
+that does not come up healthy, or breaks after it came up, pauses the rollout:
+abort or restore it from there. -now moves every tenant at once; -wait waits
+for the waves too.
 
 Every command accepts -socket (default $MURDER_SOCKET or /run/murder/agent.sock).
 `
@@ -48,13 +68,28 @@ func runApp(args []string) error {
 	asJSON := flags.Bool("json", false, "with list, check and history: print JSON")
 	update := flags.Bool("update", false, "with apply: pin tags to their newest images, also tags the apps have already")
 	to := flags.Int64("to", 0, "with rollback: the revision to go back to")
+	now := flags.Bool("now", false, "with apply, update and rollback: move every tenant at once, not in waves")
+	var restoreTenants listFlag
+	flags.Var(&restoreTenants, "tenant", "with rollout restore: a tenant to take back with its data (repeatable; default every tenant the rollout moved)")
+	yes := flags.Bool("yes", false, "with rollout restore: confirm that what the tenants wrote since they moved is lost")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
 	client := api.NewClient(*socket)
+	if *now {
+		client = client.AtOnce()
+	}
 	switch command {
+	case "rollout":
+		if len(positional) == 2 && positional[0] == "restore" {
+			return restoreRollout(ctx, client, positional[1], restoreTenants, *yes)
+		}
+		if len(restoreTenants) > 0 || *yes {
+			return errors.New("-tenant and -yes only make sense with rollout restore")
+		}
+		return runRollout(ctx, client, positional)
 	case "apply":
 		if len(positional) == 0 {
 			return errors.New("usage: murder app apply FILE... [-wait 3m]")
@@ -160,6 +195,7 @@ func applyApps(ctx context.Context, client *api.Client, paths []string, wait tim
 		apps = append(apps, loaded{name, app})
 	}
 	var failures []string
+	var rolling []string
 	applied := map[string]bool{}
 	for _, app := range apps {
 		put := client.PutApp
@@ -184,16 +220,16 @@ func applyApps(ctx context.Context, client *api.Client, paths []string, wait tim
 		if result.Note != "" {
 			fmt.Fprintf(stdout, "%-20s note: %s\n", "", result.Note)
 		}
-		if len(result.Tenants) > 0 {
-			names := make([]string, 0, len(result.Tenants))
-			for _, tenant := range result.Tenants {
-				names = append(names, tenant.Spec.Name)
-			}
-			fmt.Fprintf(stdout, "%-20s rolls out to %s\n", "", strings.Join(names, ", "))
-		}
+		reportTenants(app.name, result)
+		// Changed or not: a retry waits for what an earlier apply began.
+		rolling = append(rolling, app.name)
 	}
+	deadline := time.Now().Add(wait)
 	if wait > 0 {
-		current, err := client.List(ctx)
+		bounded, cancel := context.WithDeadline(ctx, deadline.Add(rolloutPoll))
+		defer cancel()
+		failures = append(failures, waitRollouts(bounded, client, rolling, deadline)...)
+		current, err := client.List(bounded)
 		if err != nil {
 			return err
 		}
@@ -203,7 +239,7 @@ func applyApps(ctx context.Context, client *api.Client, paths []string, wait tim
 				tenants = append(tenants, tenant)
 			}
 		}
-		failures = append(failures, waitAll(ctx, client, tenants, wait)...)
+		failures = append(failures, waitAll(ctx, client, tenants, max(time.Until(deadline).Round(time.Second), time.Second))...)
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf("%d problem(s):\n  %s", len(failures), strings.Join(failures, "\n  "))
@@ -336,23 +372,187 @@ func rollbackApp(ctx context.Context, client *api.Client, name string, to int64,
 // reportApplied says what storing an app changed and, with wait, waits for
 // its live tenants to be healthy.
 func reportApplied(ctx context.Context, client *api.Client, name string, applied api.AppApplied, wait time.Duration) error {
-	if !applied.Changed {
+	if applied.Changed {
+		fmt.Fprintf(stdout, "%-20s revision %d: %s\n", name, applied.App.Revision, shortImage(applied.App.Spec.Image))
+	} else {
 		fmt.Fprintf(stdout, "%-20s unchanged %s\n", name, shortImage(applied.App.Spec.Image))
-		return nil
 	}
-	fmt.Fprintf(stdout, "%-20s revision %d: %s\n", name, applied.App.Revision, shortImage(applied.App.Spec.Image))
 	if applied.Note != "" {
 		fmt.Fprintf(stdout, "%-20s note: %s\n", "", applied.Note)
 	}
-	if len(applied.Tenants) > 0 {
-		names := make([]string, 0, len(applied.Tenants))
-		for _, tenant := range applied.Tenants {
-			names = append(names, tenant.Spec.Name)
-		}
-		fmt.Fprintf(stdout, "%-20s rolls out to %s\n", "", strings.Join(names, ", "))
+	reportTenants(name, applied)
+	if wait <= 0 {
+		return nil
 	}
-	if failures := waitAll(ctx, client, applied.Tenants, wait); len(failures) > 0 {
+	// Changed or not: a retry waits for what an earlier one began.
+	deadline := time.Now().Add(wait)
+	bounded, cancel := context.WithDeadline(ctx, deadline.Add(rolloutPoll))
+	defer cancel()
+	if failures := waitRollouts(bounded, client, []string{name}, deadline); len(failures) > 0 {
 		return fmt.Errorf("%d problem(s):\n  %s", len(failures), strings.Join(failures, "\n  "))
+	}
+	current, err := client.List(bounded)
+	if err != nil {
+		return err
+	}
+	applied.Tenants = applied.Tenants[:0]
+	for _, tenant := range current {
+		if tenant.App == name && !tenant.Archived() {
+			applied.Tenants = append(applied.Tenants, tenant)
+		}
+	}
+	if failures := waitAll(ctx, client, applied.Tenants, max(time.Until(deadline).Round(time.Second), time.Second)); len(failures) > 0 {
+		return fmt.Errorf("%d problem(s):\n  %s", len(failures), strings.Join(failures, "\n  "))
+	}
+	return nil
+}
+
+// reportTenants says which tenants a change moves, and how.
+func reportTenants(app string, applied api.AppApplied) {
+	if len(applied.Tenants) == 0 {
+		return
+	}
+	names := make([]string, 0, len(applied.Tenants))
+	for _, tenant := range applied.Tenants {
+		names = append(names, tenant.Spec.Name)
+	}
+	if applied.Rollout {
+		fmt.Fprintf(stdout, "%-20s rolls out in waves to %s (murder app rollout %s)\n", "", strings.Join(names, ", "), app)
+		return
+	}
+	fmt.Fprintf(stdout, "%-20s rolls out to %s\n", "", strings.Join(names, ", "))
+}
+
+// rolloutPoll is how often waiting for a rollout asks how it goes.
+var rolloutPoll = 5 * time.Second
+
+// waitRollouts waits until the apps' rollouts are done, and reports those
+// that paused, were aborted, or are not done by deadline.
+func waitRollouts(ctx context.Context, client *api.Client, apps []string, deadline time.Time) []string {
+	var failures []string
+	for _, name := range apps {
+		for {
+			app, err := client.App(ctx, name)
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+				break
+			}
+			rollout := app.Rollout
+			// A rollout of an older revision is not this one's: one that
+			// went at once has none.
+			if rollout == nil || rollout.ToRevision != app.Revision {
+				break
+			}
+			if rollout.State == store.RolloutDone {
+				fmt.Fprintf(stdout, "%-20s rolled out\n", name)
+				break
+			}
+			if rollout.State != store.RolloutRunning {
+				failures = append(failures, fmt.Sprintf("%s: the rollout is %s: %s", name, rollout.State, rollout.Reason))
+				break
+			}
+			if time.Now().After(deadline) {
+				failures = append(failures, fmt.Sprintf("%s: the rollout is at wave %d, not done yet (murder app rollout %s)", name, rollout.Wave, name))
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return append(failures, ctx.Err().Error())
+			case <-time.After(rolloutPoll):
+			}
+		}
+	}
+	return failures
+}
+
+// runRollout shows an app's rollout, or acts on it.
+func runRollout(ctx context.Context, client *api.Client, args []string) error {
+	switch {
+	case len(args) == 1:
+		return showRollout(ctx, client, args[0])
+	case len(args) == 2 && slices.Contains([]string{"pause", "resume", "abort", "promote"}, args[0]):
+		if _, err := client.RolloutAction(ctx, args[1], args[0]); err != nil {
+			return err
+		}
+		return showRollout(ctx, client, args[1])
+	default:
+		return errors.New("usage: murder app rollout NAME, murder app rollout pause|resume|abort|promote NAME, or murder app rollout restore NAME [-tenant T ...] -yes")
+	}
+}
+
+// restoreRollout takes tenants of an app's rollout back to the revision
+// before with their data from before they moved; without yes it only says
+// what that loses.
+func restoreRollout(ctx context.Context, client *api.Client, name string, tenants []string, yes bool) error {
+	if !yes {
+		named := tenants
+		if len(named) == 0 {
+			list, err := client.List(ctx)
+			if err != nil {
+				return err
+			}
+			for _, tenant := range list {
+				if tenant.App == name && !tenant.Archived() && tenant.AppRevision == 0 && tenant.BeforeRevision != 0 {
+					named = append(named, fmt.Sprintf("%s (to revision %d)", tenant.Spec.Name, tenant.BeforeRevision))
+				}
+			}
+			if len(named) == 0 {
+				return fmt.Errorf("the rollout of app %s moved no tenant to take back", name)
+			}
+		}
+		return fmt.Errorf("restore takes %s back to the revision before, their data to the snapshot taken as they moved: writes to these tenants since they moved are lost. Add -yes to confirm (`murder app rollout abort %s` takes them back with their data as it is)", strings.Join(named, ", "), name)
+	}
+	restored, err := client.RestoreRollout(ctx, name, tenants)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "%s go back to the revision before, their data too; the rollout is paused\n", strings.Join(restored.Tenants, ", "))
+	return showRollout(ctx, client, name)
+}
+
+func showRollout(ctx context.Context, client *api.Client, name string) error {
+	app, err := client.App(ctx, name)
+	if err != nil {
+		return err
+	}
+	rollout := app.Rollout
+	if rollout == nil {
+		fmt.Fprintf(stdout, "app %s has rolled nothing out in waves\n", name)
+		return nil
+	}
+	fmt.Fprintf(stdout, "app %s, revision %d: %s, wave %d, since %s\n", name, rollout.ToRevision, rollout.State, rollout.Wave, rollout.WaveStarted.Local().Format(time.DateTime))
+	if rollout.Reason != "" {
+		fmt.Fprintf(stdout, "  %s\n", rollout.Reason)
+	}
+	tenants, err := client.List(ctx)
+	if err != nil {
+		return err
+	}
+	var moved, waiting, held []string
+	for _, tenant := range tenants {
+		if tenant.App != name || tenant.Archived() {
+			continue
+		}
+		label := tenant.Spec.Name
+		if tenant.Canary {
+			label += " (canary)"
+		}
+		switch {
+		case tenant.Hold && tenant.AppRevision != 0:
+			held = append(held, fmt.Sprintf("%s (revision %d)", label, tenant.AppRevision))
+		case tenant.AppRevision != 0:
+			waiting = append(waiting, fmt.Sprintf("%s (revision %d)", label, tenant.AppRevision))
+		default:
+			moved = append(moved, label)
+		}
+	}
+	for _, row := range []struct {
+		title string
+		names []string
+	}{{"on revision " + strconv.FormatInt(rollout.ToRevision, 10), moved}, {"waiting", waiting}, {"held", held}} {
+		if len(row.names) > 0 {
+			fmt.Fprintf(stdout, "  %-16s %s\n", row.title+":", strings.Join(row.names, ", "))
+		}
 	}
 	return nil
 }

@@ -34,6 +34,9 @@ type AppAgent interface {
 	Get(ctx context.Context, name string) (api.Tenant, error)
 	Configure(ctx context.Context, name string, request api.TenantRequest) (api.Applied, error)
 	Rotate(ctx context.Context, name, key string) (api.Tenant, error)
+	RolloutAction(ctx context.Context, name, action string) (api.App, error)
+	RestoreRollout(ctx context.Context, name string, tenants []string) (api.RolloutRestored, error)
+	SetFlags(ctx context.Context, name string, flags api.TenantFlags) (api.Tenant, error)
 }
 
 // formLimit bounds an app's or settings' form.
@@ -137,6 +140,8 @@ func appOutcome(name string, applied api.AppApplied) string {
 		message = "app " + name + " is unchanged"
 	case len(applied.Tenants) == 0:
 		message = "app " + name + " is changed; no live tenant runs it"
+	case applied.Rollout:
+		message = fmt.Sprintf("app %s is changed; it rolls out in waves to %d tenants", name, len(applied.Tenants))
 	default:
 		message = fmt.Sprintf("app %s is changed; it rolls out to %d tenants", name, len(applied.Tenants))
 	}
@@ -157,6 +162,8 @@ type appData struct {
 	Archived []string
 	// Revisions are its recent revisions, newest first.
 	Revisions []store.Revision
+	// Restoring are its tenants waiting for their data to go back.
+	Restoring []string
 }
 
 func (s *Server) app(w http.ResponseWriter, r *http.Request) {
@@ -194,8 +201,12 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, p
 		if t.App == data.App.Name && t.Archived() {
 			data.Archived = append(data.Archived, t.Spec.Name)
 		}
+		if t.App == data.App.Name && t.Restoring {
+			data.Restoring = append(data.Restoring, t.Spec.Name)
+		}
 	}
 	slices.Sort(data.Archived)
+	slices.Sort(data.Restoring)
 	if data.Revisions, err = s.Apps(s.actor(userOf(r))).AppRevisions(ctx, data.App.Name); err != nil {
 		s.fail(w, r, err)
 		return
@@ -245,6 +256,28 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		back("done", appOutcome(name, applied))
+	case "pause", "resume", "abort", "promote":
+		action := r.FormValue("do")
+		if action == "abort" && strings.TrimSpace(r.FormValue("confirm")) != name {
+			back("problem", "type the app's name to take every tenant back")
+			return
+		}
+		if _, err := agent.RolloutAction(ctx, name, action); err != nil {
+			back("problem", err.Error())
+			return
+		}
+		back("done", map[string]string{"pause": "the rollout is paused", "resume": "the rollout goes on", "abort": "the rollout is aborted: its tenants go back, their data as it is", "promote": "every waiting tenant moves now"}[action])
+	case "restore-data":
+		if strings.TrimSpace(r.FormValue("confirm")) != name {
+			back("problem", "type the app's name to take its tenants back with their data")
+			return
+		}
+		restored, err := agent.RestoreRollout(ctx, name, nil)
+		if err != nil {
+			back("problem", err.Error())
+			return
+		}
+		back("done", strings.Join(restored.Tenants, ", ")+" go back to the revision before with their data from before they moved; the rollout is paused")
 	case "check":
 		check, err := agent.CheckApp(ctx, name)
 		switch {
@@ -547,6 +580,13 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		default:
 			back("done", name+"'s settings are changed: it gets a new container")
 		}
+	case "flags":
+		canary, hold := r.FormValue("canary") == "on", r.FormValue("hold") == "on"
+		if _, err := agent.SetFlags(ctx, name, api.TenantFlags{Canary: &canary, Hold: &hold}); err != nil {
+			back("problem", err.Error())
+			return
+		}
+		back("done", fmt.Sprintf("%s takes rollouts %s", name, map[bool]string{true: "never: it is held", false: map[bool]string{true: "first: it is a canary", false: "with the others"}[canary]}[hold]))
 	case "rotate":
 		key := r.FormValue("key")
 		if strings.TrimSpace(r.FormValue("confirm")) != key {

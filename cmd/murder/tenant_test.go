@@ -72,6 +72,9 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		tenant.Status = &reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: name != "slow", Message: "health check: HTTP 500", Generation: tenant.Generation, CheckedAt: time.Now()}
 		_ = json.NewEncoder(w).Encode(tenant)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/apps/"):
+		// Changes went at once: no rollout.
+		_ = json.NewEncoder(w).Encode(api.App{Name: strings.TrimPrefix(r.URL.Path, "/v1/apps/")})
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/apps/"):
 		name := strings.TrimPrefix(r.URL.Path, "/v1/apps/")
 		var app spec.Tenant

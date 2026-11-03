@@ -40,8 +40,9 @@ between servers, to you; Murder does it with ZFS. An app is configuration
 - **Upgrades that stop nothing.** Murder upgrades itself node by node
   without restarting a tenant or dropping a request. Apps follow an image
   tag in their registry (GHCR or any other): a newer image is offered, an
-  update rolls it out, and every change of an app is a revision to go back
-  to. [Operating Murder](docs/operations.md)
+  update rolls it out in waves, canaries first, and a tenant that does not
+  come up pauses the rollout, to abort it or take tenants back with their
+  data from before. Every change of an app is a revision to go back to. [Operating Murder](docs/operations.md)
 - **Backups.** Every tenant's whole data, compressed and encrypted with
   `age`, to an S3 bucket, with object lock in production.
 - **An administration panel.** Signed in with passkeys, reached through a
@@ -123,7 +124,7 @@ What setup does, and how to do it by hand, is in
 
 | | |
 | --- | --- |
-| [docs/apps.md](docs/apps.md) | apps, tenants, overrides, secrets, image updates and revisions |
+| [docs/apps.md](docs/apps.md) | apps, tenants, overrides, secrets, image updates, rollouts and revisions |
 | [docs/node.md](docs/node.md) | what the agent, the edge and the volumes do on a node |
 | [docs/operations.md](docs/operations.md) | install, upgrade Murder, back up and restore |
 | [docs/cluster.md](docs/cluster.md) | join nodes, move tenants, copies, a dead node, DNS |

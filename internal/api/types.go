@@ -8,6 +8,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // Tenant is what the API shows about a tenant. Secret values never appear.
@@ -36,10 +37,20 @@ type Tenant struct {
 	Host            string    `json:"host"`
 	URL             string    `json:"url"`
 	// Address is where the tenant listens, reachable from this node only.
-	Address    string    `json:"address,omitempty"`
-	Generation int64     `json:"generation"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	Address    string `json:"address,omitempty"`
+	Generation int64  `json:"generation"`
+	// AppRevision is the app's revision the tenant runs: 0 for the newest.
+	// BeforeRevision is the one it ran before its app's rollout moved it.
+	AppRevision    int64 `json:"appRevision,omitempty"`
+	BeforeRevision int64 `json:"beforeRevision,omitempty"`
+	// Canary tenants take an app's rollout first; held ones are left out.
+	Canary bool `json:"canary,omitempty"`
+	Hold   bool `json:"hold,omitempty"`
+	// Restoring says the tenant waits for its data to go back to the
+	// snapshot from before its rollout moved it.
+	Restoring bool      `json:"restoring,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 	// ArchivedAt is set for an archived tenant, which runs nothing until it
 	// is restored.
 	ArchivedAt time.Time         `json:"archivedAt,omitzero"`
@@ -85,6 +96,8 @@ type App struct {
 	// another one: an update. LatestAt is when it was found.
 	Latest   string    `json:"latest,omitempty"`
 	LatestAt time.Time `json:"latestAt,omitzero"`
+	// Rollout is the app's newest rollout, if it has had one.
+	Rollout *store.Rollout `json:"rollout,omitempty"`
 	// Tenants are the live tenants running the app.
 	Tenants   []string  `json:"tenants"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -96,6 +109,8 @@ type AppApplied struct {
 	App     App  `json:"app"`
 	Created bool `json:"created"`
 	Changed bool `json:"changed"`
+	// Rollout is set when the tenants move in waves.
+	Rollout bool `json:"rollout,omitempty"`
 	// Tenants are the live tenants the change rolls out to.
 	Tenants []Tenant `json:"tenants"`
 	Note    string   `json:"note,omitempty"`
@@ -108,6 +123,26 @@ type AppCheck struct {
 	Image string `json:"image"`
 	// Newer is set when it is not the image the app runs.
 	Newer bool `json:"newer"`
+}
+
+// RolloutRestore names the tenants of an app's rollout to take back with
+// their data; none takes back every tenant it moved.
+type RolloutRestore struct {
+	Tenants []string `json:"tenants,omitempty"`
+}
+
+// RolloutRestored is an app after some of its rollout's tenants were taken
+// back with their data, and those tenants.
+type RolloutRestored struct {
+	App     App      `json:"app"`
+	Tenants []string `json:"tenants"`
+}
+
+// TenantFlags makes a tenant a canary or held, or not; nil leaves one as
+// it is.
+type TenantFlags struct {
+	Canary *bool `json:"canary,omitempty"`
+	Hold   *bool `json:"hold,omitempty"`
 }
 
 // SecretValue carries one secret to an operator.

@@ -10,7 +10,7 @@ import (
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
 // versions 4 to 13 in place.
-const schemaVersion = 14
+const schemaVersion = 15
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -45,6 +45,25 @@ CREATE TABLE apps (
 	-- another; and when it was found there.
 	latest     TEXT NOT NULL DEFAULT '',
 	latest_at  TEXT
+) STRICT;
+
+-- An app's newest rollout: its tenants move to revision to_revision in
+-- waves, each healthy for a while before the next.
+CREATE TABLE rollouts (
+	app           TEXT PRIMARY KEY REFERENCES apps (name),
+	to_revision   INTEGER NOT NULL,
+	-- running, paused (by someone, or by a tenant that failed), done or
+	-- aborted (its tenants went back).
+	state         TEXT NOT NULL CHECK (state IN ('running', 'paused', 'done', 'aborted')),
+	wave          INTEGER NOT NULL,
+	wave_started  TEXT NOT NULL,
+	reason        TEXT NOT NULL,
+	started_at    TEXT NOT NULL,
+	updated_at    TEXT NOT NULL,
+	actor         TEXT NOT NULL,
+	-- epoch counts the rollout's changes of state (waves, pauses, resumes):
+	-- a decision made on one epoch is refused on another.
+	epoch         INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 -- The specs an app was stored with, the recent ones, to go back to.
@@ -90,7 +109,21 @@ CREATE TABLE tenants (
 	-- The node the copy moves to, to even out the copies the nodes keep:
 	-- it gets a whole copy while replica keeps its own, and replaces
 	-- replica once that copy is whole.
-	replica_next TEXT NOT NULL DEFAULT ''
+	replica_next TEXT NOT NULL DEFAULT '',
+	-- The app revision the tenant runs: 0 for the app's newest; another
+	-- while a rollout has not reached it, or took it back. before_revision
+	-- is the one it ran before the rollout that moved it, to go back to.
+	app_revision    INTEGER NOT NULL DEFAULT 0,
+	before_revision INTEGER NOT NULL DEFAULT 0,
+	-- canary tenants take a rollout first; held ones are left out of it.
+	canary INTEGER NOT NULL DEFAULT 0 CHECK (canary IN (0, 1)),
+	hold   INTEGER NOT NULL DEFAULT 0 CHECK (hold IN (0, 1)),
+	-- The image the tenant's data goes back to, from the snapshot taken as
+	-- the image changed, on the tenant's node; empty for none.
+	restore TEXT NOT NULL DEFAULT '',
+	-- moved_on is the node it ran on as its rollout moved it, which keeps
+	-- the snapshot its data can go back to.
+	moved_on TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -374,6 +407,23 @@ func upgrade(db *sql.DB) error {
 				return err
 			}
 		}
+		version = 14
+	}
+	// Version 15 rolls app changes out in waves.
+	if version == 14 {
+		for _, statement := range []string{
+			`ALTER TABLE tenants ADD COLUMN app_revision INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE tenants ADD COLUMN before_revision INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE tenants ADD COLUMN canary INTEGER NOT NULL DEFAULT 0 CHECK (canary IN (0, 1))`,
+			`ALTER TABLE tenants ADD COLUMN hold INTEGER NOT NULL DEFAULT 0 CHECK (hold IN (0, 1))`,
+			`ALTER TABLE tenants ADD COLUMN restore TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE tenants ADD COLUMN moved_on TEXT NOT NULL DEFAULT ''`,
+			rolloutsTable,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return err
@@ -383,6 +433,22 @@ func upgrade(db *sql.DB) error {
 
 // SchemaVersion is the schema version of this release's databases.
 const SchemaVersion = schemaVersion
+
+// rolloutsTable is the table schema 15 added.
+const rolloutsTable = `CREATE TABLE rollouts (
+	app           TEXT PRIMARY KEY REFERENCES apps (name),
+	to_revision   INTEGER NOT NULL,
+	state         TEXT NOT NULL CHECK (state IN ('running', 'paused', 'done', 'aborted')),
+	wave          INTEGER NOT NULL,
+	wave_started  TEXT NOT NULL,
+	reason        TEXT NOT NULL,
+	started_at    TEXT NOT NULL,
+	updated_at    TEXT NOT NULL,
+	actor         TEXT NOT NULL,
+	-- epoch counts the rollout's changes of state (waves, pauses, resumes):
+	-- a decision made on one epoch is refused on another.
+	epoch         INTEGER NOT NULL DEFAULT 0
+) STRICT`
 
 // revisionsTable is the table schema 14 added.
 const revisionsTable = `CREATE TABLE app_revisions (

@@ -49,6 +49,9 @@ func (d *DemoCluster) demoApps() {
 		web.Revision = 3
 		web.Latest = "ghcr.io/example/web@sha256:" + strings.Repeat("5e", 32)
 		web.LatestAt = time.Now().Add(-18 * time.Minute)
+		// A rollout of revision 3 is on its second wave.
+		web.Rollout = &store.Rollout{App: "web", ToRevision: 3, State: store.RolloutRunning, Wave: 2,
+			WaveStarted: time.Now().Add(-40 * time.Second), StartedAt: time.Now().Add(-3 * time.Minute), UpdatedAt: time.Now().Add(-40 * time.Second), Actor: "root"}
 		d.apps["web"] = web
 	}
 	d.apps["testapp"] = api.App{Name: "testapp", Spec: spec.Tenant{Image: "ghcr.io/powerpenguini/murder-testapp@sha256:" + strings.Repeat("7", 64), User: "10001:10001", HealthPath: "/health"}.WithDefaults(),
@@ -274,6 +277,75 @@ func (a *demoActor) Rotate(_ context.Context, name, key string) (api.Tenant, err
 		}
 		if _, ok := t.Spec.Secrets[key]; !ok {
 			return &api.Error{Status: 404, Message: "tenant " + name + " has no secret " + key}
+		}
+		return nil
+	})
+}
+
+func (a *demoActor) RolloutAction(_ context.Context, name, action string) (api.App, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	app, ok := a.apps[name]
+	if !ok {
+		return api.App{}, &api.Error{Status: 404, Message: "app " + name + ": not found"}
+	}
+	if app.Rollout == nil || !app.Rollout.Active() {
+		return api.App{}, &api.Error{Status: 409, Message: "app " + name + " has no rollout under way"}
+	}
+	rollout := *app.Rollout
+	switch action {
+	case "pause":
+		rollout.State, rollout.Reason = store.RolloutPaused, "paused by "+a.actor
+	case "resume":
+		rollout.State, rollout.Reason, rollout.WaveStarted = store.RolloutRunning, "", time.Now()
+	case "abort":
+		rollout.State, rollout.Reason = store.RolloutAborted, "aborted by "+a.actor
+	case "promote":
+		if rollout.State != store.RolloutRunning {
+			return api.App{}, &api.Error{Status: 409, Message: "the rollout of app " + name + " is " + rollout.State + ": resume it first"}
+		}
+		rollout.Wave++
+		rollout.WaveStarted = time.Now()
+	default:
+		return api.App{}, &api.Error{Status: 400, Message: "a rollout is paused, resumed, aborted or promoted"}
+	}
+	app.Rollout = &rollout
+	a.apps[name] = app
+	a.recordApp("rollout."+action, name)
+	app.Tenants = a.liveTenantsOf(name)
+	return app, nil
+}
+
+func (a *demoActor) RestoreRollout(_ context.Context, name string, tenants []string) (api.RolloutRestored, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	app, ok := a.apps[name]
+	if !ok {
+		return api.RolloutRestored{}, &api.Error{Status: 404, Message: "app " + name + ": not found"}
+	}
+	if app.Rollout == nil || !app.Rollout.Active() {
+		return api.RolloutRestored{}, &api.Error{Status: 409, Message: "app " + name + " has no rollout under way"}
+	}
+	if len(tenants) == 0 {
+		tenants = a.liveTenantsOf(name)
+	}
+	rollout := *app.Rollout
+	rollout.State = store.RolloutPaused
+	rollout.Reason = strings.Join(tenants, ", ") + " went back to the revision before, data too, as " + a.actor + " asked"
+	app.Rollout = &rollout
+	a.apps[name] = app
+	a.recordApp("rollout.restored", name)
+	app.Tenants = a.liveTenantsOf(name)
+	return api.RolloutRestored{App: app, Tenants: tenants}, nil
+}
+
+func (a *demoActor) SetFlags(_ context.Context, name string, flags api.TenantFlags) (api.Tenant, error) {
+	return a.change(name, "tenant.flags", "", func(t *api.Tenant) error {
+		if flags.Canary != nil {
+			t.Canary = *flags.Canary
+		}
+		if flags.Hold != nil {
+			t.Hold = *flags.Hold
 		}
 		return nil
 	})

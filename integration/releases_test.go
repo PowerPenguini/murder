@@ -108,7 +108,7 @@ func TestAnAppIsUpdatedToItsTagsNewestImageOnDocker(t *testing.T) {
 	if check, err := n.client.CheckApp(ctx, "it-release"); err != nil || !check.Newer || check.Image != found.Latest {
 		t.Fatalf("check %+v, %v", check, err)
 	}
-	updated, err := n.client.UpdateApp(ctx, "it-release", time.Time{})
+	updated, err := n.client.AtOnce().UpdateApp(ctx, "it-release", time.Time{})
 	if err != nil || updated.App.Spec.Image != found.Latest || updated.App.Latest != "" || len(updated.Tenants) != 1 {
 		t.Fatalf("update %+v, %v", updated, err)
 	}
@@ -118,7 +118,7 @@ func TestAnAppIsUpdatedToItsTagsNewestImageOnDocker(t *testing.T) {
 	}
 
 	// Back to the first revision: v1, by its digest.
-	back, err := n.client.RestoreRevision(ctx, "it-release", 1, updated.App.UpdatedAt)
+	back, err := n.client.AtOnce().RestoreRevision(ctx, "it-release", 1, updated.App.UpdatedAt)
 	if err != nil || back.App.Spec.Image != v1 || back.App.Tag != tag {
 		t.Fatalf("back %+v, %v", back, err)
 	}

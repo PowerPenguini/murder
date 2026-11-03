@@ -28,6 +28,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/rollout"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/spec"
@@ -114,6 +115,36 @@ func newNode(t *testing.T, name string) *node {
 
 func (n *node) newReconciler() *reconcile.Reconciler {
 	return reconcile.New(n.store, n.docker, n.volumes, n.key, reconcile.Config{BaseDomain: baseDomain, Scheme: "http", StopTimeout: 5 * time.Second, HealthTimeout: time.Second}, n.log)
+}
+
+// rollOut drives app's rollout to its end, reconciling as it goes, with
+// waves that soak for a second.
+func (n *node) rollOut(t *testing.T, app string) {
+	t.Helper()
+	driver := &rollout.Driver{Store: n.store, Log: n.log, CanarySoak: time.Second, Soak: time.Second, FailAfter: time.Minute,
+		Status: func(_ context.Context, record store.Record) (reconcile.Status, bool) {
+			return n.reconciler.Status(record.Spec.Name)
+		}}
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		driver.Step(context.Background())
+		if err := n.reconciler.Reconcile(context.Background()); err != nil {
+			t.Logf("reconcile: %v", err)
+		}
+		found, err := n.store.Rollout(app)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch found.State {
+		case store.RolloutDone:
+			return
+		case store.RolloutRunning:
+		default:
+			t.Fatalf("rollout %+v", found)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatalf("the rollout of %s did not end", app)
 }
 
 // waitHealthy reconciles until the tenant is running and healthy.
@@ -226,12 +257,16 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 
 	// A new image of the app replaces the container and keeps the data.
 	app.Image = repository + ":v2"
-	if upgraded, err := n.client.PutApp(ctx, "it-app", app); err != nil || !upgraded.Changed || len(upgraded.Tenants) != 1 || !pinnedTo(upgraded.Tenants[0].Spec.Image, imageV2) {
+	// It rolls out in waves: the tenant waits on v1 until the driver moves
+	// it, then the rollout is through once it is healthy on v2.
+	upgraded, err := n.client.PutApp(ctx, "it-app", app)
+	if err != nil || !upgraded.Changed || !upgraded.Rollout || len(upgraded.Tenants) != 1 || pinnedTo(upgraded.Tenants[0].Spec.Image, imageV2) {
 		t.Fatalf("upgrade = %+v, %v", upgraded, err)
 	}
 	if same, err := n.client.PutApp(ctx, "it-app", app); err != nil || same.Changed {
 		t.Fatalf("applying the same app again = %+v, %v", same, err)
 	}
+	n.rollOut(t, "it-app")
 	second := n.waitHealthy(t, n.reconciler, tenant)
 	if second.ContainerID == first.ContainerID {
 		t.Fatal("the image change kept the old container")

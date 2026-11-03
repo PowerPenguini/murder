@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -166,5 +168,126 @@ func TestAppApplyWithUpdateAsksForTheNewestImage(t *testing.T) {
 	}
 	if got := strings.Join(calls(), ","); got != "PUT /v1/apps/web?update=true,PUT /v1/apps/web" {
 		t.Fatalf("calls %s", got)
+	}
+}
+
+func TestApplyWaitsForTheWavesAndRolloutActs(t *testing.T) {
+	rolloutPoll = 10 * time.Millisecond
+	defer func() { rolloutPoll = 5 * time.Second }()
+	var mu sync.Mutex
+	asked := 0
+	state := store.RolloutRunning
+	changed := true
+	socket, calls := serveAgent(t, func(call string, w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case call == "PUT /v1/apps/web":
+			var app spec.Tenant
+			_ = json.NewDecoder(r.Body).Decode(&app)
+			_ = json.NewEncoder(w).Encode(api.AppApplied{App: api.App{Name: "web", Spec: app}, Changed: changed, Rollout: changed && r.URL.Query().Get("rollout") != "now",
+				Tenants: []api.Tenant{{Spec: spec.Tenant{Name: "acme"}, App: "web"}}})
+		case call == "GET /v1/apps/web":
+			// Running twice, then as the test says.
+			asked++
+			current := store.RolloutRunning
+			if asked > 2 {
+				current = state
+			}
+			_ = json.NewEncoder(w).Encode(api.App{Name: "web", Revision: 2, Rollout: &store.Rollout{App: "web", ToRevision: 2, State: current, Wave: asked, Reason: "acme did not come up"}})
+		case call == "GET /v1/tenants":
+			_ = json.NewEncoder(w).Encode([]api.Tenant{{Spec: spec.Tenant{Name: "acme"}, App: "web"}})
+		case strings.HasPrefix(call, "GET /v1/tenants/"):
+			_ = json.NewEncoder(w).Encode(api.Tenant{Spec: spec.Tenant{Name: "acme"}, App: "web", Status: &reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true, CheckedAt: time.Now()}})
+		case call == "POST /v1/apps/web/rollout/pause":
+			_ = json.NewEncoder(w).Encode(api.App{Name: "web"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"unexpected call"}`))
+		}
+	})
+	file := writeFile(t, t.TempDir(), "web.yaml", "image: ghcr.io/example/web:stable\nuser: \"101:101\"\n")
+	mu.Lock()
+	state = store.RolloutDone
+	mu.Unlock()
+	out := capture(t)
+	if err := runApp([]string{"apply", file, "-wait", "10s", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "rolls out in waves to acme (murder app rollout web)") || !strings.Contains(out.String(), "web                  rolled out") || !strings.Contains(out.String(), "acme is healthy") {
+		t.Fatalf("output:\n%s", out)
+	}
+	// A rollout that pauses fails the wait, saying why.
+	mu.Lock()
+	asked, state = 0, store.RolloutPaused
+	mu.Unlock()
+	capture(t)
+	if err := runApp([]string{"apply", file, "-wait", "10s", "-socket", socket}); err == nil || !strings.Contains(err.Error(), "the rollout is paused: acme did not come up") {
+		t.Fatalf("a paused rollout: %v", err)
+	}
+	// So does a retry that changes nothing: it waits for what the first
+	// began.
+	mu.Lock()
+	asked, changed = 0, false
+	mu.Unlock()
+	if err := runApp([]string{"apply", file, "-wait", "10s", "-socket", socket}); err == nil || !strings.Contains(err.Error(), "the rollout is paused") {
+		t.Fatalf("an unchanged retry: %v", err)
+	}
+	mu.Lock()
+	changed = true
+	mu.Unlock()
+	if err := runApp([]string{"apply", file, "-now", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runApp([]string{"rollout", "pause", "web", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(calls(), "\n")
+	if !strings.Contains(got, "PUT /v1/apps/web?rollout=now") || !strings.Contains(got, "POST /v1/apps/web/rollout/pause") {
+		t.Fatalf("calls:\n%s", got)
+	}
+}
+
+// A restore says what it loses and does nothing without -yes; with it, it
+// takes the tenants named back with their data.
+func TestRolloutRestoreAsksFirst(t *testing.T) {
+	var body []byte
+	socket, calls := serveAgent(t, func(call string, w http.ResponseWriter, r *http.Request) {
+		switch call {
+		case "GET /v1/tenants":
+			_ = json.NewEncoder(w).Encode([]api.Tenant{
+				{Spec: spec.Tenant{Name: "acme"}, App: "web", BeforeRevision: 1},
+				{Spec: spec.Tenant{Name: "beta"}, App: "web", AppRevision: 1},
+				{Spec: spec.Tenant{Name: "other"}, App: "blog", BeforeRevision: 3},
+			})
+		case "POST /v1/apps/web/rollout/restore":
+			body, _ = io.ReadAll(r.Body)
+			_ = json.NewEncoder(w).Encode(api.RolloutRestored{App: api.App{Name: "web"}, Tenants: []string{"acme"}})
+		case "GET /v1/apps/web":
+			_ = json.NewEncoder(w).Encode(api.App{Name: "web", Revision: 2, Rollout: &store.Rollout{App: "web", ToRevision: 2, State: store.RolloutPaused, Wave: 1, Reason: "acme went back"}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"unexpected call"}`))
+		}
+	})
+	err := runApp([]string{"rollout", "restore", "web", "-socket", socket})
+	if err == nil || !strings.Contains(err.Error(), "takes acme (to revision 1) back") || !strings.Contains(err.Error(), "writes to these tenants since they moved are lost") || !strings.Contains(err.Error(), "-yes") {
+		t.Fatalf("without -yes: %v", err)
+	}
+	if err := runApp([]string{"rollout", "restore", "web", "-tenant", "acme", "-socket", socket}); err == nil || !strings.Contains(err.Error(), "takes acme back") {
+		t.Fatalf("one named, without -yes: %v", err)
+	}
+	if got := strings.Join(calls(), "\n"); strings.Contains(got, "POST") {
+		t.Fatalf("restored without -yes:\n%s", got)
+	}
+	out := capture(t)
+	if err := runApp([]string{"rollout", "restore", "web", "-tenant", "acme", "-yes", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"tenants":["acme"]`) || !strings.Contains(out.String(), "acme go back to the revision before, their data too") {
+		t.Fatalf("body %s, output:\n%s", body, out)
+	}
+	if err := runApp([]string{"rollout", "pause", "web", "-yes", "-socket", socket}); err == nil {
+		t.Fatal("-yes taken by another action")
 	}
 }

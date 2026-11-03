@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -66,9 +67,12 @@ type fakeDataset struct {
 type fakeZFS struct {
 	datasets  map[string]*fakeDataset
 	snapshots []string // what "zfs list -t snapshot" prints
-	held      string   // a snapshot that cannot be destroyed
-	calls     []string
-	fail      string // a command that fails, as a fragment of it
+	// images holds each snapshot's io.murder:image, as "zfs snapshot -o"
+	// set it.
+	images map[string]string
+	held   string // a snapshot that cannot be destroyed
+	calls  []string
+	fail   string // a command that fails, as a fragment of it
 }
 
 func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -159,6 +163,15 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		f.datasets[dataset].refquota = parseQuota(value)
 		return nil, nil
 	case "snapshot":
+		for i, arg := range args {
+			if image, ok := strings.CutPrefix(arg, imageProperty+"="); ok && args[i-1] == "-o" {
+				if f.images == nil {
+					f.images = map[string]string{}
+				}
+				f.images[dataset] = image
+			}
+		}
+		f.snapshots = append(f.snapshots, dataset)
 		return nil, nil
 	case "destroy":
 		if dataset == f.held {
@@ -174,7 +187,18 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 			}
 			return []byte(strings.Join(names, "\n") + "\n"), nil
 		}
-		return []byte(strings.Join(f.snapshots, "\n") + "\n"), nil
+		var lines []string
+		for _, name := range f.snapshots {
+			if strings.Contains(call, ","+imageProperty) {
+				image := f.images[name]
+				if image == "" {
+					image = "-"
+				}
+				name += "\t" + image
+			}
+			lines = append(lines, name)
+		}
+		return []byte(strings.Join(lines, "\n") + "\n"), nil
 	}
 	return nil, errors.New("unexpected command " + call)
 }
@@ -348,5 +372,75 @@ func TestZFSPruneKeepsTheNewest(t *testing.T) {
 	}
 	if err := volumes.Prune(context.Background(), "acme", "image-change", 0); err == nil {
 		t.Fatal("pruned with keep 0")
+	}
+}
+
+// A snapshot taken as the image changed records the image whose data it
+// holds, and going back takes the newest of that image's: not the newest
+// of all, which may hold another image's data, nor one from before images
+// were recorded.
+func TestZFSRestoreGoesBackToTheImagesSnapshot(t *testing.T) {
+	const prefix = "tank/murder/acme@murder-image-change-"
+	fake := &fakeZFS{datasets: map[string]*fakeDataset{}, snapshots: []string{prefix + "20261020T120000.000Z"}}
+	clock := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	volumes := ZFS{Parent: "tank/murder", MountRoot: t.TempDir(), Run: fake.run, Now: func() time.Time { return clock }}
+	ctx := context.Background()
+	for _, image := range []string{"a", "b", "c", "b"} {
+		if _, err := volumes.SnapshotImage(ctx, "acme", "image-change", image); err != nil {
+			t.Fatal(err)
+		}
+		clock = clock.Add(time.Hour)
+	}
+	if !fake.ran("zfs snapshot -o io.murder:image=a " + prefix + "20261024T120000.000Z") {
+		t.Fatalf("calls %v", fake.calls)
+	}
+	// Older releases recorded no image: the newest snapshot holds none.
+	fake.snapshots = append(fake.snapshots, prefix+"20261030T120000.000Z")
+	name, err := volumes.RestoreSnapshot(ctx, "acme", "image-change", "a")
+	if err != nil || name != prefix+"20261024T120000.000Z" {
+		t.Fatalf("RestoreSnapshot(a) = %q, %v", name, err)
+	}
+	if !fake.ran("zfs rollback -r " + prefix + "20261024T120000.000Z") {
+		t.Fatalf("calls %v", fake.calls)
+	}
+	if name, _ := volumes.RestoreSnapshot(ctx, "acme", "image-change", "b"); name != prefix+"20261024T150000.000Z" {
+		t.Fatalf("RestoreSnapshot(b) = %q", name)
+	}
+	fake.calls = nil
+	for _, image := range []string{"d", ""} {
+		if _, err := volumes.RestoreSnapshot(ctx, "acme", "image-change", image); !errors.Is(err, ErrNoSnapshot) {
+			t.Fatalf("RestoreSnapshot(%q) = %v", image, err)
+		}
+	}
+	if fake.ran("rollback") {
+		t.Fatalf("rolled back to a snapshot of another image's data: %v", fake.calls)
+	}
+}
+
+// Pruning keeps the newest snapshot of the image a tenant may go back to,
+// however old.
+func TestZFSPruneKeepsTheSnapshotARestoreNeeds(t *testing.T) {
+	const prefix = "tank/murder/acme@murder-image-change-"
+	fake := &fakeZFS{datasets: map[string]*fakeDataset{}}
+	clock := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	volumes := ZFS{Parent: "tank/murder", MountRoot: t.TempDir(), Run: fake.run, Now: func() time.Time { return clock }}
+	ctx := context.Background()
+	for _, image := range []string{"a", "a", "b", "c", "b"} {
+		if _, err := volumes.SnapshotImage(ctx, "acme", "image-change", image); err != nil {
+			t.Fatal(err)
+		}
+		clock = clock.Add(time.Hour)
+	}
+	if err := volumes.PruneKeeping(ctx, "acme", "image-change", 2, "a"); err != nil {
+		t.Fatal(err)
+	}
+	var destroyed []string
+	for _, call := range fake.calls {
+		if name, ok := strings.CutPrefix(call, "zfs destroy "); ok {
+			destroyed = append(destroyed, name)
+		}
+	}
+	if !slices.Equal(destroyed, []string{prefix + "20261024T120000.000Z", prefix + "20261024T140000.000Z"}) {
+		t.Fatalf("destroyed %v", destroyed)
 	}
 }

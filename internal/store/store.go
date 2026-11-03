@@ -57,8 +57,11 @@ type App struct {
 	// app runs another one; LatestAt is when it was found. Given to
 	// PutAppIf, it is what the registry named just now, which replaces
 	// what was found before.
-	Latest    string    `json:"latest,omitempty"`
-	LatestAt  time.Time `json:"latestAt,omitzero"`
+	Latest   string    `json:"latest,omitempty"`
+	LatestAt time.Time `json:"latestAt,omitzero"`
+	// AllAtOnce, given to PutAppIf, moves every tenant to the change now
+	// instead of in waves.
+	AllAtOnce bool      `json:"-"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -114,6 +117,24 @@ type Record struct {
 	// Rollout counts the rollouts asked for the tenant; each gives it a new
 	// container made as this release of Murder makes them.
 	Rollout int64 `json:"rollout,omitempty"`
+	// AppRevision is the revision of its app the tenant runs: 0 for the
+	// newest; another while a rollout has not reached it, or took it
+	// back. BeforeRevision is the one it ran before the rollout that moved
+	// it.
+	AppRevision    int64 `json:"appRevision,omitempty"`
+	BeforeRevision int64 `json:"beforeRevision,omitempty"`
+	// Canary tenants take a rollout first; held ones are left out.
+	Canary bool `json:"canary,omitempty"`
+	Hold   bool `json:"hold,omitempty"`
+	// Restore is the image the tenant's data goes back to, from the
+	// snapshot taken as its image changed; empty for none.
+	Restore string `json:"restore,omitempty"`
+	// MovedOn is the node it ran on as its rollout moved it: the one that
+	// keeps the snapshot its data can go back to.
+	MovedOn string `json:"movedOn,omitempty"`
+	// BeforeImage is the image of BeforeRevision, as the tenant composes
+	// it: the one its data would go back to. Derived, not stored.
+	BeforeImage string `json:"-"`
 	// Generation counts changes of the desired state.
 	Generation int64     `json:"generation"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -163,8 +184,10 @@ type AppChange struct {
 	Created bool
 	// Changed is false when the app was stored as it already was.
 	Changed bool
-	// Tenants are the live tenants whose spec changed with the app.
+	// Tenants are the live tenants the change moves: now, or in waves.
 	Tenants []string
+	// Rollout is set when they move in waves.
+	Rollout bool
 }
 
 // Event is one entry of the audit log.
@@ -278,7 +301,22 @@ type Store interface {
 	Revisions(app string) ([]Revision, error)
 	// RestoreRevision stores one of the app's revisions again, as its
 	// newest, as PutAppIf would.
-	RestoreRevision(app string, revision int64, cond AppIf, actor string) (AppChange, error)
+	RestoreRevision(app string, revision int64, cond AppIf, allAtOnce bool, actor string) (AppChange, error)
+
+	// Rollouts and Rollout read the apps' newest rollouts; the rest moves
+	// them on (see rollouts.go).
+	Rollouts() []Rollout
+	Rollout(app string) (Rollout, error)
+	AdvanceRollout(app string, at RolloutAt, tenants []string, actor string) error
+	FinishRollout(app string, at RolloutAt, actor string) error
+	PauseRollout(app, reason, actor string) error
+	PauseRolloutAt(app string, at RolloutAt, reason, actor string) error
+	RolloutState() ([]Rollout, []Record)
+	ResumeRollout(app, actor string) error
+	AbortRollout(app, reason, actor string) ([]string, error)
+	RestoreTenants(app string, tenants []string, actor string) ([]string, error)
+	Restored(name, image string) error
+	SetFlags(name string, canary, hold *bool, actor string) (Record, error)
 	// SetLatest records latest, pinned, as the newest image of tag in its
 	// registry, as asked about the app at revision. Nothing changes unless
 	// the app is still at that revision, with that tag: an answer older

@@ -28,6 +28,9 @@ type State interface {
 	// Forget deletes an archived tenant for good, once its runtime and data
 	// are gone.
 	Forget(name, actor string) error
+	// Restored records that a tenant's data went back to image, as its
+	// Restore asked.
+	Restored(name, image string) error
 }
 
 // The agent passes its store.

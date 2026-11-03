@@ -335,17 +335,22 @@ func (f *fakeRuntime) takeEvents() []string {
 type fakeVolumes struct {
 	volume.Dir
 	// runtime, if set, logs snapshots among the container events.
-	runtime      *fakeRuntime
-	destroyed    []string
-	failFinal    bool
-	snapshots    []string
+	runtime   *fakeRuntime
+	destroyed []string
+	restored  []string
+	failFinal bool
+	snapshots []string
+	// images holds the image whose data each snapshot holds, as recorded.
+	images       map[string]string
 	removed      []string
 	failSnapshot error
 	failPrune    error
 	pruned       []string
-	notServing   bool
-	diskGB       map[string]int
-	limitErr     error
+	// prunedKeeping names the tenant and image each prune kept a snapshot of.
+	prunedKeeping []string
+	notServing    bool
+	diskGB        map[string]int
+	limitErr      error
 }
 
 func (f *fakeVolumes) LateMounts() bool { return true }
@@ -368,7 +373,11 @@ func (f *fakeVolumes) Ensure(ctx context.Context, tenant string, uid, gid, diskG
 	return path, err
 }
 
-func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string, error) {
+func (f *fakeVolumes) Snapshot(ctx context.Context, tenant, reason string) (string, error) {
+	return f.SnapshotImage(ctx, tenant, reason, "")
+}
+
+func (f *fakeVolumes) SnapshotImage(_ context.Context, tenant, reason, image string) (string, error) {
 	if f.failSnapshot != nil {
 		return "", f.failSnapshot
 	}
@@ -377,12 +386,35 @@ func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string
 	}
 	name := fmt.Sprintf("%s@murder-%s-%d", tenant, reason, len(f.snapshots)+1)
 	f.snapshots = append(f.snapshots, name)
+	if f.images == nil {
+		f.images = map[string]string{}
+	}
+	f.images[name] = image
 	if f.runtime != nil {
 		f.runtime.mu.Lock()
 		f.runtime.record("snapshot " + name)
 		f.runtime.mu.Unlock()
 	}
 	return name, nil
+}
+
+func (f *fakeVolumes) RestoreSnapshot(_ context.Context, tenant, reason, image string) (string, error) {
+	var newest string
+	for _, name := range f.snapshots {
+		if strings.HasPrefix(name, tenant+"@murder-"+reason+"-") && !slices.Contains(f.destroyed, name) && image != "" && f.images[name] == image {
+			newest = name
+		}
+	}
+	if newest == "" {
+		return "", volume.ErrNoSnapshot
+	}
+	f.restored = append(f.restored, newest)
+	if f.runtime != nil {
+		f.runtime.mu.Lock()
+		f.runtime.record("restore " + newest)
+		f.runtime.mu.Unlock()
+	}
+	return newest, nil
 }
 
 func (f *fakeVolumes) DestroySnapshot(_ context.Context, tenant, snapshot string) error {
@@ -393,6 +425,13 @@ func (f *fakeVolumes) DestroySnapshot(_ context.Context, tenant, snapshot string
 func (f *fakeVolumes) Prune(_ context.Context, tenant, reason string, keep int) error {
 	f.pruned = append(f.pruned, fmt.Sprintf("%s@%s keep %d", tenant, reason, keep))
 	return f.failPrune
+}
+
+func (f *fakeVolumes) PruneKeeping(ctx context.Context, tenant, reason string, keep int, image string) error {
+	if image != "" {
+		f.prunedKeeping = append(f.prunedKeeping, tenant+" "+image)
+	}
+	return f.Prune(ctx, tenant, reason, keep)
 }
 
 // IsReplica says a tenant's data is a copy while a file "replica" marks it.
@@ -495,6 +534,8 @@ func (f *fixture) updateApp(t *testing.T, name string, change func(*spec.Tenant)
 		t.Fatal(err)
 	}
 	change(&app.Spec)
+	// Every tenant at once: the rollouts' waves are tested on their own.
+	app.AllAtOnce = true
 	if _, err := f.store.PutApp(app, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -2063,6 +2104,160 @@ func TestATenantIsNotStartedOnMissingData(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.volumes.Root, "beta", ".replica")); err == nil {
 		t.Fatal("the new tenant runs on the earlier tenant's copy")
+	}
+}
+
+// A tenant someone takes back from its rollout with its data has its node
+// restore the snapshot taken as the image changed before the old image
+// starts: what the newer one wrote is gone, though it served.
+func TestARestoredTenantGetsItsDataBack(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	app, _ := f.store.App("acme")
+	app.Spec.Image = imageB
+	if change, err := f.store.PutApp(app, "test"); err != nil || !change.Rollout {
+		t.Fatalf("change %+v, %v", change, err)
+	}
+	f.reconcile(t)
+	if f.runtime.only(t).spec.Image != imageA {
+		t.Fatal("a tenant moved before its wave")
+	}
+	rollout, _ := f.store.Rollout("acme")
+	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if c := f.runtime.only(t); c.spec.Image != imageB || !c.Running {
+		t.Fatalf("the wave did not move the tenant: %+v", c)
+	}
+	if _, err := f.store.RestoreTenants("acme", nil, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.runtime.takeEvents()
+	f.reconcile(t)
+	back := f.runtime.only(t)
+	if back.spec.Image != imageA || !back.Running {
+		t.Fatalf("after going back: %+v", back)
+	}
+	if !slices.Equal(f.volumes.restored, []string{"acme@murder-image-change-2"}) {
+		t.Fatalf("restored %v, snapshots %v", f.volumes.restored, f.volumes.snapshots)
+	}
+	events := strings.Join(f.runtime.takeEvents(), ",")
+	if !strings.HasPrefix(events, "stop ") || !strings.Contains(events, "restore acme@murder-image-change-2,create ") {
+		t.Fatalf("events %s", events)
+	}
+	record, _ := f.store.Get("acme")
+	if record.Restore != "" || record.DataImage != imageA {
+		t.Fatalf("record %+v", record)
+	}
+	// Going back took no snapshot of its own: the data is the old image's.
+	if len(f.volumes.snapshots) != 2 {
+		t.Fatalf("snapshots %v", f.volumes.snapshots)
+	}
+}
+
+// A tenant whose image changed again after its rollout moved it gets the
+// data of the image it goes back to: rolled out from A to B, configured to
+// C and back to B, it goes back to A on the snapshot holding A's data, not
+// the newest, which holds C's.
+func TestARestoredTenantGetsItsOwnImagesData(t *testing.T) {
+	const imageC = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	app, _ := f.store.App("acme")
+	app.Spec.Image = imageB
+	if _, err := f.store.PutApp(app, "test"); err != nil {
+		t.Fatal(err)
+	}
+	rollout, _ := f.store.Rollout("acme")
+	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	for _, image := range []string{imageC, ""} {
+		record, _ := f.store.Get("acme")
+		if _, _, err := f.store.Configure("acme", "acme", spec.Overrides{Image: image}, record.Generation, "test"); err != nil {
+			t.Fatal(err)
+		}
+		f.reconcile(t)
+	}
+	if c := f.runtime.only(t); c.spec.Image != imageB || !c.Running {
+		t.Fatalf("after configuring it back: %+v", c)
+	}
+	if len(f.volumes.snapshots) != 6 {
+		t.Fatalf("snapshots %v", f.volumes.snapshots)
+	}
+	// Pruned keeping the snapshot it may go back to.
+	if !slices.Contains(f.volumes.prunedKeeping, "acme "+imageA) {
+		t.Fatalf("pruned keeping %v", f.volumes.prunedKeeping)
+	}
+	if _, err := f.store.RestoreTenants("acme", nil, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if c := f.runtime.only(t); c.spec.Image != imageA || !c.Running {
+		t.Fatalf("after going back: %+v", c)
+	}
+	if !slices.Equal(f.volumes.restored, []string{"acme@murder-image-change-2"}) {
+		t.Fatalf("restored %v, snapshots %v, images %v", f.volumes.restored, f.volumes.snapshots, f.volumes.images)
+	}
+}
+
+// Without the snapshot from before the newer image, the old one is not
+// started on what the newer one left; aborting starts it on the data as
+// it is.
+func TestATenantWithoutItsSnapshotStaysStopped(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	app, _ := f.store.App("acme")
+	app.Spec.Image = imageB
+	if _, err := f.store.PutApp(app, "test"); err != nil {
+		t.Fatal(err)
+	}
+	rollout, _ := f.store.Rollout("acme")
+	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	f.failHealth()
+	f.reconcileOnce(t)
+	f.volumes.destroyed = append(f.volumes.destroyed, f.volumes.snapshots...)
+	if _, err := f.store.RestoreTenants("acme", []string{"acme"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "no snapshot of then") {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if f.runtime.count() != 0 {
+		t.Fatal("the old image started on the newer one's data")
+	}
+	if _, err := f.store.AbortRollout("acme", "start it as it is", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if c := f.runtime.only(t); c.spec.Image != imageA || !c.Running {
+		t.Fatalf("after the abort: %+v", c)
+	}
+}
+
+// failHealth has every tenant's health check fail from now on.
+func (f *fixture) failHealth() {
+	f.reconciler.backend = func(store.Record) (string, error) { return "127.0.0.1:1", nil }
+}
+
+// reconcileOnce is reconcile, whatever the passes say of health.
+func (f *fixture) reconcileOnce(t *testing.T) {
+	t.Helper()
+	for {
+		_ = f.reconciler.Reconcile(context.Background())
+		f.reconciler.pulls.wait()
+		select {
+		case <-f.reconciler.pulls.done:
+		default:
+			return
+		}
 	}
 }
 

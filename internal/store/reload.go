@@ -66,6 +66,7 @@ var partOf = map[string]string{
 	"meta":              "meta",
 	"events":            "meta",
 	"app_revisions":     "revisions",
+	"rollouts":          "rollouts",
 	"nodes":             "nodes",
 	"devices":           "devices",
 	"images":            "images",
@@ -79,6 +80,7 @@ var partOf = map[string]string{
 var loaders = map[string]func(querier, *snapshot) error{
 	"meta":      loadMeta,
 	"revisions": loadRevisions,
+	"rollouts":  loadRollouts,
 	"nodes":     loadNodes,
 	"devices":   loadDevices,
 	"images":    loadImages,
@@ -258,6 +260,7 @@ func snapshotDiff(whole, part *snapshot) string {
 	diff("lastEvent", whole.lastEvent, part.lastEvent)
 	diff("apps", whole.apps, part.apps)
 	diff("revisions", whole.revisions, part.revisions)
+	diff("rollouts", whole.rollouts, part.rollouts)
 	for name := range whole.tenants {
 		if !reflect.DeepEqual(whole.tenants[name], part.tenants[name]) {
 			out = append(out, "tenant "+name)

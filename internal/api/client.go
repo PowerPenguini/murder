@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/spec"
@@ -23,6 +24,8 @@ type Client struct {
 	base string
 	// Actor, if set, names the person the client acts for in the audit log.
 	Actor string
+	// atOnce moves every tenant to an app change at once (AtOnce).
+	atOnce bool
 }
 
 // NewClient returns a client for the agent listening on socket.
@@ -122,7 +125,7 @@ func (c *Client) App(ctx context.Context, name string) (App, error) {
 // agent fills in defaults and pins the image.
 func (c *Client) PutApp(ctx context.Context, name string, app spec.Tenant) (AppApplied, error) {
 	var applied AppApplied
-	return applied, c.do(ctx, http.MethodPut, appPath(name), app, &applied)
+	return applied, c.do(ctx, http.MethodPut, c.rollout(appPath(name)), app, &applied)
 }
 
 // PutAppIf is PutApp only if the stored app is as cond expects; a 409
@@ -136,14 +139,14 @@ func (c *Client) PutAppIf(ctx context.Context, name string, app spec.Tenant, con
 		path += "?if=" + url.QueryEscape(cond.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	}
 	var applied AppApplied
-	return applied, c.do(ctx, http.MethodPut, path, app, &applied)
+	return applied, c.do(ctx, http.MethodPut, c.rollout(path), app, &applied)
 }
 
 // PutAppNewest is PutApp, pinning a tag to its newest image even when the
 // app was given that tag before: PutApp keeps the image the app has.
 func (c *Client) PutAppNewest(ctx context.Context, name string, app spec.Tenant) (AppApplied, error) {
 	var applied AppApplied
-	return applied, c.do(ctx, http.MethodPut, appPath(name)+"?update=true", app, &applied)
+	return applied, c.do(ctx, http.MethodPut, c.rollout(appPath(name)+"?update=true"), app, &applied)
 }
 
 // CheckApp asks the app's registry now which image its tag names.
@@ -160,7 +163,7 @@ func (c *Client) UpdateApp(ctx context.Context, name string, updatedAt time.Time
 		path += "?if=" + url.QueryEscape(updatedAt.UTC().Format(time.RFC3339Nano))
 	}
 	var applied AppApplied
-	return applied, c.do(ctx, http.MethodPost, path, nil, &applied)
+	return applied, c.do(ctx, http.MethodPost, c.rollout(path), nil, &applied)
 }
 
 // AppRevisions lists the app's recent revisions, newest first.
@@ -178,7 +181,47 @@ func (c *Client) RestoreRevision(ctx context.Context, name string, revision int6
 		path += "?if=" + url.QueryEscape(updatedAt.UTC().Format(time.RFC3339Nano))
 	}
 	var applied AppApplied
-	return applied, c.do(ctx, http.MethodPost, path, nil, &applied)
+	return applied, c.do(ctx, http.MethodPost, c.rollout(path), nil, &applied)
+}
+
+// AtOnce is the client, but an app change it makes moves every tenant at
+// once, not in waves.
+func (c *Client) AtOnce() *Client {
+	copied := *c
+	copied.atOnce = true
+	return &copied
+}
+
+// rollout adds to an app change's path that it moves every tenant at once,
+// when the client says so.
+func (c *Client) rollout(path string) string {
+	if !c.atOnce {
+		return path
+	}
+	if strings.Contains(path, "?") {
+		return path + "&rollout=now"
+	}
+	return path + "?rollout=now"
+}
+
+// RolloutAction pauses, resumes, aborts or promotes an app's rollout.
+func (c *Client) RolloutAction(ctx context.Context, name, action string) (App, error) {
+	var app App
+	return app, c.do(ctx, http.MethodPost, appPath(name)+"/rollout/"+url.PathEscape(action), nil, &app)
+}
+
+// RestoreRollout takes tenants of an app's rollout, those named or every
+// one it moved, back to the revision before with their data from before
+// they moved: what they wrote since is lost. The rollout pauses.
+func (c *Client) RestoreRollout(ctx context.Context, name string, tenants []string) (RolloutRestored, error) {
+	var restored RolloutRestored
+	return restored, c.do(ctx, http.MethodPost, appPath(name)+"/rollout/restore", RolloutRestore{Tenants: tenants}, &restored)
+}
+
+// SetFlags makes a tenant a canary or held, or not.
+func (c *Client) SetFlags(ctx context.Context, name string, flags TenantFlags) (Tenant, error) {
+	var tenant Tenant
+	return tenant, c.do(ctx, http.MethodPut, tenantPath(name)+"/flags", flags, &tenant)
 }
 
 // DeleteApp removes an app no tenant runs.

@@ -26,6 +26,16 @@
   </form>
 </section>
 
+<section class="near">
+  <div class="head"><h2>Rollouts</h2></div>
+  <form method="post" class="stack">
+    <input type="hidden" name="do" value="flags">
+    <label class="row"><input type="checkbox" name="canary" {{if $t.Canary}}checked{{end}}> Canary: takes {{$t.App}}'s changes first, before the other tenants</label>
+    <label class="row"><input type="checkbox" name="hold" {{if $t.Hold}}checked{{end}}> Held: stays on the revision it runs{{if $t.AppRevision}} ({{$t.AppRevision}}){{end}}; released, it follows {{$t.App}} again</label>
+    <div><button type="submit">Save</button></div>
+  </form>
+</section>
+
 <section>
   <div class="head"><h2>All its secrets</h2></div>
   <table>

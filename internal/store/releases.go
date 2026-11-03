@@ -71,14 +71,14 @@ func (s *SQLite) Revisions(app string) ([]Revision, error) {
 	return revisions, nil
 }
 
-func (s *SQLite) RestoreRevision(app string, revision int64, cond AppIf, actor string) (AppChange, error) {
+func (s *SQLite) RestoreRevision(app string, revision int64, cond AppIf, allAtOnce bool, actor string) (AppChange, error) {
 	revisions, err := s.Revisions(app)
 	if err != nil {
 		return AppChange{}, err
 	}
 	for _, kept := range revisions {
 		if kept.Revision == revision {
-			return s.putApp(App{Name: app, Spec: kept.Spec, Tag: kept.Tag}, cond, revision, actor)
+			return s.putApp(App{Name: app, Spec: kept.Spec, Tag: kept.Tag, AllAtOnce: allAtOnce}, cond, revision, actor)
 		}
 	}
 	return AppChange{}, fmt.Errorf("app %s keeps no revision %d: %w", app, revision, ErrNotFound)
