@@ -1,0 +1,56 @@
+# Publishes a release for a tag v*: murder for Linux on amd64 and arm64,
+# install.sh, and SHA256SUMS of all three, which install.sh checks. Run by
+# hand, it only builds them and keeps them as the run's artifact.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # What CI checks on main, so a tag on an untested commit publishes
+      # nothing.
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race ./...
+        env:
+          MURDER_VERIFY_RELOADS: "1"
+      - name: Build
+        env:
+          RELEASE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          mkdir dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+              -ldflags "-X main.release=${RELEASE}" -o "dist/murder-linux-$arch" ./cmd/murder
+          done
+          cp scripts/install.sh dist/install.sh
+          (cd dist && sha256sum murder-linux-amd64 murder-linux-arm64 install.sh > SHA256SUMS && cat SHA256SUMS)
+      - name: Check install.sh against the build
+        run: |
+          python3 -m http.server --directory dist 8765 >/dev/null 2>&1 &
+          sleep 1
+          sudo env MURDER_BASE_URL=http://127.0.0.1:8765 sh dist/install.sh
+          /usr/local/bin/murder version
+      - name: Publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/murder-linux-amd64 dist/murder-linux-arm64 dist/install.sh dist/SHA256SUMS --title "$TAG" --generate-notes --verify-tag
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        with:
+          name: murder
+          path: dist/
