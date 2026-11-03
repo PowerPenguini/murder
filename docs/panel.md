@@ -6,6 +6,94 @@ on every node, like the edge, and asks the local agent over its socket, as
 the CLI does: it holds no state of its own, and every change it makes is in
 the audit log as `<person> via murder-panel`.
 
+## Using the panel
+
+`murder panel` serves a web panel over the agent's API: the cluster's nodes
+(up, down, failed, the leader), every tenant with its state and its copy, a
+tenant's runtime, spec, limits and environment, the audit log, and who may
+sign in. Its pages follow the cluster every few seconds. On a tenant's page
+you suspend or resume it, roll it (a new container), move it to another
+node, archive, restore or purge it (these last ones only with its name
+typed), and read its logs; the overview creates tenants. It was built in
+the stages below. Run it on every node (deploy/murder-panel.service).
+
+It is never on the internet. Every node serves it inside a WireGuard tunnel
+that runs in the panel process itself, so nothing changes on the host's
+network and tenants cannot reach it; only devices you add reach it:
+
+```yaml
+cluster:
+  publicAddresses: [203.0.113.10]   # the tunnel's endpoint
+panel:
+  tunnel:
+    address: 10.77.0.1              # this node's, different on every node, below .100
+    # network: 10.77.0.0/24         # the same on every node; devices get .100 and up
+    # port: 51820                   # UDP, open it in the provider's firewall
+  # name: panel.example.com         # panel.<baseDomain> by default
+```
+
+The panel needs `edge.tls` (internal or acme): it serves HTTPS with the
+wildcard certificate, as `panel.<baseDomain>` (so no tenant may be named
+`panel`; rename one from before, or set `panel.name`). The nodes must be a
+cluster: the devices are kept in its state. Then, on any node:
+
+```bash
+sudo murder admin device add laptop          # a QR code for the WireGuard app
+sudo murder admin device add laptop -out laptop.conf
+sudo murder admin device list
+sudo murder admin device remove laptop       # shut out within seconds, during an upgrade too
+```
+
+The device's private key is in the QR code and the configuration, shown
+once and kept nowhere (`-out` only ever makes a new file, readable by you).
+A node that cannot read the devices as the cluster has them, cut off from
+it, lets no device in. Each node is a peer of its own, so the panel stays
+reachable through any node that is up. The panel's name must lead to the
+nodes' tunnel addresses: with `cluster.dns`, the leader keeps its records
+(of the nodes that serve), otherwise add them, or a hosts file entry. Some
+home routers drop DNS answers with private addresses; a hosts file entry
+works around that.
+
+People sign in with passkeys only: no passwords. Every person has the same
+rights, and the audit log names who did what (`jan (panel)`). The first
+person is invited from a node:
+
+```bash
+sudo murder admin invite jan        # a link, valid 24 hours, once
+sudo murder admin user list
+sudo murder admin user remove jan
+```
+
+Opened on a device in the tunnel, the link adds a passkey (on the device, or
+a phone near it) and shows ten recovery codes, once: each adds one passkey,
+should every passkey be lost, at the same page (`/enroll`, "an invitation,
+or a lost passkey?"). Signed in, the Access page invites others, removes
+people and passkeys, makes new recovery codes, and adds or removes devices
+(a QR code, shown once). The Cluster page shows each node's release,
+drains, removes and fails over nodes, backs up this node's tenants, takes
+changes again after a stopped upgrade, and upgrades the cluster with an
+uploaded `murder` binary; the slow ones run as jobs, with a page that
+follows them. The Apps page creates apps and edits their specs as YAML,
+as `murder app apply` reads them (keep the files in git in step); a
+tenant's settings page changes its app, image, env, own secrets and
+limits, and gives a secret a new value. Secrets' values are never shown.
+Sessions last 12 hours; signing in and out is in
+the audit log. Should everyone lose everything, `murder admin invite` on a
+node starts over.
+
+On a computer without the WireGuard app:
+
+```bash
+murder admin connect -device laptop.conf     # then open https://panel.example.com:8443
+```
+
+It listens on 127.0.0.1:8443 and passes connections through the tunnel; add
+`127.0.0.1 panel.example.com` to the hosts file. As a last resort, root on a
+node reaches the panel on its unix socket (`panel.socket`) through SSH:
+`ssh -L 7480:/run/murder/panel.sock root@node`, then http://localhost:7480.
+
+To try the pages without a cluster: `go run ./internal/panel/demo`.
+
 ## Decisions
 
 - **Who:** a few people, all with the same rights. Each has an account; the
@@ -42,7 +130,7 @@ the audit log as `<person> via murder-panel`.
   tenant runs and keeps its copy (a column per node), the events of the
   last day by hour, a tenant's of the last fortnight by day, and each
   app's tenants. A tooltip names every mark; the tables stay beside them.
-  What tenants use (see the README's "Use") shows as each tenant's memory
+  What tenants use (see "Use" in [node.md](node.md)) shows as each tenant's memory
   and CPU against its limits and its requests a minute, each node's CPU
   and memory, and on a tenant's page its last day: CPU and memory against
   their limits, requests and errors, the 95th percentile of its response

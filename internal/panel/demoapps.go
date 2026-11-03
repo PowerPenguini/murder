@@ -34,10 +34,10 @@ func (d *DemoCluster) demoApps() {
 	}
 	d.apps["testapp"] = api.App{Name: "testapp", Spec: spec.Tenant{Image: "ghcr.io/powerpenguini/murder-testapp@sha256:" + strings.Repeat("7", 64), User: "10001:10001", HealthPath: "/health"}.WithDefaults(),
 		CreatedAt: created, UpdatedAt: created}
-	t := d.tenants["iqtms"]
+	t := d.tenants["atlas"]
 	t.Overrides = spec.Overrides{Env: map[string]string{"TZ": "Europe/Berlin", "FEATURE_PLANNER": "on"}, Secrets: spec.Secrets{"ADMIN_PASSWORD": {Kind: "password", Bytes: 20}}, Limits: spec.Limits{MemoryMB: 768}}
 	t.Spec = spec.Compose(d.apps[t.App].Spec, t.Spec.Name, t.Overrides)
-	d.tenants["iqtms"] = t
+	d.tenants["atlas"] = t
 }
 
 // liveTenantsOf lists the live tenants of app; the caller holds d.mu.

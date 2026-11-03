@@ -32,11 +32,11 @@ func (d Demo) Nodes(context.Context) (api.Nodes, error) {
 		end := &store.Tunnel{Address: netip.MustParseAddr("10.77.0." + host), Key: "pnQ8Rn0r6k0yBqI3m3eH1vO8y7cWvCq1h8mJv0q3b2Y=", Port: 51820}
 		return api.NodeState{Node: store.Node{Name: name, Address: private + ":7400", CreatedAt: now.Add(-40 * 24 * time.Hour), Public: []netip.Addr{netip.MustParseAddr(public)}, Tunnel: end}, Answers: answers}
 	}
-	n3 := node("hel-1", "10.0.1.3", "204.168.230.236", false)
+	n3 := node("hel-1", "10.0.1.3", "203.0.113.13", false)
 	n3.FailedAt = now.Add(-6 * time.Minute)
 	return api.Nodes{Cluster: "4NUMVTJKAY45MV4ANV47PA6COB", Self: "fsn-1", Leader: "fsn-1", Nodes: []api.NodeState{
-		node("fsn-1", "10.0.1.1", "2.28.108.222", true),
-		node("nbg-1", "10.0.1.2", "167.235.105.216", true),
+		node("fsn-1", "10.0.1.1", "203.0.113.11", true),
+		node("nbg-1", "10.0.1.2", "203.0.113.12", true),
 		n3,
 	}}, nil
 }
@@ -52,7 +52,7 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 				Env: map[string]string{"DATA_DIR": "/data", "TZ": "Europe/Warsaw"}, Secrets: spec.Secrets{"SESSION_KEY": {Kind: "hex"}},
 				Limits: spec.Limits{MemoryMB: 256, CPUs: 1, PIDs: 256, DiskGB: 10}},
 			App: app, Node: node, Replica: replica, ReplicaReady: ready, ReplicaSyncedAt: now.Add(-9 * time.Second),
-			Host: name + ".iqtms.io", URL: "https://" + name + ".iqtms.io", Generation: 3,
+			Host: name + ".example.com", URL: "https://" + name + ".example.com", Generation: 3,
 			CreatedAt: now.Add(-20 * 24 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour), Status: status,
 		}
 	}
@@ -65,7 +65,7 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 	archived := tenant("old-demo", "addhoc", "nbg-1", "", false, nil)
 	archived.ArchivedAt = now.Add(-9 * 24 * time.Hour)
 	return []api.Tenant{
-		tenant("iqtms", "addhoc", "fsn-1", "nbg-1", true, running(0)),
+		tenant("atlas", "addhoc", "fsn-1", "nbg-1", true, running(0)),
 		tenant("acme-logistics", "addhoc", "fsn-1", "nbg-1", true, running(1)),
 		unhealthy, moving, syncing, suspended, archived,
 		tenant("vistula-cargo", "addhoc", "nbg-1", "fsn-1", true, running(0)),
@@ -91,7 +91,7 @@ func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, 
 		{ID: 211, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "nordwind", App: "addhoc", Detail: "hel-1 → fsn-1"},
 		{ID: 210, At: now.Add(-48 * time.Minute), Actor: "jan via murder-panel", Action: "tenant.suspended", Tenant: "test-staging", App: "addhoc"},
 		{ID: 209, At: now.Add(-3 * time.Hour), Actor: "root", Action: "app.updated", App: "addhoc", Detail: "image sha256:c23c323553d0"},
-		{ID: 208, At: now.Add(-3 * time.Hour), Actor: "root", Action: "tenant.rolled", Tenant: "iqtms", App: "addhoc"},
+		{ID: 208, At: now.Add(-3 * time.Hour), Actor: "root", Action: "tenant.rolled", Tenant: "atlas", App: "addhoc"},
 		{ID: 207, At: now.Add(-26 * time.Hour), Actor: "root", Action: "node.upgraded", Detail: "fsn-1 to a10e3bfb8220"},
 		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "anna via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "addhoc"},
 	}
@@ -112,7 +112,7 @@ func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, 
 // events, busier lately, the same every time: for the activity charts.
 // Every event is numbered anew, newest highest.
 func withHistory(events []store.Event, now time.Time) []store.Event {
-	tenants := []string{"iqtms", "acme-logistics", "baltic-freight", "kowalski-trans", "nordwind", "vistula-cargo", "test-staging"}
+	tenants := []string{"atlas", "acme-logistics", "baltic-freight", "kowalski-trans", "nordwind", "vistula-cargo", "test-staging"}
 	routine := []struct{ action, detail string }{
 		{"tenant.replica-ready", "the copy holds the whole data"},
 		{"tenant.rolled", ""},
