@@ -67,7 +67,9 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 	// outlast: the panel's handler bounds each body itself.
 	servers := []*http.Server{
 		{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: IdleTimeout, TLSConfig: config.TLS},
-		{Handler: redirect(config.Name), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: IdleTimeout},
+		// It only redirects: a whole request within a time, the body it
+		// never reads (and Go drains) too.
+		{Handler: redirect(config.Name), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: IdleTimeout},
 	}
 	go func() { _ = servers[0].Serve(tls.NewListener(secure, config.TLS)) }()
 	go func() { _ = servers[1].Serve(plain) }()

@@ -186,7 +186,9 @@ func (s *Server) bounded(next http.Handler) http.Handler {
 		case r.URL.Path == "/cluster/upgrade":
 			limit, within = -1, uploadBodyTime
 		}
-		if r.ContentLength == 0 || r.Body == nil || r.Body == http.NoBody {
+		// No body for certain only when the server says so: an HTTP/2
+		// stream with Content-Length 0 may still not have ended.
+		if r.Body == nil || r.Body == http.NoBody {
 			next.ServeHTTP(w, r)
 			return
 		}
