@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -200,6 +201,20 @@ func (d *Docker) ImageID(ctx context.Context, ref string) (string, error) {
 		return "", nil
 	}
 	return image.ID, err
+}
+
+// ImageVolumes reads the image's configuration for the paths it declares
+// as volumes.
+func (d *Docker) ImageVolumes(ctx context.Context, ref string) ([]string, error) {
+	var image struct {
+		Config struct {
+			Volumes map[string]struct{} `json:"Volumes"`
+		} `json:"Config"`
+	}
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/images/" + url.PathEscape(ref) + "/json"}, &image); err != nil {
+		return nil, fmt.Errorf("image %s: %w", ref, err)
+	}
+	return slices.Sorted(maps.Keys(image.Config.Volumes)), nil
 }
 
 // RemoveImage removes the image by its ID, so its tags in the repository go
@@ -599,7 +614,22 @@ func (d *Docker) List(ctx context.Context) ([]Container, error) {
 	return containers, nil
 }
 
+// Create refuses an image that declares a volume no mount or tmpfs of the
+// spec covers: the engine would make an anonymous volume there, outside
+// the tenant's data, and Remove would destroy it with the container.
 func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error) {
+	volumes, err := d.ImageVolumes(ctx, spec.Image)
+	// A missing image is the engine's to report.
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return "", fmt.Errorf("create container %s: %w", spec.Name, err)
+	}
+	for _, volume := range volumes {
+		target := path.Clean(volume)
+		_, tmpfs := spec.Tmpfs[target]
+		if !tmpfs && !slices.ContainsFunc(spec.Mounts, func(m Mount) bool { return path.Clean(m.Target) == target }) {
+			return "", fmt.Errorf("create container %s: image %s declares a volume at %s, which nothing is mounted on: %w", spec.Name, spec.Image, volume, ErrUncoveredVolume)
+		}
+	}
 	mounts := make([]map[string]any, 0, len(spec.Mounts))
 	for _, mount := range spec.Mounts {
 		mounts = append(mounts, map[string]any{"Type": "bind", "Source": mount.Source, "Target": mount.Target})

@@ -44,6 +44,8 @@ func (m *memoryRuntime) HasImage(context.Context, string) (bool, error) { return
 
 func (m *memoryRuntime) PullImage(context.Context, string) error { return nil }
 
+func (m *memoryRuntime) ImageVolumes(context.Context, string) ([]string, error) { return nil, nil }
+
 func (m *memoryRuntime) RemoveImage(context.Context, string) error { return nil }
 
 func (m *memoryRuntime) ImageID(context.Context, string) (string, error) { return "", nil }
