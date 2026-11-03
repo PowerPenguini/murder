@@ -31,6 +31,7 @@ func (c *Cluster) handler() http.Handler {
 	members("GET /cluster/v1/node", c.handleNodeInfo)
 	members("PUT /cluster/v1/tenants/{name}/data", c.handleReceive)
 	members("DELETE /cluster/v1/tenants/{name}/data", c.handleDiscard)
+	members("GET /cluster/v1/tenants/{name}/data", c.handleDataExists)
 	members("GET /cluster/v1/tenants/{name}/status", c.handleTenantStatus)
 	members("POST /cluster/v1/tenants/{name}/move", c.handleMove)
 	members("PUT /cluster/v1/node/binary", c.handleInstall)
@@ -459,6 +460,20 @@ func (c *Cluster) handleDiscard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+func (c *Cluster) handleDataExists(w http.ResponseWriter, r *http.Request) {
+	if !c.moves(w) {
+		return
+	}
+	exists, err := c.config.Moves.DataExists(r.Context(), r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Exists bool `json:"exists"`
+	}{exists})
 }
 
 func (c *Cluster) handleTenantStatus(w http.ResponseWriter, r *http.Request) {

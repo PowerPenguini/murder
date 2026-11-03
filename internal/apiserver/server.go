@@ -442,6 +442,28 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := detached(r)
 	defer cancel()
+	node, err := s.placeNew(request.Node)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// Data on another node is that node's to say: it starts the tenant on
+	// whatever it finds.
+	if node != s.store.Node() {
+		if s.cluster == nil {
+			writeError(w, errNoCluster)
+			return
+		}
+		exists, err := s.cluster.DataExistsOn(ctx, node, request.Name)
+		if err != nil {
+			writeError(w, statusError{http.StatusBadGateway, fmt.Errorf("node %s: %w", node, err)})
+			return
+		}
+		if exists {
+			writeError(w, statusError{http.StatusConflict, fmt.Errorf("data of an earlier tenant %s is on node %s but not in the archive; purge it there first, or create the tenant on another node", request.Name, node)})
+			return
+		}
+	}
 	var record store.Record
 	// Under the reconciler's lock, so a concurrent purge cannot interleave
 	// with the check for leftover data.
@@ -454,14 +476,16 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		} else if err == nil {
 			return store.ErrExists
 		}
-		exists, err := s.reconciler.DataExists(ctx, request.Name)
-		if err != nil {
-			return err
+		exists := false
+		if node == s.store.Node() {
+			if exists, err = s.reconciler.DataExists(ctx, request.Name); err != nil {
+				return err
+			}
 		}
 		if exists {
 			return statusError{http.StatusConflict, fmt.Errorf("data of an earlier tenant %s is on this node but not in the archive; purge it first", request.Name)}
 		}
-		record, err = s.store.Create(store.NewTenant{Name: request.Name, App: request.App, Overrides: overrides}, actor(r))
+		record, err = s.store.Create(store.NewTenant{Name: request.Name, App: request.App, Overrides: overrides, Node: node}, actor(r))
 		return err
 	})
 	if err != nil {
@@ -470,6 +494,30 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("tenant created", "tenant", request.Name, "app", request.App, "image", record.Spec.Image)
 	writeJSON(w, http.StatusCreated, api.Applied{Tenant: s.view(record), Changed: true, Note: note})
+}
+
+// placeNew is the node a new tenant runs on, as asked: a node's name,
+// "auto" for the least loaded, or this node.
+func (s *Server) placeNew(asked string) (string, error) {
+	switch asked {
+	case "":
+		return s.store.Node(), nil
+	case store.Auto:
+		return store.LeastLoaded(s.store.Nodes(), s.store.List(), s.store.Node()), nil
+	}
+	if asked == s.store.Node() {
+		return asked, nil
+	}
+	for _, node := range s.store.Nodes() {
+		if node.Name != asked {
+			continue
+		}
+		if node.Failed() {
+			return "", statusError{http.StatusConflict, fmt.Errorf("node %s failed and has not answered since", asked)}
+		}
+		return asked, nil
+	}
+	return "", badRequest(fmt.Errorf("node %s is not in the cluster", asked))
 }
 
 // configure gives a tenant, live or archived, another app or other

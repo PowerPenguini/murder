@@ -570,6 +570,9 @@ type Moves interface {
 	Receive(ctx context.Context, tenant string, incremental bool, data io.Reader) error
 	Discard(ctx context.Context, tenant string) error
 	Status(tenant string) (any, bool)
+	// DataExists reports whether this node holds data of tenant: its own,
+	// a copy, or what a failure left.
+	DataExists(ctx context.Context, tenant string) (bool, error)
 	Move(ctx context.Context, tenant, to, actor string) error
 }
 
@@ -604,6 +607,15 @@ func (c *Cluster) ReceiveOn(ctx context.Context, node, tenant string, incrementa
 // DiscardOn drops what node received for a move that failed.
 func (c *Cluster) DiscardOn(ctx context.Context, node, tenant string) error {
 	return c.stream(ctx, node, http.MethodDelete, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/data", nil, nil)
+}
+
+// DataExistsOn reports whether node holds data of tenant.
+func (c *Cluster) DataExistsOn(ctx context.Context, node, tenant string) (bool, error) {
+	var answer struct {
+		Exists bool `json:"exists"`
+	}
+	err := c.stream(ctx, node, http.MethodGet, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/data", nil, &answer)
+	return answer.Exists, err
 }
 
 // StatusOn decodes a tenant's status on node into out.

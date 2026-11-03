@@ -54,6 +54,9 @@ type TenantRequest struct {
 	Name      string         `json:"name,omitempty"`
 	App       string         `json:"app"`
 	Overrides spec.Overrides `json:"overrides"`
+	// Node, when creating, runs the tenant: a node's name, "auto" for the
+	// one running the fewest tenants, or this node if empty.
+	Node string `json:"node,omitempty"`
 	// Generation, when reconfiguring, is the generation the client read; a
 	// tenant changed since is refused with 409 instead of overwritten.
 	Generation int64 `json:"generation,omitempty"`

@@ -102,6 +102,18 @@ func TestActingOnTheCluster(t *testing.T) {
 		t.Fatalf("the cluster page does not list the drain:\n%s", page)
 	}
 
+	// Drained, nbg-1 runs nothing: balancing moves tenants back, as a job.
+	if !strings.Contains(page, "moves even the nodes' tenants:") || !strings.Contains(page, `value="balance"`) {
+		t.Fatalf("the cluster page offers no balancing:\n%s", page)
+	}
+	response, _ = submit(t, client, server, "/cluster", url.Values{"do": {"balance"}}, server.URL)
+	if body = waitForJob(t, s, client, response); !strings.Contains(body, "balance the tenants") || !strings.Contains(body, "to nbg-1") || !strings.Contains(body, ">done<") {
+		t.Fatalf("the balance's page:\n%s", body)
+	}
+	if _, page = get(t, server.URL+"/cluster"); !strings.Contains(page, "No node runs two tenants more than another") {
+		t.Fatalf("not balanced after balancing:\n%s", page)
+	}
+
 	// Backing up is a job too, listing each tenant's backup.
 	response, _ = submit(t, client, server, "/cluster", url.Values{"do": {"backups"}}, server.URL)
 	if body = waitForJob(t, s, client, response); !strings.Contains(body, "back up the tenants of fsn-1") || !strings.Contains(body, ".db.zst") {

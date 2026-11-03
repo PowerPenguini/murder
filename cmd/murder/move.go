@@ -102,6 +102,10 @@ func (a *agentMoves) catchUp() error {
 
 func (a *agentMoves) Status(tenant string) (any, bool) { return a.reconciler.Status(tenant) }
 
+func (a *agentMoves) DataExists(ctx context.Context, tenant string) (bool, error) {
+	return a.reconciler.DataExists(ctx, tenant)
+}
+
 // Move moves a tenant to another node, from the node that runs it.
 func (a *agentMoves) Move(ctx context.Context, tenant, to, actor string) error {
 	record, err := a.store.Get(tenant)

@@ -10,6 +10,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/failover"
+	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 )
 
@@ -27,6 +28,8 @@ type Cluster interface {
 	Ping(ctx context.Context, node string) error
 	// CatchUp applies here what the cluster has applied.
 	CatchUp() error
+	// DataExistsOn reports whether node holds data of tenant.
+	DataExistsOn(ctx context.Context, node, tenant string) (bool, error)
 }
 
 // Invites makes invitations for hosts to join the cluster as nodes.
@@ -53,6 +56,17 @@ func (s *Server) clusterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /v1/cluster/nodes/{name}", s.removeNode)
 	mux.HandleFunc("POST /v1/cluster/nodes/{name}/failover", rootOnly(s.failOver))
 	mux.HandleFunc("POST /v1/cluster/invites", rootOnly(s.invite))
+	mux.HandleFunc("GET /v1/cluster/balance", s.balance)
+}
+
+// balance plans the moves that would leave no node running two tenants
+// more than another; the client makes them, one after the other.
+func (s *Server) balance(w http.ResponseWriter, _ *http.Request) {
+	moves := store.BalanceMoves(s.store.Nodes(), s.store.List())
+	if moves == nil {
+		moves = []store.Move{}
+	}
+	writeJSON(w, http.StatusOK, moves)
 }
 
 // invite makes an invitation: it hands the master key to whoever brings

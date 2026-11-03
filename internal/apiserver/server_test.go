@@ -874,3 +874,55 @@ func TestStoringAnAppOnlyAsRead(t *testing.T) {
 		t.Fatalf("a bad if: %d %s", recorder.Code, recorder.Body)
 	}
 }
+
+// dataCluster says which nodes hold data of which tenants.
+type dataCluster struct {
+	Cluster
+	data map[string]bool
+}
+
+func (c dataCluster) DataExistsOn(_ context.Context, node, tenant string) (bool, error) {
+	return c.data[node+"/"+tenant], nil
+}
+
+func TestNewTenantsGoWhereTheyAreAskedTo(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	self := f.store.Node()
+	for i, node := range []string{self, "n2", "n3"} {
+		if err := f.store.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.server.WithCluster(dataCluster{data: map[string]bool{"n3/stale": true}})
+	create := func(name, node string) (api.Applied, error) {
+		return f.client.Create(ctx, api.TenantRequest{Name: name, App: "web", Node: node})
+	}
+	// Here by default; auto spreads them, this node first among equals.
+	for _, c := range []struct{ name, node, want string }{
+		{"a", "", self}, {"b", store.Auto, "n2"}, {"c", store.Auto, "n3"}, {"d", store.Auto, self}, {"e", "n2", "n2"},
+	} {
+		applied, err := create(c.name, c.node)
+		if err != nil || applied.Tenant.Node != c.want {
+			t.Fatalf("%s on %q: %+v, %v", c.name, c.node, applied.Tenant.Node, err)
+		}
+	}
+	if _, err := create("x", "nowhere"); err == nil || !strings.Contains(err.Error(), "not in the cluster") {
+		t.Fatalf("an unknown node: %v", err)
+	}
+	// What a failure left on the node it would go to stops it.
+	if _, err := create("stale", "n3"); err == nil || !strings.Contains(err.Error(), "on node n3 but not in the archive") {
+		t.Fatalf("leftover data elsewhere: %v", err)
+	}
+	if _, err := f.store.Get("stale"); err == nil {
+		t.Fatal("the tenant was created anyway")
+	}
+	// The plan to balance them: none needed now.
+	moves, err := f.client.BalanceMoves(ctx)
+	if err != nil || len(moves) != 0 {
+		t.Fatalf("moves %+v, %v", moves, err)
+	}
+}
