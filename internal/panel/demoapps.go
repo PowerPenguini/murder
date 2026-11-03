@@ -34,22 +34,22 @@ func (d *DemoCluster) demoApps() {
 		d.apps[name] = app
 		d.revisions[name] = []store.Revision{{Revision: 1, Spec: app.Spec, Tag: app.Tag, CreatedAt: app.UpdatedAt, Actor: "root"}}
 	}
-	// addhoc follows a tag, has a history, and a newer image waits.
-	if addhoc, ok := d.apps["addhoc"]; ok {
-		addhoc.Tag = "ghcr.io/powerpenguini/addhoc:stable"
-		older := addhoc.Spec
-		older.Image = "ghcr.io/powerpenguini/addhoc@sha256:" + strings.Repeat("a1", 32)
+	// web follows a tag, has a history, and a newer image waits.
+	if web, ok := d.apps["web"]; ok {
+		web.Tag = "ghcr.io/example/web:stable"
+		older := web.Spec
+		older.Image = "ghcr.io/example/web@sha256:" + strings.Repeat("a1", 32)
 		oldest := older
-		oldest.Image = "ghcr.io/powerpenguini/addhoc@sha256:" + strings.Repeat("9f", 32)
-		d.revisions["addhoc"] = []store.Revision{
-			{Revision: 1, Spec: oldest, Tag: addhoc.Tag, CreatedAt: created, Actor: "root"},
-			{Revision: 2, Spec: older, Tag: addhoc.Tag, CreatedAt: time.Now().Add(-9 * 24 * time.Hour), Actor: "mateusz via murder-panel"},
-			{Revision: 3, Spec: addhoc.Spec, Tag: addhoc.Tag, CreatedAt: addhoc.UpdatedAt, Actor: "root"},
+		oldest.Image = "ghcr.io/example/web@sha256:" + strings.Repeat("9f", 32)
+		d.revisions["web"] = []store.Revision{
+			{Revision: 1, Spec: oldest, Tag: web.Tag, CreatedAt: created, Actor: "root"},
+			{Revision: 2, Spec: older, Tag: web.Tag, CreatedAt: time.Now().Add(-9 * 24 * time.Hour), Actor: "jan via murder-panel"},
+			{Revision: 3, Spec: web.Spec, Tag: web.Tag, CreatedAt: web.UpdatedAt, Actor: "root"},
 		}
-		addhoc.Revision = 3
-		addhoc.Latest = "ghcr.io/powerpenguini/addhoc@sha256:" + strings.Repeat("5e", 32)
-		addhoc.LatestAt = time.Now().Add(-18 * time.Minute)
-		d.apps["addhoc"] = addhoc
+		web.Revision = 3
+		web.Latest = "ghcr.io/example/web@sha256:" + strings.Repeat("5e", 32)
+		web.LatestAt = time.Now().Add(-18 * time.Minute)
+		d.apps["web"] = web
 	}
 	d.apps["testapp"] = api.App{Name: "testapp", Spec: spec.Tenant{Image: "ghcr.io/powerpenguini/murder-testapp@sha256:" + strings.Repeat("7", 64), User: "10001:10001", HealthPath: "/health"}.WithDefaults(),
 		CreatedAt: created, UpdatedAt: created}

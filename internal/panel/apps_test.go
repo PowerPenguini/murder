@@ -39,12 +39,12 @@ const testAppFile = "image: ghcr.io/example/web:1.0\nuser: \"10001:10001\"\nenv:
 func TestCreatingAnApp(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
-	if _, page := get(t, server.URL+"/apps"); !strings.Contains(page, `href="/apps/addhoc"`) || !strings.Contains(page, "Create the app") {
+	if _, page := get(t, server.URL+"/apps"); !strings.Contains(page, `href="/apps/web"`) || !strings.Contains(page, "Create the app") {
 		t.Fatalf("the apps page:\n%s", page)
 	}
 
 	// Refused, the form comes back as it was typed, saying why.
-	response, body := submit(t, client, server, "/apps", url.Values{"name": {"web"}, "file": {"image: x\nuser: root\nbogus: 1\n"}}, server.URL)
+	response, body := submit(t, client, server, "/apps", url.Values{"name": {"shop"}, "file": {"image: x\nuser: root\nbogus: 1\n"}}, server.URL)
 	if response.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body, "bogus") || !strings.Contains(body, "user: root") {
 		t.Fatalf("a bad spec: %d\n%s", response.StatusCode, body)
 	}
@@ -52,43 +52,43 @@ func TestCreatingAnApp(t *testing.T) {
 	if !strings.Contains(body, "the app&#39;s name") {
 		t.Fatalf("a bad name:\n%s", body)
 	}
-	_, body = submit(t, client, server, "/apps", url.Values{"name": {"addhoc"}, "file": {testAppFile}}, server.URL)
-	if !strings.Contains(body, "app addhoc exists already") {
+	_, body = submit(t, client, server, "/apps", url.Values{"name": {"web"}, "file": {testAppFile}}, server.URL)
+	if !strings.Contains(body, "app web exists already") {
 		t.Fatalf("an app of the name stored already was replaced:\n%s", body)
 	}
 
-	response, body = submit(t, client, server, "/apps", url.Values{"name": {"web"}, "file": {testAppFile}}, server.URL)
-	if response.Request.URL.Path != "/apps/web" || !strings.Contains(body, "app web is created") || !strings.Contains(body, "SESSION_SECRET: hex") {
-		t.Fatalf("after creating web (%s):\n%s", response.Request.URL, body)
+	response, body = submit(t, client, server, "/apps", url.Values{"name": {"shop"}, "file": {testAppFile}}, server.URL)
+	if response.Request.URL.Path != "/apps/shop" || !strings.Contains(body, "app shop is created") || !strings.Contains(body, "SESSION_SECRET: hex") {
+		t.Fatalf("after creating shop (%s):\n%s", response.Request.URL, body)
 	}
-	if events, _ := cluster.Events(ctx, store.EventQuery{App: "web", Limit: 1}); len(events) != 1 || events[0].Action != "app.created" || events[0].Actor != "murder-panel socket" {
+	if events, _ := cluster.Events(ctx, store.EventQuery{App: "shop", Limit: 1}); len(events) != 1 || events[0].Action != "app.created" || events[0].Actor != "murder-panel socket" {
 		t.Fatalf("the audit log: %+v", events)
 	}
-	if _, page := get(t, server.URL+"/events?app=web"); !strings.Contains(page, "app.created") || strings.Contains(page, "tenant.suspended") {
-		t.Fatalf("the events of app web:\n%s", page)
+	if _, page := get(t, server.URL+"/events?app=shop"); !strings.Contains(page, "app.created") || strings.Contains(page, "tenant.suspended") {
+		t.Fatalf("the events of app shop:\n%s", page)
 	}
 }
 
 func TestEditingAnApp(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
-	_, page := get(t, server.URL+"/apps/addhoc")
+	_, page := get(t, server.URL+"/apps/web")
 	updated := between(page, `name="updated" value="`, `"`)
 	file := between(page, `aria-label="the app's spec">`, "</textarea>")
-	if updated == "" || !strings.Contains(file, "TZ: Europe/Warsaw") || !strings.Contains(file, "image: ghcr.io/powerpenguini/addhoc:stable\n") {
+	if updated == "" || !strings.Contains(file, "TZ: Europe/Warsaw") || !strings.Contains(file, "image: ghcr.io/example/web:stable\n") {
 		t.Fatalf("the app's page:\n%s", page)
 	}
-	before, _ := cluster.AsApps("test").App(ctx, "addhoc")
+	before, _ := cluster.AsApps("test").App(ctx, "web")
 	changed := strings.Replace(file, "TZ: Europe/Warsaw", "TZ: Europe/Paris", 1)
 
 	// A save over a change made since the page was read is refused, the
 	// text kept.
-	_, body := submit(t, client, server, "/apps/addhoc", url.Values{"do": {"save"}, "updated": {"2001-01-01T00:00:00Z"}, "file": {changed}}, server.URL)
+	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"save"}, "updated": {"2001-01-01T00:00:00Z"}, "file": {changed}}, server.URL)
 	if !strings.Contains(body, "someone changed the app since") || !strings.Contains(body, "Europe/Paris") || !strings.Contains(body, `href="/tenants/old-demo"`) || strings.Contains(body, `value="delete"`) {
 		t.Fatalf("a stale save:\n%s", body)
 	}
-	_, body = submit(t, client, server, "/apps/addhoc", url.Values{"do": {"save"}, "updated": {updated}, "file": {changed}}, server.URL)
-	if !strings.Contains(body, "app addhoc is changed; it rolls out to 7 tenants") {
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"save"}, "updated": {updated}, "file": {changed}}, server.URL)
+	if !strings.Contains(body, "app web is changed; it rolls out to 7 tenants") {
 		t.Fatalf("after saving:\n%s", body)
 	}
 	if tenant, _ := cluster.Get(ctx, "acme-logistics"); tenant.Spec.Env["TZ"] != "Europe/Paris" || tenant.Spec.Image != before.Spec.Image {
@@ -100,7 +100,7 @@ func TestEditingAnApp(t *testing.T) {
 	}
 
 	// An app tenants run is not deleted; one without is, its name typed.
-	_, body = submit(t, client, server, "/apps/addhoc", url.Values{"do": {"delete"}, "confirm": {"addhoc"}}, server.URL)
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"delete"}, "confirm": {"web"}}, server.URL)
 	if !strings.Contains(body, "still has tenant") {
 		t.Fatalf("deleted an app tenants run:\n%s", body)
 	}
@@ -118,13 +118,13 @@ func TestATenantsSettings(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/tenants/atlas/settings")
-	for _, want := range []string{"FEATURE_PLANNER=on", "ADMIN_PASSWORD password 20", `value="768"`, "SESSION_KEY", "app addhoc"} {
+	for _, want := range []string{"FEATURE_PLANNER=on", "ADMIN_PASSWORD password 20", `value="768"`, "SESSION_KEY", "app web"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the settings page lacks %q:\n%s", want, page)
 		}
 	}
 	before, _ := cluster.Get(ctx, "atlas")
-	form := url.Values{"do": {"save"}, "app": {"addhoc"}, "generation": {strconv.FormatInt(before.Generation, 10)},
+	form := url.Values{"do": {"save"}, "app": {"web"}, "generation": {strconv.FormatInt(before.Generation, 10)},
 		"env": {"TZ=Europe/Warsaw\nbroken"}, "secrets": {"ADMIN_PASSWORD password 20\nAPI_TOKEN base64 48"}, "memoryMB": {"1024"}, "cpus": {"1.5"}}
 
 	// A form that does not read is shown again, as typed.
@@ -212,7 +212,7 @@ func TestArchivedTenantsInSettings(t *testing.T) {
 	if _, page := get(t, server.URL+"/tenants/old-demo/settings"); strings.Contains(page, `value="rotate"`) || !strings.Contains(page, "once it is restored") {
 		t.Fatalf("the settings of an archived tenant:\n%s", page)
 	}
-	if _, page := get(t, server.URL+"/apps/addhoc"); !strings.Contains(page, `href="/tenants/old-demo"`) || strings.Contains(page, `value="delete"`) {
+	if _, page := get(t, server.URL+"/apps/web"); !strings.Contains(page, `href="/tenants/old-demo"`) || strings.Contains(page, `value="delete"`) {
 		t.Fatalf("the page of an app an archived tenant runs:\n%s", page)
 	}
 	// Too large a form is refused as such.
@@ -226,26 +226,26 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
 	agent := cluster.AsApps("test")
-	_, page := get(t, server.URL+"/apps/addhoc")
+	_, page := get(t, server.URL+"/apps/web")
 	updated := between(page, `name="updated" value="`, `"`)
 	if !strings.Contains(page, "A newer image of") || !strings.Contains(page, "Update and roll out") || !strings.Contains(page, "Go back to this") {
 		t.Fatalf("the app's page:\n%s", page)
 	}
-	_, body := submit(t, client, server, "/apps/addhoc", url.Values{"do": {"check"}}, server.URL)
-	if !strings.Contains(body, "a newer image of ghcr.io/powerpenguini/addhoc:stable is in its registry: 5e5e5e5e5e5e") {
+	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"check"}}, server.URL)
+	if !strings.Contains(body, "a newer image of ghcr.io/example/web:stable is in its registry: 5e5e5e5e5e5e") {
 		t.Fatalf("after checking:\n%s", body)
 	}
-	before, _ := agent.App(ctx, "addhoc")
+	before, _ := agent.App(ctx, "web")
 	// An update over a page read before a change is refused.
-	_, body = submit(t, client, server, "/apps/addhoc", url.Values{"do": {"update"}, "updated": {"2001-01-01T00:00:00Z"}}, server.URL)
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"update"}, "updated": {"2001-01-01T00:00:00Z"}}, server.URL)
 	if !strings.Contains(body, "someone changed the app since you opened it") {
 		t.Fatalf("a stale update:\n%s", body)
 	}
-	_, body = submit(t, client, server, "/apps/addhoc", url.Values{"do": {"update"}, "updated": {updated}}, server.URL)
-	if !strings.Contains(body, "app addhoc is changed; it rolls out to 7 tenants") || strings.Contains(body, "A newer image of") {
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"update"}, "updated": {updated}}, server.URL)
+	if !strings.Contains(body, "app web is changed; it rolls out to 7 tenants") || strings.Contains(body, "A newer image of") {
 		t.Fatalf("after updating:\n%s", body)
 	}
-	after, _ := agent.App(ctx, "addhoc")
+	after, _ := agent.App(ctx, "web")
 	if after.Spec.Image != before.Latest || after.Latest != "" || after.Revision != 4 {
 		t.Fatalf("updated app %+v", after)
 	}
@@ -254,11 +254,11 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 	}
 	// Back to revision 2.
 	updated = between(body, `name="updated" value="`, `"`)
-	_, body = submit(t, client, server, "/apps/addhoc", url.Values{"do": {"restore"}, "revision": {"2"}, "updated": {updated}}, server.URL)
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"restore"}, "revision": {"2"}, "updated": {updated}}, server.URL)
 	if !strings.Contains(body, "it rolls out to 7 tenants") {
 		t.Fatalf("after going back:\n%s", body)
 	}
-	if back, _ := agent.App(ctx, "addhoc"); back.Revision != 5 || !strings.HasSuffix(back.Spec.Image, strings.Repeat("a1", 32)) {
+	if back, _ := agent.App(ctx, "web"); back.Revision != 5 || !strings.HasSuffix(back.Spec.Image, strings.Repeat("a1", 32)) {
 		t.Fatalf("app after going back %+v", back)
 	}
 	// An app given pinned has nothing to check.

@@ -52,7 +52,7 @@ func TestEventsAndErrorsPages(t *testing.T) {
 	if !strings.Contains(all, ">copy ready<") || strings.Contains(people, ">copy ready<") || !strings.Contains(people, ">suspended<") {
 		t.Fatalf("people's events:\n%s", people)
 	}
-	if !strings.Contains(all, `<option value="baltic-freight">`) || !strings.Contains(all, `<option value="addhoc">`) {
+	if !strings.Contains(all, `<option value="baltic-freight">`) || !strings.Contains(all, `<option value="web">`) {
 		t.Fatalf("the filters offer no names:\n%s", all)
 	}
 	response, page := get(t, server.URL+"/tenants/nobody")

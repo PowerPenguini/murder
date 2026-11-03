@@ -118,11 +118,11 @@ func TestActingOnTenants(t *testing.T) {
 			t.Fatal("the notice was lost")
 		}
 	}
-	response, body = submit(t, client, server, "/tenants", url.Values{"name": {"newco"}, "app": {"addhoc"}}, server.URL)
+	response, body = submit(t, client, server, "/tenants", url.Values{"name": {"newco"}, "app": {"web"}}, server.URL)
 	if response.Request.URL.Path != "/tenants/newco" || !strings.Contains(body, "newco is created") {
 		t.Fatalf("created: %s", response.Request.URL)
 	}
-	if _, body = submit(t, client, server, "/tenants", url.Values{"name": {"Bad Name"}, "app": {"addhoc"}}, server.URL); !strings.Contains(body, "lowercase letters") {
+	if _, body = submit(t, client, server, "/tenants", url.Values{"name": {"Bad Name"}, "app": {"web"}}, server.URL); !strings.Contains(body, "lowercase letters") {
 		t.Fatal("a bad name taken")
 	}
 	// From elsewhere, nothing.

@@ -258,7 +258,7 @@ func TestWaitEndsWhenTheTenantIsArchived(t *testing.T) {
 // Every example app loads as "murder app apply" loads it, and makes a valid
 // tenant: a spec that drifts from the format fails here, not on a node.
 func TestExampleAppsAreValid(t *testing.T) {
-	for _, file := range []string{"web.yaml", "addhoc.yaml"} {
+	for _, file := range []string{"web.yaml"} {
 		name, app, err := loadApp(filepath.Join("..", "..", "examples", "apps", file))
 		if err != nil {
 			t.Fatal(err)
@@ -269,10 +269,6 @@ func TestExampleAppsAreValid(t *testing.T) {
 		if err := spec.Compose(app, "acme", spec.Overrides{}).ValidateUnpinned(); err != nil {
 			t.Fatalf("%s: %v", file, err)
 		}
-	}
-	_, addhoc, _ := loadApp(filepath.Join("..", "..", "examples", "apps", "addhoc.yaml"))
-	if addhoc.HealthPath != "/api/health" || addhoc.Limits.MemoryMB != 512 || addhoc.Secrets["APP_ADMIN_PASSWORD"] != (spec.Secret{Kind: "password", Bytes: 24}) || addhoc.Env["TRUSTED_PROXIES"] != "{{network}}" {
-		t.Fatalf("addhoc = %+v", addhoc)
 	}
 }
 

@@ -56,19 +56,19 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 			CreatedAt: now.Add(-20 * 24 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour), Status: status,
 		}
 	}
-	moving := tenant("kowalski-trans", "addhoc", "nbg-1", "fsn-1", true, running(0))
+	moving := tenant("kowalski-trans", "web", "nbg-1", "fsn-1", true, running(0))
 	moving.ReplicaNext = "hel-1"
-	unhealthy := tenant("baltic-freight", "addhoc", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 3, LastExit: "exit 137 (most likely out of memory) 4m ago", Generation: 2, CheckedAt: now.Add(-3 * time.Second)})
-	syncing := tenant("nordwind", "addhoc", "fsn-1", "nbg-1", false, running(0))
-	suspended := tenant("test-staging", "addhoc", "fsn-1", "nbg-1", true, &reconcile.Status{Phase: "stopped", Generation: 5, CheckedAt: now.Add(-6 * time.Second)})
+	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 3, LastExit: "exit 137 (most likely out of memory) 4m ago", Generation: 2, CheckedAt: now.Add(-3 * time.Second)})
+	syncing := tenant("nordwind", "web", "fsn-1", "nbg-1", false, running(0))
+	suspended := tenant("test-staging", "web", "fsn-1", "nbg-1", true, &reconcile.Status{Phase: "stopped", Generation: 5, CheckedAt: now.Add(-6 * time.Second)})
 	suspended.Spec.Suspended = true
-	archived := tenant("old-demo", "addhoc", "nbg-1", "", false, nil)
+	archived := tenant("old-demo", "web", "nbg-1", "", false, nil)
 	archived.ArchivedAt = now.Add(-9 * 24 * time.Hour)
 	return []api.Tenant{
-		tenant("atlas", "addhoc", "fsn-1", "nbg-1", true, running(0)),
-		tenant("acme-logistics", "addhoc", "fsn-1", "nbg-1", true, running(1)),
+		tenant("atlas", "web", "fsn-1", "nbg-1", true, running(0)),
+		tenant("acme-logistics", "web", "fsn-1", "nbg-1", true, running(1)),
 		unhealthy, moving, syncing, suspended, archived,
-		tenant("vistula-cargo", "addhoc", "nbg-1", "fsn-1", true, running(0)),
+		tenant("vistula-cargo", "web", "nbg-1", "fsn-1", true, running(0)),
 	}, nil
 }
 
@@ -85,15 +85,15 @@ func (d Demo) Get(ctx context.Context, name string) (api.Tenant, error) {
 func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, error) {
 	now := d.now()
 	all := []store.Event{
-		{ID: 214, At: now.Add(-50 * time.Second), Actor: "murder", Action: "tenant.replica", Tenant: "kowalski-trans", App: "addhoc", Detail: "copy moves from fsn-1 to hel-1, which keeps fewer"},
+		{ID: 214, At: now.Add(-50 * time.Second), Actor: "murder", Action: "tenant.replica", Tenant: "kowalski-trans", App: "web", Detail: "copy moves from fsn-1 to hel-1, which keeps fewer"},
 		{ID: 213, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "node.failed-over", Detail: "hel-1: 2 tenants run from their replicas"},
-		{ID: 212, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "vistula-cargo", App: "addhoc", Detail: "hel-1 → nbg-1"},
-		{ID: 211, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "nordwind", App: "addhoc", Detail: "hel-1 → fsn-1"},
-		{ID: 210, At: now.Add(-48 * time.Minute), Actor: "jan via murder-panel", Action: "tenant.suspended", Tenant: "test-staging", App: "addhoc"},
-		{ID: 209, At: now.Add(-3 * time.Hour), Actor: "root", Action: "app.updated", App: "addhoc", Detail: "image sha256:c23c323553d0"},
-		{ID: 208, At: now.Add(-3 * time.Hour), Actor: "root", Action: "tenant.rolled", Tenant: "atlas", App: "addhoc"},
+		{ID: 212, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "vistula-cargo", App: "web", Detail: "hel-1 → nbg-1"},
+		{ID: 211, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "nordwind", App: "web", Detail: "hel-1 → fsn-1"},
+		{ID: 210, At: now.Add(-48 * time.Minute), Actor: "jan via murder-panel", Action: "tenant.suspended", Tenant: "test-staging", App: "web"},
+		{ID: 209, At: now.Add(-3 * time.Hour), Actor: "root", Action: "app.updated", App: "web", Detail: "image sha256:c23c323553d0"},
+		{ID: 208, At: now.Add(-3 * time.Hour), Actor: "root", Action: "tenant.rolled", Tenant: "atlas", App: "web"},
 		{ID: 207, At: now.Add(-26 * time.Hour), Actor: "root", Action: "node.upgraded", Detail: "fsn-1 to a10e3bfb8220"},
-		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "anna via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "addhoc"},
+		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "anna via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "web"},
 	}
 	all = withHistory(all, now)
 	var out []store.Event
@@ -132,7 +132,7 @@ func withHistory(events []store.Event, now time.Time) []store.Event {
 		}
 		r := routine[next(len(routine))]
 		tenant := tenants[next(len(tenants))]
-		events = append(events, store.Event{At: now.Add(-ago - time.Minute), Actor: "murder", Action: r.action, Tenant: tenant, App: "addhoc", Detail: r.detail})
+		events = append(events, store.Event{At: now.Add(-ago - time.Minute), Actor: "murder", Action: r.action, Tenant: tenant, App: "web", Detail: r.detail})
 	}
 	slices.SortStableFunc(events, func(a, b store.Event) int { return b.At.Compare(a.At) })
 	for i := range events {
