@@ -1012,3 +1012,80 @@ func TestAJoinAcrossALeadershipChangeKeepsOneAddress(t *testing.T) {
 	}
 	sameState(t, nodes)
 }
+
+// A join that waited across two leadership changes, while its node was
+// removed and another of the same name joined at another address, leaves
+// that other one where it is, in the state and the voters.
+func TestAStaleJoinLeavesAReplacementInPlace(t *testing.T) {
+	nodes := threeNodes(t)
+	var old, next *node
+	eventually(t, "a leader", func() bool {
+		for _, n := range nodes {
+			if n.cluster.Leader() {
+				old = n
+			}
+		}
+		return old != nil
+	})
+	for _, n := range nodes {
+		if n != old {
+			next = n
+			break
+		}
+	}
+	paused, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	hook := func(at, name string) {
+		if at == joinAdd {
+			once.Do(func() { close(paused); <-release })
+		}
+	}
+	old.cluster.joinHook.Store(&hook)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	stale := newNode(t, "x-1")
+	joined := make(chan error, 1)
+	go func() { joined <- stale.cluster.Join(ctx(t), old.address, "alice") }()
+	select {
+	case <-paused:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the join never got to adding the voter")
+	}
+	if err := old.cluster.raft.LeadershipTransferToServer(raft.ServerID(next.name), raft.ServerAddress(next.address)).Error(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, next.name+" leads", next.cluster.Leader)
+	if err := next.cluster.Remove(ctx(t), "x-1", "bob"); err != nil {
+		t.Fatalf("remove x-1: %v", err)
+	}
+	// Another host joins as x-1, through the new leader.
+	replacement := newNode(t, "x-1")
+	if err := replacement.cluster.Join(ctx(t), next.address, "bob"); err != nil {
+		t.Fatalf("the replacement joins: %v", err)
+	}
+	eventually(t, old.name+" knows the replacement", func() bool {
+		node, known := nodeNamed(old.store.Nodes(), "x-1")
+		return known && node.Address == replacement.address
+	})
+	if err := next.cluster.raft.LeadershipTransferToServer(raft.ServerID(old.name), raft.ServerAddress(old.address)).Error(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, old.name+" leads again", old.cluster.Leader)
+	close(release)
+	select {
+	case <-joined:
+	case <-time.After(60 * time.Second):
+	}
+	for _, n := range nodes {
+		eventually(t, n.name+" names the replacement in the state and the voters", func() bool {
+			node, member := nodeNamed(n.store.Nodes(), "x-1")
+			voter, isVoter := n.cluster.voterAddress("x-1")
+			return member && isVoter && node.Address == replacement.address && voter == replacement.address
+		})
+	}
+}

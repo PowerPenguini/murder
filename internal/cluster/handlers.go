@@ -335,13 +335,24 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// the state does not name is taken out again; either way the host is
 	// told to ask again, which writes the node and adds it afresh.
 	if c.raft.CurrentTerm() != term {
-		if err := c.catchUp(); err == nil {
-			if node, known := nodeNamed(c.config.Store.Nodes(), name); known && node.Address == request.Address {
-				writeJSON(w, http.StatusOK, struct{}{})
-				return
-			}
+		if err := c.catchUp(); err != nil {
+			// What the state says is not known: the voter stays as it is,
+			// and the host asks again.
+			c.moved(w)
+			return
 		}
-		_ = waitFuture(c.raft.RemoveServer(raft.ServerID(name), 0, commitTimeout), commitTimeout+futureGrace)
+		node, known := nodeNamed(c.config.Store.Nodes(), name)
+		switch {
+		case known && node.Address == request.Address:
+			writeJSON(w, http.StatusOK, struct{}{})
+			return
+		case known:
+			// Another node of that name joined meanwhile: the voter goes
+			// back to its address, never out.
+			_ = waitFuture(c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(node.Address), 0, commitTimeout), commitTimeout+futureGrace)
+		default:
+			_ = waitFuture(c.raft.RemoveServer(raft.ServerID(name), 0, commitTimeout), commitTimeout+futureGrace)
+		}
 		c.moved(w)
 		return
 	}
