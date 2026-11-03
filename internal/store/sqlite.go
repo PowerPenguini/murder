@@ -870,9 +870,18 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			revision = 2
 		}
 		// What the registry was found to hold stays news only for the same
-		// tag, and only while the app runs another image.
+		// tag, and only while the app runs another image. What the caller
+		// found in it just now replaces it.
 		latest, latestAt := "", any(nil)
-		if found && existing.Tag == app.Tag && existing.Latest != "" && !SameImage(existing.Latest, app.Spec.Image) {
+		switch {
+		case app.Latest != "":
+			if !SameImage(app.Latest, app.Spec.Image) {
+				latest, latestAt = app.Latest, stamp
+				if existing.Latest == app.Latest && existing.Tag == app.Tag {
+					latestAt = formatTime(existing.LatestAt)
+				}
+			}
+		case found && existing.Tag == app.Tag && existing.Latest != "" && !SameImage(existing.Latest, app.Spec.Image):
 			latest, latestAt = existing.Latest, formatTime(existing.LatestAt)
 		}
 		if err := tx.Exec(`INSERT INTO apps (name, spec, created_at, updated_at, tag, revision, latest, latest_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -880,6 +889,11 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 				revision = excluded.revision, latest = excluded.latest, latest_at = excluded.latest_at`,
 			app.Name, marshal(app.Spec), stamp, stamp, app.Tag, revision, latest, latestAt); err != nil {
 			return err
+		}
+		if latest != "" && (latest != existing.Latest || existing.Tag != app.Tag) {
+			if err := event(tx, now, actor, "app.image-found", "", app.Name, "image "+latest+" of "+app.Tag); err != nil {
+				return err
+			}
 		}
 		if keepFirst {
 			if err := tx.Exec(`INSERT INTO app_revisions (app, revision, spec, tag, created_at, actor) VALUES (?, 1, ?, ?, ?, ?)`,

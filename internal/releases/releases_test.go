@@ -29,7 +29,7 @@ type fakeStore struct {
 
 func (f *fakeStore) Apps() []store.App { return f.apps }
 
-func (f *fakeStore) SetLatest(app, tag, latest, actor string) (bool, error) {
+func (f *fakeStore) SetLatest(app, tag, latest string, _ int64, actor string) (bool, error) {
 	f.set = append(f.set, app+" "+tag+" "+latest+" "+actor)
 	return f.err == nil, f.err
 }

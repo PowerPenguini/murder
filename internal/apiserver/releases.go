@@ -33,7 +33,7 @@ func (s *Server) checkApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusError{http.StatusBadGateway, err})
 		return
 	}
-	if _, err := s.store.SetLatest(name, app.Tag, latest, actor(r)); err != nil {
+	if _, err := s.store.SetLatest(name, app.Tag, latest, app.Revision, actor(r)); err != nil {
 		writeError(w, err)
 		return
 	}

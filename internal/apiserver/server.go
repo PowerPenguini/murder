@@ -218,26 +218,41 @@ func (s *Server) storeApp(w http.ResponseWriter, r *http.Request, name string, a
 		writeError(w, err)
 		return
 	}
-	tag, note := "", ""
-	kept, fresh := false, false
+	tag, note, latest := "", "", ""
+	kept := false
 	if !spec.Pinned(app.Image) {
 		tag = app.Image
 		stored, err := s.store.App(name)
-		if kept = err == nil && stored.Tag == tag && !update; kept {
+		follows := err == nil && stored.Tag == tag
+		if kept = follows && !update; kept {
 			app.Image = stored.Spec.Image
 			// What the pin was kept on must not change meanwhile.
 			if cond == (store.AppIf{}) {
 				cond.UpdatedAt = stored.UpdatedAt
 			}
+			// The registry is asked now, briefly: what it holds is newer
+			// than any earlier answer. No answer leaves what was found.
+			ask, cancel := context.WithTimeout(r.Context(), askTimeout)
+			latest, err = s.runtime.Latest(ask, tag)
+			cancel()
+			if err != nil {
+				latest = ""
+				s.log.Info("ask the registry about a kept tag", "app", name, "tag", tag, "error", err)
+			}
 		} else {
-			pinned, pinNote, err := s.pinTag(r.Context(), tag, update)
+			// Only an update of the tag the app follows insists on the
+			// registry's answer; a new tag may be a local image.
+			pinned, pinNote, err := s.pinTag(r.Context(), tag, update && follows)
 			if err != nil {
 				writeError(w, err)
 				return
 			}
 			app.Image, note = pinned, pinNote
-			// A local image cannot be asked about.
-			if fresh = spec.RegistryPinned(pinned); !fresh {
+			// A local image cannot be asked about; one pinned from the
+			// registry is what it names now.
+			if spec.RegistryPinned(pinned) && pinNote == "" {
+				latest = pinned
+			} else if !spec.RegistryPinned(pinned) {
 				tag = ""
 			}
 		}
@@ -246,30 +261,19 @@ func (s *Server) storeApp(w http.ResponseWriter, r *http.Request, name string, a
 		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
 		return
 	}
-	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app, Tag: tag}, cond, actor(r))
+	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app, Tag: tag, Latest: latest}, cond, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	// The registry is asked now: what it holds is newer than any earlier
-	// answer, whether the image was just pinned from it or kept.
-	if kept {
-		ask, cancel := context.WithTimeout(r.Context(), askTimeout)
-		latest, err := s.runtime.Latest(ask, tag)
-		cancel()
-		if err == nil {
-			_, err = s.store.SetLatest(name, tag, latest, actor(r))
+	// An app stored as it was takes no new revision for what the registry
+	// holds: that is recorded on its own.
+	if !change.Changed && latest != "" {
+		if _, err := s.store.SetLatest(name, tag, latest, change.App.Revision, actor(r)); err != nil {
+			s.log.Warn("record what the registry holds", "app", name, "error", err)
+		} else if current, err := s.store.App(name); err == nil {
+			change.App = current
 		}
-		if err != nil {
-			s.log.Info("ask the registry about a kept tag", "app", name, "tag", tag, "error", err)
-		}
-	} else if fresh && change.App.Latest != "" {
-		if _, err := s.store.SetLatest(name, tag, app.Image, actor(r)); err != nil {
-			s.log.Warn("forget an older image found", "app", name, "error", err)
-		}
-	}
-	if current, err := s.store.App(name); err == nil {
-		change.App = current
 	}
 	if kept && change.App.Latest != "" {
 		note = fmt.Sprintf("kept the image %s is pinned to; a newer one is in its registry: \"murder app update %s\" takes it", tag, name)
@@ -277,8 +281,9 @@ func (s *Server) storeApp(w http.ResponseWriter, r *http.Request, name string, a
 	s.writeAppChange(w, change, note)
 }
 
-// askTimeout bounds asking a registry about a tag while a client waits.
-const askTimeout = 15 * time.Second
+// askTimeout bounds asking a registry about a kept tag while a client
+// waits; the change waits for it, and goes on without its answer.
+const askTimeout = 5 * time.Second
 
 // catchUp applies here what the cluster has applied; nothing outside one.
 func (s *Server) catchUp() error {

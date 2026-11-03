@@ -134,3 +134,20 @@ func TestAnUpdateTakesOnlyTheRegistrysAnswer(t *testing.T) {
 		t.Fatalf("after apply -update %+v", app)
 	}
 }
+
+// Only an update of the tag the app follows insists on the registry's
+// answer: apply -update with a new tag pins it as a plain apply would.
+func TestApplyWithUpdateTakesANewTagAsAPlainApplyWould(t *testing.T) {
+	f := withApp(t)
+	ctx := context.Background()
+	next := appSpec()
+	next.Image = "ghcr.io/example/app:dev"
+	f.runtime.setLatest(next.Image, "")
+	applied, err := f.client.PutAppNewest(ctx, "web", next)
+	if err != nil || applied.App.Spec.Image != pinnedTag(next.Image) || applied.App.Tag != next.Image {
+		t.Fatalf("a new tag with -update: %+v, %v", applied.App, err)
+	}
+	// The same tag again, the registry still silent: refused, unchanged.
+	_, err = f.client.PutAppNewest(ctx, "web", next)
+	checkStatus(t, "an update of the followed tag without the registry", err, 502)
+}

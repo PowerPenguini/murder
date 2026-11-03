@@ -54,7 +54,9 @@ type App struct {
 	// an app stored before revisions, unchanged since.
 	Revision int64 `json:"revision,omitempty"`
 	// Latest is the tag's newest image in its registry, pinned, while the
-	// app runs another one; LatestAt is when it was found.
+	// app runs another one; LatestAt is when it was found. Given to
+	// PutAppIf, it is what the registry named just now, which replaces
+	// what was found before.
 	Latest    string    `json:"latest,omitempty"`
 	LatestAt  time.Time `json:"latestAt,omitzero"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -274,10 +276,12 @@ type Store interface {
 	// newest, as PutAppIf would.
 	RestoreRevision(app string, revision int64, cond AppIf, actor string) (AppChange, error)
 	// SetLatest records latest, pinned, as the newest image of tag in its
-	// registry. Nothing changes unless tag is still the app's tag; an
-	// image the app runs already clears what was found. It reports
-	// whether it changed anything.
-	SetLatest(app, tag, latest, actor string) (bool, error)
+	// registry, as asked about the app at revision. Nothing changes unless
+	// the app is still at that revision, with that tag: an answer older
+	// than a change of the app could name an image older than the one it
+	// took. An image the app runs already clears what was found. It
+	// reports whether it changed anything.
+	SetLatest(app, tag, latest string, revision int64, actor string) (bool, error)
 
 	// List returns every tenant, archived ones too, by name.
 	List() []Record

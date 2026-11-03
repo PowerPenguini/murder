@@ -118,16 +118,16 @@ func TestTheRegistrysNewestImageIsNewsUntilTheAppRunsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	drain(st)
-	if changed, err := st.SetLatest("web", tag, pinnedV1, "murder"); err != nil || changed {
+	if changed, err := setLatest(st, "web", tag, pinnedV1); err != nil || changed {
 		t.Fatalf("the image the app runs: %v %v", changed, err)
 	}
-	if changed, err := st.SetLatest("web", "ghcr.io/example/web:other", pinnedV2, "murder"); err != nil || changed {
+	if changed, err := setLatest(st, "web", "ghcr.io/example/web:other", pinnedV2); err != nil || changed {
 		t.Fatalf("a check of another tag: %v %v", changed, err)
 	}
-	if _, err := st.SetLatest("nope", tag, pinnedV2, "murder"); !errors.Is(err, ErrNotFound) {
+	if _, err := setLatest(st, "nope", tag, pinnedV2); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("no such app: %v", err)
 	}
-	changed, err := st.SetLatest("web", tag, pinnedV2, "murder")
+	changed, err := setLatest(st, "web", tag, pinnedV2)
 	if err != nil || !changed {
 		t.Fatalf("a newer image: %v %v", changed, err)
 	}
@@ -138,7 +138,7 @@ func TestTheRegistrysNewestImageIsNewsUntilTheAppRunsIt(t *testing.T) {
 	if drain(st) {
 		t.Fatal("finding an image woke the reconciler")
 	}
-	if changed, _ := st.SetLatest("web", tag, pinnedV2, "murder"); changed {
+	if changed, _ := setLatest(st, "web", tag, pinnedV2); changed {
 		t.Fatal("the same image found twice changed the app twice")
 	}
 	events, _ := st.Events(EventQuery{App: "web", Limit: 1})
@@ -153,7 +153,7 @@ func TestTheRegistrysNewestImageIsNewsUntilTheAppRunsIt(t *testing.T) {
 		t.Fatalf("a change of env forgot the image found: %+v", app)
 	}
 	// Running a newer one still keeps it news.
-	if _, err := st.SetLatest("web", tag, pinnedV3, "murder"); err != nil {
+	if _, err := setLatest(st, "web", tag, pinnedV3); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.PutApp(withEnv(taggedApp(pinnedV2, tag), "A", "1"), "alice"); err != nil {
@@ -170,7 +170,7 @@ func TestTheRegistrysNewestImageIsNewsUntilTheAppRunsIt(t *testing.T) {
 		t.Fatalf("latest %q at %v once the app runs it", app.Latest, app.LatestAt)
 	}
 	// So does another tag.
-	if _, err := st.SetLatest("web", tag, pinnedV1, "murder"); err != nil {
+	if _, err := setLatest(st, "web", tag, pinnedV1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.PutApp(withEnv(taggedApp(pinnedV3, "ghcr.io/example/web:3"), "A", "1"), "alice"); err != nil {
@@ -180,10 +180,10 @@ func TestTheRegistrysNewestImageIsNewsUntilTheAppRunsIt(t *testing.T) {
 		t.Fatalf("latest %q of the old tag", app.Latest)
 	}
 	// And the registry going back to what the app runs.
-	if _, err := st.SetLatest("web", "ghcr.io/example/web:3", pinnedV1, "murder"); err != nil {
+	if _, err := setLatest(st, "web", "ghcr.io/example/web:3", pinnedV1); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := st.SetLatest("web", "ghcr.io/example/web:3", pinnedV3, "murder"); err != nil || !changed {
+	if changed, err := setLatest(st, "web", "ghcr.io/example/web:3", pinnedV3); err != nil || !changed {
 		t.Fatalf("the registry back to the app's image: %v %v", changed, err)
 	}
 	if app, _ := st.App("web"); app.Latest != "" {
@@ -193,8 +193,70 @@ func TestTheRegistrysNewestImageIsNewsUntilTheAppRunsIt(t *testing.T) {
 	if _, err := st.PutApp(withEnv(taggedApp(pinnedV3, ""), "A", "1"), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if changed, _ := st.SetLatest("web", "", pinnedV1, "murder"); changed {
+	if changed, _ := setLatest(st, "web", "", pinnedV1); changed {
 		t.Fatal("an app without a tag took an image found")
+	}
+}
+
+// setLatest records what the registry holds as asked about the app as it
+// is now.
+func setLatest(st *SQLite, name, tag, latest string) (bool, error) {
+	app, _ := st.App(name)
+	return st.SetLatest(name, tag, latest, app.Revision, "murder")
+}
+
+func TestAnAnswerOlderThanAChangeIsDropped(t *testing.T) {
+	st, _ := openNew(t, options())
+	const tag = "ghcr.io/example/web:stable"
+	if _, err := st.PutApp(taggedApp(pinnedV1, tag), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	asked, _ := st.App("web")
+	// The app takes v3 while the question about revision 1 is out; the
+	// registry's older answer, v2, is no newer image.
+	if _, err := st.PutApp(taggedApp(pinnedV3, tag), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := st.SetLatest("web", tag, pinnedV2, asked.Revision, "murder"); err != nil || changed {
+		t.Fatalf("an answer about revision %d: %v %v", asked.Revision, changed, err)
+	}
+	if app, _ := st.App("web"); app.Latest != "" {
+		t.Fatalf("latest %q", app.Latest)
+	}
+}
+
+func TestWhatTheCallerFoundReplacesWhatWasFound(t *testing.T) {
+	st, _ := openNew(t, options())
+	const tag = "ghcr.io/example/web:stable"
+	if _, err := st.PutApp(taggedApp(pinnedV1, tag), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setLatest(st, "web", tag, pinnedV2); err != nil {
+		t.Fatal(err)
+	}
+	// Pinned to the registry's answer just now: v3, newer than v2 found.
+	update := taggedApp(pinnedV3, tag)
+	update.Latest = pinnedV3
+	if _, err := st.PutApp(update, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if app, _ := st.App("web"); app.Latest != "" {
+		t.Fatalf("latest %q after taking the registry's image", app.Latest)
+	}
+	// Kept, while the registry now names v4: found with the change.
+	kept := withEnv(taggedApp(pinnedV3, tag), "A", "1")
+	const pinnedV4 = "ghcr.io/example/web@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+	kept.Latest = pinnedV4
+	if _, err := st.PutApp(kept, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := st.App("web")
+	if app.Latest != pinnedV4 || app.LatestAt.IsZero() || app.Spec.Image != pinnedV3 {
+		t.Fatalf("app %+v", app)
+	}
+	events, _ := st.Events(EventQuery{App: "web", Limit: 2})
+	if len(events) != 2 || events[1].Action != "app.image-found" || events[0].Action != "app.updated" {
+		t.Fatalf("events %+v", events)
 	}
 }
 

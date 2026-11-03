@@ -36,7 +36,7 @@ const firstCheck = 30 * time.Second
 // Store is what the watcher needs of the store.
 type Store interface {
 	Apps() []store.App
-	SetLatest(app, tag, latest, actor string) (bool, error)
+	SetLatest(app, tag, latest string, revision int64, actor string) (bool, error)
 }
 
 // Registry asks a registry, without pulling, which image a tag names.
@@ -130,7 +130,9 @@ func (w *Watcher) Check(ctx context.Context) {
 			}
 			continue
 		}
-		changed, err := w.Store.SetLatest(app.Name, app.Tag, got.image, Actor)
+		// As of the revision read before asking: an answer older than a
+		// change of the app is dropped, and asked again at the next check.
+		changed, err := w.Store.SetLatest(app.Name, app.Tag, got.image, app.Revision, Actor)
 		switch {
 		case errors.Is(err, store.ErrFrozen), errors.Is(err, store.ErrNotFound):
 			// Asked again at the next check.

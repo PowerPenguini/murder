@@ -84,13 +84,13 @@ func (s *SQLite) RestoreRevision(app string, revision int64, cond AppIf, actor s
 	return AppChange{}, fmt.Errorf("app %s keeps no revision %d: %w", app, revision, ErrNotFound)
 }
 
-func (s *SQLite) SetLatest(app, tag, latest, actor string) (bool, error) {
+func (s *SQLite) SetLatest(app, tag, latest string, revision int64, actor string) (bool, error) {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		existing, ok := current.apps[app]
 		if !ok {
 			return fmt.Errorf("app %s: %w", app, ErrNotFound)
 		}
-		if existing.Tag == "" || existing.Tag != tag {
+		if existing.Tag == "" || existing.Tag != tag || existing.Revision != revision {
 			return errUnchanged
 		}
 		found := latest
