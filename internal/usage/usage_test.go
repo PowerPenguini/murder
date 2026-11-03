@@ -60,7 +60,8 @@ func TestCountersThatStartAgain(t *testing.T) {
 }
 
 // The edge's counts become requests, errors and a 95th percentile per
-// minute; an edge that restarted counts anew.
+// minute; an edge that restarted (of a release that says no ID) counts
+// anew.
 func TestRequestsFromTheEdge(t *testing.T) {
 	r := NewRecorder("n1")
 	waits := func(fast, slow uint64) []uint64 {
@@ -68,11 +69,11 @@ func TestRequestsFromTheEdge(t *testing.T) {
 		w[0], w[5] = fast, slow // up to 5 ms; 100-250 ms
 		return w
 	}
-	r.Edge("web", metrics.Counts{ByClass: [5]uint64{0, 100, 0, 0, 0}, Waits: waits(100, 0), Count: 100}, t0)
+	r.Edge(EdgeInstance{}, map[string]metrics.Counts{"web": {ByClass: [5]uint64{0, 100, 0, 0, 0}, Waits: waits(100, 0), Count: 100}}, t0)
 	// In the first minute: 90 more 2xx, 10 more 5xx and 2 refused; 80 fast, 20 slow.
-	r.Edge("web", metrics.Counts{ByClass: [5]uint64{0, 190, 0, 0, 10}, BackendErrors: 2, Waits: waits(180, 20), Count: 200}, t0.Add(30*time.Second))
+	r.Edge(EdgeInstance{}, map[string]metrics.Counts{"web": {ByClass: [5]uint64{0, 190, 0, 0, 10}, BackendErrors: 2, Waits: waits(180, 20), Count: 200}}, t0.Add(30*time.Second))
 	// The edge restarted: 5 requests since.
-	r.Edge("web", metrics.Counts{ByClass: [5]uint64{0, 5, 0, 0, 0}, Waits: waits(5, 0), Count: 5}, t0.Add(70*time.Second))
+	r.Edge(EdgeInstance{}, map[string]metrics.Counts{"web": {ByClass: [5]uint64{0, 5, 0, 0, 0}, Waits: waits(5, 0), Count: 5}}, t0.Add(70*time.Second))
 	series, _ := r.Series("web", time.Minute, t0.Add(2*time.Minute))
 	if len(series.Points) != 2 {
 		t.Fatalf("points: %+v", series.Points)
@@ -116,15 +117,58 @@ func TestSteps(t *testing.T) {
 	}
 }
 
-// Kept is a day: older minutes go.
+// While one edge hands over to the next, both tell their counts, each
+// since it started: each edge's requests count once, and the new edge's
+// from its start.
+func TestAHandoverCountsEachEdgeOnce(t *testing.T) {
+	r := NewRecorder("n1")
+	r.started = t0.Add(-time.Hour)
+	parent := EdgeInstance{ID: "parent", Started: t0.Add(-2 * time.Hour)}
+	child := EdgeInstance{ID: "child", Started: t0.Add(15 * time.Second)}
+	tell := func(from EdgeInstance, n uint64, seconds int) {
+		r.Edge(from, map[string]metrics.Counts{"web": {Count: n, ByClass: [5]uint64{0, n, 0, 0, 0}}}, t0.Add(time.Duration(seconds)*time.Second))
+	}
+	tell(parent, 1000, 0) // where counting starts: the parent ran before the agent
+	tell(parent, 1010, 15)
+	tell(child, 10, 16) // its first 10
+	tell(parent, 1010, 30)
+	tell(child, 20, 31)
+	series, _ := r.Series("web", time.Minute, t0.Add(time.Minute))
+	if len(series.Points) != 1 || series.Points[0].Requests != 30 {
+		t.Fatalf("requests through a handover: %+v", series.Points)
+	}
+	// A tenant the child tells of only later may have been here before
+	// (it moved away and back): its first counts are where counting starts.
+	r.Edge(child, map[string]metrics.Counts{"api": {Count: 50, ByClass: [5]uint64{0, 50, 0, 0, 0}}}, t0.Add(45*time.Second))
+	if series, _ := r.Series("api", time.Minute, t0.Add(time.Minute)); len(series.Points) != 0 {
+		t.Fatalf("requests of a tenant told of later: %+v", series.Points)
+	}
+	// The parent, gone, is forgotten once it said nothing for long.
+	tell(child, 20, int((edgeRetired + time.Minute).Seconds()))
+	if edges := r.tenants["web"].edges; len(edges) != 1 || edges["child"] == nil || len(r.edges) != 1 {
+		t.Fatalf("edges kept: %v, %v", edges, r.edges)
+	}
+}
+
+// Kept is a day: older minutes go, also those of a tenant measured no
+// more, such as one stopped.
 func TestADayIsKept(t *testing.T) {
 	r := NewRecorder("n1")
+	minutes := int(Kept / time.Minute)
 	for i := range minutes + 30 {
 		r.Sample("web", Raw{At: t0.Add(time.Duration(i) * time.Minute), Container: "c1", Memory: 1}, 0)
 	}
-	r.Tick(t0.Add(time.Duration(minutes+31) * time.Minute))
+	r.Tick(t0.Add(time.Duration(minutes+30) * time.Minute))
 	if n := len(r.tenants["web"].points); n != minutes {
 		t.Fatalf("%d minutes kept", n)
+	}
+	r.Sample("stopped", Raw{At: t0, Container: "c1", Memory: 1}, 0)
+	r.Tick(t0.Add(time.Minute))
+	if series, _ := r.Series("stopped", time.Minute, t0.Add(Kept)); len(series.Points) != 1 {
+		t.Fatalf("a day on: %+v", series.Points)
+	}
+	if series, _ := r.Series("stopped", time.Minute, t0.Add(2*Kept)); len(series.Points) != 0 {
+		t.Fatalf("two days on: %+v", series.Points)
 	}
 	r.Keep(func(string) bool { return false })
 	if _, ok := r.Series("web", time.Minute, t0); ok {

@@ -61,8 +61,9 @@ func TestUsage(t *testing.T) {
 	ago := time.Now().Add(-2 * time.Minute).Truncate(time.Minute)
 	recorder.Sample("acme", usage.Raw{At: ago, Container: "c", CPU: 0, Memory: 64 << 20}, 1)
 	recorder.Sample("acme", usage.Raw{At: ago.Add(30 * time.Second), Container: "c", CPU: 15_000_000, Memory: 80 << 20}, 1)
-	recorder.Edge("acme", metrics.Counts{Waits: make([]uint64, len(metrics.Buckets)+1)}, ago)
-	if err := f.client.EdgeUsage(ctx, map[string]metrics.Counts{"acme": {ByClass: [5]uint64{0, 6, 0, 0, 1}, Waits: []uint64{7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, Count: 7}}); err != nil {
+	edge := usage.EdgeInstance{ID: "edge-1", Started: ago.Add(-time.Hour)}
+	recorder.Edge(edge, map[string]metrics.Counts{"acme": {Waits: make([]uint64, len(metrics.Buckets)+1)}}, ago)
+	if err := f.client.EdgeUsage(ctx, edge, map[string]metrics.Counts{"acme": {ByClass: [5]uint64{0, 6, 0, 0, 1}, Waits: []uint64{7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, Count: 7}}); err != nil {
 		t.Fatal(err)
 	}
 
