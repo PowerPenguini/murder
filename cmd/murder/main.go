@@ -11,6 +11,7 @@ import (
 const usage = `Usage: murder <command> [arguments]
 
 Node commands:
+  setup      set this host up as a node: services, config, key, database
   init       create the master key and the database for a node
   agent      run the agent (reconciler, local API and cluster)
   edge       serve the public listeners; SIGHUP replaces it without a gap
@@ -48,6 +49,8 @@ func run(args []string) error {
 		return flag.ErrHelp
 	}
 	switch args[0] {
+	case "setup":
+		return runSetup(args[1:])
 	case "init":
 		return runInit(args[1:])
 	case "agent":

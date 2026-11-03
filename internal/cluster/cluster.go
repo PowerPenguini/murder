@@ -93,6 +93,8 @@ type Config struct {
 	Replicas Replicas
 	// Usage is what this node measures of its tenants; nil if nothing.
 	Usage Usage
+	// Invites lets hosts join with an invitation; nil takes none.
+	Invites Invites
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
@@ -100,14 +102,17 @@ type Config struct {
 
 // Cluster is this node's part of the cluster.
 type Cluster struct {
-	config    Config
-	address   string
-	raft      *raft.Raft
-	logs      *raftboltdb.BoltStore
-	snapshots raft.SnapshotStore
-	listener  *listener
-	server    *http.Server
-	client    *http.Client
+	config      Config
+	address     string
+	raft        *raft.Raft
+	logs        *raftboltdb.BoltStore
+	snapshots   raft.SnapshotStore
+	listener    *listener
+	server      *http.Server
+	credentials *Credentials
+	// joins answers hosts that bring an invitation.
+	joins  *http.Server
+	client *http.Client
 	// barrierTerm is the last term in which this node, as the leader, has
 	// applied everything committed before it.
 	barrierTerm atomic.Uint64
@@ -152,7 +157,7 @@ func Start(config Config) (*Cluster, error) {
 		_ = logs.Close()
 		return nil, err
 	}
-	c := &Cluster{config: config, address: l.inner.Addr().String(), raft: r, logs: logs, snapshots: snapshots, listener: l}
+	c := &Cluster{config: config, address: l.inner.Addr().String(), raft: r, logs: logs, snapshots: snapshots, listener: l, credentials: credentials}
 	c.client = &http.Client{
 		Transport: namedTransport{cluster: config.Store.Cluster, next: &http.Transport{
 			DialTLSContext: func(ctx context.Context, _, address string) (net.Conn, error) {
@@ -168,13 +173,32 @@ func Start(config Config) (*Cluster, error) {
 			config.Log.Error("the cluster port stopped serving", "error", err)
 		}
 	}()
+	c.joins = &http.Server{Handler: joinHandler(config.Invites), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+	c.joins.SetKeepAlivesEnabled(false)
+	go func() {
+		if err := c.joins.Serve(l.joinListener()); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			config.Log.Error("the cluster port stopped taking invitations", "error", err)
+		}
+	}()
 	config.Store.Replicate(c.commit, c.catchUp)
 	return c, nil
 }
 
+// Invitation is an invitation to this node, for its secret.
+func (c *Cluster) Invitation(secret []byte) Invite {
+	return Invite{Address: c.config.Address, Secret: secret, CA: c.credentials.CAKey()}
+}
+
+// InviteSecret makes a new invitation secret.
+func InviteSecret() ([]byte, error) {
+	secret := make([]byte, inviteSecretSize)
+	_, err := rand.Read(secret)
+	return secret, err
+}
+
 // Close stops the node's part of the cluster; the store's own state stays.
 func (c *Cluster) Close() error {
-	err := c.server.Close()
+	err := errors.Join(c.server.Close(), c.joins.Close())
 	err = errors.Join(err, c.raft.Shutdown().Error(), c.listener.close())
 	return errors.Join(err, c.logs.Close())
 }

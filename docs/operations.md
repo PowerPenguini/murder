@@ -4,6 +4,37 @@ Installing a node, upgrading Murder without stopping tenants, and backups.
 
 ## Install
 
+`murder setup` sets a host up as a node, and checks first that it has what
+Murder needs: systemd, Docker 25 or newer, nftables and, unless told
+`-zfs-pool none`, a ZFS pool. It never installs system packages; it names
+the missing ones and the commands that install them. Then it:
+
+- installs the binary as `/usr/local/bin/murder`, the systemd units, the
+  sysctl settings and, with ZFS, the Docker drop-in, all from the binary;
+- creates the dataset `<pool>/murder/tenants`;
+- writes `/etc/murder/agent.yaml` with only what differs from the defaults,
+  and the tokens it was given as `0600` files beside it;
+- makes the master key and the database (`murder init`);
+- starts `murder-firewall`, `murder-agent`, `murder-edge`, the hourly
+  backup of the database and, in a cluster with TLS and a public address,
+  `murder-panel`;
+- starts a cluster of the node, when it has a private address.
+
+It finds the node's name (the host name), its ZFS pool, its private and
+public addresses, and asks in a terminal for the rest: the domain, how
+certificates are made (Let's Encrypt through Hetzner or Namecheap DNS, a
+local CA for testing, or none), the DNS token, the e-mail for Let's
+Encrypt. With a Hetzner Cloud token it also powers dead nodes off for
+failover (`-hetzner-token-file`); `-manage-dns` has the cluster keep the
+wildcard records. `-dry-run` shows the plan and the config; `-yes` asks
+nothing. A node set up already is left alone (`-force` writes the config
+anew, keeping the master key and database).
+
+`murder setup -join <invitation>` sets a host up as a node of a cluster:
+see [joining nodes](cluster.md#join-nodes-into-a-cluster).
+
+To install by hand instead:
+
 ```bash
 sudo apt install nftables               # the agent loads the tenant firewall with nft
 sudo install -m 0755 murder /usr/local/bin/murder

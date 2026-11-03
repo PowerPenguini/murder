@@ -16,6 +16,8 @@ import (
 const clusterUsage = `Usage: murder cluster <command> [arguments]
 
   status              show the cluster as this node sees it
+  invite [-valid 1h]  let a new host join: prints the command to run on it
+                      (sudo murder setup -join …), valid once
   bootstrap           start a cluster of this node alone, with its state
   join <address>      add this node, with a new database, to the cluster of
                       the node at address (host:port on the private network)
@@ -32,8 +34,9 @@ const clusterUsage = `Usage: murder cluster <command> [arguments]
                       answers (with cluster.failover set, the leader does
                       this by itself, after powering the node off)
 
-A node joins with the cluster's master key: copy /etc/murder/master.key
-from a node of the cluster before "murder init". Every node runs tenants.
+A node joins with the cluster's master key: "murder cluster invite" and
+"murder setup -join" hand it over, or copy /etc/murder/master.key from a
+node of the cluster before "murder init". Every node runs tenants.
 `
 
 func runCluster(args []string) error {
@@ -46,6 +49,7 @@ func runCluster(args []string) error {
 	asJSON := flags.Bool("json", false, "print JSON")
 	to := flags.String("to", "", "with drain: the node to move the tenants to")
 	poweredOff := flags.Bool("powered-off", false, "with failover: the node is powered off, checked by you")
+	valid := flags.Duration("valid", time.Hour, "with invite: how long the invitation is valid (up to 24h)")
 	rest, err := parseInterspersed(flags, args[1:])
 	if err != nil {
 		return err
@@ -57,6 +61,14 @@ func runCluster(args []string) error {
 	switch command := args[0]; {
 	case command == "status" && len(rest) == 0:
 		status, err = client.ClusterStatus(ctx)
+	case command == "invite" && len(rest) == 0:
+		invitation, err := client.Invite(ctx, *valid)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "On the new host, as root, with murder installed:\n\n  murder setup -join %s\n\n", invitation.Invitation)
+		fmt.Fprintf(stdout, "It joins it to the cluster as a node like this one. The invitation is valid once,\nuntil %s, and hands the cluster's master key to whoever brings it:\nsend it only over a channel you trust. On a host others log in to, run\n`murder setup -join -` and paste it, so it is not in the process list.\n", invitation.Expires.Local().Format(time.DateTime))
+		return nil
 	case command == "bootstrap" && len(rest) == 0:
 		status, err = client.Bootstrap(ctx)
 	case command == "join" && len(rest) == 1:

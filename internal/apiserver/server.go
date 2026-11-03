@@ -52,6 +52,8 @@ type Server struct {
 	backups Backups
 	// usage is what this node measures of its tenants; nil if nothing.
 	usage Usage
+	// invites makes invitations to join the cluster; nil makes none.
+	invites Invites
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }

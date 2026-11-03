@@ -61,16 +61,28 @@ change.
   off; elsewhere a node is failed over by hand.
 - Go 1.26 to build.
 
-## Quick start: one node
+## Quick start
+
+On a server with Docker, nftables and a ZFS pool (setup says what is
+missing, and how to get it):
 
 ```bash
 go build -o murder ./cmd/murder
-sudo install -m 0755 murder /usr/local/bin/murder
-sudo install -d -m 0755 /etc/murder
-sudo install -m 0644 deploy/agent.example.yaml /etc/murder/agent.yaml   # set baseDomain, volumes, edge
-sudo murder init       # the master key (keep a copy offline) and an empty database
-sudo install -m 0644 deploy/murder-*.service deploy/murder-backup.timer /etc/systemd/system/
-sudo systemctl enable --now murder-firewall murder-agent murder-edge
+sudo ./murder setup -domain example.com
+```
+
+`setup` installs Murder and its services, writes a short
+`/etc/murder/agent.yaml`, makes the master key and the database, starts
+everything and, on a private network, starts a cluster of this node. It
+asks only for what it cannot find out, such as a DNS token for Let's
+Encrypt; every answer is also an option, for scripts (`murder setup -h`).
+
+More nodes join with an invitation, and take the master key, the config
+and its tokens from the cluster:
+
+```bash
+sudo murder cluster invite                      # on a node: prints the command for the next one
+sudo ./murder setup -join 10.0.0.2:7400/…       # on the new server
 ```
 
 Then describe an app and run a tenant of it:
@@ -91,8 +103,8 @@ murder tenant create acme -app web -wait 3m    # https://acme.<baseDomain>
 murder tenant list
 ```
 
-A full install, with the sysctl settings, backups and the panel, is in
-[Operating Murder](docs/operations.md); joining more nodes is in
+What setup does, and how to do it by hand, is in
+[Operating Murder](docs/operations.md); clusters are in
 [Running a cluster](docs/cluster.md).
 
 ## Documentation

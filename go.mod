@@ -18,6 +18,7 @@ require (
 	github.com/minio/minio-go/v7 v7.4.1
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.57.0
+	golang.org/x/term v0.46.0
 	golang.zx2c4.com/wireguard v0.0.0-20261024220952-b3bc704ef0ee
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.61.0
