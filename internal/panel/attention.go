@@ -69,7 +69,7 @@ func tenantProblem(t api.Tenant, state tag) (string, bool) {
 	case state.Kind == "ok" || state.Kind == "mute":
 		return "", false
 	case status == nil:
-		return "its node does not answer: its state is not known", false
+		return "is in a state not known: its node does not answer", false
 	case state.Label == "unhealthy":
 		text := "is unhealthy: it does not answer its health check"
 		if status.LastExit != "" {

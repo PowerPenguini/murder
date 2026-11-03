@@ -1,8 +1,8 @@
 // Murder panel: the page follows the cluster. Every few seconds it asks
 // for itself again and puts in the new content, unless someone is at
 // work on it (typing, a choice made, a file chosen, a menu open, text
-// selected), or it shows something once (a secret), or it holds still
-// (logs), or is hidden.
+// selected, a form sent and not yet answered), or it shows something once
+// (a secret), or it holds still (logs), or is hidden.
 "use strict";
 (() => {
   const main = document.getElementById("live");
@@ -10,7 +10,9 @@
   const indicator = document.querySelector(".live");
   const busy = () =>
     document.hidden ||
-    document.querySelector(".once, [data-still], details[open]") ||
+    // A sent form's button says "Working…" until the answer replaces the
+    // page: putting in fresh content would bring the button back.
+    document.querySelector(".once, [data-still], details[open], button[data-label]") ||
     (document.activeElement && document.activeElement.closest("form")) ||
     [...document.querySelectorAll("input[type=text], input[type=search], input[type=number]")].some((input) => input.value !== "" && input.defaultValue !== input.value) ||
     [...document.querySelectorAll("input[type=file]")].some((input) => input.files.length > 0) ||
