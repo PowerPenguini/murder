@@ -2,9 +2,12 @@ package records
 
 import (
 	"context"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/libdns/libdns"
 )
 
 // A call the provider cannot stop holds back the next ones: they are
@@ -32,5 +35,33 @@ func TestNamecheapCallsDoNotPileUp(t *testing.T) {
 	}
 	if err := n.withContext(context.Background(), func() error { return nil }); err != nil {
 		t.Fatalf("after the earlier call ended: %v", err)
+	}
+}
+
+// fakeNamecheap keeps one zone's records.
+type fakeNamecheap struct{ records []libdns.Record }
+
+func (f *fakeNamecheap) GetRecords(context.Context, string) ([]libdns.Record, error) {
+	return f.records, nil
+}
+
+func (f *fakeNamecheap) SetRecords(_ context.Context, _ string, records []libdns.Record) ([]libdns.Record, error) {
+	f.records = records
+	return records, nil
+}
+
+// Publish reads the records and then writes them: the read that ended
+// does not refuse the write, nor one publish the next.
+func TestNamecheapPublishesOneAfterAnother(t *testing.T) {
+	fake := &fakeNamecheap{}
+	n := &Namecheap{Name: "*", Zone: "example.com", api: fake}
+	for i := range 200 {
+		address := netip.AddrFrom4([4]byte{203, 0, 113, byte(i%250 + 1)})
+		if err := n.Publish(context.Background(), []netip.Addr{address}); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+		if len(fake.records) != 1 || fake.records[0].RR().Data != address.String() {
+			t.Fatalf("publish %d wrote %v", i, fake.records)
+		}
 	}
 }

@@ -192,28 +192,26 @@ func (c *Cluster) memberAddress(name string) (string, bool) {
 	if node, known := nodeNamed(c.config.Store.Nodes(), name); known {
 		return node.Address, true
 	}
-	future := c.raft.GetConfiguration()
-	if future.Error() == nil {
-		for _, server := range future.Configuration().Servers {
-			if server.ID == raft.ServerID(name) {
-				return string(server.Address), true
-			}
-		}
-	}
-	return "", false
+	return c.voterAddress(name)
 }
 
 func (c *Cluster) isVoter(name string) bool {
+	_, voter := c.voterAddress(name)
+	return voter
+}
+
+// voterAddress is where the voters have node name.
+func (c *Cluster) voterAddress(name string) (string, bool) {
 	future := c.raft.GetConfiguration()
 	if future.Error() != nil {
-		return false
+		return "", false
 	}
 	for _, server := range future.Configuration().Servers {
 		if server.ID == raft.ServerID(name) {
-			return true
+			return string(server.Address), true
 		}
 	}
-	return false
+	return "", false
 }
 
 // handleJoin adds a node: first to the state, so its role is known before
@@ -259,7 +257,14 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = "node " + name
 	}
-	if err := c.config.Store.PutNode(store.Node{Name: name, Address: request.Address}, actor); err != nil {
+	if hook := c.beforeJoinWrite.Load(); hook != nil {
+		(*hook)(name)
+	}
+	// The mutex keeps joins apart on this node only: a leader that lost
+	// its leadership meanwhile still gets here, and its write goes to the
+	// next leader. The write refuses a node that one added at another
+	// address, as part of the replicated change.
+	if err := c.config.Store.AddNode(store.Node{Name: name, Address: request.Address}, actor); err != nil {
 		switch {
 		case errors.Is(err, ErrNotLeader) || errors.Is(err, ErrNoLeader):
 			c.moved(w)
@@ -270,13 +275,23 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	// As of the voters read now: a change of them meanwhile refuses it.
-	configuration := c.raft.GetConfiguration()
-	if err := configuration.Error(); err != nil {
+	// The state names the node at its address now. Only a leader that
+	// still leads adds it to the voters, and only if they do not name it
+	// elsewhere: no other join changes them meanwhile, as another leader's
+	// would end its leadership, and this one's are held off by the mutex.
+	if err := waitFuture(c.raft.VerifyLeader(), commitTimeout+futureGrace); err != nil {
+		if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
+			c.moved(w)
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	if err := c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), configuration.Index(), commitTimeout).Error(); err != nil {
+	if address, voter := c.voterAddress(name); voter && address != request.Address {
+		writeError(w, http.StatusConflict, fmt.Errorf("node %s is already a voter at %s; remove it first, or give the new node another name", name, address))
+		return
+	}
+	if err := waitFuture(c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), 0, commitTimeout), commitTimeout+futureGrace); err != nil {
 		if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
 			// The node may be a voter now, or not: asking again is safe.
 			c.moved(w)

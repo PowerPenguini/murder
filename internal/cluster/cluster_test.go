@@ -826,3 +826,66 @@ func TestAFutureThatNeverEndsIsGivenUp(t *testing.T) {
 		t.Fatal("waited too long")
 	}
 }
+
+// A join that waited while leadership moved does not move a node the next
+// leader added meanwhile: the state and the voters keep naming one
+// address.
+func TestAJoinAcrossALeadershipChangeKeepsOneAddress(t *testing.T) {
+	nodes := threeNodes(t)
+	var old, next *node
+	eventually(t, "a leader", func() bool {
+		for _, n := range nodes {
+			if n.cluster.Leader() {
+				old = n
+			}
+		}
+		return old != nil
+	})
+	for _, n := range nodes {
+		if n != old {
+			next = n
+			break
+		}
+	}
+	paused, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	hook := func(name string) {
+		once.Do(func() { close(paused); <-release })
+	}
+	old.cluster.beforeJoinWrite.Store(&hook)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+
+	first, second := newNode(t, "x-1"), newNode(t, "x-1")
+	joined := make(chan error, 1)
+	go func() { joined <- first.cluster.Join(ctx(t), old.address, "mallory") }()
+	select {
+	case <-paused:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the first join never got to its write")
+	}
+	if err := old.cluster.raft.LeadershipTransferToServer(raft.ServerID(next.name), raft.ServerAddress(next.address)).Error(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, next.name+" leads", next.cluster.Leader)
+	if err := second.cluster.Join(ctx(t), next.address, "alice"); err != nil {
+		t.Fatalf("the second join: %v", err)
+	}
+	close(release)
+	if err := <-joined; err == nil || !strings.Contains(err.Error(), "already a member at "+second.address) {
+		t.Fatalf("the first join, resumed: %v", err)
+	}
+	for _, n := range nodes {
+		eventually(t, n.name+" names x-1 at the second's address", func() bool {
+			address, member := n.cluster.memberAddress("x-1")
+			voter, isVoter := n.cluster.voterAddress("x-1")
+			return member && isVoter && address == second.address && voter == second.address
+		})
+	}
+	sameState(t, nodes)
+}

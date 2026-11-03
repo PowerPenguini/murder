@@ -116,6 +116,9 @@ type Cluster struct {
 	client *http.Client
 	// membership keeps joins and removals one at a time on the leader.
 	membership sync.Mutex
+	// beforeJoinWrite, if set, runs as a join is about to write the node
+	// to the state: tests pause a join there.
+	beforeJoinWrite atomic.Pointer[func(name string)]
 	// barrierTerm is the last term in which this node, as the leader, has
 	// applied everything committed before it.
 	barrierTerm atomic.Uint64
@@ -297,7 +300,9 @@ func (c *Cluster) leaderApplied() (uint64, error) {
 			c.barrierTerm.Store(term)
 		}
 	} else {
-		err = c.raft.VerifyLeader().Error()
+		// A Raft that stalls answers neither: a writer waiting to learn
+		// what happened to its change returns all the same.
+		err = waitFuture(c.raft.VerifyLeader(), commitTimeout+futureGrace)
 	}
 	switch {
 	case errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost):

@@ -206,6 +206,16 @@ func TestNodesAreReplicatedState(t *testing.T) {
 	if err := st.PutNode(Node{Name: "hel-1", Address: "10.0.0.3:7400"}, "alice"); err != nil || st.state.Load().version != version {
 		t.Fatalf("an unchanged node was written again: %v", err)
 	}
+	// A join adds a node; it does not move one already there.
+	if err := st.AddNode(Node{Name: "hel-1", Address: "10.0.0.3:7400"}, "alice"); err != nil || st.state.Load().version != version {
+		t.Fatalf("a node added again at its address: %v", err)
+	}
+	if err := st.AddNode(Node{Name: "hel-1", Address: "10.0.0.4:7400"}, "mallory"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a node added at another address: %v", err)
+	}
+	if address := st.state.Load().nodes["hel-1"].Address; address != "10.0.0.3:7400" {
+		t.Fatalf("hel-1 moved to %s", address)
+	}
 	for _, bad := range []Node{
 		{Name: "x y", Address: "10.0.0.9:7400"},
 		{Name: "nbg-1", Address: "10.0.0.1:7400"},

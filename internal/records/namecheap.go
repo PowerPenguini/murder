@@ -87,8 +87,11 @@ func (n *Namecheap) withContext(ctx context.Context, call func() error) error {
 	}
 	done := make(chan error, 1)
 	go func() {
-		defer n.busy.Store(false)
-		done <- call()
+		err := call()
+		// Cleared before the result is sent: the caller's next call, as
+		// SetRecords right after GetRecords, finds the provider free.
+		n.busy.Store(false)
+		done <- err
 	}()
 	select {
 	case err := <-done:
