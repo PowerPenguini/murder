@@ -66,6 +66,10 @@ type Status struct {
 	ContainerID string    `json:"containerID,omitempty"`
 	Generation  int64     `json:"generation"`
 	CheckedAt   time.Time `json:"checkedAt"`
+	// ServedGeneration is the generation of the tenant this node saw pass
+	// a health check on the revision its rollout moved it to, on its new
+	// container: it served, whatever its health since.
+	ServedGeneration int64 `json:"servedGeneration,omitempty"`
 }
 
 // Config holds the node-wide settings the reconciler applies to every tenant.
@@ -105,8 +109,9 @@ type Reconciler struct {
 	mu           sync.RWMutex
 	statuses     map[string]Status
 	// served is the generation of each tenant recorded as served on the
-	// revision its rollout moved it to; under mu.
-	served map[string]int64
+	// revision its rollout moved it to, seenServing the one seen passing a
+	// health check there, recorded or not; under mu.
+	served, seenServing map[string]int64
 	// passAt is when the last whole pass ended, passErrors how many errors
 	// it had.
 	passAt     time.Time
@@ -358,9 +363,16 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 			if message != "" {
 				statuses[i].Message = message
 			}
+			// Only a check of the container of the tenant's revision, not
+			// the old one serving while the new image is pulled, says it
+			// served on that revision.
+			recorded := true
+			if healthy && statuses[i].Phase == PhaseRunning {
+				recorded = r.noteServed(record)
+			}
 			// Served at once, and said so, not when the slowest check of
 			// the pass is done.
-			if record.MoveHeld && healthy && statuses[i].Phase == PhaseRunning {
+			if record.MoveHeld && healthy && statuses[i].Phase == PhaseRunning && recorded {
 				released[i], releaseErrs[i] = true, r.store.ReleaseHold(record.Spec.Name)
 				status := statuses[i]
 				status.Generation, status.CheckedAt = record.Generation, time.Now().UTC()
@@ -474,6 +486,7 @@ func (r *Reconciler) Status(tenant string) (Status, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	status, ok := r.statuses[tenant]
+	status.ServedGeneration = r.seenServing[tenant]
 	return status, ok
 }
 

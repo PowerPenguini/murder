@@ -36,6 +36,10 @@ type fixture struct {
 	// stuckAt, again and again, their checks held up.
 	stuck   map[string]bool
 	stuckAt map[string]time.Time
+	// skew is how far the tenants' node's clock is from the driver's;
+	// servedSeen the generation each tenant's node saw serve.
+	skew       time.Duration
+	servedSeen map[string]int64
 }
 
 func newFixture(t *testing.T, tenants int, canaries ...string) *fixture {
@@ -67,18 +71,18 @@ func newFixture(t *testing.T, tenants int, canaries ...string) *fixture {
 			t.Fatal(err)
 		}
 	}
-	f := &fixture{store: st, clock: time.Now(), sick: map[string]bool{}, unknown: map[string]bool{}, restarts: map[string]int{}, stuck: map[string]bool{}, stuckAt: map[string]time.Time{}}
+	f := &fixture{store: st, clock: time.Now(), sick: map[string]bool{}, unknown: map[string]bool{}, restarts: map[string]int{}, stuck: map[string]bool{}, stuckAt: map[string]time.Time{}, servedSeen: map[string]int64{}}
 	f.driver = &Driver{Store: st, Now: func() time.Time { return f.clock }, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Status: func(_ context.Context, record store.Record) (reconcile.Status, bool) {
 			name := record.Spec.Name
 			if f.unknown[name] {
 				return reconcile.Status{}, false
 			}
-			checked := f.clock
+			checked := f.clock.Add(f.skew)
 			if f.stuck[name] {
 				checked = f.stuckAt[name]
 			}
-			return reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: !f.sick[name], Generation: record.Generation, ContainerID: "c-" + name + "-" + record.Spec.Image[7:12], Restarts: f.restarts[name], CheckedAt: checked}, true
+			return reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: !f.sick[name], Generation: record.Generation, ContainerID: "c-" + name + "-" + record.Spec.Image[7:12], Restarts: f.restarts[name], CheckedAt: checked, ServedGeneration: f.servedSeen[name]}, true
 		}}
 	app.Image = imageB
 	if change, err := st.PutApp(store.App{Name: "web", Spec: app}, "alice"); err != nil || !change.Rollout {
@@ -389,5 +393,35 @@ func TestTheSameResultReadAgainIsNoSoak(t *testing.T) {
 	f.step(3 * time.Minute)
 	if got := f.onNewest(); len(got) != 1 {
 		t.Fatalf("moved on with no fresh check: %v", got)
+	}
+}
+
+// The tenants' node's clock need not agree with the leader's: a rollout
+// goes through with it a minute behind.
+func TestARolloutGoesThroughWithClocksApart(t *testing.T) {
+	for _, skew := range []time.Duration{-time.Minute, 2 * time.Minute} {
+		f := newFixture(t, 3)
+		f.skew = skew
+		for range 12 {
+			f.step(time.Minute)
+		}
+		if rollout := f.rollout(t); rollout.State != store.RolloutDone {
+			t.Fatalf("skew %v: rollout %+v", skew, rollout)
+		}
+	}
+}
+
+// A tenant its node saw serve, though the store did not record it, keeps
+// its data when it fails afterwards.
+func TestAServingItsNodeSawKeepsTheData(t *testing.T) {
+	f := newFixture(t, 3)
+	f.sick["t00"] = true
+	f.step(time.Second)
+	t00, _ := f.store.Get("t00")
+	f.servedSeen["t00"] = t00.Generation
+	f.step(6 * time.Minute)
+	t00, _ = f.store.Get("t00")
+	if t00.Restore != "" || t00.AppRevision != 0 || !t00.Served {
+		t.Fatalf("t00 restore %q revision %d served %v", t00.Restore, t00.AppRevision, t00.Served)
 	}
 }

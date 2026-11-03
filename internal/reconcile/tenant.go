@@ -426,7 +426,9 @@ func (r *Reconciler) awaitReplaced(ctx context.Context, record store.Record) {
 	defer r.replacing.set(record.Spec.Name, false)
 	deadline := time.Now().Add(r.replacedWait)
 	for time.Now().Before(deadline) && ctx.Err() == nil {
-		if healthy, _ := r.checkHealth(ctx, record); healthy {
+		// The new container answers: once its serving is recorded, the
+		// requests held for it go to it.
+		if healthy, _ := r.checkHealth(ctx, record); healthy && r.noteServed(record) {
 			return
 		}
 		select {
@@ -471,28 +473,34 @@ func (r *Reconciler) checkHealth(ctx context.Context, record store.Record) (bool
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return false, "health check: HTTP " + strconv.Itoa(response.StatusCode)
 	}
-	r.noteServed(record)
 	return true, ""
 }
 
 // noteServed records, once per generation, that a tenant a rollout moved
-// passed a health check on its new revision: before it is served, so its
-// rollout never takes back the data it then takes. Recorded by the node
-// that serves it, it does not depend on the leader looking at that moment.
-func (r *Reconciler) noteServed(record store.Record) {
+// passed a health check on its new revision, its new container's: before
+// it is served, so its rollout never takes back the data it then takes.
+// Recorded by the node that serves it, it does not depend on the leader
+// looking at that moment; and its status says so too, in case the record
+// cannot be written. It reports whether the store has it: requests held
+// for the tenant wait until it does.
+func (r *Reconciler) noteServed(record store.Record) bool {
 	if record.AppRevision != 0 || record.BeforeRevision == 0 || record.Served {
-		return
+		return true
 	}
 	name := record.Spec.Name
 	r.mu.Lock()
+	if r.seenServing == nil {
+		r.seenServing = map[string]int64{}
+	}
+	r.seenServing[name] = record.Generation
 	done := r.served[name] == record.Generation
 	r.mu.Unlock()
 	if done {
-		return
+		return true
 	}
 	if err := r.store.Served(name, record.Generation); err != nil {
 		r.log.Warn("record that a tenant served on its new revision", "tenant", name, "error", err)
-		return
+		return false
 	}
 	r.mu.Lock()
 	if r.served == nil {
@@ -500,4 +508,5 @@ func (r *Reconciler) noteServed(record store.Record) {
 	}
 	r.served[name] = record.Generation
 	r.mu.Unlock()
+	return true
 }

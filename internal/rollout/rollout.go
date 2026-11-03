@@ -86,6 +86,10 @@ type watch struct {
 	// served if it never saw it healthy. Any gap ends that for good.
 	moved    bool
 	lastSeen time.Time
+	// checkedAt is the time its node last checked it, as that node says,
+	// and checkedChanged when this driver saw it change: a result that does
+	// not change for long is old, whatever the two clocks say.
+	checkedAt, checkedChanged time.Time
 	// epoch is the rollout's as last seen: any change of it since (a pause,
 	// a resume, a wave this driver did not move) was not watched.
 	epoch          int64
@@ -287,11 +291,25 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 		}
 		w.lastSeen, w.epoch = now, rollout.Epoch
 		status, known := d.Status(ctx, record)
-		// A result its node checked long ago says nothing of now.
-		if known && now.Sub(status.CheckedAt) > coverage {
-			known = false
+		// A result its node has not checked again for long says nothing
+		// of now: measured by when this driver saw it change, so the two
+		// nodes' clocks need not agree.
+		if known {
+			if !status.CheckedAt.Equal(w.checkedAt) || w.checkedChanged.IsZero() {
+				w.checkedAt, w.checkedChanged = status.CheckedAt, now
+			} else if now.Sub(w.checkedChanged) > coverage {
+				known = false
+			}
 		}
-		served := record.Served || w.everHealthy
+		// Its node saw it pass a health check on this generation: it
+		// served, whether that was recorded or not.
+		if known && status.ServedGeneration == record.Generation && !record.Served && !w.marked {
+			if err := d.Store.MarkServed(rollout.App, at, name, record.Generation); err != nil {
+				return false, err
+			}
+			w.marked = true
+		}
+		served := record.Served || w.everHealthy || known && status.ServedGeneration == record.Generation
 		if !known || status.Generation < record.Generation {
 			// Not known, or not yet of this generation: no time counts
 			// as healthy, and what happened meanwhile is unknown.

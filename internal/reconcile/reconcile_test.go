@@ -2053,3 +2053,67 @@ func (f *fixture) reconcileOnce(t *testing.T) {
 		}
 	}
 }
+
+// The old container, serving while the new image is pulled, answers its
+// health check for the tenant: that says nothing of the new revision,
+// which has not served.
+func TestTheOldContainersHealthIsNotTheNewRevisionsServing(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	release := make(chan struct{})
+	pull := f.reconciler.pulls.pull
+	f.reconciler.pulls.pull = func(ctx context.Context, image string) error {
+		<-release
+		return pull(ctx, image)
+	}
+	defer close(release)
+	app, _ := f.store.App("acme")
+	app.Spec.Image = imageB
+	if _, err := f.store.PutApp(app, "test"); err != nil {
+		t.Fatal(err)
+	}
+	rollout, _ := f.store.Rollout("acme")
+	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, _ := f.reconciler.Status("acme")
+	if status.Phase != PhasePulling || !status.Healthy {
+		t.Fatalf("acme while pulling: %+v", status)
+	}
+	if record, _ := f.store.Get("acme"); record.Served || status.ServedGeneration != 0 {
+		t.Fatalf("the old container's health counted as the new revision's: served %v, status %d", record.Served, status.ServedGeneration)
+	}
+}
+
+// Seen passing a health check on its new revision, a tenant's status says
+// so, even when the store could not take it.
+func TestAServingTheStoreMissedIsInTheStatus(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	app, _ := f.store.App("acme")
+	app.Spec.Image = imageB
+	if _, err := f.store.PutApp(app, "test"); err != nil {
+		t.Fatal(err)
+	}
+	rollout, _ := f.store.Rollout("acme")
+	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconciler.store = missesServed{f.reconciler.store}
+	f.reconcileOnce(t)
+	record, _ := f.store.Get("acme")
+	status, _ := f.reconciler.Status("acme")
+	if status.ServedGeneration != record.Generation {
+		t.Fatalf("status %+v, record generation %d, served %v", status, record.Generation, record.Served)
+	}
+}
+
+// missesServed is a store that cannot take a tenant's serving.
+type missesServed struct{ State }
+
+func (missesServed) Served(string, int64) error { return errors.New("no leader") }
