@@ -23,6 +23,12 @@ var ErrInUse = errors.New("in use")
 // ErrNetworkMismatch reports a network that exists with another subnet.
 var ErrNetworkMismatch = errors.New("network has another subnet")
 
+// ErrUncoveredVolume refuses a container whose image declares a volume
+// (VOLUME) that no mount of its spec covers: the engine would keep that
+// path's data in an anonymous volume of its own, outside the tenant's
+// data, and destroy it with the container.
+var ErrUncoveredVolume = errors.New("an image volume would be kept outside the tenant's data")
+
 // Addresses returns the two addresses a tenant network uses: its gateway,
 // which is the host (the edge proxy and health checks connect from it), and
 // the tenant container's own fixed address.
@@ -53,6 +59,9 @@ type Runtime interface {
 	// ImageID returns the ID of the image ref names, or "" if it is not
 	// present.
 	ImageID(ctx context.Context, ref string) (string, error)
+	// ImageVolumes returns the paths in the container that the present
+	// image ref declares as volumes (VOLUME), sorted.
+	ImageVolumes(ctx context.Context, ref string) ([]string, error)
 	// RemoveImage deletes the image with this ID and its names. One a
 	// container uses, stopped or not, or one named in several repositories,
 	// is kept and reported with ErrInUse; a missing one is no error.
@@ -76,6 +85,8 @@ type Runtime interface {
 	// containers.
 	ListNetworks(ctx context.Context) ([]Network, error)
 	List(ctx context.Context) ([]Container, error)
+	// Create makes a container; one whose image declares a volume that no
+	// mount or tmpfs of spec covers is refused with ErrUncoveredVolume.
 	Create(ctx context.Context, spec ContainerSpec) (string, error)
 	Start(ctx context.Context, id string) error
 	Stop(ctx context.Context, id string, timeout time.Duration) error

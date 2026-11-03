@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,6 +16,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/runtime"
+	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/volume"
 )
@@ -181,7 +186,7 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		}
 	}
 	if current == nil {
-		id, removed, err := r.replace(ctx, record, desired, outdated)
+		id, removed, err := r.replace(ctx, record, dataPath, desired, outdated)
 		if err != nil {
 			// The status names the container whose logs tell most: the old
 			// one while it still serves, else the new one, if created.
@@ -284,12 +289,27 @@ func lastExit(state runtime.ContainerState, memoryMB int) string {
 // Should it fail, the first stays, and the change goes on: apps are only
 // onboarded once they recover from point-in-time snapshots.
 //
+// The volumes the image declares (VOLUME) are bound from the tenant's
+// data, dataPath on the host; an image with one outside the data is
+// refused before anything stops.
+//
 // It returns the new container's ID, once created, and whether the outdated
 // containers are gone: until then the old one still serves.
-func (r *Reconciler) replace(ctx context.Context, record store.Record, desired runtime.ContainerSpec, outdated []runtime.Container) (id string, removed bool, err error) {
+func (r *Reconciler) replace(ctx context.Context, record store.Record, dataPath string, desired runtime.ContainerSpec, outdated []runtime.Container) (id string, removed bool, err error) {
 	tenant := record.Spec
 	if err := r.image(ctx, tenant.Image); err != nil {
 		return "", false, err
+	}
+	volumes, err := r.imageVolumes(ctx, tenant)
+	if err != nil {
+		return "", false, err
+	}
+	uid, gid := tenant.Owner()
+	if err := volumeDirs(dataPath, volumes, uid, gid); err != nil {
+		return "", false, err
+	}
+	for _, dir := range volumes {
+		desired.Mounts = append(desired.Mounts, runtime.Mount{Source: filepath.Join(dataPath, dir), Target: path.Join(tenant.DataPath, dir)})
 	}
 	gate := ""
 	if record.DataImage != "" && record.DataImage != tenant.Image {
@@ -324,6 +344,10 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 			r.log.Warn("prune old snapshots", "tenant", tenant.Name, "error", err)
 		}
 	}
+	// Checked again with no container of the tenant left to change them.
+	if err := volumeDirs(dataPath, volumes, uid, gid); err != nil {
+		return "", true, err
+	}
 	// From here on the data belongs to the new image: a later pass must not
 	// snapshot again for the same change. Not before: a pass that failed to
 	// remove the old container leaves the next one to snapshot once it has
@@ -347,6 +371,70 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	}
 	r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
 	return id, true, nil
+}
+
+// imageVolumes returns the directories below the tenant's data that the
+// volumes its image declares (VOLUME) are bound from: the engine would
+// otherwise keep each in an anonymous volume, outside the data, with no
+// snapshots, copies, backups or disk limit, and destroy it with the
+// container. One at the data path itself or a tmpfs needs none; one outside
+// the data is refused.
+func (r *Reconciler) imageVolumes(ctx context.Context, tenant spec.Tenant) ([]string, error) {
+	declared, err := r.runtime.ImageVolumes(ctx, tenant.Image)
+	if err != nil {
+		return nil, fmt.Errorf("read the image's volumes: %w", err)
+	}
+	var dirs []string
+	for _, declaredAt := range declared {
+		target := path.Clean(declaredAt)
+		if _, tmpfs := tenant.Tmpfs[target]; tmpfs || target == tenant.DataPath {
+			continue
+		}
+		dir, inside := strings.CutPrefix(target, tenant.DataPath+"/")
+		if !inside || !path.IsAbs(target) {
+			return nil, fmt.Errorf("%w: image %s declares a volume at %s, outside the tenant's data (dataPath %s), where its data would be lost with the container; set dataPath to %s, or to a directory it is in", runtime.ErrUncoveredVolume, tenant.Image, declaredAt, tenant.DataPath, target)
+		}
+		dirs = append(dirs, dir)
+	}
+	return dirs, nil
+}
+
+// volumeDirs makes the directories below data that image volumes are bound
+// from, owned by the app's user, and refuses one that is not a directory
+// of its own: the engine follows a symlink in a mount's source, and one the
+// app left there could lead anywhere on the host.
+func volumeDirs(data string, dirs []string, uid, gid int) error {
+	if len(dirs) == 0 {
+		return nil
+	}
+	root, err := os.OpenRoot(data)
+	if err != nil {
+		return fmt.Errorf("image volumes: %w", err)
+	}
+	defer root.Close()
+	for _, dir := range dirs {
+		parts := strings.Split(dir, "/")
+		for i := range parts {
+			name := filepath.Join(parts[:i+1]...)
+			info, err := root.Lstat(name)
+			if errors.Is(err, fs.ErrNotExist) {
+				if err := root.Mkdir(name, 0o700); err != nil {
+					return fmt.Errorf("image volume %s: %w", dir, err)
+				}
+				if err := root.Lchown(name, uid, gid); err != nil {
+					return fmt.Errorf("image volume %s: %w", dir, err)
+				}
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("image volume %s: %w", dir, err)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("image volume %s: %s in the tenant's data is not a directory (a symlink is not followed); move it away, and the container is made at the next pass", dir, name)
+			}
+		}
+	}
+	return nil
 }
 
 // snapshotDestroyer destroys one snapshot of a tenant's data, by the name

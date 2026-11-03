@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -64,6 +65,8 @@ type fakeRuntime struct {
 	// exitBeforeInspect makes the next Inspect call see the container's
 	// process gone, as if it exited between List and the inspection.
 	exitBeforeInspect bool
+	// volumes are the paths images declare as volumes (VOLUME).
+	volumes map[string][]string
 	// state is what Inspect reports beyond the PID: restarts and the last
 	// exit. onStop runs when Stop is called.
 	state  runtime.ContainerState
@@ -96,6 +99,12 @@ func (f *fakeRuntime) imageID(ref string) string {
 		return id
 	}
 	return ref
+}
+
+func (f *fakeRuntime) ImageVolumes(_ context.Context, ref string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.volumes[ref]), nil
 }
 
 func (f *fakeRuntime) ImageID(_ context.Context, ref string) (string, error) {
@@ -206,6 +215,14 @@ func (f *fakeRuntime) Create(_ context.Context, spec runtime.ContainerSpec) (str
 	}
 	if !f.images[spec.Image] {
 		return "", fmt.Errorf("image %s not present", spec.Image)
+	}
+	// Like Docker: an image volume nothing covers is refused.
+	for _, volume := range f.volumes[spec.Image] {
+		volume = path.Clean(volume)
+		_, tmpfs := spec.Tmpfs[volume]
+		if !tmpfs && !slices.ContainsFunc(spec.Mounts, func(m runtime.Mount) bool { return m.Target == volume }) {
+			return "", fmt.Errorf("volume %s: %w", volume, runtime.ErrUncoveredVolume)
+		}
 	}
 	f.next++
 	id := fmt.Sprintf("c%d", f.next)
@@ -1859,6 +1876,90 @@ func TestAnExitedAppIsStartedAgainAndReported(t *testing.T) {
 	f.reconcile(t)
 	if status, _ := f.reconciler.Status("acme"); status.Restarts != 1 || status.Phase != PhaseRunning {
 		t.Fatalf("after a stop and an old exit: %+v", status)
+	}
+}
+
+// A volume the image declares inside the tenant's data is bound from the
+// matching directory of the data, so its files stay in the tenant's
+// dataset, with its snapshots, copies and backups.
+func TestImageVolumesInsideTheDataAreBoundFromIt(t *testing.T) {
+	f := newFixture(t)
+	f.runtime.volumes = map[string][]string{imageA: {"/data/child/", "/data", "/tmp"}}
+	f.create(t, "acme")
+	f.reconcile(t)
+	container := f.runtime.only(t)
+	data := filepath.Join(f.volumes.Root, "acme")
+	want := []runtime.Mount{{Source: data, Target: "/data"}, {Source: filepath.Join(data, "child"), Target: "/data/child"}}
+	if !slices.Equal(container.spec.Mounts, want) {
+		t.Fatalf("mounts = %v, want %v", container.spec.Mounts, want)
+	}
+	if info, err := os.Lstat(filepath.Join(data, "child")); err != nil || !info.IsDir() {
+		t.Fatalf("the volume's directory: %v, %v", info, err)
+	}
+}
+
+// An image with a volume outside the tenant's data is refused before the
+// old container stops: the tenant keeps running on its old image. A
+// running container of such an image is adopted as it is.
+func TestAnImageVolumeOutsideTheDataIsRefused(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	f.runtime.mu.Lock()
+	f.runtime.images[imageB] = true
+	f.runtime.volumes = map[string][]string{imageA: {"/var/lib/app"}, imageB: {"/var/lib/app"}}
+	f.runtime.mu.Unlock()
+	// The running container's image declares one too: it stays, untouched.
+	f.runtime.takeEvents()
+	f.reconcile(t)
+	if events := f.runtime.takeEvents(); len(events) != 0 {
+		t.Fatalf("a running container whose image declares a volume was touched: %v", events)
+	}
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	err := f.reconciler.Reconcile(context.Background())
+	if !errors.Is(err, runtime.ErrUncoveredVolume) || !strings.Contains(err.Error(), "set dataPath to /var/lib/app") {
+		t.Fatalf("Reconcile = %v", err)
+	}
+	if container := f.runtime.only(t); container.ID != old || !container.Running {
+		t.Fatalf("the old container after a refused image: %+v", container)
+	}
+	if events := f.runtime.takeEvents(); len(events) != 0 || len(f.volumes.snapshots) != 0 {
+		t.Fatalf("a refused image touched the tenant: events %v, snapshots %v", events, f.volumes.snapshots)
+	}
+	if record, _ := f.store.Get("acme"); record.DataImage != imageA {
+		t.Fatalf("data image = %q", record.DataImage)
+	}
+	// With the data there, the image runs, its volume bound from the data.
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.DataPath = "/var/lib/app" })
+	f.reconcile(t)
+	if container := f.runtime.only(t); container.ID == old || container.spec.Image != imageB {
+		t.Fatalf("container = %+v", container)
+	}
+}
+
+// A symlink where an image volume's directory belongs, which the engine
+// would follow out of the data, is refused, before the old container
+// stops.
+func TestAnImageVolumeIsNotBoundThroughASymlink(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	data := filepath.Join(f.volumes.Root, "acme")
+	if err := os.Symlink("/etc", filepath.Join(data, "child")); err != nil {
+		t.Fatal(err)
+	}
+	f.runtime.mu.Lock()
+	f.runtime.images[imageB] = true
+	f.runtime.volumes = map[string][]string{imageB: {"/data/child/cache"}}
+	f.runtime.mu.Unlock()
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "child in the tenant's data is not a directory") {
+		t.Fatalf("Reconcile = %v", err)
+	}
+	if container := f.runtime.only(t); container.ID != old || !container.Running {
+		t.Fatalf("the old container: %+v", container)
 	}
 }
 

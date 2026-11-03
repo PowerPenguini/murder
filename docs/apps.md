@@ -75,6 +75,15 @@ connects from it, so trust it for proxy headers.
   history web` lists them and `murder app rollback web` stores the one
   before the current again (`-to N` another), with its image and tag. An
   app stored by an older release gets its first revision at its next change.
+- Paths an image declares with `VOLUME` are kept in the tenant's data. One
+  at or below `dataPath` is bound from the same directory of the data
+  (made for the app's user if missing; the image's own files there are not
+  copied in), so it is snapshotted, copied to the replica and backed up
+  with the rest. A volume at a `tmpfs` path is that tmpfs. An image with a
+  volume anywhere else is refused when its container is made, before the
+  old container stops, so the tenant keeps running the image it had: set
+  `dataPath` to that path, or to a directory it is in. A container that
+  already runs such an image keeps running as it is until it is replaced.
 - A tag that only exists locally is pinned to the local image.
 - Images are kept in a registry outside the cluster, so a node that takes a
   tenant over can still pull its image when another node is gone. GitHub's
