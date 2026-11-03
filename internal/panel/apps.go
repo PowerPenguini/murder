@@ -453,7 +453,7 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 		secret := t.Spec.Secrets[key]
 		data.Secrets = append(data.Secrets, secretRow{Name: key, Kind: secret.Kind, Bytes: secret.Bytes, Own: own})
 	}
-	s.renderWith(w, r, "settings", t.Spec.Name+" · settings", "overview", data, problem, status)
+	s.renderWith(w, r, "settings", t.Spec.Name+" · settings", "tenants", data, problem, status)
 }
 
 func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {

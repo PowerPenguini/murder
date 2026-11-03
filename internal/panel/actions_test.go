@@ -76,9 +76,9 @@ func TestActingOnTenants(t *testing.T) {
 	if tenant, _ := cluster.Get(ctx, "iqtms"); !tenant.Archived() {
 		t.Fatal("not archived")
 	}
-	// Purged, it is gone, and the page is the overview.
+	// Purged, it is gone, and the page is the tenants'.
 	response, body := submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"purge"}, "confirm": {"iqtms"}}, server.URL)
-	if response.Request.URL.Path != "/" || !strings.Contains(body, "iqtms is purged") {
+	if response.Request.URL.Path != "/tenants" || !strings.Contains(body, "iqtms is purged") {
 		t.Fatalf("after purging: %s", response.Request.URL)
 	}
 	if _, err := cluster.Get(ctx, "iqtms"); err == nil {

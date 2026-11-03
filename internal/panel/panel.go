@@ -90,7 +90,7 @@ type Server struct {
 // New returns a panel asking backend.
 func New(backend Backend, log *slog.Logger) (*Server, error) {
 	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}, Jobs: &Jobs{}}
-	for _, page := range []string{"overview", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job", "apps", "app", "settings"} {
+	for _, page := range []string{"overview", "tenants", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job", "apps", "app", "settings"} {
 		t, err := template.New("layout.html").Funcs(s.funcs()).ParseFS(templateFiles, "templates/layout.html", "templates/partials.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("panel template %s: %w", page, err)
@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", noListing(cacheFor(24*time.Hour, files))))
 	pages := http.NewServeMux()
 	pages.HandleFunc("GET /{$}", s.overview)
+	pages.HandleFunc("GET /tenants", s.tenants)
 	pages.HandleFunc("GET /tenants/{name}", s.tenant)
 	pages.HandleFunc("GET /events", s.events)
 	if s.Access != nil {
@@ -362,5 +363,22 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 	s.log.Warn("a panel page failed", "path", r.URL.Path, "error", err)
-	s.write(w, "error", page{Title: "Error", Now: s.now(), Data: err.Error()}, status)
+	fault := fault{Detail: err.Error(), Title: "The agent did not answer as expected", Hint: "It may be restarting: try again in a moment. If it lasts, see its log: journalctl -u murder-agent."}
+	var apiErr *api.Error
+	switch {
+	case status == http.StatusNotFound:
+		fault.Title, fault.Hint = "Not found", "It may have been purged, renamed or never made; the overview lists what there is."
+	case errors.As(err, &apiErr) && apiErr.Status < 500:
+		fault.Title, fault.Hint = "The agent refused this", ""
+		status = apiErr.Status
+	case errors.Is(err, context.DeadlineExceeded):
+		fault.Title, fault.Hint = "The agent took too long to answer", "A node it asked may be down. Try again in a moment."
+		status = http.StatusGatewayTimeout
+	}
+	p := page{Title: fault.Title, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Edits: s.Apps != nil, Data: fault}
+	s.write(w, "error", p, status)
 }
+
+// fault is what the error page says: what happened, the agent's words, and
+// what to do.
+type fault struct{ Title, Detail, Hint string }

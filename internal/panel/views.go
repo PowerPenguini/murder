@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html/template"
+	"maps"
 	"math"
 	"net/http"
 	"slices"
@@ -62,7 +63,7 @@ func tenantState(t api.Tenant) tag {
 	case t.Status.Phase == "running" && t.Status.Healthy:
 		return tag{"running", "ok"}
 	case t.Status.Phase == "running":
-		return tag{"unhealthy", "warn"}
+		return tag{"unhealthy", "bad"}
 	case t.Status.Phase == "failed":
 		return tag{"failed", "bad"}
 	}
@@ -88,8 +89,6 @@ func replicaState(t api.Tenant, cluster bool) tag {
 type tenantRow struct {
 	api.Tenant
 	State, Replica tag
-	// Placements say, per node, what the tenant has there.
-	Placements []placement
 	// Use is what it uses now; nil if it was not measured.
 	Use *tenantUse
 }
@@ -108,11 +107,35 @@ type overviewData struct {
 	Live, Serving, Healthy, Unprotected int
 	// Apps a tenant may be created of.
 	Apps []string
+	// Attention is what needs it, the broken first.
+	Attention []notice
 }
 
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+	nodes, data, err := s.overviewOf(ctx, r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.write(w, "overview", s.pageFor(w, r, "Overview", "overview", nodes, data), http.StatusOK)
+}
+
+// tenants is every tenant, with what each uses, and the way to make one.
+func (s *Server) tenants(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	nodes, data, err := s.overviewOf(ctx, r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.write(w, "tenants", s.pageFor(w, r, "Tenants", "tenants", nodes, data), http.StatusOK)
+}
+
+// overviewOf is the cluster as the overview and the tenants' page show it.
+func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, overviewData, error) {
 	// Asked at once: each may wait on a node that does not answer.
 	var nodes api.Nodes
 	var tenants []api.Tenant
@@ -129,8 +152,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			return
 		},
 	); err != nil {
-		s.fail(w, r, err)
-		return
+		return nodes, overviewData{}, err
 	}
 	now := s.now()
 	clustered := len(nodes.Nodes) > 1
@@ -184,10 +206,8 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		n := &data.Nodes[i]
 		n.TenantBar, n.CopyBar, n.MemoryBar = meterOf(n.Tenants, most), meterOf(n.Copies, most), meterOf(n.MemoryMB, mostMemory)
 	}
-	for i := range data.Tenants {
-		data.Tenants[i].Placements = placementsOf(data.Tenants[i], data.Nodes)
-	}
 	data.States = stateBar(data.Tenants)
+	data.Attention = attentionOf(data.Nodes, data.Tenants, clustered, now)
 	if s.Actions != nil {
 		if apps, err := s.Actions(s.actor(userOf(r))).Apps(ctx); err == nil {
 			for _, app := range apps {
@@ -195,7 +215,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.write(w, "overview", s.pageFor(w, r, "Overview", "overview", nodes, data), http.StatusOK)
+	return nodes, data, nil
 }
 
 // activityEvents is how many of the newest events the activity charts
@@ -205,12 +225,19 @@ const activityEvents = 1000
 type tenantData struct {
 	Tenant         api.Tenant
 	State, Replica tag
-	Events         []store.Event
+	// Row is the tenant as the overview's table has it, for its copy.
+	Row    tenantRow
+	Events []store.Event
 	// Activity counts its events of the last fortnight, by day.
 	Activity activity
 	// Usage is its last day, drawn; nil if it was not measured.
 	Usage *tenantUsage
-	Env   []envVar
+	// Problem says what is wrong with it, if anything; Broken whether it
+	// does not serve; MemoryHigh whether it nears its memory limit.
+	Problem    string
+	Broken     bool
+	MemoryHigh bool
+	Env        []envVar
 	// Targets are the nodes the tenant may move to.
 	Targets []string
 }
@@ -240,6 +267,17 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	}
 	data := tenantData{Tenant: t, State: tenantState(t), Replica: replicaState(t, len(nodes.Nodes) > 1), Events: events[:min(len(events), 30)],
 		Activity: activityOf(events, s.now(), 14*24*time.Hour, 24*time.Hour, len(events) < activityEvents, dayLabel), Usage: use}
+	data.Row = tenantRow{Tenant: t, State: data.State, Replica: data.Replica}
+	if !t.Archived() && !t.Spec.Suspended {
+		data.Problem, data.Broken = tenantProblem(t, data.State)
+		if data.Problem != "" {
+			data.Problem = "It " + data.Problem + "."
+		}
+		if use != nil && use.Memory.MemoryLimit != "" && use.Memory.Memory.Width >= memoryWarn {
+			data.MemoryHigh = true
+			data.Problem = strings.TrimSpace(data.Problem + " It uses " + use.Memory.MemoryText + " of its " + use.Memory.MemoryLimit + " of memory: the kernel kills it at the limit.")
+		}
+	}
 	for key, value := range t.Spec.Env {
 		data.Env = append(data.Env, envVar{key, value})
 	}
@@ -249,12 +287,16 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 			data.Targets = append(data.Targets, node.Name)
 		}
 	}
-	s.write(w, "tenant", s.pageFor(w, r, t.Spec.Name, "overview", nodes, data), http.StatusOK)
+	s.write(w, "tenant", s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data), http.StatusOK)
 }
 
 type eventsData struct {
 	Events      []store.Event
 	Tenant, App string
+	// People shows only what people did; Tenants and Apps are the names
+	// the filters offer.
+	People        bool
+	Tenants, Apps []string
 	// Older is the ID to page back from; zero when there are no more.
 	Older int64
 }
@@ -266,17 +308,43 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if before, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64); err == nil && before > 0 {
 		query.Before = before
 	}
+	people := r.URL.Query().Get("people") != ""
+	if people {
+		// What people did is found among more of the cluster's own.
+		query.Limit = activityEvents
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	events, err := s.backend.Events(ctx, query)
-	if err != nil {
+	var events []store.Event
+	var tenants []api.Tenant
+	if err := all(
+		func() (err error) { events, err = s.backend.Events(ctx, query); return },
+		// The filters' names: a list that fails leaves them to be typed.
+		func() error { tenants, _ = s.backend.List(ctx); return nil },
+	); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	data := eventsData{Events: events, Tenant: query.Tenant, App: query.App}
-	if len(events) == eventsPage {
-		data.Older = events[len(events)-1].ID
+	data := eventsData{Tenant: query.Tenant, App: query.App, People: people}
+	apps := map[string]bool{}
+	for _, t := range tenants {
+		data.Tenants = append(data.Tenants, t.Spec.Name)
+		apps[t.App] = true
 	}
+	slices.Sort(data.Tenants)
+	data.Apps = slices.Sorted(maps.Keys(apps))
+	read := events
+	if people {
+		events = slices.DeleteFunc(slices.Clone(events), func(e store.Event) bool { return !byPeople(e) })
+	}
+	switch {
+	case len(events) > eventsPage:
+		events = events[:eventsPage]
+		data.Older = events[len(events)-1].ID
+	case len(read) == query.Limit:
+		data.Older = read[len(read)-1].ID
+	}
+	data.Events = events
 	s.render(w, r, "events", "Events", "events", data)
 }
 
@@ -302,10 +370,19 @@ func all(calls ...func() error) error {
 
 func (s *Server) funcs() template.FuncMap {
 	return template.FuncMap{
-		"static": staticURL,
-		"mem":    memory,
-		"lines":  func(text string) int { return strings.Count(text, "\n") + 1 },
-		"ago":    func(t time.Time) string { return ago(s.now(), t) },
+		"static":   staticURL,
+		"action":   actionText,
+		"loglines": logLines,
+		"head": func(name string, state any, on string, logs, settings bool) tenantHead {
+			h := tenantHead{Name: name, On: on, Logs: logs, Settings: settings}
+			if t, ok := state.(tag); ok {
+				h.State = &t
+			}
+			return h
+		},
+		"mem":   memory,
+		"lines": func(text string) int { return strings.Count(text, "\n") + 1 },
+		"ago":   func(t time.Time) string { return ago(s.now(), t) },
 		"stamp": func(t time.Time) string {
 			if t.IsZero() {
 				return "—"
@@ -375,4 +452,12 @@ func memory(mb int) string {
 		return strconv.Itoa(mb) + " MB"
 	}
 	return strconv.FormatFloat(math.Round(float64(mb)/1024*10)/10, 'f', -1, 64) + " GB"
+}
+
+// tenantHead is the head of a tenant's pages: where it is, its name and
+// state, and its pages.
+type tenantHead struct {
+	Name, On       string
+	State          *tag
+	Logs, Settings bool
 }

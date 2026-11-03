@@ -1,100 +1,49 @@
 {{define "content"}}{{$d := .Data}}
 <div class="figures">
   <div class="figure"><div class="n">{{template "upcount" $d.Nodes}}<small> / {{len $d.Nodes}}</small></div><div class="l">nodes up</div></div>
-  <div class="figure"><div class="n">{{$d.Live}}</div><div class="l">tenants</div></div>
-  <div class="figure"><div class="n">{{$d.Healthy}}<small> / {{$d.Serving}}</small></div><div class="l">healthy</div></div>
-  <div class="figure"><div class="n">{{$d.Unprotected}}</div><div class="l">without a ready copy</div></div>
+  <a class="figure" href="/tenants"><div class="n">{{$d.Healthy}}<small> / {{$d.Serving}}</small></div><div class="l">tenants healthy</div></a>
+  <div class="figure{{range $d.Attention}}{{if .Bad}} alarm{{break}}{{end}}{{end}}"><div class="n">{{len $d.Attention}}</div><div class="l">need attention</div></div>
 </div>
 
-{{with $d.States}}{{if .Total}}
 <section class="near">
-  <svg class="segbar" viewBox="0 0 1000 28" role="img" aria-label="live tenants by state:{{range .Parts}} {{.Label}} {{.N}},{{end}}">
-    {{range .Parts}}{{if .N}}<g><title>{{.Label}}: {{.N}}</title>
-      <rect x="{{.X}}" y="0" width="{{.W}}" height="28" fill="{{.Fill}}"/>
-      {{if .Fits}}<text x="{{.TX}}" y="18.5" fill="{{.Ink}}">{{.N}}</text>{{end}}</g>{{end}}{{end}}
-  </svg>
-  <div class="legend">{{range .Parts}}<span>{{template "swatch" .Fill}}{{.Label}}</span>{{end}}</div>
+  {{with $d.Attention}}
+  <ul class="attention">
+    {{range .}}<li><span class="st {{if .Bad}}bad{{else}}warn{{end}}"></span><a href="{{.Href}}">{{.Subject}}</a> {{.Text}}</li>{{end}}
+  </ul>
+  {{else}}
+  <p class="calm"><span class="st ok"></span>Every node answers and every tenant runs as it should.</p>
+  {{end}}
 </section>
-{{end}}{{end}}
 
 <section>
-  <div class="head"><h2>Nodes</h2><div class="legend"><span>{{template "swatch" "#b0b0b0"}}tenants</span><span>{{template "swatch" "#4a4a4a"}}copies</span></div></div>
+  <div class="head"><h2>Nodes</h2></div>
+  <div class="scroll">
   <table>
-    <thead><tr><th>Node</th><th>State</th><th>CPU</th><th>Memory</th><th>Tenants and copies</th><th class="hide-narrow">Address</th></tr></thead>
+    <thead><tr><th>Node</th><th>State</th><th>CPU</th><th>Memory</th><th>Tenants</th><th class="hide-narrow">Address</th></tr></thead>
     <tbody>
     {{range $d.Nodes}}
       <tr>
         <td>{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}</td>
         <td><span class="st {{.State.Kind}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
-        <td class="barcell">{{with .Use}}<div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.CPU.Width}}" height="6" fill="#b0b0b0"/></svg><span class="num">{{.CPUText}}</span></div>{{else}}<span class="faint">—</span>{{end}}</td>
-        <td class="barcell">{{with .Use}}<div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.Memory.Width}}" height="6" fill="#b0b0b0"/></svg><span class="num">{{.MemoryText}}</span></div>{{end}}
-          <div class="barline dim">{{if .MemoryMB}}<span class="num">{{mem .MemoryMB}} reserved</span>{{else if not .Use}}<span class="faint">—</span>{{end}}</div>
-        </td>
-        <td class="barcell">
-          <div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.TenantBar.Width}}" height="6" fill="#b0b0b0"/></svg><span class="num">{{.Tenants}}</span></div>
-          <div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.CopyBar.Width}}" height="6" fill="#4a4a4a"/></svg><span class="num dim">{{.Copies}}</span></div>
-        </td>
+        <td class="barcell">{{with .Use}}<div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div>{{else}}<span class="faint">—</span>{{end}}</td>
+        <td class="barcell">{{with .Use}}<div class="barline">{{template "bar" .Memory}}<span class="num">{{.MemoryText}}</span></div>{{else}}<span class="faint">—</span>{{end}}
+          {{if .MemoryMB}}<div class="barline dim"><span class="num">{{mem .MemoryMB}} reserved by limits</span></div>{{end}}</td>
+        <td class="num-left">{{.Tenants}} <span class="dim">· {{.Copies}} {{if eq .Copies 1}}copy{{else}}copies{{end}}</span></td>
         <td class="mono dim hide-narrow">{{addrs .NodeState}}</td>
       </tr>
     {{end}}
     </tbody>
   </table>
-</section>
-
-<section>
-  <div class="head">
-    <h2>Tenants</h2>
-    <div class="row">
-      <div class="legend">
-        <span><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="2" width="10" height="10" fill="#ececec"/></svg>runs</span>
-        <span><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><rect x="3" y="3" width="8" height="8" fill="none" stroke="#b0b0b0" stroke-width="2"/></svg>copy</span>
-        <span><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><rect x="3" y="3" width="8" height="8" fill="none" stroke="#4a4a4a" stroke-width="2"/></svg>copy catching up</span>
-        <span><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><rect x="5" y="5" width="4" height="4" fill="#7a7a7a"/></svg>copy moving here</span>
-      </div>
-      {{if and .Acts $d.Apps}}
-      <details>
-        <summary class="button">New tenant</summary>
-        <div class="pop">
-          <form method="post" action="/tenants" class="stack">
-            <label class="field">Name <input type="text" name="name" placeholder="acme" aria-label="tenant name" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" autocomplete="off"></label>
-            <label class="field">App <select name="app" aria-label="app">{{range $d.Apps}}<option>{{.}}</option>{{end}}</select></label>
-            <span class="hint">It starts on {{.Cluster.Self}}; move it after.</span>
-            <div><button type="submit" class="primary">Create</button></div>
-          </form>
-        </div>
-      </details>
-      {{end}}
-    </div>
   </div>
-  <table>
-    <thead><tr><th>Tenant</th><th>State</th><th>Memory</th><th>CPU</th><th class="num">Requests a minute</th>{{range $d.Nodes}}<th class="place">{{.Name}}</th>{{end}}<th>Copy</th></tr></thead>
-    <tbody>
-    {{range $d.Tenants}}
-      <tr>
-        <td><a href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
-        <td><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
-        {{with .Use}}
-        <td class="barcell"><div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.Memory.Width}}" height="6" fill="#b0b0b0"/></svg><span class="num">{{.MemoryText}}</span></div></td>
-        <td class="barcell"><div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.CPU.Width}}" height="6" fill="#7a7a7a"/></svg><span class="num">{{.CPUText}}</span></div></td>
-        <td class="num">{{.Requests}}</td>
-        {{else}}<td class="faint">—</td><td class="faint">—</td><td class="num faint">—</td>{{end}}
-        {{range .Placements}}<td class="place">{{if .Kind}}<svg class="glyph" viewBox="0 0 14 14" role="img" aria-label="{{.Title}}"><title>{{.Title}}</title>{{if eq .Kind "runs"}}<rect x="2" y="2" width="10" height="10" fill="#ececec"/>{{else if eq .Kind "archived"}}<rect x="2" y="2" width="10" height="10" fill="#4a4a4a"/>{{else if eq .Kind "copy"}}<rect x="3" y="3" width="8" height="8" fill="none" stroke="#b0b0b0" stroke-width="2"/>{{else if eq .Kind "syncing"}}<rect x="3" y="3" width="8" height="8" fill="none" stroke="#4a4a4a" stroke-width="2"/>{{else}}<rect x="5" y="5" width="4" height="4" fill="#7a7a7a"/>{{end}}</svg>{{end}}</td>{{end}}
-        <td>{{if eq .Replica.Kind "bad"}}<span class="st bad">none</span>{{else if eq .Replica.Kind "warn"}}<span class="dim">{{if .ReplicaNext}}moving{{else}}catching up{{end}}</span>{{else if eq .Replica.Kind "ok"}}<span class="dim">ready</span>{{else}}<span class="faint">—</span>{{end}}</td>
-      </tr>
-    {{else}}
-      <tr><td colspan="9" class="empty">No tenants yet.</td></tr>
-    {{end}}
-    </tbody>
-  </table>
 </section>
 
 <section>
-  <div class="head"><h2>Activity, last 24 hours</h2><span class="dim">{{$d.Activity.Total}} events{{if $d.Activity.Partial}}, the oldest hours not all read{{end}}</span></div>
+  <div class="head"><h2>Activity, last 24 hours</h2><a href="/events" class="dim">{{$d.Activity.Total}} events{{if $d.Activity.Partial}}, the oldest hours not all read{{end}}</a></div>
   {{template "activity" $d.Activity}}
 </section>
 
 <section>
   <div class="head"><h2>Recent events</h2><a href="/events" class="dim">All events</a></div>
-  {{template "events" $d.Events}}
+  <div class="scroll">{{template "events" $d.Events}}</div>
 </section>
 {{end}}

@@ -19,6 +19,9 @@ const (
 	ink2 = "#b0b0b0"
 	ink3 = "#7a7a7a" // the calm majority
 	ink4 = "#4a4a4a" // what is at rest
+	// inkBad is the one colour, kept for what is wrong: a failure, an
+	// error, a limit nearly reached. 6.5:1 on #000.
+	inkBad = "#ff5147"
 )
 
 // chartWidth is the width the charts are drawn at; they scale to their box.
@@ -202,36 +205,6 @@ func activityOf(events []store.Event, now time.Time, span, bucket time.Duration,
 func hourLabel(t time.Time) string { return t.UTC().Format("15:04") }
 func dayLabel(t time.Time) string  { return t.UTC().Format("Jan 2") }
 
-// placement is where a tenant is on one node: it runs there, keeps its
-// copy there (ready or not), or its copy is moving there.
-type placement struct {
-	Node, Kind, Title string
-}
-
-func placementsOf(t tenantRow, nodes []nodeView) []placement {
-	out := make([]placement, len(nodes))
-	for i, n := range nodes {
-		p := placement{Node: n.Name}
-		switch n.Name {
-		case t.Node:
-			p.Kind, p.Title = "runs", t.Spec.Name+" runs on "+n.Name
-		case t.Tenant.Replica:
-			if t.ReplicaReady {
-				p.Kind, p.Title = "copy", n.Name+" keeps a copy that can take over"
-			} else {
-				p.Kind, p.Title = "syncing", n.Name+" keeps a copy, still catching up"
-			}
-		case t.ReplicaNext:
-			p.Kind, p.Title = "next", "the copy moves to "+n.Name
-		}
-		if t.Archived() && p.Kind == "runs" {
-			p.Kind, p.Title = "archived", t.Spec.Name+" is archived; its data is on "+n.Name
-		}
-		out[i] = p
-	}
-	return out
-}
-
 // lineChart is one measure over the kept day: a line per series (two at
 // most, the second the one to watch), a limit if it has one, and a hover
 // target per step.
@@ -258,6 +231,8 @@ type lineSeries struct {
 type level struct {
 	Y     float64
 	Label string
+	// Hot says the measure's last value is near it.
+	Hot bool
 }
 
 type hoverStep struct {
@@ -340,6 +315,11 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 	}
 	if limit > 0 {
 		chart.Limit = &level{Y: y(limit), Label: "limit " + format(limit)}
+		if len(samples) > 0 {
+			for _, v := range samples[len(samples)-1].Values {
+				chart.Limit.Hot = chart.Limit.Hot || 100*v/limit >= memoryWarn
+			}
+		}
 	}
 	// The highest value names the top of the scale, unless the limit is it.
 	if limit <= 0 || top/1.08 > limit*1.05 {

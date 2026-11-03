@@ -33,7 +33,7 @@ func demoPoint(tenant string, memoryLimitMB int, cpuLimit float64, t time.Time, 
 	memoryShare := 0.28 + 0.3*load
 	errorShare := 0.002
 	if tenant == "baltic-freight" {
-		memoryShare, errorShare = 0.82+0.17*load, 0.04
+		memoryShare, errorShare = 0.91+0.07*load, 0.04
 	}
 	rpm := 4 + 180*load
 	p := usage.Point{
@@ -101,6 +101,6 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	}
 	last := series.Points[len(series.Points)-1]
 	series.Now = usage.Now{At: last.At, CPU: last.CPU, Memory: last.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
-		DiskUsed: int64(limits.DiskGB) << 30 / 7, DiskLimit: int64(limits.DiskGB) << 30, Requests: last.Requests / int64(step.Minutes()), Errors: last.Errors, P95: last.P95}
+		DiskUsed: int64(limits.DiskGB) << 30 / 7, DiskLimit: int64(limits.DiskGB) << 30, Requests: last.Requests / int64(step.Minutes()), Errors: last.Errors / int64(step.Minutes()), P95: last.P95}
 	return series, nil
 }

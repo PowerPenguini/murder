@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -251,4 +252,19 @@ func (d *DemoAccess) RemoveDevice(_ context.Context, name string) error {
 	defer d.mu.Unlock()
 	delete(d.devices, name)
 	return nil
+}
+
+// Seed gives the demo people and devices to show: jan with two passkeys,
+// anna invited, and their devices.
+func (d *DemoAccess) Seed() {
+	d.Invite("jan")
+	d.Invite("anna")
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := time.Now()
+	d.passkeys["demo-laptop"] = store.Passkey{ID: "demo-laptop", User: "jan", Label: "laptop", CreatedAt: now.Add(-20 * 24 * time.Hour), UsedAt: now.Add(-2 * time.Hour)}
+	d.passkeys["demo-phone"] = store.Passkey{ID: "demo-phone", User: "jan", Label: "phone", CreatedAt: now.Add(-20 * 24 * time.Hour)}
+	for i, name := range []string{"jan-laptop", "jan-phone"} {
+		d.devices[name] = store.Device{Name: name, Key: "pnQ8Rn0r6k0yBqI3m3eH1vO8y7cWvCq1h8mJv0q3b2Y=", Address: netip.AddrFrom4([4]byte{10, 77, 0, byte(100 + i)}), CreatedAt: now.Add(-19 * 24 * time.Hour), CreatedBy: "jan (panel)"}
+	}
 }

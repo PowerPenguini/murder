@@ -1,7 +1,6 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}{{$f := $d.Form}}
-<div class="title"><h1>{{$t.Spec.Name}}</h1><span class="sub">settings</span></div>
-<p class="lead">What is its own, over app {{$t.App}}; empty takes the app's. Saved, it gets a new container{{if $t.Archived}} once restored{{end}}.</p>
-<p class="lead"><a href="/tenants/{{$t.Spec.Name}}">Back to {{$t.Spec.Name}}</a></p>
+<header class="pagehead">{{template "tenant-head" (head $t.Spec.Name nil "settings" .Acts true)}}</header>
+<p class="lead">What is its own, over app <a href="/apps/{{$t.App}}">{{$t.App}}</a>. A field left empty takes the app's value. Saving gives it a new container{{if $t.Archived}} once it is restored{{end}}: a few seconds without it.</p>
 
 <section data-still class="near">
   <form method="post" class="stack">
@@ -12,21 +11,23 @@
     <label class="field">Environment
       <textarea name="env" rows="5" spellcheck="false">{{$f.Env}}</textarea>
       <span class="hint">NAME=value, a line each; adds to the app's, or replaces it. Spaces around a value go; to keep them, or for several lines, quote it: "a\nb".</span></label>
-    <label class="field">Secrets
+    <label class="field">Secrets of its own
       <textarea name="secrets" rows="3" spellcheck="false">{{$f.Secrets}}</textarea>
       <span class="hint">NAME [kind [length]], a line each; kind is hex, base64 or password. Adds to the app's.</span></label>
+    {{$l := $t.Spec.Limits}}
     <div class="row">
-      <label class="field">Memory, MB <input type="text" name="memoryMB" value="{{$f.MemoryMB}}" class="short" inputmode="numeric"></label>
-      <label class="field">CPUs <input type="text" name="cpus" value="{{$f.CPUs}}" class="short" inputmode="decimal"></label>
-      <label class="field">Processes <input type="text" name="pids" value="{{$f.PIDs}}" class="short" inputmode="numeric"></label>
-      <label class="field">Disk, GB <input type="text" name="diskGB" value="{{$f.DiskGB}}" class="short" inputmode="numeric"></label>
+      <label class="field">Memory, MB <input type="number" name="memoryMB" value="{{$f.MemoryMB}}" class="short" min="0" step="1" placeholder="{{if $l.MemoryMB}}{{$l.MemoryMB}}{{else}}default{{end}}"></label>
+      <label class="field">CPUs <input type="number" name="cpus" value="{{$f.CPUs}}" class="short" min="0" step="0.05" placeholder="{{if $l.CPUs}}{{$l.CPUs}}{{else}}default{{end}}"></label>
+      <label class="field">Processes <input type="number" name="pids" value="{{$f.PIDs}}" class="short" min="0" step="1" placeholder="{{if $l.PIDs}}{{$l.PIDs}}{{else}}default{{end}}"></label>
+      <label class="field">Disk, GB <input type="number" name="diskGB" value="{{$f.DiskGB}}" class="short" min="0" step="1" placeholder="{{if $l.DiskGB}}{{$l.DiskGB}}{{else}}default{{end}}"></label>
     </div>
+    <span class="hint">Limits left empty are the app's (shown greyed), or the node's default.</span>
     <div><button type="submit" class="primary">Save</button></div>
   </form>
 </section>
 
 <section>
-  <div class="head"><h2>Secrets</h2></div>
+  <div class="head"><h2>All its secrets</h2></div>
   <table>
     <thead><tr><th>Name</th><th>Kind</th><th>Of</th><th class="end"></th></tr></thead>
     <tbody>
@@ -37,12 +38,12 @@
         <td class="dim">{{if .Own}}{{$t.Spec.Name}}{{else}}app {{$t.App}}{{end}}</td>
         <td class="end">
           {{if not $t.Archived}}
-          <details class="menu">
-            <summary aria-label="what to do with {{.Name}}">⋯</summary>
+          <details class="menu-text">
+            <summary class="button small">New value…</summary>
             <div class="pop">
               <form method="post" class="stack"><input type="hidden" name="do" value="rotate"><input type="hidden" name="key" value="{{.Name}}">
                 <span class="hint">A new value restarts {{$t.Spec.Name}}; what it signed or set with the old one (sessions, a password) stops working. Save the settings above first. Type its name.</span>
-                <input type="text" name="confirm" placeholder="{{.Name}}" aria-label="the secret's name" autocomplete="off" required>
+                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="the secret's name" autocomplete="off" required>
                 <div><button type="submit" class="danger">Give it a new value</button></div>
               </form>
             </div>
