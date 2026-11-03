@@ -35,6 +35,10 @@ func (s *Server) routes(w http.ResponseWriter, r *http.Request) {
 	}
 	routes := Routes{Store: s.store, RelayPort: s.relayPort, Replacing: s.reconciler.Replacing}
 	after := r.URL.Query().Get("after")
+	// What it has: the table it asks to be after, which it serves from.
+	if after != "" {
+		s.edges.says(r.Header.Get(EdgeHeader), after, time.Now())
+	}
 	timeout := time.NewTimer(routesWait)
 	defer timeout.Stop()
 	for {
@@ -42,6 +46,7 @@ func (s *Server) routes(w http.ResponseWriter, r *http.Request) {
 		changed, replacing := s.store.Watch(), s.reconciler.WatchReplacing()
 		table := routes.Table()
 		if table.Version != after {
+			s.edges.sent(table)
 			writeJSON(w, http.StatusOK, table)
 			return
 		}

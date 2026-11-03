@@ -318,6 +318,21 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 		case <-time.After(r.replaceNotice):
 		}
 	}
+	// A tenant a wave moved takes no request until it is known to serve:
+	// the edges must hold its requests before its new container starts. If
+	// they do not say so in time, it may take one, so its data never goes
+	// back by itself: that is recorded first.
+	if record.AwaitsServing() && r.edgesHold != nil {
+		wait, cancel := context.WithTimeout(ctx, edgesHoldWait)
+		held := r.edgesHold(wait, tenant.Name)
+		cancel()
+		if !held {
+			r.log.Warn("the edge did not say it holds the tenant's requests: its data will not go back by itself", "tenant", tenant.Name)
+			if err := r.store.Served(tenant.Name, record.Generation); err != nil {
+				return "", false, fmt.Errorf("the edge does not hold the tenant's requests, and that could not be recorded: %w", err)
+			}
+		}
+	}
 	if err := r.removeContainers(ctx, outdated); err != nil {
 		return "", false, err
 	}

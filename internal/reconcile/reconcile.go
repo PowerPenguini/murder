@@ -108,6 +108,9 @@ type Reconciler struct {
 	imageRetryAt map[string]time.Time
 	mu           sync.RWMutex
 	statuses     map[string]Status
+	// edgesHold waits until every edge of this node holds a tenant's
+	// requests; nil where nothing serves them (tests, no edge).
+	edgesHold func(ctx context.Context, tenant string) bool
 	// served is the generation of each tenant recorded as served on the
 	// revision its rollout moved it to, seenServing the one seen passing a
 	// health check there, recorded or not; under mu.
@@ -523,3 +526,14 @@ func (r *Reconciler) Exclusive(fn func() error) error {
 // ErrStopping refuses work queued behind a pass while the agent stops, so
 // the agent's stop does not wait for it.
 var ErrStopping = errors.New("the agent is stopping; try again once it is back")
+
+// edgesHoldWait is how long a new container waits for the edges to hold
+// its tenant's requests.
+const edgesHoldWait = 10 * time.Second
+
+// WithEdgesHold has new containers of tenants a wave moved wait until hold
+// says every edge holds their requests.
+func (r *Reconciler) WithEdgesHold(hold func(ctx context.Context, tenant string) bool) *Reconciler {
+	r.edgesHold = hold
+	return r
+}

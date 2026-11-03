@@ -2117,3 +2117,31 @@ func TestAServingTheStoreMissedIsInTheStatus(t *testing.T) {
 type missesServed struct{ State }
 
 func (missesServed) Served(string, int64) error { return errors.New("no leader") }
+
+// A new container of a tenant a wave moved starts once the edges hold its
+// requests; if they do not say so in time, its data no longer goes back by
+// itself, and that is recorded before it starts.
+func TestANewContainerWaitsForTheEdgesToHoldItsRequests(t *testing.T) {
+	for _, held := range []bool{true, false} {
+		f := newFixture(t)
+		f.create(t, "acme")
+		f.reconcile(t)
+		asked := 0
+		f.reconciler.WithEdgesHold(func(context.Context, string) bool { asked++; return held })
+		app, _ := f.store.App("acme")
+		app.Spec.Image = imageB
+		if _, err := f.store.PutApp(app, "test"); err != nil {
+			t.Fatal(err)
+		}
+		rollout, _ := f.store.Rollout("acme")
+		if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
+			t.Fatal(err)
+		}
+		f.failHealth()
+		f.reconcileOnce(t)
+		record, _ := f.store.Get("acme")
+		if asked == 0 || f.runtime.only(t).spec.Image != imageB || record.Served == held {
+			t.Fatalf("held %v: asked %d, served %v", held, asked, record.Served)
+		}
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -256,12 +257,16 @@ func runEdge(args []string) error {
 // they change, and saves each new version. While the agent does not
 // answer, the table stays as it was.
 func followRoutes(ctx context.Context, client *api.Client, table *edge.LiveTable, path string, log *slog.Logger) {
+	// This process, as the agent tells it from another edge's: it waits for
+	// every edge to hold a tenant's requests before that tenant may take
+	// one it could lose.
+	instance := rand.Text()
 	delay := time.Second
 	failing := false
 	for ctx.Err() == nil {
 		version := table.Load().Version
 		request, cancel := context.WithTimeout(ctx, 2*routesPoll)
-		got, err := client.Routes(request, version)
+		got, err := client.RoutesAs(request, instance, version)
 		cancel()
 		if err != nil {
 			if ctx.Err() != nil {

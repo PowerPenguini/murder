@@ -250,6 +250,9 @@ func runAgent(args []string) error {
 	}
 
 	apiHandler := apiserver.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves).WithUsage(recorder)
+	// New containers of tenants a wave moved wait for the edge to hold
+	// their requests.
+	reconciler.WithEdgesHold(apiHandler.EdgesHold)
 	// Backups to a bucket, if set up: this node's tenants, and the
 	// cluster's state from its leader.
 	var backups *agentBackups

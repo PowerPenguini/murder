@@ -38,6 +38,8 @@ type Server struct {
 	// stopping is closed when the agent stops, so requests that wait, such
 	// as the edge's for new routes, end at once.
 	stopping chan struct{}
+	// edges is what this node's edges serve from.
+	edges    edges
 	stopOnce sync.Once
 	// upgrader installs new binaries on this node; nil if it takes none.
 	upgrader Upgrader

@@ -42,6 +42,11 @@ func NewClient(socket string) *Client {
 func NewClientURL(base string) *Client { return &Client{http: http.DefaultClient, base: base} }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWith(ctx, method, path, body, out, nil)
+}
+
+// doWith is do with headers of its own; empty values are left out.
+func (c *Client) doWith(ctx context.Context, method, path string, body, out any, headers map[string]string) error {
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -59,6 +64,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	if c.Actor != "" {
 		request.Header.Set(ActorHeader, c.Actor)
+	}
+	for name, value := range headers {
+		if value != "" {
+			request.Header.Set(name, value)
+		}
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
