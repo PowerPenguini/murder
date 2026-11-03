@@ -12,6 +12,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/failover"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/releases"
 	"github.com/PowerPenguini/murder/internal/replicate"
 	"github.com/PowerPenguini/murder/internal/store"
 	measure "github.com/PowerPenguini/murder/internal/usage"
@@ -39,6 +40,8 @@ type agentMetrics struct {
 	monitor *failover.Monitor
 	// digests is nil outside a cluster.
 	digests *cluster.Digests
+	// releases is nil when registries are never asked.
+	releases *releases.Watcher
 	// usage is what the node's tenants use; nil in tests that measure none.
 	usage *measure.Recorder
 }
@@ -112,6 +115,9 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if m.monitor != nil {
 		m.monitor.WriteMetrics(out)
+	}
+	if m.releases != nil {
+		m.releases.WriteMetrics(out)
 	}
 	if m.digests != nil {
 		diverged := m.digests.Diverged()

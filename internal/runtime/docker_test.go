@@ -290,6 +290,53 @@ func TestLogsAreDemultiplexed(t *testing.T) {
 	}
 }
 
+func TestLatestAsksTheRegistryWithoutPulling(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	ctx := context.Background()
+	const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	authFile := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(authFile, []byte(`{"auths":{"ghcr.io":{"auth":"`+base64.StdEncoding.EncodeToString([]byte("bot:secret"))+`"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docker.authFile = authFile
+	engine.handlers["POST /images/create"] = func(http.ResponseWriter, *http.Request) {
+		t.Error("asking about a tag pulled it")
+	}
+	engine.handlers["GET /distribution/ghcr.io/org/app:stable/json"] = func(w http.ResponseWriter, r *http.Request) {
+		auth, _ := base64.URLEncoding.DecodeString(r.Header.Get("X-Registry-Auth"))
+		if !strings.Contains(string(auth), `"username":"bot"`) {
+			t.Errorf("registry auth = %s", auth)
+		}
+		_, _ = w.Write([]byte(`{"Descriptor":{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"` + digest + `","size":9226},"Platforms":[]}`))
+	}
+	if pinned, err := docker.Latest(ctx, "ghcr.io/org/app:stable"); err != nil || pinned != "ghcr.io/org/app@"+digest {
+		t.Fatalf("Latest = %q, %v", pinned, err)
+	}
+	// Docker Hub's names come back short, as Resolve pins them.
+	engine.handlers["GET /distribution/docker.io/library/postgres:latest/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Descriptor":{"digest":"` + digest + `"}}`))
+	}
+	if pinned, err := docker.Latest(ctx, "docker.io/library/postgres"); err != nil || pinned != "postgres@"+digest {
+		t.Fatalf("Latest(hub) = %q, %v", pinned, err)
+	}
+	engine.handlers["GET /distribution/ghcr.io/org/gone:1/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"denied"}`))
+	}
+	if _, err := docker.Latest(ctx, "ghcr.io/org/gone:1"); err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Fatalf("a refused question: %v", err)
+	}
+	engine.handlers["GET /distribution/ghcr.io/org/odd:1/json"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Descriptor":{"digest":"md5:abc"}}`))
+	}
+	if _, err := docker.Latest(ctx, "ghcr.io/org/odd:1"); err == nil {
+		t.Fatal("an odd digest was taken")
+	}
+	if _, err := docker.Latest(ctx, "ghcr.io/org/app@"+digest); err == nil {
+		t.Fatal("a pinned image was asked about")
+	}
+}
+
 func TestResolvePinsTags(t *testing.T) {
 	engine, docker := newFakeEngine(t)
 	ctx := context.Background()

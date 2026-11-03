@@ -62,6 +62,9 @@ type Runtime interface {
 	// or by the local image ID if it has none or cannot be pulled. note
 	// explains a fallback to the local image.
 	Resolve(ctx context.Context, ref string) (pinned, note string, err error)
+	// Latest asks the registry, without pulling, which image tag names
+	// now, pinned as Resolve pins it.
+	Latest(ctx context.Context, tag string) (pinned string, err error)
 	// EnsureNetwork creates the isolated network with the given IPv4 subnet
 	// (its gateway the first address) if it is missing. An existing network
 	// with another subnet is reported with ErrNetworkMismatch, and one this

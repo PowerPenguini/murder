@@ -45,10 +45,29 @@ var ErrInvalid = errors.New("invalid")
 // App is a spec shared by tenants: everything but the tenant's name. Its
 // image is pinned.
 type App struct {
-	Name      string      `json:"name"`
+	Name string      `json:"name"`
+	Spec spec.Tenant `json:"spec"`
+	// Tag is the tag the image was given as and pinned from, which its
+	// registry is asked about; empty when the image was given pinned.
+	Tag string `json:"tag,omitempty"`
+	// Revision numbers the app's spec; each change stores a new one. 0 is
+	// an app stored before revisions, unchanged since.
+	Revision int64 `json:"revision,omitempty"`
+	// Latest is the tag's newest image in its registry, pinned, while the
+	// app runs another one; LatestAt is when it was found.
+	Latest    string    `json:"latest,omitempty"`
+	LatestAt  time.Time `json:"latestAt,omitzero"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// Revision is one spec an app was stored with.
+type Revision struct {
+	Revision  int64       `json:"revision"`
 	Spec      spec.Tenant `json:"spec"`
+	Tag       string      `json:"tag,omitempty"`
 	CreatedAt time.Time   `json:"createdAt"`
-	UpdatedAt time.Time   `json:"updatedAt"`
+	Actor     string      `json:"actor"`
 }
 
 // Record is one tenant's desired state plus what Murder assigned to it.
@@ -247,8 +266,18 @@ type Store interface {
 	// PutAppIf is PutApp only if the stored app is as cond expects:
 	// ErrConflict otherwise, with nothing changed.
 	PutAppIf(app App, cond AppIf, actor string) (AppChange, error)
-	// DeleteApp removes an app no tenant runs.
+	// DeleteApp removes an app no tenant runs, and its revisions.
 	DeleteApp(name, actor string) error
+	// Revisions lists the app's recent revisions, newest first.
+	Revisions(app string) ([]Revision, error)
+	// RestoreRevision stores one of the app's revisions again, as its
+	// newest, as PutAppIf would.
+	RestoreRevision(app string, revision int64, cond AppIf, actor string) (AppChange, error)
+	// SetLatest records latest, pinned, as the newest image of tag in its
+	// registry. Nothing changes unless tag is still the app's tag; an
+	// image the app runs already clears what was found. It reports
+	// whether it changed anything.
+	SetLatest(app, tag, latest, actor string) (bool, error)
 
 	// List returns every tenant, archived ones too, by name.
 	List() []Record

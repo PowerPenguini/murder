@@ -1,0 +1,170 @@
+package main
+
+import (
+	"encoding/json"
+	"net"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
+)
+
+const (
+	imageV1 = "ghcr.io/example/web@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	imageV2 = "ghcr.io/example/web@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+)
+
+// serveAgent answers the CLI with handler over a unix socket, and records
+// each call with its query.
+func serveAgent(t *testing.T, handler func(call string, w http.ResponseWriter, r *http.Request)) (string, func() []string) {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "agent.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var calls []string
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := r.Method + " " + r.URL.Path
+		mu.Lock()
+		if r.URL.RawQuery != "" {
+			calls = append(calls, call+"?"+r.URL.RawQuery)
+		} else {
+			calls = append(calls, call)
+		}
+		mu.Unlock()
+		handler(call, w, r)
+	})}
+	go server.Serve(listener)
+	t.Cleanup(func() { _ = server.Close() })
+	return socket, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), calls...)
+	}
+}
+
+func TestAppCheckAsksAboutEveryAppGivenATag(t *testing.T) {
+	updated := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	apps := []api.App{
+		{Name: "web", Tag: "ghcr.io/example/web:stable", Revision: 3, Spec: spec.Tenant{Image: imageV1}, Latest: imageV2, UpdatedAt: updated},
+		{Name: "shop", Tag: "ghcr.io/example/shop:1", Revision: 1, Spec: spec.Tenant{Image: imageV1}, UpdatedAt: updated},
+		{Name: "pinned", Spec: spec.Tenant{Image: imageV1}, UpdatedAt: updated},
+	}
+	socket, calls := serveAgent(t, func(call string, w http.ResponseWriter, _ *http.Request) {
+		switch call {
+		case "GET /v1/apps":
+			_ = json.NewEncoder(w).Encode(apps)
+		case "POST /v1/apps/web/check":
+			_ = json.NewEncoder(w).Encode(api.AppCheck{App: apps[0], Image: imageV2, Newer: true})
+		case "POST /v1/apps/shop/check":
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"ask the registry about ghcr.io/example/shop:1: denied"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"unexpected call"}`))
+		}
+	})
+	out := capture(t)
+	err := runApp([]string{"check", "-socket", socket})
+	if err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Fatalf("a failed check: %v", err)
+	}
+	if got := strings.Join(calls(), ","); got != "GET /v1/apps,POST /v1/apps/web/check,POST /v1/apps/shop/check" {
+		t.Fatalf("calls %s", got)
+	}
+	if !strings.Contains(out.String(), "web                  newer image ghcr.io/example/web@222222222222 of ghcr.io/example/web:stable (runs ghcr.io/example/web@111111111111): murder app update web") {
+		t.Fatalf("output:\n%s", out)
+	}
+	out = capture(t)
+	if err := runApp([]string{"list", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(out.String(), "\n")
+	if !strings.Contains(lines[0], "REVISION") || !strings.Contains(lines[1], "ghcr.io/example/web:stable") || !strings.Contains(lines[1], "ghcr.io/example/web@222222222222") || !strings.HasPrefix(lines[3], "pinned  ") {
+		t.Fatalf("list:\n%s", out)
+	}
+}
+
+func TestAppUpdateRollbackAndHistory(t *testing.T) {
+	updated := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	app := api.App{Name: "web", Tag: "ghcr.io/example/web:stable", Revision: 3, Spec: spec.Tenant{Image: imageV2}, UpdatedAt: updated}
+	revisions := []store.Revision{
+		{Revision: 3, Spec: spec.Tenant{Image: imageV2}, Tag: app.Tag, Actor: "alice", CreatedAt: updated},
+		{Revision: 2, Spec: spec.Tenant{Image: imageV1}, Tag: app.Tag, Actor: "bob", CreatedAt: updated.Add(-time.Hour)},
+	}
+	socket, calls := serveAgent(t, func(call string, w http.ResponseWriter, _ *http.Request) {
+		switch call {
+		case "GET /v1/apps/web":
+			_ = json.NewEncoder(w).Encode(app)
+		case "GET /v1/apps/web/revisions":
+			_ = json.NewEncoder(w).Encode(revisions)
+		case "POST /v1/apps/web/update":
+			next := app
+			next.Revision = 4
+			_ = json.NewEncoder(w).Encode(api.AppApplied{App: next, Changed: true, Tenants: []api.Tenant{{Spec: spec.Tenant{Name: "acme"}}}})
+		case "POST /v1/apps/web/revisions/2/restore", "POST /v1/apps/web/revisions/1/restore":
+			next := app
+			next.Revision, next.Spec.Image = 4, imageV1
+			_ = json.NewEncoder(w).Encode(api.AppApplied{App: next, Changed: true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"unexpected call"}`))
+		}
+	})
+	out := capture(t)
+	if err := runApp([]string{"update", "web", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "revision 4: ghcr.io/example/web@222222222222") || !strings.Contains(out.String(), "rolls out to acme") {
+		t.Fatalf("update output:\n%s", out)
+	}
+	if err := runApp([]string{"rollback", "web", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runApp([]string{"rollback", "web", "-to", "1", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	stamp := "if=2026-11-03T10%3A00%3A00Z"
+	want := []string{
+		"POST /v1/apps/web/update",
+		"GET /v1/apps/web", "GET /v1/apps/web/revisions", "POST /v1/apps/web/revisions/2/restore?" + stamp,
+		"GET /v1/apps/web", "POST /v1/apps/web/revisions/1/restore?" + stamp,
+	}
+	if got := strings.Join(calls(), "\n"); got != strings.Join(want, "\n") {
+		t.Fatalf("calls:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	}
+	out = capture(t)
+	if err := runApp([]string{"history", "web", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "3 (current)") || !strings.Contains(out.String(), "bob") {
+		t.Fatalf("history:\n%s", out)
+	}
+}
+
+func TestAppApplyWithUpdateAsksForTheNewestImage(t *testing.T) {
+	socket, calls := serveAgent(t, func(_ string, w http.ResponseWriter, r *http.Request) {
+		var app spec.Tenant
+		_ = json.NewDecoder(r.Body).Decode(&app)
+		_ = json.NewEncoder(w).Encode(api.AppApplied{App: api.App{Name: "web", Spec: app}, Changed: true})
+	})
+	file := writeFile(t, t.TempDir(), "web.yaml", "image: ghcr.io/example/web:stable\nuser: \"101:101\"\n")
+	capture(t)
+	if err := runApp([]string{"apply", file, "-update", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runApp([]string{"apply", file, "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls(), ","); got != "PUT /v1/apps/web?update=1,PUT /v1/apps/web" {
+		t.Fatalf("calls %s", got)
+	}
+}

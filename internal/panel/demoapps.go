@@ -28,6 +28,10 @@ func (d *DemoCluster) demoApps() {
 		app.Name, app.Suspended = "", false
 		d.apps[t.App] = api.App{Name: t.App, Spec: app, CreatedAt: created, UpdatedAt: time.Now().Add(-3 * time.Hour)}
 	}
+	if addhoc, ok := d.apps["addhoc"]; ok {
+		addhoc.Tag = "ghcr.io/powerpenguini/addhoc:stable"
+		d.apps["addhoc"] = addhoc
+	}
 	d.apps["testapp"] = api.App{Name: "testapp", Spec: spec.Tenant{Image: "ghcr.io/powerpenguini/murder-testapp@sha256:" + strings.Repeat("7", 64), User: "10001:10001", HealthPath: "/health"}.WithDefaults(),
 		CreatedAt: created, UpdatedAt: created}
 	t := d.tenants["iqtms"]
@@ -78,6 +82,14 @@ func (a *demoActor) PutAppIf(_ context.Context, name string, app spec.Tenant, co
 	defer a.mu.Unlock()
 	app = app.WithDefaults()
 	old, existed := a.apps[name]
+	// As the agent does: the tag the app has keeps its pinned image.
+	tag := ""
+	if !spec.Pinned(app.Image) {
+		tag = app.Image
+		if existed && old.Tag == tag {
+			app.Image = old.Spec.Image
+		}
+	}
 	switch {
 	case cond.Absent && existed:
 		return api.AppApplied{}, &api.Error{Status: 409, Message: "app " + name + " exists already"}
@@ -85,13 +97,13 @@ func (a *demoActor) PutAppIf(_ context.Context, name string, app spec.Tenant, co
 		return api.AppApplied{}, &api.Error{Status: 409, Message: "app " + name + " was changed after the version read; read it again"}
 	}
 	// As the store compares them: with defaults filled in.
-	applied := api.AppApplied{Created: !existed, Changed: !existed || !old.Spec.WithDefaults().Equal(app)}
+	applied := api.AppApplied{Created: !existed, Changed: !existed || !old.Spec.WithDefaults().Equal(app) || old.Tag != tag}
 	if !applied.Changed {
 		applied.App = old
 		return applied, nil
 	}
 	now := time.Now()
-	stored := api.App{Name: name, Spec: app, CreatedAt: now, UpdatedAt: now}
+	stored := api.App{Name: name, Spec: app, Tag: tag, CreatedAt: now, UpdatedAt: now}
 	if existed {
 		stored.CreatedAt = old.CreatedAt
 	}

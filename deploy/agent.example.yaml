@@ -48,3 +48,4 @@ edge:                              # served by "murder edge"
 
 defaults: {memoryMB: 512, cpus: 1, pids: 512, diskGB: 20}   # diskGB needs the zfs driver
 reconcileInterval: 10s
+imageChecks: 5m                    # the leader asks registries for newer images of apps' tags; 0 never

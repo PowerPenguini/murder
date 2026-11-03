@@ -161,7 +161,13 @@ func (s *Server) app(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	file, err := spec.AppFile(app.Spec)
+	// An app given a tag shows the tag: saving the file keeps the image it
+	// is pinned to, and the tag is still asked about.
+	shown := app.Spec
+	if app.Tag != "" {
+		shown.Image = app.Tag
+	}
+	file, err := spec.AppFile(shown)
 	if err != nil {
 		s.fail(w, r, err)
 		return

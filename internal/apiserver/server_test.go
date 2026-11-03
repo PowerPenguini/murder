@@ -35,6 +35,9 @@ import (
 type memoryRuntime struct {
 	mu         sync.Mutex
 	containers []runtime.Container
+	// latest is what the registry holds under each tag, if not what
+	// Resolve pins it to.
+	latest map[string]string
 }
 
 func (m *memoryRuntime) HasImage(context.Context, string) (bool, error) { return true, nil }
@@ -107,7 +110,36 @@ func (m *memoryRuntime) Resolve(_ context.Context, ref string) (string, string, 
 	if strings.Contains(ref, "missing") {
 		return "", "", errors.New("manifest unknown")
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if pinned, ok := m.latest[ref]; ok && pinned != "" {
+		return pinned, "", nil
+	}
 	return pinnedTag(ref), "", nil
+}
+
+func (m *memoryRuntime) Latest(_ context.Context, tag string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if strings.Contains(tag, "missing") {
+		return "", errors.New("manifest unknown")
+	}
+	if pinned, ok := m.latest[tag]; ok {
+		if pinned == "" {
+			return "", errors.New("the registry did not answer")
+		}
+		return pinned, nil
+	}
+	return pinnedTag(tag), nil
+}
+
+func (m *memoryRuntime) setLatest(tag, pinned string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.latest == nil {
+		m.latest = map[string]string{}
+	}
+	m.latest[tag] = pinned
 }
 
 func (m *memoryRuntime) Logs(_ context.Context, id string, tail int) ([]byte, error) {
@@ -121,6 +153,7 @@ type apiFixture struct {
 	handler    http.Handler
 	dataRoot   string
 	server     *Server
+	runtime    *memoryRuntime
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
@@ -147,7 +180,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	handler := served.Handler()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return &apiFixture{client: api.NewClientURL(server.URL), store: st, reconciler: reconciler, handler: handler, dataRoot: dataRoot, server: served}
+	return &apiFixture{client: api.NewClientURL(server.URL), store: st, reconciler: reconciler, handler: handler, dataRoot: dataRoot, server: served, runtime: rt}
 }
 
 func appSpec() spec.Tenant {
@@ -680,7 +713,7 @@ func TestEventsNameTheSocketUser(t *testing.T) {
 	if events[0].Actor != "alice via "+me.Username || events[0].Action != "tenant.created" {
 		t.Errorf("newest event = %+v", events[0])
 	}
-	if events[1].Actor != me.Username || events[1].Action != "app.created" || events[1].Detail != "image "+pinnedTag("ghcr.io/example/app:1.4") {
+	if events[1].Actor != me.Username || events[1].Action != "app.created" || events[1].Detail != "image "+pinnedTag("ghcr.io/example/app:1.4")+" of ghcr.io/example/app:1.4" {
 		t.Errorf("first event = %+v", events[1])
 	}
 	if cleanActor("bo\x01b\u200b") != "bob" || len(cleanActor(strings.Repeat("x", 100))) != 64 {

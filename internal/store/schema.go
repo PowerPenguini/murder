@@ -9,8 +9,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 12 in place.
-const schemaVersion = 13
+// versions 4 to 13 in place.
+const schemaVersion = 14
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -35,7 +35,27 @@ CREATE TABLE apps (
 	name       TEXT PRIMARY KEY,
 	spec       TEXT NOT NULL,
 	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
+	updated_at TEXT NOT NULL,
+	-- The tag the image was given as, and pinned from; empty when it was
+	-- given pinned.
+	tag        TEXT NOT NULL DEFAULT '',
+	-- The app's newest revision; 0 for an app stored before revisions.
+	revision   INTEGER NOT NULL DEFAULT 0,
+	-- The tag's newest image in its registry, pinned, while the app runs
+	-- another; and when it was found there.
+	latest     TEXT NOT NULL DEFAULT '',
+	latest_at  TEXT
+) STRICT;
+
+-- The specs an app was stored with, the recent ones, to go back to.
+CREATE TABLE app_revisions (
+	app        TEXT NOT NULL REFERENCES apps (name),
+	revision   INTEGER NOT NULL,
+	spec       TEXT NOT NULL,
+	tag        TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	actor      TEXT NOT NULL,
+	PRIMARY KEY (app, revision)
 ) STRICT;
 
 -- Live and archived tenants. A tenant keeps its subnet until it is purged,
@@ -336,6 +356,24 @@ func upgrade(db *sql.DB) error {
 		if _, err := tx.Exec(panelTables); err != nil {
 			return err
 		}
+		version = 13
+	}
+	// Version 14 keeps apps' tags and revisions, and what their registry
+	// holds. Apps stored before keep no revision until they change: a
+	// node that installs a snapshot of an older release has none either,
+	// so every node holds the same.
+	if version == 13 {
+		for _, statement := range []string{
+			`ALTER TABLE apps ADD COLUMN tag TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE apps ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE apps ADD COLUMN latest TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE apps ADD COLUMN latest_at TEXT`,
+			revisionsTable,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return err
@@ -345,6 +383,17 @@ func upgrade(db *sql.DB) error {
 
 // SchemaVersion is the schema version of this release's databases.
 const SchemaVersion = schemaVersion
+
+// revisionsTable is the table schema 14 added.
+const revisionsTable = `CREATE TABLE app_revisions (
+	app        TEXT NOT NULL REFERENCES apps (name),
+	revision   INTEGER NOT NULL,
+	spec       TEXT NOT NULL,
+	tag        TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	actor      TEXT NOT NULL,
+	PRIMARY KEY (app, revision)
+) STRICT`
 
 // panelTables are the tables schema 13 added, as one script.
 const panelTables = `-- The panel's people, each signing in with passkeys; handle is the

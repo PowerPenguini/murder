@@ -73,6 +73,15 @@ type Applied struct {
 type App struct {
 	Name string      `json:"name"`
 	Spec spec.Tenant `json:"spec"`
+	// Tag is the tag the image was given as and pinned from; empty when it
+	// was given pinned.
+	Tag string `json:"tag,omitempty"`
+	// Revision numbers the app's spec; 0 for one stored before revisions.
+	Revision int64 `json:"revision,omitempty"`
+	// Latest is the tag's newest image in its registry, while the app runs
+	// another one: an update. LatestAt is when it was found.
+	Latest   string    `json:"latest,omitempty"`
+	LatestAt time.Time `json:"latestAt,omitzero"`
 	// Tenants are the live tenants running the app.
 	Tenants   []string  `json:"tenants"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -87,6 +96,15 @@ type AppApplied struct {
 	// Tenants are the live tenants the change rolls out to.
 	Tenants []Tenant `json:"tenants"`
 	Note    string   `json:"note,omitempty"`
+}
+
+// AppCheck is what an app's registry holds under its tag now.
+type AppCheck struct {
+	App App `json:"app"`
+	// Image is the tag's image in the registry, pinned.
+	Image string `json:"image"`
+	// Newer is set when it is not the image the app runs.
+	Newer bool `json:"newer"`
 }
 
 // SecretValue carries one secret to an operator.

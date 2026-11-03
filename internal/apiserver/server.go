@@ -82,6 +82,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
 	mux.HandleFunc("PUT /v1/apps/{name}", s.putApp)
 	mux.HandleFunc("DELETE /v1/apps/{name}", s.deleteApp)
+	mux.HandleFunc("POST /v1/apps/{name}/check", s.checkApp)
+	mux.HandleFunc("POST /v1/apps/{name}/update", s.updateApp)
+	mux.HandleFunc("GET /v1/apps/{name}/revisions", s.appRevisions)
+	mux.HandleFunc("POST /v1/apps/{name}/revisions/{revision}/restore", s.restoreRevision)
 	mux.HandleFunc("GET /v1/tenants", s.list)
 	mux.HandleFunc("POST /v1/tenants", s.create)
 	mux.HandleFunc("GET /v1/tenants/{name}", s.get)
@@ -130,7 +134,7 @@ func (s *Server) view(record store.Record) api.Tenant {
 }
 
 func (s *Server) appView(app store.App) api.App {
-	view := api.App{Name: app.Name, Spec: app.Spec, Tenants: []string{}, CreatedAt: app.CreatedAt, UpdatedAt: app.UpdatedAt}
+	view := api.App{Name: app.Name, Spec: app.Spec, Tag: app.Tag, Revision: app.Revision, Latest: app.Latest, LatestAt: app.LatestAt, Tenants: []string{}, CreatedAt: app.CreatedAt, UpdatedAt: app.UpdatedAt}
 	for _, record := range s.store.List() {
 		if record.App == app.Name && !record.Archived() {
 			view.Tenants = append(view.Tenants, record.Spec.Name)
@@ -160,8 +164,25 @@ func (s *Server) getApp(w http.ResponseWriter, r *http.Request) {
 // putApp stores an app and rolls it out to its tenants. Everything but the
 // image pin is checked first, so a broken spec never waits for a pull; the
 // pull runs on the request's context, so a client that gives up cancels it.
+// An image given as the tag the app already has keeps the image it is
+// pinned to, unless update is asked for: a change of the spec takes no
+// newer image by the way.
 func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	cond, err := appCondition(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var app spec.Tenant
+	if !readJSON(w, r, &app) {
+		return
+	}
+	s.storeApp(w, r, name, app, cond, r.URL.Query().Get("update") != "")
+}
+
+// appCondition reads the condition a change of an app is made on.
+func appCondition(r *http.Request) (store.AppIf, error) {
 	var cond store.AppIf
 	switch value := r.URL.Query().Get("if"); {
 	case value == "absent":
@@ -169,34 +190,60 @@ func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
 	case value != "":
 		updated, err := time.Parse(time.RFC3339Nano, value)
 		if err != nil {
-			writeError(w, badRequest(errors.New(`if must be "absent" or the app's updatedAt`)))
-			return
+			return cond, badRequest(errors.New(`if must be "absent" or the app's updatedAt`))
 		}
 		cond.UpdatedAt = updated
 	}
-	var app spec.Tenant
-	if !readJSON(w, r, &app) {
-		return
-	}
+	return cond, nil
+}
+
+// storeApp pins app's image and stores it; with update, a tag is pinned to
+// its newest image even if the app has it already.
+func (s *Server) storeApp(w http.ResponseWriter, r *http.Request, name string, app spec.Tenant, cond store.AppIf, update bool) {
 	if err := s.store.CheckApp(store.App{Name: name, Spec: app}); err != nil {
 		writeError(w, err)
 		return
 	}
-	pinned, note, err := s.resolve(r.Context(), app.Image)
-	if err != nil {
-		writeError(w, err)
-		return
+	tag, note := "", ""
+	if !spec.Pinned(app.Image) {
+		tag = app.Image
+		stored, err := s.store.App(name)
+		if kept := err == nil && stored.Tag == tag && !update; kept {
+			app.Image = stored.Spec.Image
+			// What the pin was kept on must not change meanwhile.
+			if cond == (store.AppIf{}) {
+				cond.UpdatedAt = stored.UpdatedAt
+			}
+			if stored.Latest != "" {
+				note = fmt.Sprintf("a newer image of %s is in its registry; \"murder app update %s\" takes it", tag, name)
+			}
+		} else {
+			pinned, pinNote, err := s.resolve(r.Context(), app.Image)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			app.Image, note = pinned, pinNote
+			// A local image cannot be asked about.
+			if !spec.RegistryPinned(pinned) {
+				tag = ""
+			}
+		}
 	}
-	app.Image = pinned
 	if err := r.Context().Err(); err != nil {
 		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
 		return
 	}
-	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app}, cond, actor(r))
+	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app, Tag: tag}, cond, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	s.writeAppChange(w, change, note)
+}
+
+// writeAppChange answers with a stored app and the tenants it rolls out to.
+func (s *Server) writeAppChange(w http.ResponseWriter, change store.AppChange, note string) {
 	result := api.AppApplied{App: s.appView(change.App), Created: change.Created, Changed: change.Changed, Tenants: []api.Tenant{}, Note: note}
 	for _, tenant := range change.Tenants {
 		if record, err := s.store.Get(tenant); err == nil {
@@ -204,7 +251,7 @@ func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if change.Changed {
-		s.log.Info("app stored", "app", name, "image", app.Image, "tenants", change.Tenants)
+		s.log.Info("app stored", "app", change.App.Name, "revision", change.App.Revision, "image", change.App.Spec.Image, "tenants", change.Tenants)
 	}
 	status := http.StatusOK
 	if change.Created {
