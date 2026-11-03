@@ -707,10 +707,26 @@ connects from it, so trust it for proxy headers.
   before the current again (`-to N` another), with its image and tag. An
   app stored by an older release gets its first revision at its next change.
 - A tag that only exists locally is pinned to the local image.
-- Private registries need credentials in `registryAuthFile`, a Docker
-  `config.json` with an `auths` entry per registry. Credential helpers are not
-  supported. The Docker engine never reads what `docker login` saved; the
-  client has to send it.
+- Images are kept in a registry outside the cluster, so a node that takes a
+  tenant over can still pull its image when another node is gone. GitHub's
+  container registry (ghcr.io) is the one set up here; any other works the
+  same way. Images are named in full (`ghcr.io/powerpenguini/addhoc:stable`).
+- Private registries need a login on every node, under `registries` in
+  the agent config: the registry's host, a user and a file holding the
+  token, read at every pull, so a token replaced there is used at once.
+  For ghcr.io, a classic token with only `read:packages`; for another
+  registry, another entry:
+
+  ```yaml
+  registries:
+    - {host: ghcr.io, username: powerpenguini, tokenFile: /etc/murder/ghcr.token}
+    - {host: registry.example.com, username: murder, tokenFile: /etc/murder/own.token}
+  ```
+
+  A registry without a login there may have one in `registryAuthFile`, a
+  Docker `config.json` with an `auths` entry per registry. Credential
+  helpers are not supported. The Docker engine never reads what `docker
+  login` saved; the client has to send it.
 
 Day-to-day operations:
 

@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,6 +41,11 @@ type Agent struct {
 	Socket       string `yaml:"socket"`
 	SocketGroup  string `yaml:"socketGroup"`
 	DockerSocket string `yaml:"dockerSocket"`
+	// Registries are the private registries the node pulls from and asks
+	// about tags, each signed in to with a user and a token kept in a file:
+	// GitHub's container registry (ghcr.io) with a token that may only read
+	// packages, or any other. They come before RegistryAuthFile.
+	Registries []Registry `yaml:"registries"`
 	// RegistryAuthFile is a Docker config.json with credentials for private
 	// registries (as written by "docker login" without a credential helper).
 	RegistryAuthFile string `yaml:"registryAuthFile"`
@@ -76,6 +82,54 @@ type Agent struct {
 	// ImageChecks is how often the cluster's leader asks apps' registries
 	// which image each app's tag names now (5m); 0 asks never.
 	ImageChecks Duration `yaml:"imageChecks"`
+}
+
+// Registry is how the node signs in to one private registry.
+type Registry struct {
+	// Host is the registry's host name, with its port if it has one, as
+	// image names begin with it: ghcr.io. docker.io is Docker Hub.
+	Host     string `yaml:"host"`
+	Username string `yaml:"username"`
+	// TokenFile holds the password or access token. It is read at every
+	// pull, so a token replaced in it is used at once.
+	TokenFile string `yaml:"tokenFile"`
+}
+
+// registryHost is a host name with an optional port, as an image name
+// begins with it.
+var registryHost = regexp.MustCompile(`^(localhost|[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+)(:[0-9]{1,5})?$`)
+
+// sameRegistry names a registry as pulls see it: Docker Hub's host names
+// are all docker.io.
+func sameRegistry(host string) string {
+	host = strings.ToLower(host)
+	switch host {
+	case "index.docker.io", "registry-1.docker.io":
+		return "docker.io"
+	}
+	return host
+}
+
+func registriesProblems(registries []Registry) []string {
+	var problems []string
+	seen := map[string]bool{}
+	for i, registry := range registries {
+		where := fmt.Sprintf("registries[%d]", i)
+		switch {
+		case !registryHost.MatchString(registry.Host):
+			problems = append(problems, where+".host must be a registry's host name, such as ghcr.io, without https:// or a path")
+		case seen[sameRegistry(registry.Host)]:
+			problems = append(problems, where+".host "+registry.Host+" is given twice")
+		}
+		seen[sameRegistry(registry.Host)] = true
+		if registry.Username == "" {
+			problems = append(problems, where+".username must be set")
+		}
+		if !strings.HasPrefix(registry.TokenFile, "/") {
+			problems = append(problems, where+".tokenFile must be an absolute path")
+		}
+	}
+	return problems
 }
 
 // Backups keeps tenants' data and the cluster's state in an S3 bucket,
@@ -383,6 +437,7 @@ func (a Agent) Validate() error {
 	if a.BaseDomain == "" || strings.HasPrefix(a.BaseDomain, ".") || strings.Contains(a.BaseDomain, "/") {
 		problems = append(problems, "baseDomain must be a domain name")
 	}
+	problems = append(problems, registriesProblems(a.Registries)...)
 	if a.Cluster != nil {
 		problems = append(problems, a.Cluster.problems()...)
 	}
