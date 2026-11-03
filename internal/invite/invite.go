@@ -65,6 +65,14 @@ func (b *Book) Create(valid time.Duration, actor string) (cluster.Invite, time.T
 	if valid <= 0 || valid > MaxValid {
 		return cluster.Invite{}, time.Time{}, fmt.Errorf("an invitation is valid for up to %s", MaxValid)
 	}
+	// A host would refuse what this node cannot send whole: say so now,
+	// not once the invitation is spent.
+	b.mu.Lock()
+	_, err := b.bundle()
+	b.mu.Unlock()
+	if err != nil {
+		return cluster.Invite{}, time.Time{}, fmt.Errorf("this node cannot invite: %w", err)
+	}
 	secret, err := cluster.InviteSecret()
 	if err != nil {
 		return cluster.Invite{}, time.Time{}, err
@@ -141,12 +149,15 @@ func (b *Book) bundle() (cluster.Bundle, error) {
 	if err != nil {
 		return cluster.Bundle{}, err
 	}
+	dir := filepath.Dir(b.ConfigPath)
+	if filepath.Dir(agent.MasterKeyFile) != dir {
+		return cluster.Bundle{}, fmt.Errorf("the master key %s is not in %s: a host would not know where to keep it", agent.MasterKeyFile, dir)
+	}
 	key, err := os.ReadFile(agent.MasterKeyFile)
 	if err != nil {
 		return cluster.Bundle{}, fmt.Errorf("read the master key: %w", err)
 	}
 	bundle := cluster.Bundle{Cluster: b.Store.Cluster(), Key: key, Config: data, Files: map[string][]byte{}}
-	dir := filepath.Dir(b.ConfigPath)
 	for _, path := range Shared(agent) {
 		// Only files beside the config: a host writes them where this
 		// node keeps them.

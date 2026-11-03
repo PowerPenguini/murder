@@ -23,7 +23,12 @@ Then it installs and starts everything as `murder setup` does, and joins.
 An invitation is used once, and only when the server is ready for it:
 setup checks the server first. It hands the master key to whoever brings
 it, so only root makes one, and each one made and used is in the audit
-log. A restarted agent forgets the invitations it made.
+log. A restarted agent forgets the invitations it made. On a host other
+people log in to, `murder setup -join -` reads the invitation from
+standard input, so it never shows in the process list. A host that has a
+master key or a database already, its own or a cluster's it left, is
+refused: move them aside first. The node takes at most 8 hosts with
+invitations at once, each for 30 seconds.
 
 To join by hand instead, as below: copy the master key, give the node a
 `cluster:` section, then join.

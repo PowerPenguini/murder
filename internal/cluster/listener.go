@@ -20,6 +20,11 @@ import (
 const (
 	handshakeTimeout = 10 * time.Second
 	handshakes       = 64
+	// joins bounds the connections of hosts with an invitation, which
+	// prove nothing in their handshake, and joinTimeout how long each
+	// lasts.
+	joins       = 8
+	joinTimeout = 30 * time.Second
 )
 
 // listener accepts nodes of the cluster on one port and hands each
@@ -32,6 +37,7 @@ type listener struct {
 	cluster          func() string
 	log              *slog.Logger
 	pending          chan struct{}
+	joining          chan struct{}
 	raft, http, join chan net.Conn
 	done             chan struct{}
 	once             sync.Once
@@ -42,7 +48,7 @@ func listen(address string, credentials *Credentials, cluster func() string, log
 	if err != nil {
 		return nil, err
 	}
-	l := &listener{inner: inner, credentials: credentials, cluster: cluster, log: log, pending: make(chan struct{}, handshakes), raft: make(chan net.Conn), http: make(chan net.Conn), join: make(chan net.Conn), done: make(chan struct{})}
+	l := &listener{inner: inner, credentials: credentials, cluster: cluster, log: log, pending: make(chan struct{}, handshakes), joining: make(chan struct{}, joins), raft: make(chan net.Conn), http: make(chan net.Conn), join: make(chan net.Conn), done: make(chan struct{})}
 	go l.accept()
 	return l, nil
 }
@@ -85,8 +91,24 @@ func (l *listener) route(conn *tls.Conn) {
 	}
 	target := l.http
 	if conn.ConnectionState().NegotiatedProtocol == protocolJoin {
-		target = l.join
-	} else if conn.ConnectionState().NegotiatedProtocol == protocolRaft {
+		select {
+		case l.joining <- struct{}{}:
+		default:
+			_ = conn.Close()
+			return
+		}
+		var release sync.Once
+		wrapped := &handshaken{Conn: conn, release: func() { release.Do(func() { <-l.joining }) }}
+		// The whole exchange is one request and its answer.
+		_ = conn.SetDeadline(time.Now().Add(joinTimeout))
+		select {
+		case l.join <- wrapped:
+		case <-l.done:
+			_ = wrapped.Close()
+		}
+		return
+	}
+	if conn.ConnectionState().NegotiatedProtocol == protocolRaft {
 		// Raft takes entries, and votes, from its own cluster only: not
 		// from another cluster with the same master key, such as the one
 		// a backup was restored from, nor from any cluster while this
@@ -140,11 +162,6 @@ type stream struct {
 func (s *stream) Accept() (net.Conn, error) {
 	select {
 	case conn := <-s.conns:
-		if s.protocol == protocolJoin {
-			// net/http closes a TLS connection of a protocol it does not
-			// know; the invitation's is HTTP/1.1 over the handshake made.
-			return handshaken{conn}, nil
-		}
 		return conn, nil
 	case <-s.l.done:
 		return nil, net.ErrClosed
@@ -171,9 +188,18 @@ func (s *stream) Dial(address raft.ServerAddress, timeout time.Duration) (net.Co
 	return conn, nil
 }
 
-// handshaken is a TLS connection whose handshake is done, served as a
-// plain one.
-type handshaken struct{ net.Conn }
+// handshaken is a TLS connection of a host with an invitation, its
+// handshake done, served as a plain one: net/http closes a TLS connection
+// of a protocol it does not know. Closing it frees its place.
+type handshaken struct {
+	net.Conn
+	release func()
+}
+
+func (h *handshaken) Close() error {
+	defer h.release()
+	return h.Conn.Close()
+}
 
 // A Raft connection begins with the name of the dialing node's cluster.
 const clusterHeaderPrefix = "murder-cluster "

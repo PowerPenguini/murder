@@ -63,7 +63,18 @@ type Facts struct {
 	Private   []netip.Addr
 	Public    []netip.Addr
 	Installed bool // a config exists already
+	// HasKey and HasDatabase report a master key and a database at their
+	// default places: a node's, or one that was.
+	HasKey, HasDatabase bool
+	// Busy are the edge's ports something else listens on.
+	Busy []string
 }
+
+// Default places of the master key and the database.
+const (
+	KeyFile      = "/etc/murder/master.key"
+	DatabaseFile = "/var/lib/murder/murder.db"
+)
 
 // Inspect looks at the host.
 func Inspect(ctx context.Context, host Host) Facts {
@@ -92,6 +103,15 @@ func Inspect(ctx context.Context, host Host) Facts {
 		}
 	}
 	facts.Installed = host.Exists(ConfigFile)
+	facts.HasKey, facts.HasDatabase = host.Exists(KeyFile), host.Exists(DatabaseFile)
+	// The edge's ports, unless Murder's own edge holds them.
+	if out, err := host.Run(ctx, "ss", "-H", "-ltnp", "( sport = :80 or sport = :443 )"); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			if fields := strings.Fields(line); len(fields) >= 4 && !strings.Contains(line, `"murder"`) {
+				facts.Busy = append(facts.Busy, fields[3])
+			}
+		}
+	}
 	return facts
 }
 
@@ -117,10 +137,19 @@ func (f Facts) Problems() []string {
 	if !f.Nftables {
 		problems = append(problems, "nftables is missing: `apt install nftables` (the tenant firewall)")
 	}
-	if !f.CgroupV2 {
-		problems = append(problems, "the host does not use cgroup v2: tenants run, but their use is not measured")
+	if len(f.Busy) > 0 {
+		problems = append(problems, fmt.Sprintf("something else listens on %s: the edge serves ports 80 and 443 (`ss -ltnp` names it)", strings.Join(f.Busy, ", ")))
 	}
 	return problems
+}
+
+// Warnings are what Murder runs without, but lesser.
+func (f Facts) Warnings() []string {
+	var warnings []string
+	if !f.CgroupV2 {
+		warnings = append(warnings, "the host does not use cgroup v2: tenants run, but what they use is not measured")
+	}
+	return warnings
 }
 
 // atLeast compares two "major.minor" versions.

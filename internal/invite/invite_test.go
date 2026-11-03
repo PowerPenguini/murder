@@ -124,8 +124,8 @@ func TestAnInvitationExpiresAndKeepsTakenNames(t *testing.T) {
 
 func TestOnlyFilesBesideTheConfigGo(t *testing.T) {
 	b, _, _ := book(t, "registryAuthFile: /root/.docker/config.json\n")
-	invite, _, _ := b.Create(time.Hour, "root")
-	if _, err := b.Redeem(context.Background(), invite.Secret, "n2"); err == nil || !strings.Contains(err.Error(), "is not in") {
+	// Said when the invitation is made, not once it is spent.
+	if _, _, err := b.Create(time.Hour, "root"); err == nil || !strings.Contains(err.Error(), "is not in") {
 		t.Fatalf("a file elsewhere: %v", err)
 	}
 }

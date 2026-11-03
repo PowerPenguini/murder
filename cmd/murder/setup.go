@@ -61,7 +61,7 @@ func runSetup(args []string) error {
 	flags.BoolVar(&opts.Force, "force", false, "write the config anew over an existing one (the master key and database are kept)")
 	yes := flags.Bool("yes", false, "ask nothing: take the options and what setup finds")
 	dryRun := flags.Bool("dry-run", false, "only show what setup would do, and the config it would write")
-	join := flags.String("join", "", "join the cluster this invitation names, printed by `murder cluster invite` on one of its nodes")
+	join := flags.String("join", "", "join the cluster this invitation names, printed by `murder cluster invite` on one of its nodes; - reads it from standard input, out of other users' sight")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -90,6 +90,17 @@ func runSetup(args []string) error {
 	}
 	interactive := !*yes && term.IsTerminal(int(os.Stdin.Fd()))
 	ask := asker{in: bufio.NewReader(stdin), out: stdout}
+	for _, warning := range facts.Warnings() {
+		fmt.Fprintln(stdout, "Note: "+warning)
+	}
+	if *join == "-" {
+		line, err := bufio.NewReader(stdin).ReadString('\n')
+		if err != nil && line == "" {
+			return fmt.Errorf("read the invitation from standard input: %w", err)
+		}
+		*join = strings.TrimSpace(line)
+		interactive = false
+	}
 	if *join != "" {
 		return joinCluster(ctx, host, facts, opts, *join, interactive, *dryRun, ask)
 	}
@@ -180,8 +191,13 @@ func joinCluster(ctx context.Context, host setup.System, facts setup.Facts, opts
 	peer := netip.MustParseAddrPort(invite.Address)
 	own, problems := setup.SettleOwn(opts, facts, peer)
 	problems = append(facts.Problems(), problems...)
-	if facts.Installed && !opts.Force {
+	if facts.Installed {
 		problems = append(problems, setup.ConfigFile+" exists: this host is set up already")
+	}
+	// A host joins with the cluster's master key and a new database: one
+	// it has, of its own or of a cluster it left, would be lost.
+	if facts.HasKey || facts.HasDatabase {
+		problems = append(problems, fmt.Sprintf("this host has a master key (%s) or a database (%s) already: a host joins with the cluster's key and a new database; move them aside first, if they are not needed", setup.KeyFile, setup.DatabaseFile))
 	}
 	if err := stopFor(problems); err != nil {
 		return err

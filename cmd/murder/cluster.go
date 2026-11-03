@@ -67,7 +67,7 @@ func runCluster(args []string) error {
 			return err
 		}
 		fmt.Fprintf(stdout, "On the new host, as root, with murder installed:\n\n  murder setup -join %s\n\n", invitation.Invitation)
-		fmt.Fprintf(stdout, "It joins it to the cluster as a node like this one. The invitation is valid once,\nuntil %s, and hands the cluster's master key to whoever brings it:\nsend it only over a channel you trust.\n", invitation.Expires.Local().Format(time.DateTime))
+		fmt.Fprintf(stdout, "It joins it to the cluster as a node like this one. The invitation is valid once,\nuntil %s, and hands the cluster's master key to whoever brings it:\nsend it only over a channel you trust. On a host others log in to, run\n`murder setup -join -` and paste it, so it is not in the process list.\n", invitation.Expires.Local().Format(time.DateTime))
 		return nil
 	case command == "bootstrap" && len(rest) == 0:
 		status, err = client.Bootstrap(ctx)

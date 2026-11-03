@@ -47,7 +47,10 @@ func newFakeHost() *fakeHost {
 func (f *fakeHost) Run(_ context.Context, name string, args ...string) (string, error) {
 	line := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	f.ran = append(f.ran, line)
-	if strings.HasPrefix(line, "systemctl enable --now") {
+	if strings.HasPrefix(line, "systemctl enable --now") || strings.HasPrefix(line, "systemctl try-") || strings.HasPrefix(line, "ss ") {
+		if out, ok := f.commands[line]; ok {
+			return out, nil
+		}
 		return "", nil
 	}
 	out, ok := f.commands[line]
@@ -99,11 +102,19 @@ func TestInspectFindsWhatTheHostHas(t *testing.T) {
 	delete(bare.commands, "nft --version")
 	bare.commands["docker version --format {{.Server.APIVersion}}"] = "1.43"
 	delete(bare.files, "/sys/fs/cgroup/cgroup.controllers")
-	problems := strings.Join(Inspect(context.Background(), bare).Problems(), "\n")
-	for _, want := range []string{"as root", "Docker's API is 1.43", "apt install nftables", "cgroup v2"} {
+	bare.commands["ss -H -ltnp ( sport = :80 or sport = :443 )"] = "LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:((\"nginx\",pid=1,fd=6))\nLISTEN 0 4096 *:443 *:* users:((\"murder\",pid=2,fd=8))\n"
+	bareFacts := Inspect(context.Background(), bare)
+	problems := strings.Join(bareFacts.Problems(), "\n")
+	for _, want := range []string{"as root", "Docker's API is 1.43", "apt install nftables", "something else listens on 0.0.0.0:80"} {
 		if !strings.Contains(problems, want) {
 			t.Errorf("problems lack %q:\n%s", want, problems)
 		}
+	}
+	if strings.Contains(problems, "*:443") || strings.Contains(problems, "cgroup") {
+		t.Errorf("problems name Murder's own edge or cgroups:\n%s", problems)
+	}
+	if warnings := bareFacts.Warnings(); len(warnings) != 1 || !strings.Contains(warnings[0], "cgroup v2") {
+		t.Errorf("warnings %v", warnings)
 	}
 }
 
@@ -240,6 +251,26 @@ func TestStepsInstallEverything(t *testing.T) {
 		}
 	}
 	t.Fatal("setup wrote over an existing config")
+}
+
+func TestForceRestartsWhatRuns(t *testing.T) {
+	host := newFakeHost()
+	host.exe = Binary
+	s, _ := Settle(Options{Domain: "example.com", ZFSPool: "none", ClusterAddress: "none"}, Inspect(context.Background(), host))
+	host.files[ConfigFile] = []byte("old")
+	steps, _ := Steps(host, s.Install(), true, func() error { return nil })
+	for _, step := range steps {
+		if err := step.Do(context.Background()); err != nil {
+			t.Fatalf("%s: %v", step.Say, err)
+		}
+	}
+	ran := strings.Join(host.ran, "\n")
+	if !strings.Contains(ran, "systemctl try-reload-or-restart murder-edge.service") || !strings.Contains(ran, "systemctl try-restart murder-firewall.service murder-agent.service") {
+		t.Fatalf("ran:\n%s", ran)
+	}
+	if string(host.files[ConfigFile]) == "old" {
+		t.Fatal("-force kept the old config")
+	}
 }
 
 func TestPlainDirectoriesNeedNoZFS(t *testing.T) {

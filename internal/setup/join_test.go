@@ -12,10 +12,14 @@ import (
 const clusterConfig = `# written by murder setup
 node: n1
 baseDomain: example.com  # tenants live here
+metrics: 10.0.0.2:9464
 volumes:
   driver: zfs
   parent: tank/murder/tenants
+  mountRoot: /srv/tenants
 edge:
+  http: ":80"
+  https: 203.0.113.10:443
   tls:
     mode: acme
     email: ops@example.com
@@ -47,6 +51,10 @@ func TestAHostMakesTheClustersConfigItsOwn(t *testing.T) {
 	// The cluster's own settings stay as they are.
 	if agent.BaseDomain != "example.com" || agent.Edge.TLS.DNSProvider != "hetzner" || agent.Cluster.Failover == nil || len(agent.Registries) != 1 {
 		t.Fatalf("agent %+v", agent)
+	}
+	// Listeners on the inviting node's own addresses move to this host's.
+	if agent.Metrics != "10.0.0.3:9464" || agent.Edge.HTTPS != "203.0.113.11:443" || agent.Edge.HTTP != ":80" || agent.Volumes.MountRoot != "/srv/tenants" {
+		t.Fatalf("metrics %s, https %s, http %s, mountRoot %s", agent.Metrics, agent.Edge.HTTPS, agent.Edge.HTTP, agent.Volumes.MountRoot)
 	}
 	if !strings.Contains(string(in.Config), "this node on the private network") {
 		t.Fatalf("comments lost:\n%s", in.Config)

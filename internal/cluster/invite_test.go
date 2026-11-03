@@ -161,3 +161,39 @@ func TestTheRelayStaysForNodesOverHTTP2(t *testing.T) {
 		t.Fatalf("negotiated %q", got)
 	}
 }
+
+// Hosts without a certificate hold few connections, and not for long.
+func TestInvitedConnectionsAreFew(t *testing.T) {
+	l, _ := serveInvites(t, 6, &fakeInvites{})
+	var held []*tls.Conn
+	defer func() {
+		for _, conn := range held {
+			conn.Close()
+		}
+	}()
+	refused := 0
+	for range joins + 4 {
+		conn, err := tls.Dial("tcp", l.inner.Addr().String(), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{protocolJoin}, MinVersion: tls.VersionTLS13})
+		if err != nil {
+			refused++
+			continue
+		}
+		held = append(held, conn)
+	}
+	// Past the limit, the node closes the connection: a read ends at once.
+	closed := 0
+	for _, conn := range held {
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := conn.Read(make([]byte, 1)); err != nil && !isTimeout(err) {
+			closed++
+		}
+	}
+	if refused+closed < 4 {
+		t.Fatalf("%d of %d connections refused or closed, want at least 4", refused+closed, joins+4)
+	}
+}
+
+func isTimeout(err error) bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
+}

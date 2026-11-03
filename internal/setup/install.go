@@ -205,7 +205,24 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 	})
 	add("make the master key and the database", func(context.Context) error { return initialize() })
 	add("start "+strings.Join(in.Units(), ", "), func(ctx context.Context) error {
-		_, err := host.Run(ctx, "systemctl", append([]string{"enable", "--now"}, in.Units()...)...)
+		if _, err := host.Run(ctx, "systemctl", append([]string{"enable", "--now"}, in.Units()...)...); err != nil {
+			return err
+		}
+		if !force {
+			return nil
+		}
+		// Services that ran already take the new binary and config: the
+		// edge hands its listeners over, the agent leaves tenants running.
+		if _, err := host.Run(ctx, "systemctl", "try-reload-or-restart", "murder-edge.service"); err != nil {
+			return err
+		}
+		var others []string
+		for _, unit := range in.Units() {
+			if strings.HasSuffix(unit, ".service") && unit != "murder-edge.service" {
+				others = append(others, unit)
+			}
+		}
+		_, err := host.Run(ctx, "systemctl", append([]string{"try-restart"}, others...)...)
 		return err
 	})
 	return steps, nil

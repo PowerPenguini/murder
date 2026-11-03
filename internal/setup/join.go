@@ -118,6 +118,35 @@ func Adopt(bundle cluster.Bundle, own Own) (Install, config.Agent, error) {
 		return Install{}, config.Agent{}, fmt.Errorf("the cluster's config is not a YAML mapping: %v", err)
 	}
 	root := doc.Content[0]
+	theirs, err := config.Parse(bundle.Config)
+	if err != nil {
+		return Install{}, config.Agent{}, fmt.Errorf("the cluster's config: %w", err)
+	}
+	// Listeners the inviting node bound to an address of its own bind to
+	// this host's same address.
+	moved := map[string]string{}
+	if theirs.Cluster != nil {
+		if address, err := netip.ParseAddrPort(theirs.Cluster.Address); err == nil {
+			if ours, err := netip.ParseAddrPort(own.ClusterAddress); err == nil {
+				moved[address.Addr().String()] = ours.Addr().String()
+			}
+		}
+		for i, address := range theirs.Cluster.PublicAddresses {
+			if i < len(own.Public) {
+				moved[address] = own.Public[i]
+			}
+		}
+	}
+	for _, keys := range [][]string{{"edge", "http"}, {"edge", "https"}, {"edge", "metrics"}, {"metrics"}} {
+		value := get(root, keys...)
+		if value == nil || value.Kind != yaml.ScalarNode {
+			continue
+		}
+		host, port, ok := strings.Cut(value.Value, ":")
+		if ours, mine := moved[host]; ok && mine {
+			set(root, scalar(ours+":"+port), keys...)
+		}
+	}
 	set(root, scalar(own.Node), "node")
 	set(root, scalar(own.ClusterAddress), "cluster", "address")
 	if len(own.Public) > 0 {
@@ -125,14 +154,14 @@ func Adopt(bundle cluster.Bundle, own Own) (Install, config.Agent, error) {
 	} else {
 		remove(root, "cluster", "publicAddresses")
 	}
-	volumes := &yaml.Node{Kind: yaml.MappingNode}
+	// The cluster's mount paths stay; the pool is this host's.
 	if own.ZFSPool != "" {
-		set(volumes, scalar("zfs"), "driver")
-		set(volumes, scalar(own.ZFSPool+"/murder/tenants"), "parent")
+		set(root, scalar("zfs"), "volumes", "driver")
+		set(root, scalar(own.ZFSPool+"/murder/tenants"), "volumes", "parent")
 	} else {
-		set(volumes, scalar("dir"), "driver")
+		set(root, scalar("dir"), "volumes", "driver")
+		remove(root, "volumes", "parent")
 	}
-	set(root, volumes, "volumes")
 	if bundle.TunnelAddress != "" {
 		set(root, scalar(bundle.TunnelAddress), "panel", "tunnel", "address")
 	}
@@ -206,6 +235,24 @@ func set(mapping *yaml.Node, value *yaml.Node, keys ...string) {
 		}
 		mapping = next
 	}
+}
+
+// get is the value at keys in mapping, or nil.
+func get(mapping *yaml.Node, keys ...string) *yaml.Node {
+	for _, key := range keys {
+		var next *yaml.Node
+		for j := 0; mapping != nil && mapping.Kind == yaml.MappingNode && j+1 < len(mapping.Content); j += 2 {
+			if mapping.Content[j].Value == key {
+				next = mapping.Content[j+1]
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		mapping = next
+	}
+	return mapping
 }
 
 // remove deletes keys from mapping, if they are there.

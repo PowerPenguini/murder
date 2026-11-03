@@ -173,7 +173,8 @@ func Start(config Config) (*Cluster, error) {
 			config.Log.Error("the cluster port stopped serving", "error", err)
 		}
 	}()
-	c.joins = &http.Server{Handler: joinHandler(config.Invites), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second}
+	c.joins = &http.Server{Handler: joinHandler(config.Invites), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+	c.joins.SetKeepAlivesEnabled(false)
 	go func() {
 		if err := c.joins.Serve(l.joinListener()); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			config.Log.Error("the cluster port stopped taking invitations", "error", err)
