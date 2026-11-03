@@ -83,6 +83,12 @@ type Step struct {
 	Do  func(ctx context.Context) error
 }
 
+// Skipped is a step that left the host as it was, for a reason the
+// operator should read; setup goes on.
+type Skipped struct{ Reason string }
+
+func (s Skipped) Error() string { return s.Reason }
+
 // Install is what setup puts on a host.
 type Install struct {
 	// Config is the agent's config.
@@ -117,16 +123,21 @@ func (s Settings) Install() Install {
 // liveRestore sets "live-restore" in Docker's config, keeping the rest,
 // and has Docker read it again: a reload, which restarts no container.
 func liveRestore(ctx context.Context, host Host) error {
-	settings := map[string]any{}
+	var settings map[string]any
 	if data, err := host.ReadFile(DaemonConfig); err == nil {
 		if err := json.Unmarshal(data, &settings); err != nil {
-			return fmt.Errorf("%s is not JSON setup can change (%v): add \"live-restore\": true to it by hand, then `systemctl reload docker`", DaemonConfig, err)
+			return Skipped{fmt.Sprintf("%s is not a JSON object setup can change (%v): add \"live-restore\": true to it by hand, then `systemctl reload docker`", DaemonConfig, err)}
 		}
-		if err := host.WriteFile(DaemonConfig+".before-murder", data, 0o644); err != nil {
+		// Readable by root alone, the original and the copy: it may hold
+		// a registry mirror's or a proxy's credentials.
+		if err := host.WriteFile(DaemonConfig+".before-murder", data, 0o600); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
+	}
+	if settings == nil { // no file, or "null"
+		settings = map[string]any{}
 	}
 	settings["live-restore"] = true
 	data, err := json.MarshalIndent(settings, "", "  ")
@@ -136,7 +147,7 @@ func liveRestore(ctx context.Context, host Host) error {
 	if err := host.MkdirAll(path.Dir(DaemonConfig), 0o755); err != nil {
 		return err
 	}
-	if err := host.WriteFile(DaemonConfig, append(data, '\n'), 0o644); err != nil {
+	if err := host.WriteFile(DaemonConfig, append(data, '\n'), 0o600); err != nil {
 		return err
 	}
 	if _, err := host.Run(ctx, "systemctl", "reload", "docker"); err != nil {

@@ -172,7 +172,11 @@ func install(ctx context.Context, steps []setup.Step) (*api.Client, error) {
 	fmt.Fprintln(stdout)
 	for _, step := range steps {
 		fmt.Fprintln(stdout, "→ "+step.Say)
-		if err := step.Do(ctx); err != nil {
+		var skipped setup.Skipped
+		switch err := step.Do(ctx); {
+		case errors.As(err, &skipped):
+			fmt.Fprintln(stdout, "  skipped: "+skipped.Reason)
+		case err != nil:
 			return nil, fmt.Errorf("%s: %w", step.Say, err)
 		}
 	}

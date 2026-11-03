@@ -317,10 +317,22 @@ func TestSetupTurnsLiveRestoreOn(t *testing.T) {
 	if !strings.Contains(string(host.files[DaemonConfig+".before-murder"]), "max-size") || !slices.Contains(host.ran, "systemctl reload docker") {
 		t.Fatalf("backup %q, ran %v", host.files[DaemonConfig+".before-murder"], host.ran)
 	}
-	// A file setup cannot read is left as it is.
-	host.files[DaemonConfig] = []byte("{ not json")
-	if err := liveRestore(context.Background(), host); err == nil || !strings.Contains(err.Error(), "by hand") || string(host.files[DaemonConfig]) != "{ not json" {
-		t.Fatalf("a broken daemon.json: %v", err)
+	// Root alone reads them: they may hold credentials.
+	if host.modes[DaemonConfig] != 0o600 || host.modes[DaemonConfig+".before-murder"] != 0o600 {
+		t.Fatalf("modes %v", host.modes)
+	}
+	// A file setup cannot read is left as it is, and setup goes on.
+	var skipped Skipped
+	for _, broken := range []string{"{ not json", "[1, 2]"} {
+		host.files[DaemonConfig] = []byte(broken)
+		if err := liveRestore(context.Background(), host); !errors.As(err, &skipped) || !strings.Contains(err.Error(), "by hand") || string(host.files[DaemonConfig]) != broken {
+			t.Fatalf("daemon.json %q: %v", broken, err)
+		}
+	}
+	// "null" is no settings.
+	host.files[DaemonConfig] = []byte("null")
+	if err := liveRestore(context.Background(), host); err != nil || !strings.Contains(string(host.files[DaemonConfig]), `"live-restore": true`) {
+		t.Fatalf("a null daemon.json %q, %v", host.files[DaemonConfig], err)
 	}
 	// No file yet: one is written.
 	delete(host.files, DaemonConfig)
