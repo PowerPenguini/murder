@@ -429,6 +429,41 @@ func tenant(name, node string, archived bool) api.Tenant {
 
 // A drain moves every tenant of the node, archived ones too, and nothing
 // else.
+// BalanceMoves plans as the agent does, from the tenants and members.
+func (f *fakeAgent) BalanceMoves(context.Context) ([]store.Move, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var nodes []store.Node
+	for _, name := range f.members {
+		nodes = append(nodes, store.Node{Name: name})
+	}
+	var records []store.Record
+	for _, t := range f.tenants {
+		records = append(records, store.Record{Spec: t.Spec, Node: t.Node, ArchivedAt: t.ArchivedAt})
+	}
+	return store.BalanceMoves(nodes, records), nil
+}
+
+func TestBalanceMovesOneTenantAfterTheOther(t *testing.T) {
+	agent := newFakeAgent(old3())
+	agent.tenants = []api.Tenant{tenant("a", "n1", false), tenant("b", "n1", false), tenant("c", "n1", false), tenant("d", "n1", false), tenant("e", "n2", false)}
+	var out bytes.Buffer
+	if err := Balance(context.Background(), agent, true, &out); err != nil || len(agent.moved) != 0 || !strings.Contains(out.String(), "a would move from n1 to n3") {
+		t.Fatalf("dry run moved %v, %v:\n%s", agent.moved, err, out.String())
+	}
+	out.Reset()
+	if err := Balance(context.Background(), agent, false, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(agent.moved, []string{"a", "b"}) || !strings.Contains(out.String(), "balanced: 2 tenants moved") {
+		t.Fatalf("moved %v:\n%s", agent.moved, out.String())
+	}
+	out.Reset()
+	if err := Balance(context.Background(), agent, false, &out); err != nil || !strings.Contains(out.String(), "the nodes are balanced") {
+		t.Fatalf("again: %v\n%s", err, out.String())
+	}
+}
+
 func TestDrainMovesEveryTenantOfTheNode(t *testing.T) {
 	agent := newFakeAgent(old3())
 	agent.tenants = []api.Tenant{tenant("a", "n2", false), tenant("b", "n1", false), tenant("c", "n2", true), tenant("d", "n3", false)}

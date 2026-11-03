@@ -247,6 +247,10 @@ type FailedOver struct {
 // Sealer makes a new value for one secret of a tenant and seals it.
 type Sealer func(tenant, name string, secret spec.Secret) (string, error)
 
+// Resealer seals a tenant's secret's value again; changed is false for a
+// value it leaves as it is.
+type Resealer func(tenant, name, sealed string) (resealed string, changed bool, err error)
+
 // Store is the desired state of a node. Reads come from memory and never
 // fail; every write is one transaction that also records who made it.
 //
@@ -304,6 +308,10 @@ type Store interface {
 	SetSuspended(name string, suspended bool, actor string) (Record, error)
 	// Rotate gives one secret of the tenant's spec a new value.
 	Rotate(name, secret, actor string) (Record, error)
+	// ResealSecrets seals every tenant's secrets again with reseal, in
+	// one change, and says how many changed. A value changed since it was
+	// read keeps its new one.
+	ResealSecrets(reseal Resealer, actor string) (int, error)
 	// Roll has a live tenant's container replaced as it is: what a new
 	// release of Murder changed in containers then applies to it.
 	Roll(name, actor string) (Record, error)
@@ -326,12 +334,17 @@ type Store interface {
 	// another to that other (ReplicaNext). It reports how many it changed.
 	PlaceReplicas(actor string) (int, error)
 	// ReplicaReady records that the copy of a tenant on replica holds its
-	// whole data; nothing changes unless replica is still its replica.
-	ReplicaReady(name, replica string) error
+	// whole data, as owner sent it; nothing changes unless replica is
+	// still its replica, and owner still runs it and it is not moving.
+	ReplicaReady(name, replica, owner string) error
+	// ReplicaStale records that a tenant's copy no longer matches its
+	// data, replaced from a backup: it is not ready until sent again.
+	ReplicaStale(name, why, actor string) error
 	// SwitchReplica makes next, the tenant's ReplicaNext, its replica,
-	// ready, once next holds the whole data; nothing changes unless next
-	// is still its ReplicaNext. It reports whether it switched.
-	SwitchReplica(name, next string) (bool, error)
+	// ready, once next holds the whole data as owner sent it; nothing
+	// changes unless next is still its ReplicaNext, and owner still runs
+	// it and it is not moving. It reports whether it switched.
+	SwitchReplica(name, next, owner string) (bool, error)
 	// GiveUpCopy gives up the tenant's copy on node, for why: its
 	// ReplicaNext, or its replica while that copy is not whole yet. No
 	// copy goes to node for a while. It reports whether it changed
@@ -404,6 +417,7 @@ type Store interface {
 	Frozen() string
 	Freeze(reason, actor string) error
 	Thaw(actor string) error
+	ThawIf(reason, actor string) error
 	// Note records an event, frozen or not.
 	Note(action, detail, actor string) error
 

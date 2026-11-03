@@ -24,7 +24,7 @@ func credentials(t *testing.T, seed byte) *cluster.Credentials { return credenti
 
 func credentialsFor(t testing.TB, seed byte) *cluster.Credentials {
 	t.Helper()
-	c, err := cluster.NewCredentials(bytes.Repeat([]byte{seed}, 32), "edge", time.Now())
+	c, err := cluster.NewCredentials([][]byte{bytes.Repeat([]byte{seed}, 32)}, "edge", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,6 +24,8 @@ type State interface {
 	Get(name string) (store.Record, error)
 	// SnapshotFile copies the state to a file of its own, for a backup.
 	SnapshotFile() (string, error)
+	// ReplicaStale records that a tenant's copy no longer matches its data.
+	ReplicaStale(name, why, actor string) error
 }
 
 // Result is how backing up one tenant, or the cluster's state, went.
@@ -56,6 +58,10 @@ type SchedulerConfig struct {
 	// Leader reports whether this node leads the cluster, which keeps the
 	// state's backups; nil means it does (a node alone).
 	Leader func() bool
+	// Hold keeps a tenant's data from being sent to its copies, or
+	// reported whole, until release is called, once the sends under way
+	// ended: the replicator's Hold. nil if nothing sends (a node alone).
+	Hold func(ctx context.Context, tenant string) (release func(), err error)
 	// Every is how often tenants are backed up, VerifyEvery how often
 	// their newest backups are restored aside and compared.
 	Every       time.Duration
@@ -79,6 +85,7 @@ type Scheduler struct {
 	verify    time.Duration
 	log       *slog.Logger
 	exclusive func(func() error) error
+	hold      func(ctx context.Context, tenant string) (func(), error)
 	// running is held by a run or a replacement.
 	running  chan struct{}
 	verified time.Time
@@ -120,7 +127,7 @@ func NewScheduler(c SchedulerConfig) *Scheduler {
 		leader = func() bool { return true }
 	}
 	return &Scheduler{
-		state: c.State, leader: leader, every: c.Every, verify: c.VerifyEvery, log: c.Log, exclusive: c.Exclusive,
+		state: c.State, leader: leader, every: c.Every, verify: c.VerifyEvery, log: c.Log, exclusive: c.Exclusive, hold: c.Hold,
 		running: make(chan struct{}, 1), last: map[string]time.Time{}, failing: map[string]bool{},
 		identityFile: c.IdentityFile, setUp: c.SetUp,
 	}
@@ -194,6 +201,17 @@ func (a *Scheduler) ReplaceTenant(ctx context.Context, tenant, copy string) (Rep
 	if err := a.ready(); err != nil {
 		return Replaced{}, err
 	}
+	// No send of the tenant runs meanwhile, nor reports a copy whole: one
+	// begun before would report the data replaced, which no copy matches
+	// once the replacement began. Taken before the reconciler's lock, so
+	// the passes do not wait for the sends under way too.
+	if a.hold != nil {
+		release, err := a.hold(ctx, tenant)
+		if err != nil {
+			return Replaced{}, fmt.Errorf("the client gave up while waiting for the tenant's sends to its copies; nothing was replaced: %w", err)
+		}
+		defer release()
+	}
 	var result Replaced
 	err := a.exclusive(func() error {
 		record, err := a.state.Get(tenant)
@@ -206,6 +224,11 @@ func (a *Scheduler) ReplaceTenant(ctx context.Context, tenant, copy string) (Rep
 			return fmt.Errorf("tenant %s: %w: archive it before its data is replaced", tenant, store.ErrNotArchived)
 		case record.Node != a.state.Node() || record.MoveTo != "":
 			return fmt.Errorf("tenant %s: %w", tenant, store.ErrElsewhere)
+		}
+		// The copy on another node holds the data being replaced: no
+		// failover may take it until it is sent again, after the hold.
+		if err := a.state.ReplicaStale(tenant, "its data is replaced with backup "+copy, "murder"); err != nil {
+			return err
 		}
 		// Begun, the replacement ends, whether the client waits or not.
 		aside, err := a.backups.ReplaceCopy(context.WithoutCancel(ctx), tenant, copy)
