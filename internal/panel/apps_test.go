@@ -221,3 +221,53 @@ func TestArchivedTenantsInSettings(t *testing.T) {
 		t.Fatalf("too large a form: %d", response.StatusCode)
 	}
 }
+
+func TestUpdatingAnAppAndGoingBack(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	ctx := context.Background()
+	agent := cluster.AsApps("test")
+	_, page := get(t, server.URL+"/apps/addhoc")
+	updated := between(page, `name="updated" value="`, `"`)
+	if !strings.Contains(page, "A newer image of") || !strings.Contains(page, "Update and roll out") || !strings.Contains(page, "Go back to this") {
+		t.Fatalf("the app's page:\n%s", page)
+	}
+	_, body := submit(t, client, server, "/apps/addhoc", url.Values{"do": {"check"}}, server.URL)
+	if !strings.Contains(body, "a newer image of ghcr.io/powerpenguini/addhoc:stable is in its registry: 5e5e5e5e5e5e") {
+		t.Fatalf("after checking:\n%s", body)
+	}
+	before, _ := agent.App(ctx, "addhoc")
+	// An update over a page read before a change is refused.
+	_, body = submit(t, client, server, "/apps/addhoc", url.Values{"do": {"update"}, "updated": {"2001-01-01T00:00:00Z"}}, server.URL)
+	if !strings.Contains(body, "someone changed the app since you opened it") {
+		t.Fatalf("a stale update:\n%s", body)
+	}
+	_, body = submit(t, client, server, "/apps/addhoc", url.Values{"do": {"update"}, "updated": {updated}}, server.URL)
+	if !strings.Contains(body, "app addhoc is changed; it rolls out to 7 tenants") || strings.Contains(body, "A newer image of") {
+		t.Fatalf("after updating:\n%s", body)
+	}
+	after, _ := agent.App(ctx, "addhoc")
+	if after.Spec.Image != before.Latest || after.Latest != "" || after.Revision != 4 {
+		t.Fatalf("updated app %+v", after)
+	}
+	if tenant, _ := cluster.Get(ctx, "acme-logistics"); tenant.Spec.Image != before.Latest {
+		t.Fatalf("acme-logistics runs %s", tenant.Spec.Image)
+	}
+	// Back to revision 2.
+	updated = between(body, `name="updated" value="`, `"`)
+	_, body = submit(t, client, server, "/apps/addhoc", url.Values{"do": {"restore"}, "revision": {"2"}, "updated": {updated}}, server.URL)
+	if !strings.Contains(body, "it rolls out to 7 tenants") {
+		t.Fatalf("after going back:\n%s", body)
+	}
+	if back, _ := agent.App(ctx, "addhoc"); back.Revision != 5 || !strings.HasSuffix(back.Spec.Image, strings.Repeat("a1", 32)) {
+		t.Fatalf("app after going back %+v", back)
+	}
+	// An app given pinned has nothing to check.
+	_, page = get(t, server.URL+"/apps/testapp")
+	if strings.Contains(page, `value="check"`) || !strings.Contains(page, "no tag: the image was given pinned") {
+		t.Fatalf("a pinned app's page:\n%s", page)
+	}
+	_, body = submit(t, client, server, "/apps/testapp", url.Values{"do": {"check"}}, server.URL)
+	if !strings.Contains(body, "nothing to ask its registry about") {
+		t.Fatalf("checking a pinned app:\n%s", body)
+	}
+}

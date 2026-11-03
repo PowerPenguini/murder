@@ -22,6 +22,8 @@ type DemoCluster struct {
 	events  []store.Event
 	nodes   demoNodes
 	apps    map[string]api.App
+	// revisions are each app's revisions, oldest first.
+	revisions map[string][]store.Revision
 	// Pace is how long the demo's slow work takes, as an upgrade's install
 	// or a backup: for watching jobs; none in tests.
 	Pace time.Duration

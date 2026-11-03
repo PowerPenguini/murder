@@ -1,7 +1,27 @@
 {{define "content"}}{{$d := .Data}}{{$a := $d.App}}
 <nav class="crumbs" aria-label="where this is"><a href="/apps">Apps</a><span>/</span><span>{{$a.Name}}</span></nav>
 <div class="title"><h1>{{$a.Name}}</h1></div>
-<p class="lead">{{len $a.Tenants}} live tenants · changed {{ago $a.UpdatedAt}} ago · <a href="/events?app={{$a.Name}}">Events</a></p>
+<p class="lead">{{len $a.Tenants}} live tenants · {{if $a.Revision}}revision {{$a.Revision}} · {{end}}changed {{ago $a.UpdatedAt}} ago · <a href="/events?app={{$a.Name}}">Events</a></p>
+
+<section class="near">
+  <div class="head"><h2>Image</h2>
+    {{if $a.Tag}}<form method="post" class="row"><input type="hidden" name="do" value="check"><button type="submit" title="ask the registry now; the cluster asks every few minutes by itself">Check now</button></form>{{end}}
+  </div>
+  {{if $a.Latest}}
+  <div class="notice">
+    <p class="flat">A newer image of <span class="mono">{{$a.Tag}}</span> is in its registry: <span class="mono" title="{{$a.Latest}}">{{short $a.Latest}}</span>, found {{ago $a.LatestAt}} ago.</p>
+    <form method="post" class="row spaced"><input type="hidden" name="do" value="update"><input type="hidden" name="updated" value="{{$d.Updated}}">
+      <button type="submit" class="primary">Update and roll out</button>
+      <span class="hint">{{if $a.Tenants}}to {{len $a.Tenants}} live tenants, one after the other{{else}}no live tenant runs it{{end}}</span></form>
+  </div>
+  {{end}}
+  <table class="kv">
+    <tbody>
+      <tr><td class="dim">Follows</td><td class="mono">{{if $a.Tag}}{{$a.Tag}}{{else}}<span class="dim">no tag: the image was given pinned</span>{{end}}</td></tr>
+      <tr><td class="dim">Runs</td><td class="mono" title="{{$a.Spec.Image}}">{{short $a.Spec.Image}}{{if and $a.Tag (not $a.Latest)}} <span class="dim">· the newest the registry holds, as last asked</span>{{end}}</td></tr>
+    </tbody>
+  </table>
+</section>
 
 <section data-still class="near">
   <form method="post" class="stack">
@@ -23,6 +43,27 @@
     </tbody>
   </table>
   {{if $d.Archived}}<p class="hint spaced">Archived tenants run the app's spec once restored, and keep it from being deleted.</p>{{end}}
+</section>
+
+<section>
+  <div class="head"><h2>Revisions</h2></div>
+  <table>
+    <thead><tr><th>Revision</th><th>Image</th><th class="hide-narrow">Stored</th><th class="hide-narrow">By</th><th></th></tr></thead>
+    <tbody>
+    {{range $i, $r := $d.Revisions}}
+      <tr>
+        <td class="mono-num">{{$r.Revision}}</td>
+        <td class="mono" title="{{$r.Spec.Image}}">{{short $r.Spec.Image}}{{if ne $r.Tag $a.Tag}} <span class="dim">{{if $r.Tag}}{{$r.Tag}}{{else}}pinned{{end}}</span>{{end}}</td>
+        <td class="when hide-narrow">{{ago $r.CreatedAt}} ago</td>
+        <td class="dim hide-narrow">{{$r.Actor}}</td>
+        <td class="end">{{if eq $i 0}}<span class="dim">current</span>{{else}}<form method="post" class="row"><input type="hidden" name="do" value="restore"><input type="hidden" name="revision" value="{{$r.Revision}}"><input type="hidden" name="updated" value="{{$d.Updated}}"><button type="submit" title="store this revision again and roll it out">Go back to this</button></form>{{end}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="5" class="empty">No revision yet: the app was stored by an older release and has not changed since.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{if gt (len $d.Revisions) 1}}<p class="hint spaced">Going back stores that revision again, its image and tag with it, and rolls it out. The data stays as the newer image left it.</p>{{end}}
 </section>
 
 {{if and (not $a.Tenants) (not $d.Archived)}}

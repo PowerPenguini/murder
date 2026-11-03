@@ -28,8 +28,27 @@ func (d *DemoCluster) demoApps() {
 		app.Name, app.Suspended = "", false
 		d.apps[t.App] = api.App{Name: t.App, Spec: app, CreatedAt: created, UpdatedAt: time.Now().Add(-3 * time.Hour)}
 	}
+	d.revisions = map[string][]store.Revision{}
+	for name, app := range d.apps {
+		app.Revision = 1
+		d.apps[name] = app
+		d.revisions[name] = []store.Revision{{Revision: 1, Spec: app.Spec, Tag: app.Tag, CreatedAt: app.UpdatedAt, Actor: "root"}}
+	}
+	// addhoc follows a tag, has a history, and a newer image waits.
 	if addhoc, ok := d.apps["addhoc"]; ok {
 		addhoc.Tag = "ghcr.io/powerpenguini/addhoc:stable"
+		older := addhoc.Spec
+		older.Image = "ghcr.io/powerpenguini/addhoc@sha256:" + strings.Repeat("a1", 32)
+		oldest := older
+		oldest.Image = "ghcr.io/powerpenguini/addhoc@sha256:" + strings.Repeat("9f", 32)
+		d.revisions["addhoc"] = []store.Revision{
+			{Revision: 1, Spec: oldest, Tag: addhoc.Tag, CreatedAt: created, Actor: "root"},
+			{Revision: 2, Spec: older, Tag: addhoc.Tag, CreatedAt: time.Now().Add(-9 * 24 * time.Hour), Actor: "mateusz via murder-panel"},
+			{Revision: 3, Spec: addhoc.Spec, Tag: addhoc.Tag, CreatedAt: addhoc.UpdatedAt, Actor: "root"},
+		}
+		addhoc.Revision = 3
+		addhoc.Latest = "ghcr.io/powerpenguini/addhoc@sha256:" + strings.Repeat("5e", 32)
+		addhoc.LatestAt = time.Now().Add(-18 * time.Minute)
 		d.apps["addhoc"] = addhoc
 	}
 	d.apps["testapp"] = api.App{Name: "testapp", Spec: spec.Tenant{Image: "ghcr.io/powerpenguini/murder-testapp@sha256:" + strings.Repeat("7", 64), User: "10001:10001", HealthPath: "/health"}.WithDefaults(),
@@ -90,6 +109,12 @@ func (a *demoActor) PutAppIf(_ context.Context, name string, app spec.Tenant, co
 			app.Image = old.Spec.Image
 		}
 	}
+	return a.storeApp(name, app, tag, cond, "")
+}
+
+// storeApp stores an app as its newest revision; the caller holds d.mu.
+func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond store.AppIf, detail string) (api.AppApplied, error) {
+	old, existed := a.apps[name]
 	switch {
 	case cond.Absent && existed:
 		return api.AppApplied{}, &api.Error{Status: 409, Message: "app " + name + " exists already"}
@@ -100,14 +125,19 @@ func (a *demoActor) PutAppIf(_ context.Context, name string, app spec.Tenant, co
 	applied := api.AppApplied{Created: !existed, Changed: !existed || !old.Spec.WithDefaults().Equal(app) || old.Tag != tag}
 	if !applied.Changed {
 		applied.App = old
+		applied.App.Tenants = a.liveTenantsOf(name)
 		return applied, nil
 	}
 	now := time.Now()
-	stored := api.App{Name: name, Spec: app, Tag: tag, CreatedAt: now, UpdatedAt: now}
+	stored := api.App{Name: name, Spec: app, Tag: tag, Revision: old.Revision + 1, CreatedAt: now, UpdatedAt: now}
 	if existed {
 		stored.CreatedAt = old.CreatedAt
+		if old.Tag == tag && old.Latest != app.Image {
+			stored.Latest, stored.LatestAt = old.Latest, old.LatestAt
+		}
 	}
 	a.apps[name] = stored
+	a.revisions[name] = append(a.revisions[name], store.Revision{Revision: stored.Revision, Spec: app, Tag: tag, CreatedAt: now, Actor: a.actor})
 	for _, tenant := range a.liveTenantsOf(name) {
 		t := a.tenants[tenant]
 		t.Spec = spec.Compose(app, tenant, t.Overrides)
@@ -120,9 +150,70 @@ func (a *demoActor) PutAppIf(_ context.Context, name string, app spec.Tenant, co
 		action = "app.created"
 	}
 	a.recordApp(action, name)
+	if detail != "" {
+		a.events[0].Detail = detail
+	}
 	stored.Tenants = a.liveTenantsOf(name)
 	applied.App = stored
 	return applied, nil
+}
+
+func (a *demoActor) CheckApp(_ context.Context, name string) (api.AppCheck, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	app, ok := a.apps[name]
+	switch {
+	case !ok:
+		return api.AppCheck{}, &api.Error{Status: 404, Message: "app " + name + ": not found"}
+	case app.Tag == "":
+		return api.AppCheck{}, &api.Error{Status: 422, Message: "app " + name + " was given a pinned image, not a tag: there is nothing to ask its registry about"}
+	}
+	app.Tenants = a.liveTenantsOf(name)
+	if app.Latest != "" {
+		return api.AppCheck{App: app, Image: app.Latest, Newer: true}, nil
+	}
+	return api.AppCheck{App: app, Image: app.Spec.Image}, nil
+}
+
+func (a *demoActor) UpdateApp(_ context.Context, name string, updatedAt time.Time) (api.AppApplied, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	app, ok := a.apps[name]
+	switch {
+	case !ok:
+		return api.AppApplied{}, &api.Error{Status: 404, Message: "app " + name + ": not found"}
+	case app.Tag == "":
+		return api.AppApplied{}, &api.Error{Status: 422, Message: "app " + name + " was given a pinned image, not a tag: there is nothing to ask its registry about"}
+	}
+	next := app.Spec
+	if app.Latest != "" {
+		next.Image = app.Latest
+	}
+	return a.storeApp(name, next, app.Tag, store.AppIf{UpdatedAt: updatedAt}, "")
+}
+
+func (a *demoActor) AppRevisions(_ context.Context, name string) ([]store.Revision, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.apps[name]; !ok {
+		return nil, &api.Error{Status: 404, Message: "app " + name + ": not found"}
+	}
+	var revisions []store.Revision
+	for _, revision := range slices.Backward(a.revisions[name]) {
+		revisions = append(revisions, revision)
+	}
+	return revisions, nil
+}
+
+func (a *demoActor) RestoreRevision(_ context.Context, name string, revision int64, updatedAt time.Time) (api.AppApplied, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, kept := range a.revisions[name] {
+		if kept.Revision == revision {
+			return a.storeApp(name, kept.Spec, kept.Tag, store.AppIf{UpdatedAt: updatedAt}, "back to revision "+strconv.FormatInt(revision, 10))
+		}
+	}
+	return api.AppApplied{}, &api.Error{Status: 404, Message: "app " + name + " keeps no revision " + strconv.FormatInt(revision, 10)}
 }
 
 func (a *demoActor) recordApp(action, app string) {

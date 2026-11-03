@@ -120,3 +120,11 @@ Each stage is one PR, reviewed and tested before the next.
    panel never asks for a secret's value: it shows names and kinds only.
    A refused form comes back as typed, saying why. The events page also
    filters by app.
+7. **Updates and revisions:** an app given a tag shows the tag in its file
+   (a save keeps the image it is pinned to), the image it runs, and a
+   newer one the leader found in its registry, with "Update and roll out"
+   (`POST /v1/apps/NAME/update?if=`) and "Check now". Its revisions are a
+   table; "Go back to this" stores one again (`POST
+   /v1/apps/NAME/revisions/N/restore?if=`). Both are refused over a change
+   made since the page was read. The Apps page marks apps with a newer
+   image.
