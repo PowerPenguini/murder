@@ -27,6 +27,10 @@ type AppAgent interface {
 	App(ctx context.Context, name string) (api.App, error)
 	PutAppIf(ctx context.Context, name string, app spec.Tenant, cond store.AppIf) (api.AppApplied, error)
 	DeleteApp(ctx context.Context, name string) error
+	CheckApp(ctx context.Context, name string) (api.AppCheck, error)
+	UpdateApp(ctx context.Context, name string, updatedAt time.Time) (api.AppApplied, error)
+	AppRevisions(ctx context.Context, name string) ([]store.Revision, error)
+	RestoreRevision(ctx context.Context, name string, revision int64, updatedAt time.Time) (api.AppApplied, error)
 	Get(ctx context.Context, name string) (api.Tenant, error)
 	Configure(ctx context.Context, name string, request api.TenantRequest) (api.Applied, error)
 	Rotate(ctx context.Context, name, key string) (api.Tenant, error)
@@ -151,6 +155,8 @@ type appData struct {
 	Updated string
 	// Archived are its archived tenants: they keep it from being deleted.
 	Archived []string
+	// Revisions are its recent revisions, newest first.
+	Revisions []store.Revision
 }
 
 func (s *Server) app(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +196,10 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, p
 		}
 	}
 	slices.Sort(data.Archived)
+	if data.Revisions, err = s.Apps(s.actor(userOf(r))).AppRevisions(ctx, data.App.Name); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	s.renderWith(w, r, "app", data.App.Name, "apps", data, problem, status)
 }
 
@@ -232,6 +242,38 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 		applied, err := agent.PutAppIf(ctx, name, app, store.AppIf{UpdatedAt: current.UpdatedAt})
 		if err != nil {
 			refuse(err.Error())
+			return
+		}
+		back("done", appOutcome(name, applied))
+	case "check":
+		check, err := agent.CheckApp(ctx, name)
+		switch {
+		case err != nil:
+			back("problem", err.Error())
+		case check.Newer:
+			back("done", "a newer image of "+check.App.Tag+" is in its registry: "+shortImage(check.Image))
+		default:
+			back("done", "app "+name+" runs the newest image of "+check.App.Tag)
+		}
+	case "update", "restore":
+		// An update or a revision is taken over the app as it was shown.
+		if current.UpdatedAt.IsZero() || r.FormValue("updated") != stampOf(current.UpdatedAt) {
+			back("problem", "someone changed the app since you opened it: look again, then try again")
+			return
+		}
+		var applied api.AppApplied
+		if r.FormValue("do") == "update" {
+			applied, err = agent.UpdateApp(ctx, name, current.UpdatedAt)
+		} else {
+			revision, parseErr := strconv.ParseInt(r.FormValue("revision"), 10, 64)
+			if parseErr != nil {
+				back("problem", "no such revision")
+				return
+			}
+			applied, err = agent.RestoreRevision(ctx, name, revision, current.UpdatedAt)
+		}
+		if err != nil {
+			back("problem", err.Error())
 			return
 		}
 		back("done", appOutcome(name, applied))
