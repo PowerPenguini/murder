@@ -471,8 +471,10 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		err = errNoCluster
 	} else {
 		// The node it runs on creates it: the data there is that node's
-		// to check, under its own lock.
-		record, err = s.cluster.CreateOn(ctx, node, tenant, actor(r))
+		// to check, under its own lock. The client's own context: one that
+		// gives up while that node waits for its lock creates nothing there
+		// either (it finishes, detached, what it began).
+		record, err = s.cluster.CreateOn(r.Context(), node, tenant, actor(r))
 	}
 	if err != nil {
 		writeError(w, err)
@@ -890,7 +892,9 @@ func writeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &typed):
 		status = typed.status
-	case errors.As(err, &peer) && peer.Status >= 400 && peer.Status < 500:
+	case errors.As(err, &peer) && (peer.Status >= 400 && peer.Status < 500 || peer.Status == http.StatusServiceUnavailable):
+		// What another node answered, a refusal or "try again", stays
+		// that for the client.
 		status = peer.Status
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusNotFound

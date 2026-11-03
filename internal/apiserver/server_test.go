@@ -1027,3 +1027,13 @@ func TestACreateGivenUpCreatesNothing(t *testing.T) {
 		t.Fatal("created for a client that gave up")
 	}
 }
+
+// Another node that is stopping answers 503: the client gets it, to try
+// again, not a 500.
+func TestAnotherNodesTryAgainReachesTheClient(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeError(w, fmt.Errorf("node n2: %w", &cluster.PeerError{Status: http.StatusServiceUnavailable, Message: "the agent is stopping"}))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", w.Code)
+	}
+}
