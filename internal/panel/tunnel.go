@@ -77,6 +77,9 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 
 	ours := store.Tunnel{Address: config.Address, Key: public, Port: config.Port}
 	published, lastPeers := false, ""
+	// read is when the devices were last read: the tunnel starts with
+	// none let in, so it counts as read now.
+	read := time.Now()
 	// Failures in a row: the agent may still be starting, so only the
 	// third is told.
 	failed := map[string]int{}
@@ -85,10 +88,16 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 			log.Warn(message, "error", err)
 		}
 	}
+	// Each call to the agent gets a polling interval at most: one that
+	// hangs must not stop the polling, which shuts out removed devices.
+	call := func() (context.Context, context.CancelFunc) { return context.WithTimeout(ctx, every) }
 	for {
 		// The state names this end, for the devices' configurations; as
 		// after this node left the cluster and came back, again and again.
-		if err := agent.SetTunnel(ctx, ours); err != nil && ctx.Err() == nil {
+		callCtx, cancel := call()
+		err := agent.SetTunnel(callCtx, ours)
+		cancel()
+		if err != nil && ctx.Err() == nil {
 			report("tunnel", "record this node's end of the panel's tunnel", err)
 		} else if err == nil {
 			if !published {
@@ -96,18 +105,13 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 			}
 			published, failed["tunnel"] = true, 0
 		}
-		if devices, err := agent.Devices(ctx); err != nil && ctx.Err() == nil {
+		callCtx, cancel = call()
+		devices, err := agent.Devices(callCtx)
+		cancel()
+		if err != nil && ctx.Err() == nil {
 			report("devices", "read the devices that may reach the panel", err)
-			// Not knowing which devices may, it lets none in: one removed
-			// meanwhile must not reach this node.
-			if failed["devices"] == 3 && lastPeers != "" {
-				if err := end.SetPeers(nil); err == nil {
-					lastPeers = ""
-					log.Warn("no device reaches the panel on this node until the devices can be read again")
-				}
-			}
 		} else if err == nil {
-			failed["devices"] = 0
+			read, failed["devices"] = time.Now(), 0
 			peers, key := devicePeers(devices)
 			if key != lastPeers {
 				if err := end.SetPeers(peers); err != nil {
@@ -116,6 +120,15 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 					lastPeers = key
 					log.Info("the devices that may reach the panel", "devices", len(peers))
 				}
+			}
+		}
+		// Not knowing which devices may, however the reading failed, it
+		// lets none in until it knows again: one removed meanwhile must not
+		// reach this node.
+		if lastPeers != "" && time.Since(read) > staleDevices*every {
+			if err := end.SetPeers(nil); err == nil {
+				lastPeers = ""
+				log.Warn("no device reaches the panel on this node until the devices can be read again")
 			}
 		}
 		select {
@@ -127,6 +140,10 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 		}
 	}
 }
+
+// staleDevices is how many polling intervals the devices may go unread
+// before the tunnel lets no device in.
+const staleDevices = 3
 
 // devicePeers are the devices as the tunnel's peers, and a key that
 // changes when they do.

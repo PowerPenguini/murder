@@ -182,6 +182,7 @@ func serveTunnel(ctx context.Context, cfg config.Agent, client *api.Client, hand
 		case <-time.After(2 * time.Second):
 		}
 	}
+	defer certificates.Close()
 	address, err := netip.ParseAddr(t.Address)
 	if err != nil {
 		return err

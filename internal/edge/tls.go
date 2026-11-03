@@ -61,6 +61,15 @@ type Certificates struct {
 	// NotAfter returns when the first of the certificates served now
 	// expires; zero if none is known.
 	NotAfter func() time.Time
+	// stop ends what keeps the certificates renewed, if anything does.
+	stop func()
+}
+
+// Close stops renewing the certificates, once nothing serves them.
+func (c *Certificates) Close() {
+	if c != nil && c.stop != nil {
+		c.stop()
+	}
 }
 
 // NewTLS returns the TLS setup for the wildcard and apex names of
@@ -115,13 +124,14 @@ func acmeTLS(ctx context.Context, config TLSConfig, names []string, log *slog.Lo
 	if ca == "" {
 		ca = certmagic.LetsEncryptProductionCA
 	}
-	var magic *certmagic.Config
-	cache := certmagic.NewCache(certmagic.CacheOptions{
-		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return magic, nil },
-	})
 	// certmagic logs renewals and their failures; keep them, with the
 	// agent's other logs.
 	logger := zap.New(slogCore{log: log.With("component", "certmagic")})
+	var magic *certmagic.Config
+	cache := certmagic.NewCache(certmagic.CacheOptions{
+		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return magic, nil },
+		Logger:           logger,
+	})
 	magic = certmagic.New(cache, certmagic.Config{Storage: &certmagic.FileStorage{Path: config.Storage}, Logger: logger})
 	issuer := certmagic.NewACMEIssuer(magic, certmagic.ACMEIssuer{
 		CA:                      ca,
@@ -135,6 +145,9 @@ func acmeTLS(ctx context.Context, config TLSConfig, names []string, log *slog.Lo
 	magic.Issuers = []certmagic.Issuer{issuer}
 	log.Info("obtaining wildcard certificate", "names", names, "ca", ca)
 	if err := magic.ManageSync(ctx, names); err != nil {
+		// The cache renews in the background from the start; the next
+		// attempt makes its own.
+		cache.Stop()
 		return nil, fmt.Errorf("obtain certificate for %v: %w", names, err)
 	}
 	tlsConfig := magic.TLSConfig()
@@ -160,7 +173,8 @@ func acmeTLS(ctx context.Context, config TLSConfig, names []string, log *slog.Lo
 		}
 		return first
 	}
-	return &Certificates{Config: tlsConfig, NotAfter: notAfter}, nil
+	var once sync.Once
+	return &Certificates{Config: tlsConfig, NotAfter: notAfter, stop: func() { once.Do(cache.Stop) }}, nil
 }
 
 func leafOf(certificate tls.Certificate) (*x509.Certificate, error) {
