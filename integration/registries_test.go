@@ -62,6 +62,14 @@ func TestPullFromAPrivateRegistryOnDocker(t *testing.T) {
 		}
 		return strings.TrimSpace(string(output))
 	}
+	// No credential helper either: the login must not reach the user's
+	// keyring.
+	if err := os.MkdirAll(filepath.Join(dir, "cli"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cli", "config.json"), []byte(`{"credsStore":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	ref := host + "/murder-it/private:1"
 	imageID := buildTestImage(t, "private", ref)
 	cli("login", host, "-u", "bot", "--password-stdin")

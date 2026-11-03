@@ -77,6 +77,7 @@ func TestParseRejectsBadConfig(t *testing.T) {
 		"registry path":  "baseDomain: example.com\nregistries: [{host: ghcr.io/org, username: u, tokenFile: /t}]\n",
 		"registry user":  "baseDomain: example.com\nregistries: [{host: ghcr.io, tokenFile: /t}]\n",
 		"registry file":  "baseDomain: example.com\nregistries: [{host: ghcr.io, username: u, tokenFile: t}]\n",
+		"hub twice":      "baseDomain: example.com\nregistries: [{host: docker.io, username: u, tokenFile: /t}, {host: index.docker.io, username: v, tokenFile: /v}]\n",
 		"registry twice": "baseDomain: example.com\nregistries: [{host: ghcr.io, username: u, tokenFile: /t}, {host: GHCR.io, username: v, tokenFile: /v}]\n",
 	} {
 		if _, err := Parse([]byte(document)); err == nil {

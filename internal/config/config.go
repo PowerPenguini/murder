@@ -96,6 +96,17 @@ type Registry struct {
 // begins with it.
 var registryHost = regexp.MustCompile(`^(localhost|[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+)(:[0-9]{1,5})?$`)
 
+// sameRegistry names a registry as pulls see it: Docker Hub's host names
+// are all docker.io.
+func sameRegistry(host string) string {
+	host = strings.ToLower(host)
+	switch host {
+	case "index.docker.io", "registry-1.docker.io":
+		return "docker.io"
+	}
+	return host
+}
+
 func registriesProblems(registries []Registry) []string {
 	var problems []string
 	seen := map[string]bool{}
@@ -104,10 +115,10 @@ func registriesProblems(registries []Registry) []string {
 		switch {
 		case !registryHost.MatchString(registry.Host):
 			problems = append(problems, where+".host must be a registry's host name, such as ghcr.io, without https:// or a path")
-		case seen[strings.ToLower(registry.Host)]:
+		case seen[sameRegistry(registry.Host)]:
 			problems = append(problems, where+".host "+registry.Host+" is given twice")
 		}
-		seen[strings.ToLower(registry.Host)] = true
+		seen[sameRegistry(registry.Host)] = true
 		if registry.Username == "" {
 			problems = append(problems, where+".username must be set")
 		}
