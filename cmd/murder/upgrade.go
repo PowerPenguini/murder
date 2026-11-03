@@ -107,8 +107,10 @@ next node follows once it is back and has caught up.
 If a node does not come back, the upgrade stops there and changes stay
 frozen: on that node, with its agent stopped, "murder upgrade rollback"
 puts the old binary (and, if the new release changed it, the old database)
-back; run it as /usr/local/bin/murder.prev, the old binary, if the new one
-does not run. Running the same upgrade again on the same node resumes it.
+back. Run it as the new binary in place: it puts the database back first,
+and if stopped, run again, it finishes. Only if the new binary does not run
+at all, run it as /usr/local/bin/murder.prev, the old binary; one of
+v0.1.0 does not resume. Running the same upgrade again on the same node resumes it.
 An upgrade never takes over the freeze of another, which may still run
 elsewhere, unless told -take-over. "murder upgrade -thaw" takes changes
 again; it is for an upgrade that stopped, safe only once every node runs
@@ -156,9 +158,15 @@ func short(sha string) string {
 	return sha
 }
 
+// restoreDatabase puts a database copy in place; a test makes it fail.
+var restoreDatabase = store.Restore
+
 // runRollback puts the binary an upgrade replaced back on this node, and
 // the database as it was before, if the new release changed its schema. It
-// undoes the last install only, and only while the agent is stopped.
+// undoes the last install only, and only while the agent is stopped. The
+// database goes back first, while the new binary, whose code resumes a
+// rollback, is still in place: the old one may be of a release that cannot
+// (v0.1.0 drops the record as it puts its binary back).
 func runRollback(args []string) error {
 	flags := flag.NewFlagSet("upgrade rollback", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfig, "agent configuration file")
@@ -183,7 +191,8 @@ func runRollback(args []string) error {
 	} else if running {
 		return errors.New("the agent runs: stop it first (systemctl stop murder-agent)")
 	}
-	record, err := upgrade.LastInstall(executable)
+	// Nothing changes unless the binary can go back too.
+	record, err := upgrade.CheckRollback(executable)
 	if err != nil {
 		return err
 	}
@@ -202,8 +211,7 @@ func runRollback(args []string) error {
 		return err
 	}
 	before := cfg.Database + ".before-upgrade"
-	restore := schema > record.From.Schema
-	if restore {
+	if schema > record.From.Schema {
 		if _, err := store.CheckBackup(before); err != nil {
 			return fmt.Errorf("nothing was rolled back: the new release changed the database (schema %d, the old binary opens %d), and its copy from before the upgrade cannot be put back: %w", schema, record.From.Schema, err)
 		}
@@ -212,22 +220,20 @@ func runRollback(args []string) error {
 		} else if copied > record.From.Schema {
 			return fmt.Errorf("nothing was rolled back: %s is of schema %d, which the old binary (schema %d) does not open", before, copied, record.From.Schema)
 		}
-	}
-	// The record stays until the database is back too: a rollback that
-	// stops between them is run again, and finishes.
-	if record, err = upgrade.Rollback(executable); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "put murder %s back (the new binary is %s.failed)\n", short(record.From.Binary), executable)
-	if restore {
-		kept, err := store.Restore(before, cfg.Database)
+		kept, err := restoreDatabase(before, cfg.Database)
 		if err != nil {
-			return fmt.Errorf("put the database back: %w\nthe old binary is in place; once this is fixed, run \"%s upgrade rollback\" again: it puts the database back", err, executable)
+			return fmt.Errorf("put the database back: %w\nnothing else changed: the new binary is still in place; once this is fixed, run \"%s upgrade rollback\" again", err, executable)
 		}
 		fmt.Fprintf(stdout, "put the database from before the upgrade back; the one the new release changed is %s\n", kept)
 	}
+	// The record stays until the binary is back too: a rollback that
+	// stops before is run again, and finishes.
+	if record, err = upgrade.Rollback(executable); err != nil {
+		return fmt.Errorf("put the old binary back: %w\nthe new binary is still in place; once this is fixed, run \"%s upgrade rollback\" again", err, executable)
+	}
+	fmt.Fprintf(stdout, "put murder %s back (the new binary is kept as %s.failed)\n", short(record.From.Binary), executable)
 	if err := upgrade.FinishRollback(executable); err != nil {
-		return err
+		return fmt.Errorf("%w\nthe old binary and its database are back; run \"%s.failed upgrade rollback\" (the new binary's code) to finish", err, executable)
 	}
 	fmt.Fprintln(stdout, "now: systemctl start murder-agent; systemctl reload murder-edge")
 	return nil

@@ -252,6 +252,25 @@ func TestTheOldBinaryRollsBackTheNewOne(t *testing.T) {
 	if inPlace, _ := os.ReadFile(f.node.Executable); !bytes.Equal(inPlace, fakeBinary(5, "old")) {
 		t.Fatalf("after rollback from murder.prev: %q in place", inPlace)
 	}
+	// The old binary in place may be one (v0.1.0) whose rollback cannot
+	// finish this one: the new binary, kept as murder.failed, does, while
+	// the record is there.
+	failed := f.node.Executable + ".failed"
+	if kept, _ := os.ReadFile(failed); !bytes.Equal(kept, binary) {
+		t.Fatalf("murder.failed holds %q, not the new binary", kept)
+	}
+	if got := RollbackTarget(failed); got != f.node.Executable {
+		t.Fatalf("murder.failed rolls back %s, want %s", got, f.node.Executable)
+	}
+	if _, err := Rollback(RollbackTarget(failed)); err != nil {
+		t.Fatalf("finishing from murder.failed: %v", err)
+	}
+	if err := FinishRollback(f.node.Executable); err != nil {
+		t.Fatal(err)
+	}
+	if got := RollbackTarget(failed); got != failed {
+		t.Fatalf("once finished, murder.failed rolls back %s", got)
+	}
 }
 
 func TestInstallRefusesWhenTheBinaryInPlaceIsNotTheOneRunning(t *testing.T) {

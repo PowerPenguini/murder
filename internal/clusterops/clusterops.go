@@ -160,7 +160,7 @@ func run(ctx context.Context, client Client, binary string, wait time.Duration, 
 		case errors.As(err, &refused):
 			return fmt.Errorf("%w\nit runs its old binary; %d node(s) run the new one, so changes stay frozen until every node runs one release: run this upgrade again (it resumes), or one with a fixed binary (-take-over)", err, upgraded)
 		case errors.As(err, new(*backError)):
-			return fmt.Errorf("%w\nchanges stay frozen: on node %s, \"murder.prev upgrade rollback\" (the old binary, beside murder; agent stopped) puts it back; then run this upgrade again, or, once no node runs the new binary, \"murder upgrade -thaw\"", err, node)
+			return fmt.Errorf("%w\nchanges stay frozen: on node %s, with its agent stopped, \"murder upgrade rollback\" (the new binary, whose rollback resumes if stopped; \"murder.prev upgrade rollback\" only if it does not run) puts it back; then run this upgrade again, or, once no node runs the new binary, \"murder upgrade -thaw\"", err, node)
 		default:
 			return fmt.Errorf("%w\nchanges stay frozen: check node %s (\"murder version\" there), then run this upgrade again (it resumes where it stopped)", err, node)
 		}

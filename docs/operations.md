@@ -77,15 +77,23 @@ upgrade takes changes again, if the freeze is still its own. A node that
 refuses the binary keeps its old one, edge included; if it was the first,
 and the nodes ran one release, changes are taken again at once. A node that
 does not come back stops the upgrade with changes still frozen: on that
-node, with its agent stopped, `murder.prev upgrade rollback` (the old
-binary, beside the new one, so it works even if the new one does not run)
-puts the old binary back (and the database from before the upgrade, if the
-new release changed its schema); it undoes that node's last install, nothing older, and only
-while an upgrade is under way (`-force` otherwise: the database would go back
-to before it). It checks first that the database's copy can go back, and
-changes nothing if not; one that stops between the binary and the database
-is run again, and finishes. Running the same upgrade again, on the node it
-ran from, resumes it where it stopped. An upgrade never takes over the
+node, with its agent stopped, `murder upgrade rollback` (the new binary, in
+place) puts the old binary back (and the database from before the upgrade,
+if the new release changed its schema); it undoes that node's last install,
+nothing older, and only while an upgrade is under way (`-force` otherwise:
+the database would go back to before it). It checks first that both can go
+back, and changes nothing if not. It puts the database back first, while
+the new binary is still in place: a rollback that stops there is run again
+the same way, and finishes. It then keeps the new binary as `murder.failed`
+and puts the old one in place; should it stop after that, run
+`murder.failed upgrade rollback` to finish. Run the rollback from the new
+binary, or from `murder.failed`, not from the old one: the old binary of
+v0.1.0 puts its binary back first and forgets the upgrade, so a rollback it
+began does not resume. Only if the new binary does not run at all, run
+`murder.prev upgrade rollback` (the old binary, beside it); from v0.1.0, if
+it then fails to put the database back, put the copy back by hand:
+`sudo murder restore /var/lib/murder/murder.db.before-upgrade`. Running
+the same upgrade again, on the node it ran from, resumes it where it stopped. An upgrade never takes over the
 freeze of another, which may still run on another node: once sure that one
 stopped and runs nowhere, `murder upgrade -take-over ./murder` takes it
 over, say with a fixed binary. An upgrade whose freeze was taken over, or

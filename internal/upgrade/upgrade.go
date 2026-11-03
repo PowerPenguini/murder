@@ -359,13 +359,18 @@ type Record struct {
 func recordPath(executable string) string { return executable + ".upgrade" }
 
 // RollbackTarget is the binary a rollback run as executable puts the old
-// one back for: the old binary, kept as murder.prev, rolls back the one in
-// place, so a node whose new binary does not even run can still be rolled
-// back.
+// one back for. The new binary, in place, rolls itself back. The old one,
+// kept as murder.prev, rolls back the one in place, so a node whose new
+// binary does not even run can still be rolled back. A copy of the new
+// binary, kept as murder.failed once the old one is back, finishes a
+// rollback that stopped after that: the old binary in place may be of a
+// release that cannot.
 func RollbackTarget(executable string) string {
-	if installed, ok := strings.CutSuffix(executable, ".prev"); ok {
-		if _, err := os.Stat(recordPath(installed)); err == nil {
-			return installed
+	for _, suffix := range []string{".prev", ".failed"} {
+		if installed, ok := strings.CutSuffix(executable, suffix); ok {
+			if _, err := os.Stat(recordPath(installed)); err == nil {
+				return installed
+			}
 		}
 	}
 	return executable
@@ -399,14 +404,12 @@ func LastInstall(executable string) (Record, error) {
 // ErrNothingToRollBack reports a node with no install to undo.
 var ErrNothingToRollBack = errors.New("no upgrade of this node to roll back")
 
-// Rollback puts back the binary the last install replaced, if the binary
-// in place is the one it installed, and returns the record, whose From
-// schema says which database the old binary opens. It keeps the record:
-// a rollback that also puts the database back is over only once that is
-// done too, and then FinishRollback removes it. A rollback that stopped
-// after putting the binary back finds it in place, and returns the record
-// again.
-func Rollback(executable string) (Record, error) {
+// CheckRollback returns the record of the last install over executable
+// if a rollback can put its binary back, changing nothing: the binary in
+// place is the one it installed and murder.prev the one it replaced, or
+// the old binary is back already. The record's From schema says which
+// database the old binary opens.
+func CheckRollback(executable string) (Record, error) {
 	record, err := LastInstall(executable)
 	if err != nil {
 		return Record{}, err
@@ -426,8 +429,29 @@ func Rollback(executable string) (Record, error) {
 		return Record{}, fmt.Errorf("%w: %s holds %s and its .prev %s, not what the last install left (%s replacing %s)",
 			ErrNothingToRollBack, executable, short(inPlace), short(previous), short(record.To.Binary), short(record.From.Binary))
 	}
-	if err := os.Rename(executable, executable+".failed"); err != nil {
+	return record, nil
+}
+
+// Rollback puts back the binary the last install replaced, if CheckRollback
+// allows it, and returns the record. The new binary is copied to
+// murder.failed first and the old one then renamed over it, so a binary is
+// always in place and the new one, whose code finishes a rollback, is
+// kept. It keeps the record: a rollback that also puts the database back
+// is over only once both are, and then FinishRollback removes it. A
+// rollback that stopped after putting the binary back finds it in place,
+// and returns the record again.
+func Rollback(executable string) (Record, error) {
+	record, err := CheckRollback(executable)
+	if err != nil {
 		return Record{}, err
+	}
+	if inPlace, err := Hash(executable); err != nil {
+		return Record{}, err
+	} else if inPlace == record.From.Binary {
+		return record, nil
+	}
+	if err := copyFile(executable, executable+".failed"); err != nil {
+		return Record{}, fmt.Errorf("keep the new binary: %w", err)
 	}
 	if err := os.Rename(executable+".prev", executable); err != nil {
 		return Record{}, err

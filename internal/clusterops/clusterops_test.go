@@ -372,7 +372,7 @@ func TestANodeThatDoesNotComeBackKeepsChangesFrozen(t *testing.T) {
 	agent.stuck = map[string]bool{"n2": true}
 	path, _ := binary(t)
 	err := Upgrade(context.Background(), agent, path, 2*time.Second, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "did not come back") || !strings.Contains(err.Error(), "murder.prev upgrade rollback") || agent.frozen == "" {
+	if err == nil || !strings.Contains(err.Error(), "did not come back") || !strings.Contains(err.Error(), `"murder upgrade rollback" (the new binary`) || agent.frozen == "" {
 		t.Fatalf("upgrade: %v, frozen %q", err, agent.frozen)
 	}
 	if !slices.Equal(agent.installed, []string{"n2"}) {

@@ -286,3 +286,70 @@ func TestARollbackChecksTheDatabaseFirstAndFinishes(t *testing.T) {
 		t.Fatalf("a rollback once done: %v", err)
 	}
 }
+
+// A rollback puts the database back before the binary: if that fails, the
+// new binary, whose rollback resumes, is still in place, and the error
+// says to run it again, not the old binary (one of v0.1.0 drops the
+// record and cannot finish).
+func TestARollbackPutsTheDatabaseBackBeforeTheBinary(t *testing.T) {
+	dir := t.TempDir()
+	cfg := nodeConfig(t, dir, "")
+	database := filepath.Join(dir, "murder.db")
+	if err := store.Init(database, "n1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(database+".before-upgrade", "n1"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(fmt.Sprintf("PRAGMA user_version = %d", store.SchemaVersion+1))
+	if err = errors.Join(err, db.Close()); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(dir, "murder")
+	_ = os.WriteFile(executable, []byte("new"), 0o755)
+	_ = os.WriteFile(executable+".prev", []byte("old"), 0o755)
+	old, _ := upgrade.Hash(executable + ".prev")
+	installed, _ := upgrade.Hash(executable)
+	record, _ := json.Marshal(upgrade.Record{From: upgrade.Version{Binary: old, Schema: store.SchemaVersion}, To: upgrade.Version{Binary: installed, Schema: store.SchemaVersion + 1}})
+	_ = os.WriteFile(executable+".upgrade", record, 0o600)
+	capture(t)
+	rollback := func() error { return runRollback([]string{"-config", cfg, "-binary", executable, "-force"}) }
+
+	restoreDatabase = func(string, string) (string, error) { return "", errors.New("disk full") }
+	defer func() { restoreDatabase = store.Restore }()
+	err = rollback()
+	if err == nil || !strings.Contains(err.Error(), "disk full") || !strings.Contains(err.Error(), `run "`+executable+` upgrade rollback" again`) || strings.Contains(err.Error(), ".prev") {
+		t.Fatalf("a rollback whose database did not go back: %v", err)
+	}
+	if data, _ := os.ReadFile(executable); string(data) != "new" {
+		t.Fatalf("the binary went back before the database: %q in place", data)
+	}
+	if data, _ := os.ReadFile(executable + ".prev"); string(data) != "old" {
+		t.Fatalf("murder.prev holds %q", data)
+	}
+	if _, err := upgrade.LastInstall(executable); err != nil {
+		t.Fatalf("the record is gone: %v", err)
+	}
+
+	// Run again, as the error says, it finishes.
+	restoreDatabase = store.Restore
+	if err := rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(executable); string(data) != "old" {
+		t.Fatalf("after rollback %q is in place", data)
+	}
+	if data, _ := os.ReadFile(executable + ".failed"); string(data) != "new" {
+		t.Fatalf("the new binary is not kept: %q", data)
+	}
+	if schema, err := store.DatabaseSchema(database); err != nil || schema != store.SchemaVersion {
+		t.Fatalf("after rollback the database is of schema %d: %v", schema, err)
+	}
+	if _, err := upgrade.LastInstall(executable); !errors.Is(err, upgrade.ErrNothingToRollBack) {
+		t.Fatalf("the record stays after the rollback finished: %v", err)
+	}
+}
