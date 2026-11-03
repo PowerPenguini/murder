@@ -57,6 +57,7 @@ func TestDirEnsureIsPrivateIdempotentAndRemoves(t *testing.T) {
 
 type fakeDataset struct {
 	owner, mountpoint, canmount, role string
+	swap                              string // io.murder:swap
 	mounted                           bool
 	refquota, used                    int64
 }
@@ -107,10 +108,13 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		if canmount == "" {
 			canmount = "on"
 		}
-		return []byte(dash(d.owner) + "\n" + mounted + "\n" + d.mountpoint + "\n" + strconv.FormatInt(d.refquota, 10) + "\n" + dash(d.role) + "\n" + canmount + "\n"), nil
+		return []byte(dash(d.owner) + "\n" + mounted + "\n" + d.mountpoint + "\n" + strconv.FormatInt(d.refquota, 10) + "\n" + dash(d.role) + "\n" + canmount + "\n" + dash(d.swap) + "\n"), nil
 	case "inherit":
 		if args[1] == roleProperty {
 			f.datasets[dataset].role = ""
+		}
+		if args[1] == swapProperty {
+			f.datasets[dataset].swap = ""
 		}
 		return nil, nil
 	case "create":
@@ -143,6 +147,10 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		}
 		if key == "canmount" {
 			f.datasets[dataset].canmount = value
+			return nil, nil
+		}
+		if key == swapProperty {
+			f.datasets[dataset].swap = value
 			return nil, nil
 		}
 		if quota := parseQuota(value); quota != 0 && quota < f.datasets[dataset].used {

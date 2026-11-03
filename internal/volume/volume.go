@@ -195,6 +195,9 @@ type properties struct {
 	// role is "replica" for a copy of a tenant another node runs, never
 	// mounted; canmount is ZFS's, "noauto" on such a copy.
 	role, canmount string
+	// swap is swapProperty's value: the token of the whole copy's swap the
+	// dataset is part of, or "" for none.
+	swap string
 }
 
 // roleProperty marks a dataset that is a replica: a copy of the data of a
@@ -207,7 +210,7 @@ const replicaRole = "replica"
 // properties returns the dataset's properties, or ok=false if the dataset
 // does not exist.
 func (z ZFS) properties(ctx context.Context, dataset string) (properties, bool, error) {
-	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", ownerProperty+",mounted,mountpoint,refquota,"+roleProperty+",canmount", dataset)
+	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", ownerProperty+",mounted,mountpoint,refquota,"+roleProperty+",canmount,"+swapProperty, dataset)
 	if err != nil {
 		if strings.Contains(string(output), "does not exist") {
 			return properties{}, false, nil
@@ -215,14 +218,18 @@ func (z ZFS) properties(ctx context.Context, dataset string) (properties, bool, 
 		return properties{}, false, err
 	}
 	values := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
-	if len(values) != 6 {
+	if len(values) != 7 {
 		return properties{}, false, fmt.Errorf("zfs get %s: unexpected output %q", dataset, output)
 	}
 	refquota, err := strconv.ParseInt(values[3], 10, 64)
 	if err != nil {
 		return properties{}, false, fmt.Errorf("zfs get %s: refquota %q", dataset, values[3])
 	}
-	return properties{owner: values[0], mounted: values[1], mountpoint: values[2], refquota: refquota, role: values[4], canmount: values[5]}, true, nil
+	swap := values[6]
+	if swap == "-" {
+		swap = ""
+	}
+	return properties{owner: values[0], mounted: values[1], mountpoint: values[2], refquota: refquota, role: values[4], canmount: values[5], swap: swap}, true, nil
 }
 
 // diskBytes is the refquota for diskGB; 0 is none.
@@ -468,12 +475,6 @@ func (z ZFS) Remove(ctx context.Context, tenant string) error {
 	// into place.
 	defer lockDataset(z.dataset(tenant))()
 	current, exists, err := z.properties(ctx, z.dataset(tenant))
-	if err == nil && !exists {
-		exists, err = z.restoreSwap(ctx, tenant)
-		if err == nil && exists {
-			current, _, err = z.properties(ctx, z.dataset(tenant))
-		}
-	}
 	if err != nil {
 		return err
 	}
@@ -481,9 +482,16 @@ func (z ZFS) Remove(ctx context.Context, tenant string) error {
 		if err := z.owned(tenant, current.owner, current.mountpoint); err != nil {
 			return err
 		}
+	}
+	// The staging datasets go first: were the tenant's data gone and one of
+	// them left, it could be taken for a swap to finish.
+	if err := z.destroyAllStaged(ctx, tenant); err != nil {
+		return err
+	}
+	if exists {
 		if _, err := z.Run(ctx, "zfs", "destroy", "-r", z.dataset(tenant)); err != nil {
 			return err
 		}
 	}
-	return errors.Join(z.destroyStaged(ctx, tenant, incoming), z.destroyStaged(ctx, tenant, previous))
+	return nil
 }

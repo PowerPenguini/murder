@@ -135,20 +135,127 @@ func TestASwapThatStoppedHalfWayIsFinished(t *testing.T) {
 		t.Fatalf("after the swap was finished: %v", fake.datasets)
 	}
 
-	// The same, left by an older release under its names, and found by a
-	// promotion.
+	// An older release's staging datasets say nothing of which swap, or
+	// which tenant of the name, they were part of: a promotion never puts
+	// them back, and the tenant, if it ran before, is refused for missing
+	// data rather than given another's.
 	z.MountRoot = t.TempDir()
-	if err := os.MkdirAll(z.MountRoot+"/beta", 0o700); err != nil {
-		t.Fatal(err)
-	}
 	legacy := &fakeDataset{owner: "beta", role: replicaRole, canmount: "noauto", mountpoint: z.MountRoot + "/beta"}
 	fake.datasets["tank/murder/murder-incoming-beta-old"] = legacy
 	fake.datasets["tank/murder/murder-incoming-beta"] = &fakeDataset{owner: "beta", role: replicaRole, canmount: "noauto", mountpoint: z.MountRoot + "/beta"}
+	if exists, err := z.Exists(context.Background(), "beta"); err != nil || exists {
+		t.Fatalf("exists %v, %v", exists, err)
+	}
 	if _, err := z.Ensure(context.Background(), "beta", os.Getuid(), os.Getgid(), 0); err != nil {
 		t.Fatal(err)
 	}
-	if fake.datasets["tank/murder/beta"] != legacy || !legacy.mounted || legacy.role != "" || fake.datasets["tank/murder/murder-incoming-beta"] != nil {
-		t.Fatalf("the promoted copy: %+v; datasets %v", legacy, fake.datasets)
+	if fake.datasets["tank/murder/beta"] == legacy || legacy.mounted || fake.datasets["tank/murder/murder-incoming-beta-old"] != legacy {
+		t.Fatalf("an older release's staging copy was put back: %+v; datasets %v", legacy, fake.datasets)
+	}
+}
+
+// A whole copy that replaced the old one, but failed to destroy it, leaves
+// the old one behind. A new tenant of the same name, which drops the copy
+// of the earlier one, never gets that old copy put back as its data.
+func TestAFinishedSwapsLeftoverIsNeverPutBack(t *testing.T) {
+	fake, z := newReplicaZFS()
+	z.MountRoot = t.TempDir()
+	old := &fakeDataset{owner: "acme", role: replicaRole, canmount: "noauto", mountpoint: z.MountRoot + "/acme"}
+	fake.datasets["tank/murder/acme"] = old
+	fake.fail = "destroy -r tank/murder/murder-previous:acme"
+	if err := z.ReceiveReplica(context.Background(), "acme", true, strings.NewReader("x"), 3); err == nil {
+		t.Fatal("the failed destroy of the old copy was not reported")
+	}
+	if fake.datasets["tank/murder/murder-previous:acme"] != old || fake.datasets["tank/murder/acme"] == old {
+		t.Fatalf("datasets %v", fake.datasets)
+	}
+	if old.swap != "" {
+		t.Errorf("the old copy of a finished swap still carries the swap's token %q", old.swap)
+	}
+	fake.fail = ""
+	// checkData drops the earlier tenant's copy; the new one starts.
+	if err := z.DropReplica(context.Background(), "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if fake.datasets["tank/murder/murder-previous:acme"] != nil {
+		t.Errorf("dropping the copy left the old copy behind: %v", fake.datasets)
+	}
+	if exists, err := z.Exists(context.Background(), "acme"); err != nil || exists {
+		t.Fatalf("exists %v, %v", exists, err)
+	}
+	if _, err := z.Ensure(context.Background(), "acme", os.Getuid(), os.Getgid(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if d := fake.datasets["tank/murder/acme"]; d == old || d.role != "" {
+		t.Fatalf("the new tenant got the earlier tenant's copy: %+v", d)
+	}
+}
+
+// Only an old copy and a received one of the same swap make a swap to
+// finish: an old copy left alone, one without a token, or one whose token
+// the received copy does not carry, is never put back.
+func TestOnlyTheCopiesOfOneSwapAreSwappedBack(t *testing.T) {
+	for name, pair := range map[string]struct{ previous, incoming string }{
+		"old copy without a token":   {"", "t1"},
+		"tokens of different swaps":  {"t1", "t2"},
+		"old copy alone, with token": {"t1", "none"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, z := newReplicaZFS()
+			z.MountRoot = t.TempDir()
+			old := &fakeDataset{owner: "acme", role: replicaRole, canmount: "noauto", mountpoint: z.MountRoot + "/acme", swap: pair.previous}
+			fake.datasets["tank/murder/murder-previous:acme"] = old
+			if pair.incoming != "none" {
+				fake.datasets["tank/murder/murder-incoming:acme"] = &fakeDataset{owner: "acme", role: replicaRole, canmount: "noauto", mountpoint: z.MountRoot + "/acme", swap: pair.incoming}
+			}
+			if exists, err := z.Exists(context.Background(), "acme"); err != nil || exists {
+				t.Fatalf("exists %v, %v", exists, err)
+			}
+			if _, err := z.Ensure(context.Background(), "acme", os.Getuid(), os.Getgid(), 0); err != nil {
+				t.Fatal(err)
+			}
+			if fake.datasets["tank/murder/acme"] == old || old.mounted {
+				t.Fatalf("an old copy of no swap in progress was put back; datasets %v", fake.datasets)
+			}
+		})
+	}
+}
+
+// Dropping a copy whose swap stopped half way takes both its copies:
+// neither is left to be put back for a later tenant of the name.
+func TestDroppingAHalfSwappedCopyTakesBothCopies(t *testing.T) {
+	fake, z := newReplicaZFS()
+	copyOf := func() *fakeDataset {
+		return &fakeDataset{owner: "acme", role: replicaRole, canmount: "noauto", mountpoint: "/srv/murder/tenants/acme", swap: "t1"}
+	}
+	fake.datasets["tank/murder/murder-previous:acme"] = copyOf()
+	fake.datasets["tank/murder/murder-incoming:acme"] = copyOf()
+	if err := z.DropReplica(context.Background(), "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.datasets) != 0 {
+		t.Fatalf("left %v", fake.datasets)
+	}
+}
+
+// A dataset under the incoming name that is not the tenant's unmounted
+// copy is neither received over nor destroyed.
+func TestAnOccupiedIncomingNameIsLeftAlone(t *testing.T) {
+	for name, there := range map[string]*fakeDataset{
+		"another tenant's": {owner: "other", role: replicaRole, canmount: "noauto", mountpoint: "/srv/murder/tenants/other"},
+		"mounted":          {owner: "acme", role: replicaRole, mounted: true, mountpoint: "/srv/murder/tenants/acme"},
+		"not a copy":       {owner: "acme", mountpoint: "/srv/murder/tenants/acme"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, z := newReplicaZFS()
+			fake.datasets["tank/murder/murder-incoming:acme"] = there
+			if err := z.ReceiveReplica(context.Background(), "acme", true, strings.NewReader("x"), 3); err == nil {
+				t.Fatal("received a whole copy over an occupied name")
+			}
+			if fake.datasets["tank/murder/murder-incoming:acme"] != there || fake.ran("destroy") || len(fake.piped) != 0 {
+				t.Fatalf("the dataset there was touched; calls %v, piped %v", fake.calls, fake.piped)
+			}
+		})
 	}
 }
 
@@ -169,5 +276,21 @@ func TestRemoveTakesTheStagingDatasetsAlong(t *testing.T) {
 	}
 	if fake.datasets["tank/murder/murder-incoming-acme-old"] == nil {
 		t.Fatal("acme-old's copy destroyed with acme")
+	}
+}
+
+// Rolling back a copy whose swap stopped half way finishes the swap first:
+// the copy is rolled back, not dropped as one with no snapshots.
+func TestRollingBackAHalfSwappedCopyKeepsIt(t *testing.T) {
+	fake, z := newReplicaZFS()
+	old := &fakeDataset{owner: "acme", role: replicaRole, canmount: "noauto", mountpoint: "/srv/murder/tenants/acme", swap: "t1"}
+	fake.datasets["tank/murder/murder-previous:acme"] = old
+	fake.datasets["tank/murder/murder-incoming:acme"] = &fakeDataset{owner: "acme", role: replicaRole, canmount: "noauto", mountpoint: "/srv/murder/tenants/acme", swap: "t1"}
+	fake.snapshots = []string{"tank/murder/acme@murder-replica-20261102T100000.000Z"}
+	if err := z.RollbackReplica(context.Background(), "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if fake.datasets["tank/murder/acme"] != old || !fake.ran("zfs rollback -r tank/murder/acme@murder-replica-20261102T100000.000Z") {
+		t.Fatalf("datasets %v; calls %v", fake.datasets, fake.calls)
 	}
 }
