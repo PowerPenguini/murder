@@ -58,8 +58,14 @@ func (s *Server) freeze(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// thaw takes changes again; with ?if=, only if the freeze is still that
+// one.
 func (s *Server) thaw(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Thaw(actor(r)); err != nil {
+	thaw := func() error { return s.store.Thaw(actor(r)) }
+	if r.URL.Query().Has("if") {
+		thaw = func() error { return s.store.ThawIf(r.URL.Query().Get("if"), actor(r)) }
+	}
+	if err := thaw(); err != nil {
 		writeError(w, err)
 		return
 	}

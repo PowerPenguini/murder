@@ -56,6 +56,8 @@ type Server struct {
 	usage Usage
 	// invites makes invitations to join the cluster; nil makes none.
 	invites Invites
+	// keys rotates the master key; nil does not.
+	keys Keys
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
 }
@@ -79,6 +81,7 @@ func (s *Server) Stop() { s.stopOnce.Do(func() { close(s.stopping) }) }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.clusterRoutes(mux)
+	s.keyRoutes(mux)
 	s.upgradeRoutes(mux)
 	s.usageRoutes(mux)
 	mux.HandleFunc("GET /v1/routes", s.routes)

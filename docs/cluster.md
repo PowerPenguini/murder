@@ -250,7 +250,8 @@ longer: a minute or two after a node dies, new clients no longer try it.
 Nodes talk over one TLS port on the private network. A node proves it
 belongs to the cluster with a certificate of an authority derived from the
 master key, so every node needs the same master key and nothing else is
-shared. Give each node a `cluster:` section:
+shared. `murder key rotate` replaces it on every node without stopping one
+([Rotate the master key](operations.md#rotate-the-master-key)). Give each node a `cluster:` section:
 
 ```yaml
 cluster:

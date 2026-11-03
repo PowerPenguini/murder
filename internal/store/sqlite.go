@@ -1075,8 +1075,12 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 		if node == "" {
 			node = current.node
 		}
+		// Outside a cluster, this node alone; in one, its members alone:
+		// this node too, which may be leaving it. A cluster is known by its
+		// name, which stays when its last member is removed.
 		member, isMember := current.nodes[node]
-		if node != current.node && !isMember {
+		inCluster := current.cluster != "" || len(current.nodes) > 0
+		if inCluster && !isMember || !inCluster && node != current.node {
 			return fmt.Errorf("node %s: %w", node, ErrNotFound)
 		}
 		if member.Failed() {
@@ -1228,6 +1232,34 @@ func (s *SQLite) Rotate(name, secret, actor string) (Record, error) {
 	return next.tenants[name].clone(), nil
 }
 
+func (s *SQLite) ResealSecrets(reseal Resealer, actor string) (int, error) {
+	count := 0
+	// Under a rotation's freeze. Always a change, even of no secret: a
+	// batch made before it, with a value sealed by the old key, is stale
+	// after it and made again.
+	_, err := s.writeIf(false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+		count = 0
+		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
+			sealed := current.tenants[name].Sealed
+			for _, secret := range slices.Sorted(maps.Keys(sealed)) {
+				resealed, changed, err := reseal(name, secret, sealed[secret])
+				if err != nil {
+					return fmt.Errorf("tenant %s, secret %s: %w", name, secret, err)
+				}
+				if !changed {
+					continue
+				}
+				if err := tx.Exec(`UPDATE secrets SET sealed = ? WHERE tenant = ? AND name = ? AND sealed = ?`, resealed, name, secret, sealed[secret]); err != nil {
+					return err
+				}
+				count++
+			}
+		}
+		return event(tx, now, actor, "secrets.resealed", "", "", fmt.Sprintf("%d secrets sealed with the master key in use", count))
+	})
+	return count, err
+}
+
 func (s *SQLite) Roll(name, actor string) (Record, error) {
 	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, err := liveTenant(current, name)
@@ -1250,11 +1282,20 @@ func (s *SQLite) Observe(name, dataImage string) error {
 		return nil
 	}
 	_, err := s.write(false, func(tx *recorder, current *snapshot, _ time.Time) error {
-		if _, err := liveTenant(current, name); err != nil {
+		record, err := liveTenant(current, name)
+		if err != nil {
 			return err
+		}
+		// Again on every attempt: a retry after another observed the same
+		// image would put it in previous_image too.
+		if record.DataImage == dataImage {
+			return errUnchanged
 		}
 		return tx.Exec(`UPDATE tenants SET previous_image = CASE WHEN data_image = '' THEN previous_image ELSE data_image END, data_image = ? WHERE name = ?`, dataImage, name)
 	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
 	return err
 }
 

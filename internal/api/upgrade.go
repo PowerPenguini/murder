@@ -22,6 +22,11 @@ func (c *Client) Thaw(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/upgrade/thaw", nil, nil)
 }
 
+// ThawIf takes changes again only if they are still frozen for reason.
+func (c *Client) ThawIf(ctx context.Context, reason string) error {
+	return c.do(ctx, http.MethodPost, "/v1/upgrade/thaw?if="+url.QueryEscape(reason), nil, nil)
+}
+
 // NodeInfo reports on a node for an upgrade.
 func (c *Client) NodeInfo(ctx context.Context, node string) (upgrade.Info, error) {
 	var info upgrade.Info

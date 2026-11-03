@@ -128,7 +128,7 @@ func joinHandler(invites Invites) http.Handler {
 }
 
 // CAKey is the public key of the cluster's authority.
-func (c *Credentials) CAKey() ed25519.PublicKey { return c.caKey }
+func (c *Credentials) CAKey() ed25519.PublicKey { return c.state.Load().caKey }
 
 // Join asks the node an invitation names for what a host needs to become
 // node. It talks to that node only once its certificate is signed by the

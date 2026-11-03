@@ -3,6 +3,7 @@ package move
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -89,8 +90,11 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if err := st.PutNode(store.Node{Name: "n2", Address: "10.0.0.2:7400"}, "test"); err != nil {
-		t.Fatal(err)
+	// This node is a member of its cluster, as bootstrapping makes it.
+	for i, name := range []string{"n1", "n2"} {
+		if err := st.PutNode(store.Node{Name: name, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	app := spec.Tenant{Image: "sha256:" + strings.Repeat("a", 64), HealthPath: "/health", User: "1000:1000"}
 	if _, err := st.PutApp(store.App{Name: "web", Spec: app}, "test"); err != nil {
@@ -312,9 +316,6 @@ func (d listedDir) Snapshots(context.Context, string, string) ([]string, error) 
 // snapshot both have; onto another node, it sends everything.
 func TestAMoveOntoTheReplicaStartsFromItsCopy(t *testing.T) {
 	f := newFixture(t)
-	if err := f.st.PutNode(store.Node{Name: "n1", Address: "10.0.0.1:7400"}, "test"); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := f.st.PlaceReplicas("test"); err != nil {
 		t.Fatal(err)
 	}

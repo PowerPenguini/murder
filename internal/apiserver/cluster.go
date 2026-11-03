@@ -92,6 +92,8 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, api.NodeInvitation{Invitation: invite.String(), Expires: expires})
 }
 
+var errNoKeys = statusError{http.StatusConflict, errors.New("this agent does not rotate master keys")}
+
 var errNoCluster = statusError{http.StatusConflict, errors.New(`this node is not set up for a cluster: add "cluster:" to its config and restart the agent`)}
 
 func (s *Server) clusterStatus(w http.ResponseWriter, _ *http.Request) {

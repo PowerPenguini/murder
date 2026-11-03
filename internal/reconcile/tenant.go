@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -133,11 +135,17 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err != nil {
 		return Status{}, err
 	}
+	// One made by a release before master key rotations carries the hash
+	// of its secrets' sealed values: current until they are sealed again.
+	sealedHash, err := r.inputsHash(record, dataPath)
+	if err != nil {
+		return Status{}, err
+	}
 	var current *runtime.Container
 	var outdated []runtime.Container
 	for i := range existing {
 		hash := existing[i].Labels[runtime.LabelHash]
-		if current == nil && (hash == desired.Labels[runtime.LabelHash] || hash == legacy) {
+		if current == nil && (hash == desired.Labels[runtime.LabelHash] || hash == sealedHash || hash == legacy) {
 			current = &existing[i]
 			continue
 		}
@@ -269,9 +277,12 @@ func lastExit(state runtime.ContainerState, memoryMB int) string {
 // replace starts the desired container in place of outdated ones. Nothing is
 // stopped until the new image is present (errPulling until then) and, after
 // an image change, the
-// data has been snapshotted. The snapshot is taken while the old container
-// runs: apps are only onboarded once they recover from point-in-time
-// snapshots, and a failed snapshot then blocks the change without an outage.
+// data has been snapshotted. A first snapshot is taken while the old
+// container runs: a failed one then blocks the change without an outage. A
+// second is taken once the old container has stopped, so the snapshot to
+// go back to holds every write the old image made; it replaces the first.
+// Should it fail, the first stays, and the change goes on: apps are only
+// onboarded once they recover from point-in-time snapshots.
 //
 // It returns the new container's ID, once created, and whether the outdated
 // containers are gone: until then the old one still serves.
@@ -280,6 +291,7 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	if err := r.image(ctx, tenant.Image); err != nil {
 		return "", false, err
 	}
+	gate := ""
 	if record.DataImage != "" && record.DataImage != tenant.Image {
 		name, err := r.volumes.Snapshot(ctx, tenant.Name, "image-change")
 		switch {
@@ -287,10 +299,8 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 		case err != nil:
 			return "", false, fmt.Errorf("snapshot before the image change (the old container keeps running): %w", err)
 		default:
+			gate = name
 			r.log.Info("snapshot before image change", "tenant", tenant.Name, "snapshot", name, "from", record.DataImage, "to", tenant.Image)
-			if err := r.volumes.Prune(ctx, tenant.Name, "image-change", snapshotsKept); err != nil {
-				r.log.Warn("prune old snapshots", "tenant", tenant.Name, "error", err)
-			}
 		}
 	}
 	// From here on the data belongs to the new image: a later pass must not
@@ -311,6 +321,14 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	if err := r.removeContainers(ctx, outdated); err != nil {
 		return "", false, err
 	}
+	// With no old container running, the first snapshot holds every write.
+	if gate != "" && slices.ContainsFunc(outdated, func(c runtime.Container) bool { return c.Running }) {
+		r.finalSnapshot(ctx, tenant.Name, gate)
+	} else if gate != "" {
+		if err := r.volumes.Prune(ctx, tenant.Name, "image-change", snapshotsKept); err != nil {
+			r.log.Warn("prune old snapshots", "tenant", tenant.Name, "error", err)
+		}
+	}
 	id, err = r.runtime.Create(ctx, desired)
 	if err != nil {
 		return "", true, err
@@ -327,6 +345,34 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	}
 	r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
 	return id, true, nil
+}
+
+// snapshotDestroyer destroys one snapshot of a tenant's data, by the name
+// after its "@"; ZFS can.
+type snapshotDestroyer interface {
+	DestroySnapshot(ctx context.Context, tenant, snapshot string) error
+}
+
+// finalSnapshot snapshots a tenant's data once its old container has
+// stopped, every write of the old image in, and destroys gate, the one
+// taken while it ran; then it keeps the newest snapshotsKept. Requests
+// wait meanwhile: a ZFS snapshot takes milliseconds.
+func (r *Reconciler) finalSnapshot(ctx context.Context, tenant, gate string) {
+	name, err := r.volumes.Snapshot(ctx, tenant, "image-change")
+	if err != nil {
+		r.log.Warn("snapshot after the old container stopped; going back would lose what it wrote since the one taken while it ran", "tenant", tenant, "snapshot", gate, "error", err)
+	} else {
+		r.log.Info("snapshot after the old container stopped", "tenant", tenant, "snapshot", name)
+		if destroyer, ok := r.volumes.(snapshotDestroyer); ok {
+			_, short, _ := strings.Cut(gate, "@")
+			if err := destroyer.DestroySnapshot(ctx, tenant, short); err != nil {
+				r.log.Warn("destroy the snapshot taken while the old container ran", "tenant", tenant, "snapshot", gate, "error", err)
+			}
+		}
+	}
+	if err := r.volumes.Prune(ctx, tenant, "image-change", snapshotsKept); err != nil {
+		r.log.Warn("prune old snapshots", "tenant", tenant, "error", err)
+	}
 }
 
 // image returns nil once image is present. Until then a pull runs in the

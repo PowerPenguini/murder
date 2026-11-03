@@ -33,7 +33,7 @@ func (f *fakeInvites) Redeem(_ context.Context, secret []byte, node string) (Bun
 // serveInvites starts a node's cluster port that takes invitations.
 func serveInvites(t *testing.T, seed byte, invites Invites) (*listener, *Credentials) {
 	t.Helper()
-	credentials, err := NewCredentials(bytes.Repeat([]byte{seed}, ed25519.SeedSize), "n1", time.Now())
+	credentials, err := NewCredentials([][]byte{bytes.Repeat([]byte{seed}, ed25519.SeedSize)}, "n1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestAHostJoinsWithAnInvitation(t *testing.T) {
 func TestAHostTalksOnlyToTheClusterItsInvitationNames(t *testing.T) {
 	invites := &fakeInvites{secret: bytes.Repeat([]byte{7}, inviteSecretSize)}
 	l, _ := serveInvites(t, 2, invites)
-	other, err := NewCredentials(bytes.Repeat([]byte{3}, ed25519.SeedSize), "x", time.Now())
+	other, err := NewCredentials([][]byte{bytes.Repeat([]byte{3}, ed25519.SeedSize)}, "x", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,13 +126,17 @@ func TestParseInviteRefusesDamagedOnes(t *testing.T) {
 
 // The edges' relay takes nodes only, over HTTP/2, and no invitations.
 func TestTheRelayStaysForNodesOverHTTP2(t *testing.T) {
-	credentials, err := NewCredentials(bytes.Repeat([]byte{5}, ed25519.SeedSize), "n1", time.Now())
+	credentials, err := NewCredentials([][]byte{bytes.Repeat([]byte{5}, ed25519.SeedSize)}, "n1", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := credentials.RelayServer()
-	if server.GetConfigForClient != nil || server.ClientAuth != tls.RequireAndVerifyClientCert || len(server.NextProtos) != 2 || server.NextProtos[0] != "h2" {
-		t.Fatalf("relay config %+v", server)
+	// What a handshake gets, one asking for an invitation's protocol too.
+	for _, protos := range [][]string{{"h2"}, {protocolJoin}} {
+		got, err := server.GetConfigForClient(&tls.ClientHelloInfo{SupportedProtos: protos})
+		if err != nil || got.ClientAuth != tls.RequireAndVerifyClientCert || len(got.NextProtos) != 2 || got.NextProtos[0] != "h2" {
+			t.Fatalf("relay config for %v: %+v, %v", protos, got, err)
+		}
 	}
 	listener, err := tls.Listen("tcp", "127.0.0.1:0", server)
 	if err != nil {
