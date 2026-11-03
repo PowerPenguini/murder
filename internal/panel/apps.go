@@ -35,6 +35,7 @@ type AppAgent interface {
 	Configure(ctx context.Context, name string, request api.TenantRequest) (api.Applied, error)
 	Rotate(ctx context.Context, name, key string) (api.Tenant, error)
 	RolloutAction(ctx context.Context, name, action string) (api.App, error)
+	RestoreRollout(ctx context.Context, name string, tenants []string) (api.RolloutRestored, error)
 	SetFlags(ctx context.Context, name string, flags api.TenantFlags) (api.Tenant, error)
 }
 
@@ -259,7 +260,18 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", err.Error())
 			return
 		}
-		back("done", map[string]string{"pause": "the rollout is paused", "resume": "the rollout goes on", "abort": "the rollout is aborted: its tenants go back", "promote": "every waiting tenant moves now"}[action])
+		back("done", map[string]string{"pause": "the rollout is paused", "resume": "the rollout goes on", "abort": "the rollout is aborted: its tenants go back, their data as it is", "promote": "every waiting tenant moves now"}[action])
+	case "restore-data":
+		if strings.TrimSpace(r.FormValue("confirm")) != name {
+			back("problem", "type the app's name to take its tenants back with their data")
+			return
+		}
+		restored, err := agent.RestoreRollout(ctx, name, nil)
+		if err != nil {
+			back("problem", err.Error())
+			return
+		}
+		back("done", strings.Join(restored.Tenants, ", ")+" go back to the revision before with their data from before they moved; the rollout is paused")
 	case "check":
 		check, err := agent.CheckApp(ctx, name)
 		switch {

@@ -449,7 +449,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 	if err := closeRows(rows); err != nil {
 		return err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next, app_revision, before_revision, canary, hold, restore, served, moved_on FROM tenants`+where("name"), args...)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next, app_revision, before_revision, canary, hold, restore, moved_on FROM tenants`+where("name"), args...)
 	if err != nil {
 		return err
 	}
@@ -458,7 +458,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext, &record.AppRevision, &record.BeforeRevision, &record.Canary, &record.Hold, &record.Restore, &record.Served, &record.MovedOn); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext, &record.AppRevision, &record.BeforeRevision, &record.Canary, &record.Hold, &record.Restore, &record.MovedOn); err != nil {
 			rows.Close()
 			return err
 		}
@@ -1041,7 +1041,7 @@ func (s *SQLite) allAtOnce(tx *recorder, current *snapshot, now time.Time, app s
 		if record.App != app || record.Archived() || record.Hold || record.AppRevision == 0 {
 			continue
 		}
-		if err := tx.Exec(`UPDATE tenants SET app_revision = 0, before_revision = 0, served = 0, moved_on = '', generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+		if err := tx.Exec(`UPDATE tenants SET app_revision = 0, before_revision = 0, moved_on = '', generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 			return err
 		}
 		if err := event(tx, now, actor, "app.rolled-out", name, app, "at once"); err != nil {

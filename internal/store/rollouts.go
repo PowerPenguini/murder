@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/spec"
@@ -36,13 +37,10 @@ type Rollout struct {
 	Epoch int64 `json:"epoch"`
 }
 
-// AwaitsServing reports whether a tenant takes no request yet: one a wave
-// moved, until its new revision passed a health check and that is recorded,
-// and one whose data goes back, until it has. A rollout takes back the data
-// of a tenant that never served alone: one that took no request at all.
-func (r Record) AwaitsServing() bool {
-	return r.AppRevision == 0 && r.BeforeRevision != 0 && !r.Served || r.Restore != ""
-}
+// RestorePending reports whether the tenant's data is to go back to the
+// snapshot from before its rollout moved it: until it has, it takes no
+// request, so nothing is written to data about to be replaced.
+func (r Record) RestorePending() bool { return r.Restore != "" }
 
 // Active reports whether the rollout may still move tenants.
 func (r Rollout) Active() bool { return r.State == RolloutRunning || r.State == RolloutPaused }
@@ -162,7 +160,7 @@ func (s *SQLite) AdvanceRollout(app string, at RolloutAt, tenants []string, acto
 			if !ok || record.App != app || record.Archived() || record.Hold || record.AppRevision == 0 {
 				continue
 			}
-			if err := tx.Exec(`UPDATE tenants SET before_revision = app_revision, app_revision = 0, served = 0, moved_on = node, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+			if err := tx.Exec(`UPDATE tenants SET before_revision = app_revision, app_revision = 0, moved_on = node, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 				return err
 			}
 			if err := event(tx, now, actor, "app.rolled-out", name, app, fmt.Sprintf("wave %d: revision %d → %d", wave+1, record.AppRevision, rollout.ToRevision)); err != nil {
@@ -190,7 +188,7 @@ func (s *SQLite) FinishRollout(app string, at RolloutAt, actor string) error {
 			}
 		}
 		stamp := formatTime(now)
-		if err := tx.Exec(`UPDATE tenants SET before_revision = 0, served = 0, moved_on = '' WHERE app = ? AND app_revision = 0`, app); err != nil {
+		if err := tx.Exec(`UPDATE tenants SET before_revision = 0, moved_on = '' WHERE app = ? AND app_revision = 0`, app); err != nil {
 			return err
 		}
 		if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = '', updated_at = ?, epoch = epoch + 1 WHERE app = ?`, stamp, app); err != nil {
@@ -262,7 +260,7 @@ func (s *SQLite) AbortRollout(app, reason, actor string) ([]string, error) {
 			if record.App != app || record.Archived() || record.AppRevision != 0 || record.BeforeRevision == 0 {
 				continue
 			}
-			if err := tx.Exec(`UPDATE tenants SET app_revision = before_revision, before_revision = 0, served = 0, moved_on = '', generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+			if err := tx.Exec(`UPDATE tenants SET app_revision = before_revision, before_revision = 0, moved_on = '', generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 				return err
 			}
 			if err := event(tx, now, actor, "rollout.rolled-back", name, app, fmt.Sprintf("back to revision %d: %s", record.BeforeRevision, reason)); err != nil {
@@ -278,89 +276,75 @@ func (s *SQLite) AbortRollout(app, reason, actor string) ([]string, error) {
 	return back, err
 }
 
-// RollBackTenants takes tenants of app's rollout, as at names it, that
-// failed on the newest revision back to the one they ran before, and
-// pauses the rollout for reason. tenants are their generations as seen
-// failing: one changed since is a change of the rollout, refused. With
-// restore, their data goes back too, to the snapshot taken as their image
-// changed: for tenants that never served on the newest, on the node they
-// moved on, which keeps that snapshot.
-func (s *SQLite) RollBackTenants(app string, at RolloutAt, tenants map[string]int64, restore bool, reason, actor string) error {
+// RestoreTenants takes tenants of app's rollout back to the revision they
+// ran before, their data too: to the snapshot their node took as their
+// image changed, so what they wrote since is lost. With none named, every
+// tenant the rollout moved goes back. It pauses the rollout, and changes
+// nothing if one named was not moved by it, or cannot get its data back:
+// one that moved to another node since its wave (that node has no snapshot
+// from before), one moving now, or one whose image the rollout did not
+// change (no snapshot was taken). It returns the tenants taken back.
+func (s *SQLite) RestoreTenants(app string, tenants []string, actor string) ([]string, error) {
+	var back []string
 	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
-		if _, err := rolloutOf(current, app, &at); err != nil {
+		rollout, err := rolloutOf(current, app, nil)
+		if err != nil {
 			return err
 		}
-		stamp := formatTime(now)
-		for _, name := range slices.Sorted(maps.Keys(tenants)) {
-			record, ok := current.tenants[name]
-			if !ok || record.App != app || record.Archived() || record.AppRevision != 0 || record.BeforeRevision == 0 {
-				continue
-			}
-			if record.Generation != tenants[name] {
-				return fmt.Errorf("%w: tenant %s changed since it was seen failing", ErrConflict, name)
-			}
-			image := ""
-			if restore {
-				// The old image never starts on data the newer one may
-				// have changed, unless the data goes back too.
-				if record.Served || record.MovedOn != record.Node {
-					return fmt.Errorf("%w: tenant %s served on the newest revision or moved since its wave: its data cannot go back", ErrConflict, name)
+		back = nil
+		names := slices.Clone(tenants)
+		if len(names) == 0 {
+			for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
+				record := current.tenants[name]
+				if record.App == app && !record.Archived() && record.AppRevision == 0 && record.BeforeRevision != 0 {
+					names = append(names, name)
 				}
-				image = spec.Compose(revisionSpec(current, app, record.BeforeRevision), name, record.Overrides).Image
 			}
-			if err := tx.Exec(`UPDATE tenants SET app_revision = before_revision, before_revision = 0, served = 0, moved_on = '', restore = ?, generation = generation + 1, updated_at = ? WHERE name = ?`, image, stamp, name); err != nil {
-				return err
-			}
-			detail := fmt.Sprintf("back to revision %d: %s", record.BeforeRevision, reason)
-			if image != "" {
-				detail += "; its data goes back to the snapshot taken as its image changed"
-			}
-			if err := event(tx, now, actor, "rollout.rolled-back", name, app, detail); err != nil {
-				return err
+			if len(names) == 0 {
+				return fmt.Errorf("%w: the rollout of app %s moved no tenant that could go back", ErrConflict, app)
 			}
 		}
+		slices.Sort(names)
+		names = slices.Compact(names)
+		images := map[string]string{}
+		for _, name := range names {
+			record, ok := current.tenants[name]
+			switch {
+			case !ok || record.App != app:
+				return fmt.Errorf("%w: tenant %s does not run app %s", ErrConflict, name, app)
+			case record.Archived():
+				return fmt.Errorf("%w: tenant %s is archived", ErrConflict, name)
+			case record.AppRevision != 0 || record.BeforeRevision == 0:
+				return fmt.Errorf("%w: the rollout of app %s did not move tenant %s to revision %d", ErrConflict, app, name, rollout.ToRevision)
+			case record.MoveTo != "":
+				return fmt.Errorf("%w: tenant %s is moving to node %s: its data cannot go back", ErrConflict, name, record.MoveTo)
+			case record.MovedOn != record.Node:
+				return fmt.Errorf("%w: tenant %s moved to node %s since its wave: that node has no snapshot of its data from before, so its data cannot go back (`murder app rollout abort %s` takes it back to the revision before, data as it is)", ErrConflict, name, record.Node, app)
+			}
+			image := spec.Compose(revisionSpec(current, app, record.BeforeRevision), name, record.Overrides).Image
+			if image == spec.Compose(revisionSpec(current, app, 0), name, record.Overrides).Image {
+				return fmt.Errorf("%w: the rollout did not change tenant %s's image, so no snapshot of its data was taken as it moved (`murder app rollout abort %s` takes it back to the revision before, data as it is)", ErrConflict, name, app)
+			}
+			images[name] = image
+		}
+		stamp := formatTime(now)
+		for _, name := range names {
+			record := current.tenants[name]
+			if err := tx.Exec(`UPDATE tenants SET app_revision = before_revision, before_revision = 0, moved_on = '', restore = ?, generation = generation + 1, updated_at = ? WHERE name = ?`, images[name], stamp, name); err != nil {
+				return err
+			}
+			if err := event(tx, now, actor, "rollout.restored", name, app, fmt.Sprintf("back to revision %d, its data to the snapshot taken as its image changed: what it wrote since is lost", record.BeforeRevision)); err != nil {
+				return err
+			}
+			back = append(back, name)
+		}
+		reason := fmt.Sprintf("%s went back to the revision before, data too, as %s asked (`murder app rollout resume %s` moves them again, `abort` ends the rollout)", strings.Join(names, ", "), actor, app)
 		if err := tx.Exec(`UPDATE rollouts SET state = 'paused', reason = ?, updated_at = ?, epoch = epoch + 1 WHERE app = ?`, reason, stamp, app); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "rollout.paused", "", app, reason)
 	})
-	return err
-}
-
-// Served records, from the node that runs it, that tenant at generation
-// passed a health check on the revision its rollout moved it to: before it
-// is served, so no data it then takes goes back by itself.
-func (s *SQLite) Served(tenant string, generation int64) error {
-	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
-		record, ok := current.tenants[tenant]
-		if !ok || record.Served || record.Generation != generation || record.AppRevision != 0 || record.BeforeRevision == 0 {
-			return errUnchanged
-		}
-		return tx.Exec(`UPDATE tenants SET served = 1 WHERE name = ?`, tenant)
-	})
-	if err == errUnchanged {
-		return nil
-	}
-	return err
-}
-
-// MarkServed records that tenant, at generation, was seen healthy on the
-// revision app's rollout, as at names it, moved it to.
-func (s *SQLite) MarkServed(app string, at RolloutAt, tenant string, generation int64) error {
-	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
-		if _, err := rolloutOf(current, app, &at); err != nil {
-			return err
-		}
-		record, ok := current.tenants[tenant]
-		if !ok || record.App != app || record.Served || record.Generation != generation || record.AppRevision != 0 || record.BeforeRevision == 0 {
-			return errUnchanged
-		}
-		return tx.Exec(`UPDATE tenants SET served = 1 WHERE name = ?`, tenant)
-	})
-	if err == errUnchanged {
-		return nil
-	}
-	return err
+	return back, err
 }
 
 // Restored records that a tenant's data went back to image, as its

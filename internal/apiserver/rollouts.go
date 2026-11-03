@@ -1,8 +1,10 @@
 package apiserver
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -14,6 +16,10 @@ import (
 // waits for them to be healthy before it is done.
 func (s *Server) rolloutAction(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("name")
+	if r.PathValue("action") == "restore" {
+		s.restoreRollout(w, r, app)
+		return
+	}
 	if err := s.catchUp(); err != nil {
 		writeError(w, err)
 		return
@@ -29,7 +35,7 @@ func (s *Server) rolloutAction(w http.ResponseWriter, r *http.Request) {
 	case "promote":
 		err = s.promote(app, actor(r))
 	default:
-		err = badRequest(errors.New("a rollout is paused, resumed, aborted or promoted"))
+		err = badRequest(errors.New("a rollout is paused, resumed, aborted, promoted or restored"))
 	}
 	if err != nil {
 		writeError(w, err)
@@ -41,6 +47,34 @@ func (s *Server) rolloutAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.appView(stored))
+}
+
+// restoreRollout takes tenants of app's rollout, those named or every one
+// it moved, back to the revision before, their data too: what they wrote
+// since they moved is lost. It pauses the rollout.
+func (s *Server) restoreRollout(w http.ResponseWriter, r *http.Request, app string) {
+	var request api.RolloutRestore
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, badRequest(fmt.Errorf("request body: %w", err)))
+		return
+	}
+	if err := s.catchUp(); err != nil {
+		writeError(w, err)
+		return
+	}
+	back, err := s.store.RestoreTenants(app, request.Tenants, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	stored, err := s.store.App(app)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.RolloutRestored{App: s.appView(stored), Tenants: back})
 }
 
 // promote moves every waiting tenant of app's running rollout now.

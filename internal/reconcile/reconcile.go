@@ -66,10 +66,6 @@ type Status struct {
 	ContainerID string    `json:"containerID,omitempty"`
 	Generation  int64     `json:"generation"`
 	CheckedAt   time.Time `json:"checkedAt"`
-	// ServedGeneration is the generation of the tenant this node saw pass
-	// a health check on the revision its rollout moved it to, on its new
-	// container: it served, whatever its health since.
-	ServedGeneration int64 `json:"servedGeneration,omitempty"`
 }
 
 // Config holds the node-wide settings the reconciler applies to every tenant.
@@ -108,13 +104,6 @@ type Reconciler struct {
 	imageRetryAt map[string]time.Time
 	mu           sync.RWMutex
 	statuses     map[string]Status
-	// edgesHold waits until every edge of this node holds a tenant's
-	// requests; nil where nothing serves them (tests, no edge).
-	edgesHold func(ctx context.Context, tenant string) bool
-	// served is the generation of each tenant recorded as served on the
-	// revision its rollout moved it to, seenServing the one seen passing a
-	// health check there, recorded or not; under mu.
-	served, seenServing map[string]int64
 	// passAt is when the last whole pass ended, passErrors how many errors
 	// it had.
 	passAt     time.Time
@@ -366,16 +355,9 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 			if message != "" {
 				statuses[i].Message = message
 			}
-			// Only a check of the container of the tenant's revision, not
-			// the old one serving while the new image is pulled, says it
-			// served on that revision.
-			recorded := true
-			if healthy && statuses[i].Phase == PhaseRunning {
-				recorded = r.noteServed(record)
-			}
 			// Served at once, and said so, not when the slowest check of
 			// the pass is done.
-			if record.MoveHeld && healthy && statuses[i].Phase == PhaseRunning && recorded {
+			if record.MoveHeld && healthy && statuses[i].Phase == PhaseRunning {
 				released[i], releaseErrs[i] = true, r.store.ReleaseHold(record.Spec.Name)
 				status := statuses[i]
 				status.Generation, status.CheckedAt = record.Generation, time.Now().UTC()
@@ -408,7 +390,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	// A tenant that moved here is served once it is healthy: until then,
 	// requests for it wait.
 	for i, record := range records {
-		if record.MoveHeld && !released[i] && (statuses[i].Phase == PhaseRunning && statuses[i].Healthy && r.noteServed(record) || statuses[i].Phase == PhaseSuspended) {
+		if record.MoveHeld && !released[i] && (statuses[i].Phase == PhaseRunning && statuses[i].Healthy || statuses[i].Phase == PhaseSuspended) {
 			if err := r.store.ReleaseHold(record.Spec.Name); err != nil {
 				errs = append(errs, fmt.Errorf("tenant %s: serve it: %w", record.Spec.Name, err))
 			}
@@ -489,7 +471,6 @@ func (r *Reconciler) Status(tenant string) (Status, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	status, ok := r.statuses[tenant]
-	status.ServedGeneration = r.seenServing[tenant]
 	return status, ok
 }
 
@@ -526,14 +507,3 @@ func (r *Reconciler) Exclusive(fn func() error) error {
 // ErrStopping refuses work queued behind a pass while the agent stops, so
 // the agent's stop does not wait for it.
 var ErrStopping = errors.New("the agent is stopping; try again once it is back")
-
-// edgesHoldWait is how long a new container waits for the edges to hold
-// its tenant's requests.
-const edgesHoldWait = 10 * time.Second
-
-// WithEdgesHold has new containers of tenants a wave moved wait until hold
-// says every edge holds their requests.
-func (r *Reconciler) WithEdgesHold(hold func(ctx context.Context, tenant string) bool) *Reconciler {
-	r.edgesHold = hold
-	return r
-}

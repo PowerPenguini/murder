@@ -1,9 +1,11 @@
 // Package rollout moves an app's tenants to its newest revision in waves,
 // from the cluster's leader: canaries first, then a tenth of the tenants,
 // half, and the rest, each wave healthy for a while before the next moves.
-// A tenant that never comes up on the newest revision goes back to the one
-// before, its data too, and the rollout pauses; one that comes up and then
-// fails pauses it, its data left as it is, for someone to look.
+// A tenant that does not come up healthy on the newest revision, breaks
+// after it came up, or whose node does not say how it runs pauses the
+// rollout for someone to decide: abort takes the tenants it moved back to
+// the revision before, their data as it is; restore takes them back with
+// their data from before they moved. The driver itself takes nothing back.
 package rollout
 
 import (
@@ -11,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -31,9 +32,7 @@ type Store interface {
 	RolloutState() ([]store.Rollout, []store.Record)
 	AdvanceRollout(app string, at store.RolloutAt, tenants []string, actor string) error
 	FinishRollout(app string, at store.RolloutAt, actor string) error
-	RollBackTenants(app string, at store.RolloutAt, tenants map[string]int64, restore bool, reason, actor string) error
 	PauseRolloutAt(app string, at store.RolloutAt, reason, actor string) error
-	MarkServed(app string, at store.RolloutAt, tenant string, generation int64) error
 }
 
 // StatusFunc reports a tenant's status from its node; false when unknown.
@@ -65,7 +64,8 @@ type Driver struct {
 	// CanarySoak and Soak are how long a wave's tenants stay healthy
 	// before the next wave moves: the canaries', and the others'.
 	CanarySoak, Soak time.Duration
-	// FailAfter is how long a moved tenant may take to come up healthy.
+	// FailAfter is how long a moved tenant may take to come up healthy,
+	// and its node not say how it runs.
 	FailAfter time.Duration
 	Now       func() time.Time
 	Log       *slog.Logger
@@ -81,26 +81,22 @@ type Driver struct {
 // watch is what the driver saw of a moved tenant at one generation.
 type watch struct {
 	generation int64
-	// moved says this driver moved it and has watched it since, every few
-	// seconds, its rollout running all along: it knows the tenant never
-	// served if it never saw it healthy. Any gap ends that for good.
-	moved    bool
+	// lastSeen is when this driver last looked at it, epoch the rollout's
+	// then: a soak counts only time watched all along.
 	lastSeen time.Time
+	epoch    int64
 	// checkedAt is the time its node last checked it, as that node says,
 	// and checkedChanged when this driver saw it change: a result that does
 	// not change for long is old, whatever the two clocks say.
 	checkedAt, checkedChanged time.Time
-	// epoch is the rollout's as last seen: any change of it since (a pause,
-	// a resume, a wave this driver did not move) was not watched.
-	epoch          int64
-	gap            bool
+	// unknownSince is when its node stopped saying how it runs.
+	unknownSince   time.Time
 	container      string
 	restarts       int
 	healthySince   time.Time
 	unhealthySince time.Time
-	everHealthy    bool
-	// marked says the store knows it served.
-	marked bool
+	// everHealthy says it came up healthy on its new revision.
+	everHealthy bool
 }
 
 func (d *Driver) now() time.Time {
@@ -141,11 +137,11 @@ func (d *Driver) Step(ctx context.Context) {
 	rollouts, records := d.Store.RolloutState()
 	for _, rollout := range rollouts {
 		if rollout.State != store.RolloutRunning {
-			// Not watched while paused: what happens meanwhile is unknown.
+			// Not watched while paused: no soak counts the time.
 			d.mu.Lock()
 			for _, record := range records {
 				if w := d.watches[record.Spec.Name]; w != nil && record.App == rollout.App {
-					w.gap, w.healthySince = true, time.Time{}
+					w.healthySince = time.Time{}
 				}
 			}
 			d.mu.Unlock()
@@ -203,7 +199,7 @@ func (d *Driver) drive(ctx context.Context, rollout store.Rollout, records []sto
 	}
 	// The store took the wave as one more change of the rollout.
 	for _, name := range next {
-		d.watches[name] = &watch{generation: generations[name] + 1, moved: true, lastSeen: now, epoch: rollout.Epoch + 1}
+		d.watches[name] = &watch{generation: generations[name] + 1, lastSeen: now, epoch: rollout.Epoch + 1}
 	}
 	return nil
 }
@@ -236,10 +232,10 @@ func nextWave(wave, total, moved int, pending []store.Record) []string {
 }
 
 // judge reports whether every moved tenant is through: healthy on its new
-// revision, without restarting, for as long as its wave soaks. A tenant
-// that never served on it, watched by this driver since it moved, goes
-// back with its data; any other failure pauses the rollout, data as it
-// is, for someone to look.
+// revision, without restarting, for as long as its wave soaks. Any that
+// does not come up healthy within FailAfter, breaks after it came up, or
+// whose node does not say how it runs pauses the rollout, naming the ways
+// on; the driver takes nothing back itself.
 func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store.Record) (bool, error) {
 	soak := d.Soak
 	if soak == 0 {
@@ -259,10 +255,9 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 	if every == 0 {
 		every = DefaultEvery
 	}
-	// The longest the driver may not look at a tenant and still know
-	// what it did meanwhile.
+	// The longest the driver may not look at a tenant and still count the
+	// time as healthy.
 	coverage := max(3*every, unhealthyGrace)
-	at := rollout.At()
 	d.mu.Lock()
 	if d.watches == nil {
 		d.watches = map[string]*watch{}
@@ -270,7 +265,6 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 	d.mu.Unlock()
 	through := true
 	var broke []string
-	back := map[string]int64{}
 	for _, record := range moved {
 		name := record.Spec.Name
 		if record.Spec.Suspended {
@@ -286,8 +280,8 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 		now := d.now()
 		if !w.lastSeen.IsZero() && now.Sub(w.lastSeen) > coverage || w.epoch != rollout.Epoch {
 			// Not looked at for long, or the rollout changed meanwhile (a
-			// pause and resume, say), however briefly.
-			w.gap, w.healthySince = true, time.Time{}
+			// pause and resume, say): its soak starts over.
+			w.healthySince = time.Time{}
 		}
 		w.lastSeen, w.epoch = now, rollout.Epoch
 		status, known := d.Status(ctx, record)
@@ -301,25 +295,25 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 				known = false
 			}
 		}
-		// Its node saw it pass a health check on this generation: it
-		// served, whether that was recorded or not.
-		if known && status.ServedGeneration == record.Generation && !record.Served && !w.marked {
-			if err := d.Store.MarkServed(rollout.App, at, name, record.Generation); err != nil {
-				return false, err
-			}
-			w.marked = true
-		}
-		served := record.Served || w.everHealthy || known && status.ServedGeneration == record.Generation
-		if !known || status.Generation < record.Generation {
-			// Not known, or not yet of this generation: no time counts
-			// as healthy, and what happened meanwhile is unknown.
+		if !known {
+			// No time counts as healthy while its node does not say.
 			w.healthySince = time.Time{}
-			if !known {
-				w.gap = true
+			through = false
+			if w.unknownSince.IsZero() {
+				w.unknownSince = now
 			}
+			if now.Sub(later(rollout.WaveStarted, w.unknownSince)) > failAfter {
+				broke = append(broke, fmt.Sprintf("%s's node has not said how it runs for %s", name, failAfter))
+			}
+			continue
+		}
+		w.unknownSince = time.Time{}
+		if status.Generation < record.Generation {
+			// Its node has not started the new revision yet.
+			w.healthySince = time.Time{}
 			through = false
 			if now.Sub(rollout.WaveStarted) > failAfter {
-				broke = append(broke, name+"'s node does not say how it runs on this revision")
+				broke = append(broke, fmt.Sprintf("%s did not come up within %s: its node has not started the new revision", name, failAfter))
 			}
 			continue
 		}
@@ -340,8 +334,8 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 		if restarted {
 			healthy = false
 			w.healthySince = time.Time{}
-			if served {
-				broke = append(broke, name+" restarted")
+			if w.everHealthy {
+				broke = append(broke, name+" restarted after it came up")
 			}
 		}
 		switch {
@@ -352,48 +346,37 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 				w.healthySince = status.CheckedAt
 			}
 			w.everHealthy, w.unhealthySince = true, time.Time{}
-			if !record.Served && !w.marked {
-				if err := d.Store.MarkServed(rollout.App, at, name, record.Generation); err != nil {
-					return false, err
-				}
-				w.marked = true
-			}
 			if status.CheckedAt.Sub(w.healthySince) < soak {
 				through = false
 			}
-		case served:
+		case w.everHealthy:
 			w.healthySince = time.Time{}
 			if w.unhealthySince.IsZero() {
 				w.unhealthySince = now
 			}
-			if now.Sub(w.unhealthySince) > unhealthyGrace {
-				broke = append(broke, name+" fails its health check")
+			if now.Sub(w.unhealthySince) > unhealthyGrace && !restarted {
+				broke = append(broke, name+" fails its health check after it came up")
 			}
 			through = false
 		case now.Sub(rollout.WaveStarted) > failAfter:
 			through = false
-			switch {
-			case record.MovedOn != record.Node:
-				broke = append(broke, name+" did not come up healthy, but moved since its wave: its node has no snapshot from before, so its revision and data stay")
-			case w.moved && !w.gap:
-				back[name] = record.Generation
-			default:
-				broke = append(broke, name+" did not come up healthy, but this node did not watch it all along: its revision and data stay (`murder app rollout abort` takes it back as it is)")
-			}
+			broke = append(broke, fmt.Sprintf("%s did not come up healthy within %s", name, failAfter))
 		default:
 			through = false
 		}
 	}
-	if len(back) > 0 {
-		names := slices.Sorted(maps.Keys(back))
-		reason := fmt.Sprintf("%s did not come up healthy within %s on revision %d; back to the revision before, data too", strings.Join(names, ", "), failAfter, rollout.ToRevision)
-		d.Log.Warn("rollout rolls tenants back", "app", rollout.App, "tenants", names)
-		return false, d.Store.RollBackTenants(rollout.App, at, back, true, reason, Actor)
-	}
 	if len(broke) > 0 {
-		reason := fmt.Sprintf("%s on revision %d: paused for someone to look (`murder app rollout resume` or `abort`)", strings.Join(broke, ", "), rollout.ToRevision)
+		reason := fmt.Sprintf("%s, on revision %d. Paused: `murder app rollout abort %s` takes every tenant it moved back to the revision before, their data as it is; `murder app rollout restore %s` takes them back with their data from before they moved (-tenant NAME for some only), losing what they wrote since", strings.Join(broke, "; "), rollout.ToRevision, rollout.App, rollout.App)
 		d.Log.Warn("rollout paused", "app", rollout.App, "reason", reason)
-		return false, d.Store.PauseRolloutAt(rollout.App, at, reason, Actor)
+		return false, d.Store.PauseRolloutAt(rollout.App, rollout.At(), reason, Actor)
 	}
 	return through, nil
+}
+
+// later is the later of a and b.
+func later(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }

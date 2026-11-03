@@ -316,6 +316,29 @@ func (a *demoActor) RolloutAction(_ context.Context, name, action string) (api.A
 	return app, nil
 }
 
+func (a *demoActor) RestoreRollout(_ context.Context, name string, tenants []string) (api.RolloutRestored, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	app, ok := a.apps[name]
+	if !ok {
+		return api.RolloutRestored{}, &api.Error{Status: 404, Message: "app " + name + ": not found"}
+	}
+	if app.Rollout == nil || !app.Rollout.Active() {
+		return api.RolloutRestored{}, &api.Error{Status: 409, Message: "app " + name + " has no rollout under way"}
+	}
+	if len(tenants) == 0 {
+		tenants = a.liveTenantsOf(name)
+	}
+	rollout := *app.Rollout
+	rollout.State = store.RolloutPaused
+	rollout.Reason = strings.Join(tenants, ", ") + " went back to the revision before, data too, as " + a.actor + " asked"
+	app.Rollout = &rollout
+	a.apps[name] = app
+	a.recordApp("rollout.restored", name)
+	app.Tenants = a.liveTenantsOf(name)
+	return api.RolloutRestored{App: app, Tenants: tenants}, nil
+}
+
 func (a *demoActor) SetFlags(_ context.Context, name string, flags api.TenantFlags) (api.Tenant, error) {
 	return a.change(name, "tenant.flags", "", func(t *api.Tenant) error {
 		if flags.Canary != nil {

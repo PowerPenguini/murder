@@ -129,9 +129,8 @@ type Record struct {
 	// Restore is the image the tenant's data goes back to, from the
 	// snapshot taken as its image changed; empty for none.
 	Restore string `json:"restore,omitempty"`
-	// Served says the tenant was seen healthy on the revision its rollout
-	// moved it to; MovedOn is the node it ran on as it moved.
-	Served  bool   `json:"served,omitempty"`
+	// MovedOn is the node it ran on as its rollout moved it: the one that
+	// keeps the snapshot its data can go back to.
 	MovedOn string `json:"movedOn,omitempty"`
 	// Generation counts changes of the desired state.
 	Generation int64     `json:"generation"`
@@ -309,12 +308,10 @@ type Store interface {
 	FinishRollout(app string, at RolloutAt, actor string) error
 	PauseRollout(app, reason, actor string) error
 	PauseRolloutAt(app string, at RolloutAt, reason, actor string) error
-	MarkServed(app string, at RolloutAt, tenant string, generation int64) error
-	Served(tenant string, generation int64) error
 	RolloutState() ([]Rollout, []Record)
 	ResumeRollout(app, actor string) error
 	AbortRollout(app, reason, actor string) ([]string, error)
-	RollBackTenants(app string, at RolloutAt, tenants map[string]int64, restore bool, reason, actor string) error
+	RestoreTenants(app string, tenants []string, actor string) ([]string, error)
 	Restored(name, image string) error
 	SetFlags(name string, canary, hold *bool, actor string) (Record, error)
 	// SetLatest records latest, pinned, as the newest image of tag in its

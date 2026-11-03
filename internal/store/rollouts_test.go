@@ -45,16 +45,6 @@ func at(t *testing.T, st *SQLite) RolloutAt {
 	return rollout.At()
 }
 
-// generations are tenants' generations now.
-func generations(st *SQLite, names ...string) map[string]int64 {
-	out := map[string]int64{}
-	for _, name := range names {
-		record, _ := st.Get(name)
-		out[name] = record.Generation
-	}
-	return out
-}
-
 func TestAnAppChangeRollsOutInWaves(t *testing.T) {
 	st, change := rolling(t)
 	if !change.Rollout || !slices.Equal(change.Tenants, []string{"a", "b", "c"}) || change.App.Revision != 2 {
@@ -77,7 +67,7 @@ func TestAnAppChangeRollsOutInWaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _ := st.Get("a")
-	if a.Spec.Image != otherImage || a.AppRevision != 0 || a.BeforeRevision != 1 || a.Generation != 2 || a.MovedOn != st.Node() || a.Served {
+	if a.Spec.Image != otherImage || a.AppRevision != 0 || a.BeforeRevision != 1 || a.Generation != 2 || a.MovedOn != st.Node() {
 		t.Fatalf("a after its wave: %+v", a)
 	}
 	if h, _ := st.Get("h"); h.AppRevision != 1 || h.Spec.Image != image {
@@ -123,46 +113,47 @@ func TestAnAppChangeRollsOutInWaves(t *testing.T) {
 	}
 }
 
-func TestAFailedTenantGoesBackWithItsData(t *testing.T) {
+// Tenants a rollout moved go back with their data only as someone asks:
+// those named, or every one it moved. The rollout pauses.
+func TestRestoreTakesTenantsBackWithTheirData(t *testing.T) {
 	st, _ := rolling(t)
 	if err := st.AdvanceRollout("web", at(t, st), []string{"a", "b"}, "murder"); err != nil {
 		t.Fatal(err)
 	}
-	// b served on the new revision: its data never goes back by itself.
-	if err := st.MarkServed("web", at(t, st), "b", generations(st, "b")["b"]); err != nil {
-		t.Fatal(err)
+	before := at(t, st)
+	// One it did not move, or of another app, is refused, and nothing
+	// changes.
+	for _, names := range [][]string{{"c"}, {"a", "c"}, {"h"}, {"nobody"}} {
+		if _, err := st.RestoreTenants("web", names, "alice"); !errors.Is(err, ErrConflict) {
+			t.Fatalf("restore %v: %v", names, err)
+		}
 	}
-	if b, _ := st.Get("b"); !b.Served {
-		t.Fatal("b not served")
-	}
-	// A judgment of a tenant that changed since is refused, as is one of
-	// another rollout.
-	stale := generations(st, "a")
-	stale["a"]--
-	if err := st.RollBackTenants("web", at(t, st), stale, true, "old news", "murder"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("a stale judgment: %v", err)
+	if a, _ := st.Get("a"); a.AppRevision != 0 || a.Restore != "" || at(t, st) != before {
+		t.Fatalf("a refused restore changed a %+v, or the rollout", a)
 	}
 	other := at(t, st)
 	other.ToRevision++
-	if err := st.RollBackTenants("web", other, generations(st, "a"), true, "another rollout", "murder"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("a judgment of another rollout: %v", err)
-	}
 	if err := st.PauseRolloutAt("web", other, "another rollout", "murder"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("a pause of another rollout: %v", err)
 	}
-	if err := st.RollBackTenants("web", at(t, st), generations(st, "a"), true, "a never became healthy", "murder"); err != nil {
-		t.Fatal(err)
+	back, err := st.RestoreTenants("web", []string{"a"}, "alice")
+	if err != nil || !slices.Equal(back, []string{"a"}) {
+		t.Fatalf("restore: %v, %v", back, err)
 	}
 	a, _ := st.Get("a")
-	if a.AppRevision != 1 || a.Spec.Image != image || a.Restore != image || a.Generation != 3 {
+	if a.AppRevision != 1 || a.BeforeRevision != 0 || a.Spec.Image != image || a.Restore != image || a.Generation != 3 || !a.RestorePending() {
 		t.Fatalf("a after going back: %+v", a)
 	}
 	rollout, _ := st.Rollout("web")
-	if rollout.State != RolloutPaused || rollout.Reason != "a never became healthy" {
+	if rollout.State != RolloutPaused || !strings.Contains(rollout.Reason, "a went back to the revision before, data too, as alice asked") || rollout.Epoch != before.Epoch+1 {
 		t.Fatalf("rollout %+v", rollout)
 	}
 	if err := st.AdvanceRollout("web", at(t, st), []string{"c"}, "murder"); err == nil {
 		t.Fatal("a paused rollout moved a tenant")
+	}
+	// Taken back, a is no longer one the rollout moved.
+	if _, err := st.RestoreTenants("web", []string{"a"}, "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("restored twice: %v", err)
 	}
 	// Its node restores the data, then says so.
 	if err := st.Restored("a", "sha256:another"); err != nil {
@@ -174,12 +165,19 @@ func TestAFailedTenantGoesBackWithItsData(t *testing.T) {
 	if err := st.Restored("a", image); err != nil {
 		t.Fatal(err)
 	}
-	if a, _ := st.Get("a"); a.Restore != "" {
+	if a, _ := st.Get("a"); a.Restore != "" || a.RestorePending() {
 		t.Fatalf("restore %q", a.Restore)
 	}
-	// Abort takes b back too; its data stays.
-	back, err := st.AbortRollout("web", "the image is broken", "alice")
-	if err != nil || !slices.Equal(back, []string{"b"}) {
+	// None named: every tenant it moved.
+	if back, err := st.RestoreTenants("web", nil, "alice"); err != nil || !slices.Equal(back, []string{"b"}) {
+		t.Fatalf("restore all: %v, %v", back, err)
+	}
+	if _, err := st.RestoreTenants("web", nil, "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("nothing left to restore: %v", err)
+	}
+	// Abort leaves the data of those still waiting for it as it is.
+	back, err = st.AbortRollout("web", "the image is broken", "alice")
+	if err != nil || len(back) != 0 {
 		t.Fatalf("abort: %v, %v", back, err)
 	}
 	if b, _ := st.Get("b"); b.Spec.Image != image || b.AppRevision != 1 || b.Restore != "" {
@@ -187,6 +185,26 @@ func TestAFailedTenantGoesBackWithItsData(t *testing.T) {
 	}
 	if rollout, _ := st.Rollout("web"); rollout.State != RolloutAborted {
 		t.Fatalf("rollout %+v", rollout)
+	}
+	if _, err := st.RestoreTenants("web", nil, "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("restore of an aborted rollout: %v", err)
+	}
+}
+
+// Abort takes every tenant it moved back, their data as it is.
+func TestAbortKeepsTheData(t *testing.T) {
+	st, _ := rolling(t)
+	if err := st.AdvanceRollout("web", at(t, st), []string{"a", "b"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	back, err := st.AbortRollout("web", "the image is broken", "alice")
+	if err != nil || !slices.Equal(back, []string{"a", "b"}) {
+		t.Fatalf("abort: %v, %v", back, err)
+	}
+	for _, name := range back {
+		if record, _ := st.Get(name); record.Spec.Image != image || record.AppRevision != 1 || record.Restore != "" {
+			t.Fatalf("%s after the abort: %+v", name, record)
+		}
 	}
 }
 
@@ -282,12 +300,48 @@ func TestDataGoesBackOnlyWhereItsSnapshotIs(t *testing.T) {
 	if _, err := st.FinishMove("a", "test"); err != nil {
 		t.Fatal(err)
 	}
-	// Its data cannot go back, so neither does its revision.
-	if err := st.RollBackTenants("web", at(t, st), generations(st, "a"), true, "a never became healthy", "murder"); !errors.Is(err, ErrConflict) {
+	// Its data cannot go back: its revision stays too.
+	if _, err := st.RestoreTenants("web", []string{"a"}, "alice"); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "no snapshot of its data from before") {
 		t.Fatalf("a moved since its wave: %v", err)
+	}
+	if _, err := st.RestoreTenants("web", nil, "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("every tenant, a among them: %v", err)
 	}
 	if a, _ := st.Get("a"); a.Restore != "" || a.AppRevision != 0 {
 		t.Fatalf("a moved since its wave: %+v", a)
+	}
+	// Nor can one moving now.
+	if err := st.AdvanceRollout("web", at(t, st), []string{"b"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartMove("b", "n2", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RestoreTenants("web", []string{"b"}, "alice"); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "is moving") {
+		t.Fatalf("b moving: %v", err)
+	}
+}
+
+// A rollout that did not change a tenant's image took no snapshot of its
+// data as it moved: there is nothing to go back to.
+func TestDataGoesBackOnlyIfTheImageChanged(t *testing.T) {
+	st, _ := openNew(t, options())
+	if _, err := st.PutApp(App{Name: "web", Spec: appSpec()}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(NewTenant{Name: "a", App: "web"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	next := appSpec()
+	next.Env = map[string]string{"MODE": "new"}
+	if change, err := st.PutApp(App{Name: "web", Spec: next}, "bob"); err != nil || !change.Rollout {
+		t.Fatalf("change %+v, %v", change, err)
+	}
+	if err := st.AdvanceRollout("web", at(t, st), []string{"a"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RestoreTenants("web", nil, "alice"); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "did not change tenant a's image") {
+		t.Fatalf("restore: %v", err)
 	}
 }
 

@@ -40,8 +40,6 @@ type Server struct {
 	// stopping is closed when the agent stops, so requests that wait, such
 	// as the edge's for new routes, end at once.
 	stopping chan struct{}
-	// edges is what this node's edges serve from.
-	edges    edges
 	stopOnce sync.Once
 	// upgrader installs new binaries on this node; nil if it takes none.
 	upgrader Upgrader
@@ -127,7 +125,7 @@ func (s *Server) view(record store.Record) api.Tenant {
 		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node, Replica: record.Replica, ReplicaReady: record.ReplicaReady, ReplicaNext: record.ReplicaNext,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
-		AppRevision: record.AppRevision, Canary: record.Canary, Hold: record.Hold,
+		AppRevision: record.AppRevision, BeforeRevision: record.BeforeRevision, Canary: record.Canary, Hold: record.Hold,
 	}
 	view.Elsewhere = record.Node != s.store.Node()
 	if !view.Elsewhere && s.replicas != nil {
@@ -852,11 +850,11 @@ func (r Routes) Route(tenant string) (edge.Route, bool) {
 	if record.Node != r.Store.Node() {
 		return r.relay(record)
 	}
-	// So does a tenant whose container is being replaced, and one a wave
-	// moved until it is known to serve on its new revision (or whose data
-	// goes back): what it takes then, its rollout never takes back. Other
-	// nodes' edges pass its requests on to this one, which holds them.
-	if r.Replacing != nil && r.Replacing(tenant) || record.AwaitsServing() {
+	// So does a tenant whose container is being replaced, and one whose
+	// data goes back to before its rollout moved it, until it has: nothing
+	// is written to data about to be replaced. Other nodes' edges pass its
+	// requests on to this one, which holds them.
+	if r.Replacing != nil && r.Replacing(tenant) || record.RestorePending() {
 		return edge.Route{Moving: true, Suspended: record.Spec.Suspended}, true
 	}
 	backend, err := reconcile.Backend(record)

@@ -51,26 +51,40 @@ A tenant is through when it runs the new revision, healthy, without its
 container restarting. Until its wave moves, a tenant keeps the revision it
 ran, and a restart, a move or a failover keeps it there too.
 
-- A tenant that does not come up healthy within 5 minutes goes back to the
-  revision before, **its data too**: its node rolls the ZFS dataset back to
-  the snapshot taken when the old container stopped. Whatever it wrote
-  since is lost; that is the point, as a failed upgrade may have half
-  migrated it. The rollout pauses. Until it does, a moved tenant takes no request (they wait, then get
-  503, as from any tenant that does not answer), so its data goes back
-  only if it took none: if it never
-  passed a health check on the new revision (its node records that it did
-  before it serves a request, so a new leader knows too), the leader that
-  moved it looked at it every few seconds since with nothing changing the
-  rollout meanwhile (no pause or resume, however brief), and only while it
-  runs on the node it moved on. Otherwise (a new leader, a pause, a move) the
-  rollout pauses with the tenant's revision and data as they are. Without ZFS, the data stays as it
-  is. A node that should take the data back but has no snapshot of then
-  keeps the tenant stopped; `murder app rollout abort` starts it on its
-  data as it is.
-- A tenant that came up and then fails its health check for 30 seconds, or
-  restarts, pauses the rollout and stays as it is, for someone to look.
-- A node that does not say how its tenant runs pauses the rollout after 5
-  minutes; nothing goes back.
+Murder never takes a tenant back by itself. Anything that goes wrong
+pauses the rollout, naming the tenants, for someone to decide:
+
+- a tenant that does not come up healthy on the new revision within 5
+  minutes;
+- a tenant that came up and then fails its health check for 30 seconds, or
+  restarts;
+- a node that does not say how its tenant runs for 5 minutes.
+
+From a paused rollout there are two ways back (and `resume`, to go on):
+
+- `murder app rollout abort web` takes every tenant the rollout moved back
+  to the revision before, **its data as it is**. Use it when the old
+  revision reads what the new one wrote.
+- `murder app rollout restore web -yes` takes them back to the revision
+  before **with their data from before they moved**: each tenant's node
+  rolls its ZFS dataset back to the snapshot taken when the old container
+  stopped, and the old image starts on that. Every write to those tenants
+  since they moved is lost; that is the point when a failed upgrade half
+  migrated the data. `-tenant NAME` (repeatable) takes only those named
+  back. Without `-yes` it only says which tenants it would take back and
+  what is lost. The rollout pauses (or stays paused), and a tenant takes no
+  request until its data is back: they wait, then get 503, as from any
+  tenant that does not answer.
+
+Restore refuses, changing nothing, a tenant the rollout did not move, one
+that moved to another node since its wave or is moving now (that node has
+no snapshot of its data from before), and one whose image the rollout did
+not change (no snapshot was taken as it moved): abort takes those back as
+they are. Without ZFS there is no snapshot, and the old image starts on the
+data as it is. A node that should take the data back but no longer has the
+snapshot keeps the tenant stopped; `murder app rollout abort` then starts it
+on its data as it is.
+
 - A held tenant (`-hold true`) stays on the revision it runs, out of every
   rollout, until `-hold false`; then it takes the newest revision.
 - A suspended tenant moves with its wave and holds no wave up: nothing of
@@ -82,6 +96,8 @@ murder app rollout pause web          # stop after the wave that runs
 murder app rollout resume web
 murder app rollout promote web        # every waiting tenant now
 murder app rollout abort web          # every moved tenant back to the revision before; data stays
+murder app rollout restore web -yes   # every moved tenant back, data from before it moved: writes since are lost
+murder app rollout restore web -tenant acme -yes   # only acme
 murder app apply apps/web.yaml -now   # no waves: every tenant now, ending a rollout that runs
 ```
 
@@ -90,8 +106,10 @@ or for an app with one tenant; applying the same spec again with `-now`
 moves what its rollout has yet to move. `-wait` waits for the rollout of
 the app's newest revision, changed by this apply or an earlier one. A newer change while a rollout runs starts
 it again from the first wave, with the tenants already moved kept where
-they are until their wave. The audit log names each wave (`app.wave`),
-each tenant taken back and the end (`rollout.done`). Revisions a tenant
+they are until their wave. The audit log names each tenant a wave moves
+(`app.rolled-out`), each pause (`rollout.paused`), each tenant taken back
+with its data (`rollout.restored`) or as it is (`rollout.rolled-back`), and
+the end (`rollout.done`, `rollout.aborted`). Revisions a tenant
 still runs are kept beyond the last 20.
 
 **Overrides** are the tenant's own `-image`, `-env`, `-secret` and limits

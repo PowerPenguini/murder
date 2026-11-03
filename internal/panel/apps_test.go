@@ -284,6 +284,18 @@ func TestARolloutFromThePanel(t *testing.T) {
 	if !strings.Contains(body, "the rollout is paused") || !strings.Contains(body, `value="resume"`) {
 		t.Fatalf("after pausing:\n%s", body)
 	}
+	// Restore warns of what it loses, and needs the name too.
+	if !strings.Contains(body, `value="restore-data"`) || !strings.Contains(body, "what it wrote since is lost") {
+		t.Fatalf("no restore on the paused rollout:\n%s", body)
+	}
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"restore-data"}, "confirm": {"we"}}, server.URL)
+	if !strings.Contains(body, "type the app&#39;s name to take its tenants back with their data") {
+		t.Fatalf("restored without the name:\n%s", body)
+	}
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"restore-data"}, "confirm": {"web"}}, server.URL)
+	if app, _ := agent.App(ctx, "web"); app.Rollout.State != "paused" || !strings.Contains(body, "go back to the revision before with their data from before they moved") {
+		t.Fatalf("after restoring: %+v\n%s", app.Rollout, body)
+	}
 	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"abort"}, "confirm": {"we"}}, server.URL)
 	if !strings.Contains(body, "type the app&#39;s name") {
 		t.Fatalf("aborted without the name:\n%s", body)

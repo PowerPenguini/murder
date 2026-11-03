@@ -2,12 +2,15 @@ package apiserver
 
 import (
 	"context"
-
-	"github.com/PowerPenguini/murder/internal/api"
-	"github.com/PowerPenguini/murder/internal/store"
+	"fmt"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 func TestAnAppKeepsItsImageUntilItIsUpdated(t *testing.T) {
@@ -197,12 +200,47 @@ func TestAnAppChangeRollsOutInWavesThroughTheAPI(t *testing.T) {
 			t.Fatalf("%s after promote: %+v", name, tenant)
 		}
 	}
-	// Abort takes them back.
+	// Restore takes beta back with its data, as asked: the rollout pauses,
+	// and beta takes no request until its data is back.
+	routes := Routes{Store: f.store}
+	restored, err := f.client.RestoreRollout(ctx, "web", []string{"beta"})
+	if err != nil || !slices.Equal(restored.Tenants, []string{"beta"}) || restored.App.Rollout.State != store.RolloutPaused {
+		t.Fatalf("restore %+v, %v", restored, err)
+	}
+	if tenant, _ := f.client.Get(ctx, "beta"); tenant.AppRevision != 1 || tenant.Spec.Image != pinnedTag("ghcr.io/example/app:1.4") {
+		t.Fatalf("beta after restore: %+v", tenant)
+	}
+	if route, _ := routes.Route("beta"); !route.Moving {
+		t.Fatalf("beta's requests are not held while its data goes back: %+v", route)
+	}
+	if route, _ := routes.Route("acme"); route.Moving || route.Backend == "" {
+		t.Fatalf("acme is held: %+v", route)
+	}
+	// beta went back already; one not of the app is refused, nothing
+	// changed.
+	for _, names := range [][]string{{"beta"}, {"acme", "nobody"}} {
+		_, err = f.client.RestoreRollout(ctx, "web", names)
+		checkStatus(t, fmt.Sprintf("restore %v", names), err, 409)
+	}
+	if tenant, _ := f.client.Get(ctx, "acme"); tenant.AppRevision != 0 {
+		t.Fatalf("a refused restore moved acme: %+v", tenant)
+	}
+	// Abort takes the others back, their data as it is, and beta's data
+	// stays as it is too.
 	if app, err = f.client.RolloutAction(ctx, "web", "abort"); err != nil || app.Rollout.State != store.RolloutAborted {
 		t.Fatalf("abort %+v, %v", app.Rollout, err)
 	}
 	if tenant, _ := f.client.Get(ctx, "acme"); tenant.AppRevision != 1 || tenant.Spec.Image != pinnedTag("ghcr.io/example/app:1.4") {
 		t.Fatalf("acme after abort: %+v", tenant)
+	}
+	if route, _ := routes.Route("beta"); route.Moving {
+		t.Fatalf("beta still held after the abort: %+v", route)
+	}
+	// A restore without a body names every tenant; nothing is left.
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, httptest.NewRequest("POST", "/v1/apps/web/rollout/restore", nil))
+	if w.Code != 409 {
+		t.Fatalf("a restore of an aborted rollout: %d %s", w.Code, w.Body)
 	}
 	_, err = f.client.RolloutAction(ctx, "web", "dance")
 	checkStatus(t, "an unknown action", err, 400)

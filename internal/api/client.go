@@ -42,11 +42,6 @@ func NewClient(socket string) *Client {
 func NewClientURL(base string) *Client { return &Client{http: http.DefaultClient, base: base} }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
-	return c.doWith(ctx, method, path, body, out, nil)
-}
-
-// doWith is do with headers of its own; empty values are left out.
-func (c *Client) doWith(ctx context.Context, method, path string, body, out any, headers map[string]string) error {
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -64,11 +59,6 @@ func (c *Client) doWith(ctx context.Context, method, path string, body, out any,
 	}
 	if c.Actor != "" {
 		request.Header.Set(ActorHeader, c.Actor)
-	}
-	for name, value := range headers {
-		if value != "" {
-			request.Header.Set(name, value)
-		}
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -218,6 +208,14 @@ func (c *Client) rollout(path string) string {
 func (c *Client) RolloutAction(ctx context.Context, name, action string) (App, error) {
 	var app App
 	return app, c.do(ctx, http.MethodPost, appPath(name)+"/rollout/"+url.PathEscape(action), nil, &app)
+}
+
+// RestoreRollout takes tenants of an app's rollout, those named or every
+// one it moved, back to the revision before with their data from before
+// they moved: what they wrote since is lost. The rollout pauses.
+func (c *Client) RestoreRollout(ctx context.Context, name string, tenants []string) (RolloutRestored, error) {
+	var restored RolloutRestored
+	return restored, c.do(ctx, http.MethodPost, appPath(name)+"/rollout/restore", RolloutRestore{Tenants: tenants}, &restored)
 }
 
 // SetFlags makes a tenant a canary or held, or not.

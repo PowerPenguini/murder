@@ -1919,10 +1919,10 @@ func TestATenantIsNotStartedOnMissingData(t *testing.T) {
 	}
 }
 
-// A rollout that takes a tenant back to the image before, asking for its
-// data back too, has its node restore the snapshot taken as the image
-// changed before the old image starts.
-func TestARolledBackTenantGetsItsDataBack(t *testing.T) {
+// A tenant someone takes back from its rollout with its data has its node
+// restore the snapshot taken as the image changed before the old image
+// starts: what the newer one wrote is gone, though it served.
+func TestARestoredTenantGetsItsDataBack(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
 	f.reconcile(t)
@@ -1939,15 +1939,11 @@ func TestARolledBackTenantGetsItsDataBack(t *testing.T) {
 	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
 		t.Fatal(err)
 	}
-	// The newer image never passes its health check.
-	f.failHealth()
-	f.reconcileOnce(t)
-	if f.runtime.only(t).spec.Image != imageB {
-		t.Fatal("the wave did not move the tenant")
+	f.reconcile(t)
+	if c := f.runtime.only(t); c.spec.Image != imageB || !c.Running {
+		t.Fatalf("the wave did not move the tenant: %+v", c)
 	}
-	rollout, _ = f.store.Rollout("acme")
-	moved, _ := f.store.Get("acme")
-	if err := f.store.RollBackTenants("acme", rollout.At(), map[string]int64{"acme": moved.Generation}, true, "it never became healthy", "murder"); err != nil {
+	if _, err := f.store.RestoreTenants("acme", nil, "alice"); err != nil {
 		t.Fatal(err)
 	}
 	f.runtime.takeEvents()
@@ -1992,9 +1988,7 @@ func TestATenantWithoutItsSnapshotStaysStopped(t *testing.T) {
 	f.failHealth()
 	f.reconcileOnce(t)
 	f.volumes.destroyed = append(f.volumes.destroyed, f.volumes.snapshots...)
-	rollout, _ = f.store.Rollout("acme")
-	moved, _ := f.store.Get("acme")
-	if err := f.store.RollBackTenants("acme", rollout.At(), map[string]int64{"acme": moved.Generation}, true, "it never became healthy", "murder"); err != nil {
+	if _, err := f.store.RestoreTenants("acme", []string{"acme"}, "alice"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "no snapshot of then") {
@@ -2009,31 +2003,6 @@ func TestATenantWithoutItsSnapshotStaysStopped(t *testing.T) {
 	f.reconcile(t)
 	if c := f.runtime.only(t); c.spec.Image != imageA || !c.Running {
 		t.Fatalf("after the abort: %+v", c)
-	}
-}
-
-// A tenant a wave moved is recorded as served by its own node once it
-// passes a health check, before anyone looks: its rollout then never takes
-// its data back.
-func TestATenantMovedByAWaveIsRecordedServedOnceHealthy(t *testing.T) {
-	f := newFixture(t)
-	f.create(t, "acme")
-	f.reconcile(t)
-	app, _ := f.store.App("acme")
-	app.Spec.Image = imageB
-	if _, err := f.store.PutApp(app, "test"); err != nil {
-		t.Fatal(err)
-	}
-	rollout, _ := f.store.Rollout("acme")
-	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
-		t.Fatal(err)
-	}
-	if moved, _ := f.store.Get("acme"); moved.Served {
-		t.Fatal("served before it ran")
-	}
-	f.reconcile(t)
-	if served, _ := f.store.Get("acme"); !served.Served {
-		t.Fatalf("not recorded as served once healthy: %+v", served)
 	}
 }
 
@@ -2052,98 +2021,6 @@ func (f *fixture) reconcileOnce(t *testing.T) {
 		case <-f.reconciler.pulls.done:
 		default:
 			return
-		}
-	}
-}
-
-// The old container, serving while the new image is pulled, answers its
-// health check for the tenant: that says nothing of the new revision,
-// which has not served.
-func TestTheOldContainersHealthIsNotTheNewRevisionsServing(t *testing.T) {
-	f := newFixture(t)
-	f.create(t, "acme")
-	f.reconcile(t)
-	release := make(chan struct{})
-	pull := f.reconciler.pulls.pull
-	f.reconciler.pulls.pull = func(ctx context.Context, image string) error {
-		<-release
-		return pull(ctx, image)
-	}
-	defer close(release)
-	app, _ := f.store.App("acme")
-	app.Spec.Image = imageB
-	if _, err := f.store.PutApp(app, "test"); err != nil {
-		t.Fatal(err)
-	}
-	rollout, _ := f.store.Rollout("acme")
-	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.reconciler.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	status, _ := f.reconciler.Status("acme")
-	if status.Phase != PhasePulling || !status.Healthy {
-		t.Fatalf("acme while pulling: %+v", status)
-	}
-	if record, _ := f.store.Get("acme"); record.Served || status.ServedGeneration != 0 {
-		t.Fatalf("the old container's health counted as the new revision's: served %v, status %d", record.Served, status.ServedGeneration)
-	}
-}
-
-// Seen passing a health check on its new revision, a tenant's status says
-// so, even when the store could not take it.
-func TestAServingTheStoreMissedIsInTheStatus(t *testing.T) {
-	f := newFixture(t)
-	f.create(t, "acme")
-	f.reconcile(t)
-	app, _ := f.store.App("acme")
-	app.Spec.Image = imageB
-	if _, err := f.store.PutApp(app, "test"); err != nil {
-		t.Fatal(err)
-	}
-	rollout, _ := f.store.Rollout("acme")
-	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
-		t.Fatal(err)
-	}
-	f.reconciler.store = missesServed{f.reconciler.store}
-	f.reconcileOnce(t)
-	record, _ := f.store.Get("acme")
-	status, _ := f.reconciler.Status("acme")
-	if status.ServedGeneration != record.Generation {
-		t.Fatalf("status %+v, record generation %d, served %v", status, record.Generation, record.Served)
-	}
-}
-
-// missesServed is a store that cannot take a tenant's serving.
-type missesServed struct{ State }
-
-func (missesServed) Served(string, int64) error { return errors.New("no leader") }
-
-// A new container of a tenant a wave moved starts once the edges hold its
-// requests; if they do not say so in time, its data no longer goes back by
-// itself, and that is recorded before it starts.
-func TestANewContainerWaitsForTheEdgesToHoldItsRequests(t *testing.T) {
-	for _, held := range []bool{true, false} {
-		f := newFixture(t)
-		f.create(t, "acme")
-		f.reconcile(t)
-		asked := 0
-		f.reconciler.WithEdgesHold(func(context.Context, string) bool { asked++; return held })
-		app, _ := f.store.App("acme")
-		app.Spec.Image = imageB
-		if _, err := f.store.PutApp(app, "test"); err != nil {
-			t.Fatal(err)
-		}
-		rollout, _ := f.store.Rollout("acme")
-		if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
-			t.Fatal(err)
-		}
-		f.failHealth()
-		f.reconcileOnce(t)
-		record, _ := f.store.Get("acme")
-		if asked == 0 || f.runtime.only(t).spec.Image != imageB || record.Served == held {
-			t.Fatalf("held %v: asked %d, served %v", held, asked, record.Served)
 		}
 	}
 }

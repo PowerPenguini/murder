@@ -41,8 +41,8 @@ between servers, to you; Murder does it with ZFS. An app is configuration
   without restarting a tenant or dropping a request. Apps follow an image
   tag in their registry (GHCR or any other): a newer image is offered, an
   update rolls it out in waves, canaries first, and a tenant that does not
-  come up goes back with its data. Every change of an app is a revision to
-  go back to. [Operating Murder](docs/operations.md)
+  come up pauses the rollout, to abort it or take tenants back with their
+  data from before. Every change of an app is a revision to go back to. [Operating Murder](docs/operations.md)
 - **Backups.** Every tenant's whole data, compressed and encrypted with
   `age`, to an S3 bucket, with object lock in production.
 - **An administration panel.** Signed in with passkeys, reached through a

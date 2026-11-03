@@ -40,7 +40,9 @@ type Tenant struct {
 	Address    string `json:"address,omitempty"`
 	Generation int64  `json:"generation"`
 	// AppRevision is the app's revision the tenant runs: 0 for the newest.
-	AppRevision int64 `json:"appRevision,omitempty"`
+	// BeforeRevision is the one it ran before its app's rollout moved it.
+	AppRevision    int64 `json:"appRevision,omitempty"`
+	BeforeRevision int64 `json:"beforeRevision,omitempty"`
 	// Canary tenants take an app's rollout first; held ones are left out.
 	Canary    bool      `json:"canary,omitempty"`
 	Hold      bool      `json:"hold,omitempty"`
@@ -118,6 +120,19 @@ type AppCheck struct {
 	Image string `json:"image"`
 	// Newer is set when it is not the image the app runs.
 	Newer bool `json:"newer"`
+}
+
+// RolloutRestore names the tenants of an app's rollout to take back with
+// their data; none takes back every tenant it moved.
+type RolloutRestore struct {
+	Tenants []string `json:"tenants,omitempty"`
+}
+
+// RolloutRestored is an app after some of its rollout's tenants were taken
+// back with their data, and those tenants.
+type RolloutRestored struct {
+	App     App      `json:"app"`
+	Tenants []string `json:"tenants"`
 }
 
 // TenantFlags makes a tenant a canary or held, or not; nil leaves one as

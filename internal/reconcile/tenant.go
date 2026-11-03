@@ -324,21 +324,6 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 		case <-time.After(r.replaceNotice):
 		}
 	}
-	// A tenant a wave moved takes no request until it is known to serve:
-	// the edges must hold its requests before its new container starts. If
-	// they do not say so in time, it may take one, so its data never goes
-	// back by itself: that is recorded first.
-	if record.AwaitsServing() && r.edgesHold != nil {
-		wait, cancel := context.WithTimeout(ctx, edgesHoldWait)
-		held := r.edgesHold(wait, tenant.Name)
-		cancel()
-		if !held {
-			r.log.Warn("the edge did not say it holds the tenant's requests: its data will not go back by itself", "tenant", tenant.Name)
-			if err := r.store.Served(tenant.Name, record.Generation); err != nil {
-				return "", false, fmt.Errorf("the edge does not hold the tenant's requests, and that could not be recorded: %w", err)
-			}
-		}
-	}
 	if err := r.removeContainers(ctx, outdated); err != nil {
 		return "", false, err
 	}
@@ -376,9 +361,10 @@ type snapshotRestorer interface {
 }
 
 // restoreData takes a tenant's data back to the snapshot taken as its image
-// changed, as its Restore asks: a rollout took it back to an image that
-// owned the data before, and the newer image never served. Its containers
-// go first; the old image then starts on the data as it left it.
+// changed, as its Restore asks: someone took it back from its rollout with
+// its data, to the image that owned the data before, losing what the newer
+// one wrote. Its containers go first; the old image then starts on the data
+// as it left it. Until then the edges hold its requests.
 func (r *Reconciler) restoreData(ctx context.Context, record store.Record, existing []runtime.Container) error {
 	tenant := record.Spec.Name
 	if err := r.removeContainers(ctx, existing); err != nil {
@@ -447,9 +433,7 @@ func (r *Reconciler) awaitReplaced(ctx context.Context, record store.Record) {
 	defer r.replacing.set(record.Spec.Name, false)
 	deadline := time.Now().Add(r.replacedWait)
 	for time.Now().Before(deadline) && ctx.Err() == nil {
-		// The new container answers: once its serving is recorded, the
-		// requests held for it go to it.
-		if healthy, _ := r.checkHealth(ctx, record); healthy && r.noteServed(record) {
+		if healthy, _ := r.checkHealth(ctx, record); healthy {
 			return
 		}
 		select {
@@ -495,39 +479,4 @@ func (r *Reconciler) checkHealth(ctx context.Context, record store.Record) (bool
 		return false, "health check: HTTP " + strconv.Itoa(response.StatusCode)
 	}
 	return true, ""
-}
-
-// noteServed records, once per generation, that a tenant a rollout moved
-// passed a health check on its new revision, its new container's: before
-// it is served, so its rollout never takes back the data it then takes.
-// Recorded by the node that serves it, it does not depend on the leader
-// looking at that moment; and its status says so too, in case the record
-// cannot be written. It reports whether the store has it: requests held
-// for the tenant wait until it does.
-func (r *Reconciler) noteServed(record store.Record) bool {
-	if record.AppRevision != 0 || record.BeforeRevision == 0 || record.Served {
-		return true
-	}
-	name := record.Spec.Name
-	r.mu.Lock()
-	if r.seenServing == nil {
-		r.seenServing = map[string]int64{}
-	}
-	r.seenServing[name] = record.Generation
-	done := r.served[name] == record.Generation
-	r.mu.Unlock()
-	if done {
-		return true
-	}
-	if err := r.store.Served(name, record.Generation); err != nil {
-		r.log.Warn("record that a tenant served on its new revision", "tenant", name, "error", err)
-		return false
-	}
-	r.mu.Lock()
-	if r.served == nil {
-		r.served = map[string]int64{}
-	}
-	r.served[name] = record.Generation
-	r.mu.Unlock()
-	return true
 }

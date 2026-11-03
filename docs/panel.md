@@ -75,8 +75,9 @@ changes again after a stopped upgrade, and upgrades the cluster with an
 uploaded `murder` binary; the slow ones run as jobs, with a page that
 follows them. The Apps page creates apps and edits their specs as YAML,
 as `murder app apply` reads them (keep the files in git in step), and
-follows an app's rollout: pause, resume, promote, or abort it (with the
-app's name typed). A tenant's settings page changes its app, image, env,
+follows an app's rollout: pause, resume, promote, abort it, or restore
+its tenants with their data from before they moved, losing what they wrote
+since (abort and restore with the app's name typed). A tenant's settings page changes its app, image, env,
 own secrets and limits, whether it is a canary or held out of rollouts,
 and gives a secret a new value. Secrets' values are never shown.
 Sessions last 12 hours; signing in and out is in

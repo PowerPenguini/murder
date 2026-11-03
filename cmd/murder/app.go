@@ -38,14 +38,20 @@ const appUsage = `Usage: murder app <command> [options]
   rollout NAME               how the app's rollout goes: its waves and tenants
   rollout pause|resume|abort|promote NAME
                              stop it moving tenants; let it go on; take every
-                             tenant it moved back; move every waiting tenant now
+                             tenant it moved back to the revision before, their
+                             data as it is; move every waiting tenant now
+  rollout restore NAME [-tenant T ...] -yes
+                             take the tenants it moved (or those named) back to
+                             the revision before with their data from before
+                             they moved: what they wrote since is lost
   delete NAME                delete an app no tenant runs
 
 A change rolls out in waves: canary tenants first (murder tenant set NAME
 -canary true), then a tenth of the tenants, half, and the rest, each wave
 healthy for a while before the next; held tenants (-hold true) stay. A tenant
-that never comes up goes back, with its data, and the rollout pauses. -now
-moves every tenant at once; -wait waits for the waves too.
+that does not come up healthy, or breaks after it came up, pauses the rollout:
+abort or restore it from there. -now moves every tenant at once; -wait waits
+for the waves too.
 
 Every command accepts -socket (default $MURDER_SOCKET or /run/murder/agent.sock).
 `
@@ -63,6 +69,9 @@ func runApp(args []string) error {
 	update := flags.Bool("update", false, "with apply: pin tags to their newest images, also tags the apps have already")
 	to := flags.Int64("to", 0, "with rollback: the revision to go back to")
 	now := flags.Bool("now", false, "with apply, update and rollback: move every tenant at once, not in waves")
+	var restoreTenants listFlag
+	flags.Var(&restoreTenants, "tenant", "with rollout restore: a tenant to take back with its data (repeatable; default every tenant the rollout moved)")
+	yes := flags.Bool("yes", false, "with rollout restore: confirm that what the tenants wrote since they moved is lost")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
 		return err
@@ -74,6 +83,12 @@ func runApp(args []string) error {
 	}
 	switch command {
 	case "rollout":
+		if len(positional) == 2 && positional[0] == "restore" {
+			return restoreRollout(ctx, client, positional[1], restoreTenants, *yes)
+		}
+		if len(restoreTenants) > 0 || *yes {
+			return errors.New("-tenant and -yes only make sense with rollout restore")
+		}
 		return runRollout(ctx, client, positional)
 	case "apply":
 		if len(positional) == 0 {
@@ -461,8 +476,38 @@ func runRollout(ctx context.Context, client *api.Client, args []string) error {
 		}
 		return showRollout(ctx, client, args[1])
 	default:
-		return errors.New("usage: murder app rollout NAME, or murder app rollout pause|resume|abort|promote NAME")
+		return errors.New("usage: murder app rollout NAME, murder app rollout pause|resume|abort|promote NAME, or murder app rollout restore NAME [-tenant T ...] -yes")
 	}
+}
+
+// restoreRollout takes tenants of an app's rollout back to the revision
+// before with their data from before they moved; without yes it only says
+// what that loses.
+func restoreRollout(ctx context.Context, client *api.Client, name string, tenants []string, yes bool) error {
+	if !yes {
+		named := tenants
+		if len(named) == 0 {
+			list, err := client.List(ctx)
+			if err != nil {
+				return err
+			}
+			for _, tenant := range list {
+				if tenant.App == name && !tenant.Archived() && tenant.AppRevision == 0 && tenant.BeforeRevision != 0 {
+					named = append(named, fmt.Sprintf("%s (to revision %d)", tenant.Spec.Name, tenant.BeforeRevision))
+				}
+			}
+			if len(named) == 0 {
+				return fmt.Errorf("the rollout of app %s moved no tenant to take back", name)
+			}
+		}
+		return fmt.Errorf("restore takes %s back to the revision before, their data to the snapshot taken as they moved: writes to these tenants since they moved are lost. Add -yes to confirm (`murder app rollout abort %s` takes them back with their data as it is)", strings.Join(named, ", "), name)
+	}
+	restored, err := client.RestoreRollout(ctx, name, tenants)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "%s go back to the revision before, their data too; the rollout is paused\n", strings.Join(restored.Tenants, ", "))
+	return showRollout(ctx, client, name)
 }
 
 func showRollout(ctx context.Context, client *api.Client, name string) error {

@@ -42,6 +42,16 @@
           </form>
         </div>
       </details>
+      <details class="drop">
+        <summary class="button">Restore</summary>
+        <div class="pop">
+          <form method="post" class="stack"><input type="hidden" name="do" value="restore-data">
+            <span class="hint">Every tenant it moved goes back to the revision before, and its data to the snapshot taken as it moved: what it wrote since is lost. Type the app's name.</span>
+            <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="the app's name" autocomplete="off" required>
+            <div><button type="submit" class="danger">Restore their data</button></div>
+          </form>
+        </div>
+      </details>
     </div>
   </div>
 </section>

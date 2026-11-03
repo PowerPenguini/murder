@@ -36,10 +36,8 @@ type fixture struct {
 	// stuckAt, again and again, their checks held up.
 	stuck   map[string]bool
 	stuckAt map[string]time.Time
-	// skew is how far the tenants' node's clock is from the driver's;
-	// servedSeen the generation each tenant's node saw serve.
-	skew       time.Duration
-	servedSeen map[string]int64
+	// skew is how far the tenants' node's clock is from the driver's.
+	skew time.Duration
 }
 
 func newFixture(t *testing.T, tenants int, canaries ...string) *fixture {
@@ -71,7 +69,7 @@ func newFixture(t *testing.T, tenants int, canaries ...string) *fixture {
 			t.Fatal(err)
 		}
 	}
-	f := &fixture{store: st, clock: time.Now(), sick: map[string]bool{}, unknown: map[string]bool{}, restarts: map[string]int{}, stuck: map[string]bool{}, stuckAt: map[string]time.Time{}, servedSeen: map[string]int64{}}
+	f := &fixture{store: st, clock: time.Now(), sick: map[string]bool{}, unknown: map[string]bool{}, restarts: map[string]int{}, stuck: map[string]bool{}, stuckAt: map[string]time.Time{}}
 	f.driver = &Driver{Store: st, Now: func() time.Time { return f.clock }, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Status: func(_ context.Context, record store.Record) (reconcile.Status, bool) {
 			name := record.Spec.Name
@@ -82,7 +80,7 @@ func newFixture(t *testing.T, tenants int, canaries ...string) *fixture {
 			if f.stuck[name] {
 				checked = f.stuckAt[name]
 			}
-			return reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: !f.sick[name], Generation: record.Generation, ContainerID: "c-" + name + "-" + record.Spec.Image[7:12], Restarts: f.restarts[name], CheckedAt: checked, ServedGeneration: f.servedSeen[name]}, true
+			return reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: !f.sick[name], Generation: record.Generation, ContainerID: "c-" + name + "-" + record.Spec.Image[7:12], Restarts: f.restarts[name], CheckedAt: checked}, true
 		}}
 	app.Image = imageB
 	if change, err := st.PutApp(store.App{Name: "web", Spec: app}, "alice"); err != nil || !change.Rollout {
@@ -160,27 +158,76 @@ func TestWavesMoveCanariesThenShares(t *testing.T) {
 	}
 }
 
-func TestATenantThatNeverComesUpGoesBackWithItsData(t *testing.T) {
+// stays reports that the tenant is still on the newest revision, its data
+// left as it is: the driver takes nothing back itself.
+func (f *fixture) stays(t *testing.T, name string) {
+	t.Helper()
+	record, err := f.store.Get(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.AppRevision != 0 || record.BeforeRevision == 0 || record.Restore != "" {
+		t.Fatalf("%s went back: revision %d, before %d, restore %q", name, record.AppRevision, record.BeforeRevision, record.Restore)
+	}
+}
+
+// pausedFor reports that the rollout is paused, naming what and the two
+// ways on.
+func (f *fixture) pausedFor(t *testing.T, what string) {
+	t.Helper()
+	rollout := f.rollout(t)
+	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, what) {
+		t.Fatalf("rollout %+v", rollout)
+	}
+	for _, way := range []string{"`murder app rollout abort web`", "`murder app rollout restore web`", "losing what they wrote since"} {
+		if !strings.Contains(rollout.Reason, way) {
+			t.Fatalf("the reason does not say %s: %s", way, rollout.Reason)
+		}
+	}
+}
+
+// A tenant that does not come up pauses the rollout, for someone to take
+// it back as it is, or with its data.
+func TestATenantThatNeverComesUpPausesTheRollout(t *testing.T) {
 	f := newFixture(t, 3)
 	f.sick["t00"] = true
 	f.step(time.Second)
-	f.step(5 * time.Second) // watched from its move on
+	f.step(5 * time.Second)
 	f.step(4 * time.Minute)
 	if rollout := f.rollout(t); rollout.State != store.RolloutRunning {
 		t.Fatalf("gave up early: %+v", rollout)
 	}
 	f.step(2 * time.Minute)
-	rollout := f.rollout(t)
-	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "t00 did not come up") {
-		t.Fatalf("rollout %+v", rollout)
+	f.pausedFor(t, "t00 did not come up healthy within 5m0s")
+	f.stays(t, "t00")
+	if got := f.onNewest(); !slices.Equal(got, []string{"t00"}) {
+		t.Fatalf("on the newest: %v", got)
+	}
+	// Taken back with its data, as someone asks: the rollout stays paused.
+	back, err := f.store.RestoreTenants("web", nil, "alice")
+	if err != nil || !slices.Equal(back, []string{"t00"}) {
+		t.Fatalf("restored %v, %v", back, err)
 	}
 	t00, _ := f.store.Get("t00")
 	if t00.AppRevision != 1 || t00.Restore != imageA || t00.Spec.Image != imageA {
 		t.Fatalf("t00 %+v", t00)
 	}
-	if got := f.onNewest(); len(got) != 0 {
-		t.Fatalf("on the newest: %v", got)
+	f.step(time.Minute)
+	if rollout := f.rollout(t); rollout.State != store.RolloutPaused {
+		t.Fatalf("rollout %+v", rollout)
 	}
+}
+
+// A node that has not started the new revision for long pauses it too.
+func TestATenantItsNodeDoesNotStartPausesTheRollout(t *testing.T) {
+	f := newFixture(t, 3)
+	f.driver.Status = func(_ context.Context, record store.Record) (reconcile.Status, bool) {
+		return reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true, Generation: record.Generation - 1, CheckedAt: f.clock}, true
+	}
+	f.step(time.Second)
+	f.step(6 * time.Minute)
+	f.pausedFor(t, "its node has not started the new revision")
+	f.stays(t, "t00")
 }
 
 func TestATenantThatBreaksAfterComingUpPausesTheRollout(t *testing.T) {
@@ -190,13 +237,8 @@ func TestATenantThatBreaksAfterComingUpPausesTheRollout(t *testing.T) {
 	// It restarts: paused at once, nothing goes back.
 	f.restarts["t00"] = 1
 	f.step(time.Second)
-	rollout := f.rollout(t)
-	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "t00 restarted") {
-		t.Fatalf("rollout %+v", rollout)
-	}
-	if t00, _ := f.store.Get("t00"); t00.AppRevision != 0 || t00.Restore != "" {
-		t.Fatalf("t00 went back: %+v", t00)
-	}
+	f.pausedFor(t, "t00 restarted after it came up")
+	f.stays(t, "t00")
 }
 
 func TestAShortFailureIsNotABreak(t *testing.T) {
@@ -214,9 +256,8 @@ func TestAShortFailureIsNotABreak(t *testing.T) {
 	f.sick["t00"] = true
 	f.step(time.Second)
 	f.step(31 * time.Second)
-	if rollout := f.rollout(t); rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "fails its health check") {
-		t.Fatalf("rollout %+v", rollout)
-	}
+	f.pausedFor(t, "t00 fails its health check after it came up")
+	f.stays(t, "t00")
 }
 
 func TestANodeThatDoesNotAnswerPausesWithoutGoingBack(t *testing.T) {
@@ -224,13 +265,24 @@ func TestANodeThatDoesNotAnswerPausesWithoutGoingBack(t *testing.T) {
 	f.unknown["t00"] = true
 	f.step(time.Second)
 	f.step(6 * time.Minute)
-	rollout := f.rollout(t)
-	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "does not say how it runs") {
-		t.Fatalf("rollout %+v", rollout)
+	f.pausedFor(t, "t00's node has not said how it runs for 5m0s")
+	f.stays(t, "t00")
+}
+
+// A node that stops answering late in a wave has as long as at its start
+// before the rollout pauses.
+func TestANodeThatStopsAnsweringHasItsTime(t *testing.T) {
+	f := newFixture(t, 3)
+	f.driver.CanarySoak = 10 * time.Minute
+	f.step(time.Second)
+	f.step(6 * time.Minute)
+	f.unknown["t00"] = true
+	f.step(4 * time.Minute)
+	if rollout := f.rollout(t); rollout.State != store.RolloutRunning {
+		t.Fatalf("paused early: %+v", rollout)
 	}
-	if t00, _ := f.store.Get("t00"); t00.Restore != "" || t00.AppRevision != 0 {
-		t.Fatalf("t00 %+v", t00)
-	}
+	f.step(2 * time.Minute)
+	f.pausedFor(t, "t00's node has not said how it runs")
 }
 
 func TestOnlyTheLeaderDrives(t *testing.T) {
@@ -242,9 +294,9 @@ func TestOnlyTheLeaderDrives(t *testing.T) {
 	}
 }
 
-// A canary that served, then fails once the next wave moved, pauses the
-// rollout: its data, written while it served, stays.
-func TestACanaryThatServedNeverLosesItsData(t *testing.T) {
+// A new leader knows nothing of what the old one saw: a canary that fails
+// under it pauses the rollout all the same, nothing taken back.
+func TestANewLeaderPausesTooWithoutTakingBack(t *testing.T) {
 	f := newFixture(t, 10, "t07")
 	f.step(time.Second)
 	f.step(5 * time.Second)
@@ -252,34 +304,23 @@ func TestACanaryThatServedNeverLosesItsData(t *testing.T) {
 	if got := f.onNewest(); len(got) != 2 {
 		t.Fatalf("second wave %v", got)
 	}
-	if t07, _ := f.store.Get("t07"); !t07.Served {
-		t.Fatal("the canary is not known to have served")
-	}
-	// A new leader knows nothing but what the store says.
 	f.driver.watches = nil
-	f.driver.Leader = func() bool { return true }
 	f.sick["t07"] = true
 	f.step(time.Second)
 	f.step(6 * time.Minute)
-	rollout := f.rollout(t)
-	t07, _ := f.store.Get("t07")
-	if rollout.State != store.RolloutPaused || t07.Restore != "" || t07.AppRevision != 0 {
-		t.Fatalf("rollout %+v, t07 %+v", rollout, t07)
-	}
+	f.pausedFor(t, "t07 did not come up healthy")
+	f.stays(t, "t07")
 }
 
-// A tenant this driver did not watch from its move on may have served:
-// it pauses the rollout, its data as it is.
-func TestATenantNotWatchedAllAlongKeepsItsData(t *testing.T) {
+// A tenant not looked at for long is paused for all the same, nothing
+// taken back.
+func TestATenantNotWatchedAllAlongPausesToo(t *testing.T) {
 	f := newFixture(t, 3)
 	f.sick["t00"] = true
 	f.step(time.Second)
-	f.jump(6 * time.Minute) // looked at again long after it moved
-	rollout := f.rollout(t)
-	t00, _ := f.store.Get("t00")
-	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "did not watch it all along") || t00.Restore != "" || t00.AppRevision != 0 {
-		t.Fatalf("rollout %+v, t00 %+v", rollout, t00)
-	}
+	f.jump(6 * time.Minute)
+	f.pausedFor(t, "t00 did not come up healthy")
+	f.stays(t, "t00")
 }
 
 func TestSuspendedTenantsDoNotHoldARolloutUp(t *testing.T) {
@@ -312,13 +353,12 @@ func TestAContainerSeenFirstAfterARestartIsNotThrough(t *testing.T) {
 	}
 }
 
-// Paused and resumed, a tenant was not watched meanwhile: it may have
-// served, so its data stays.
-func TestAPauseEndsWhatTheDriverKnows(t *testing.T) {
+// Paused and resumed, a tenant's soak starts over: the time paused was not
+// watched.
+func TestAPauseStartsTheSoakOver(t *testing.T) {
 	f := newFixture(t, 3)
-	f.sick["t00"] = true
 	f.step(time.Second)
-	f.step(10 * time.Second)
+	f.step(time.Minute)
 	if err := f.store.PauseRollout("web", "a look", "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -326,60 +366,13 @@ func TestAPauseEndsWhatTheDriverKnows(t *testing.T) {
 	if err := f.store.ResumeRollout("web", "alice"); err != nil {
 		t.Fatal(err)
 	}
-	f.step(6 * time.Minute)
-	rollout := f.rollout(t)
-	t00, _ := f.store.Get("t00")
-	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "did not watch it all along") || t00.Restore != "" || t00.AppRevision != 0 {
-		t.Fatalf("rollout %+v, t00 restore %q revision %d", rollout, t00.Restore, t00.AppRevision)
+	f.step(90 * time.Second)
+	if got := f.onNewest(); len(got) != 1 {
+		t.Fatalf("moved on before a whole soak since the resume: %v", got)
 	}
-}
-
-// One that moved to another node since its wave keeps its revision and
-// data: that node has no snapshot of before.
-func TestATenantMovedSinceItsWaveKeepsItsRevision(t *testing.T) {
-	f := newFixture(t, 3)
-	if err := f.store.PutNode(store.Node{Name: "n1", Address: "10.0.0.1:7400"}, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.store.PutNode(store.Node{Name: "n2", Address: "10.0.0.2:7400"}, "test"); err != nil {
-		t.Fatal(err)
-	}
-	f.sick["t00"] = true
-	f.step(time.Second)
-	if _, err := f.store.StartMove("t00", "n2", "test"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.store.FinishMove("t00", "test"); err != nil {
-		t.Fatal(err)
-	}
-	f.step(6 * time.Minute)
-	rollout := f.rollout(t)
-	t00, _ := f.store.Get("t00")
-	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "moved since its wave") || t00.Restore != "" || t00.AppRevision != 0 {
-		t.Fatalf("rollout %+v, t00 restore %q revision %d", rollout, t00.Restore, t00.AppRevision)
-	}
-}
-
-// A pause and resume between the move and the first look are seen too:
-// the tenant may have served meanwhile, so its data stays.
-func TestAPauseBeforeTheFirstLookEndsWhatTheDriverKnows(t *testing.T) {
-	f := newFixture(t, 3)
-	f.sick["t00"] = true
-	f.clock = f.clock.Add(time.Second)
-	f.driver.Step(context.Background()) // t00 moves
-	if err := f.store.PauseRollout("web", "a look", "alice"); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.store.ResumeRollout("web", "alice"); err != nil {
-		t.Fatal(err)
-	}
-	f.step(6 * time.Minute)
-	t00, _ := f.store.Get("t00")
-	if t00.Restore != "" || t00.AppRevision != 0 {
-		t.Fatalf("t00 restore %q revision %d", t00.Restore, t00.AppRevision)
-	}
-	if rollout := f.rollout(t); rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "did not watch it all along") {
-		t.Fatalf("rollout %+v", rollout)
+	f.step(time.Minute)
+	if got := f.onNewest(); len(got) != 2 {
+		t.Fatalf("not moved on after a whole soak: %v", got)
 	}
 }
 
@@ -408,20 +401,5 @@ func TestARolloutGoesThroughWithClocksApart(t *testing.T) {
 		if rollout := f.rollout(t); rollout.State != store.RolloutDone {
 			t.Fatalf("skew %v: rollout %+v", skew, rollout)
 		}
-	}
-}
-
-// A tenant its node saw serve, though the store did not record it, keeps
-// its data when it fails afterwards.
-func TestAServingItsNodeSawKeepsTheData(t *testing.T) {
-	f := newFixture(t, 3)
-	f.sick["t00"] = true
-	f.step(time.Second)
-	t00, _ := f.store.Get("t00")
-	f.servedSeen["t00"] = t00.Generation
-	f.step(6 * time.Minute)
-	t00, _ = f.store.Get("t00")
-	if t00.Restore != "" || t00.AppRevision != 0 || !t00.Served {
-		t.Fatalf("t00 restore %q revision %d served %v", t00.Restore, t00.AppRevision, t00.Served)
 	}
 }
