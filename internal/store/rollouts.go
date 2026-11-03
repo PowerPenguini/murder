@@ -37,6 +37,35 @@ type Rollout struct {
 // Active reports whether the rollout may still move tenants.
 func (r Rollout) Active() bool { return r.State == RolloutRunning || r.State == RolloutPaused }
 
+// At names the rollout as it is: a change the driver decided on what it
+// saw then is refused once the rollout has moved on, been replaced, paused
+// or resumed.
+func (r Rollout) At() RolloutAt {
+	return RolloutAt{ToRevision: r.ToRevision, Wave: r.Wave, WaveStarted: r.WaveStarted}
+}
+
+// RolloutAt is a rollout at one wave: its revision, the wave and when it
+// started.
+type RolloutAt struct {
+	ToRevision  int64
+	Wave        int
+	WaveStarted time.Time
+}
+
+// RolloutState is every rollout and tenant as of one moment.
+func (s *SQLite) RolloutState() ([]Rollout, []Record) {
+	state := s.state.Load()
+	rollouts := make([]Rollout, 0, len(state.rollouts))
+	for _, app := range slices.Sorted(maps.Keys(state.rollouts)) {
+		rollouts = append(rollouts, state.rollouts[app])
+	}
+	records := make([]Record, 0, len(state.tenants))
+	for _, name := range slices.Sorted(maps.Keys(state.tenants)) {
+		records = append(records, state.tenants[name].clone())
+	}
+	return rollouts, records
+}
+
 func loadRollouts(q querier, state *snapshot) error {
 	state.rollouts = map[string]Rollout{}
 	rows, err := q.Query(`SELECT app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor FROM rollouts`)
@@ -88,25 +117,28 @@ func (s *SQLite) Rollout(app string) (Rollout, error) {
 	return rollout, nil
 }
 
-// rolloutOf is the active rollout of app at wave, or why not.
-func rolloutOf(state *snapshot, app string, wave int) (Rollout, error) {
+// rolloutOf is the active rollout of app, as at says if it is not nil, or
+// why not.
+func rolloutOf(state *snapshot, app string, at *RolloutAt) (Rollout, error) {
 	rollout, ok := state.rollouts[app]
 	switch {
 	case !ok:
 		return Rollout{}, fmt.Errorf("app %s has no rollout: %w", app, ErrNotFound)
 	case !rollout.Active():
 		return Rollout{}, fmt.Errorf("%w: the rollout of app %s is %s", ErrConflict, app, rollout.State)
-	case wave >= 0 && rollout.Wave != wave:
-		return Rollout{}, fmt.Errorf("%w: the rollout of app %s is at wave %d, not %d", ErrConflict, app, rollout.Wave, wave)
+	case at != nil && !(rollout.ToRevision == at.ToRevision && rollout.Wave == at.Wave && rollout.WaveStarted.Equal(at.WaveStarted)):
+		return Rollout{}, fmt.Errorf("%w: the rollout of app %s moved on (revision %d, wave %d)", ErrConflict, app, rollout.ToRevision, rollout.Wave)
 	}
 	return rollout, nil
 }
 
-// AdvanceRollout moves tenants of app, as its rollout's wave after wave,
-// to the app's newest revision. Only a running rollout at wave moves.
-func (s *SQLite) AdvanceRollout(app string, wave int, tenants []string, actor string) error {
+// AdvanceRollout moves tenants of app, as its rollout's wave after the one
+// at names, to the app's newest revision. Only a running rollout as at
+// says moves.
+func (s *SQLite) AdvanceRollout(app string, at RolloutAt, tenants []string, actor string) error {
+	wave := at.Wave
 	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
-		rollout, err := rolloutOf(current, app, wave)
+		rollout, err := rolloutOf(current, app, &at)
 		if err != nil {
 			return err
 		}
@@ -119,7 +151,7 @@ func (s *SQLite) AdvanceRollout(app string, wave int, tenants []string, actor st
 			if !ok || record.App != app || record.Archived() || record.Hold || record.AppRevision == 0 {
 				continue
 			}
-			if err := tx.Exec(`UPDATE tenants SET before_revision = app_revision, app_revision = 0, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+			if err := tx.Exec(`UPDATE tenants SET before_revision = app_revision, app_revision = 0, served = 0, moved_on = node, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 				return err
 			}
 			if err := event(tx, now, actor, "app.rolled-out", name, app, fmt.Sprintf("wave %d: revision %d → %d", wave+1, record.AppRevision, rollout.ToRevision)); err != nil {
@@ -132,15 +164,22 @@ func (s *SQLite) AdvanceRollout(app string, wave int, tenants []string, actor st
 }
 
 // FinishRollout marks app's rollout done once every tenant it moves runs
-// the newest revision.
-func (s *SQLite) FinishRollout(app string, wave int, actor string) error {
+// the newest revision: refused while one, released from its hold
+// meanwhile say, still waits.
+func (s *SQLite) FinishRollout(app string, at RolloutAt, actor string) error {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
-		rollout, err := rolloutOf(current, app, wave)
+		rollout, err := rolloutOf(current, app, &at)
 		if err != nil {
 			return err
 		}
+		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
+			record := current.tenants[name]
+			if record.App == app && !record.Archived() && !record.Hold && record.AppRevision != 0 {
+				return fmt.Errorf("%w: tenant %s of app %s still waits for the rollout", ErrConflict, name, app)
+			}
+		}
 		stamp := formatTime(now)
-		if err := tx.Exec(`UPDATE tenants SET before_revision = 0 WHERE app = ? AND app_revision = 0`, app); err != nil {
+		if err := tx.Exec(`UPDATE tenants SET before_revision = 0, served = 0, moved_on = '' WHERE app = ? AND app_revision = 0`, app); err != nil {
 			return err
 		}
 		if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = '', updated_at = ? WHERE app = ?`, stamp, app); err != nil {
@@ -153,18 +192,24 @@ func (s *SQLite) FinishRollout(app string, wave int, actor string) error {
 
 // PauseRollout stops app's rollout from moving more tenants, for reason.
 func (s *SQLite) PauseRollout(app, reason, actor string) error {
-	return s.setRollout(app, RolloutPaused, reason, actor)
+	return s.setRollout(app, nil, RolloutPaused, reason, actor)
+}
+
+// PauseRolloutAt is PauseRollout for the rollout as at names it, and none
+// other.
+func (s *SQLite) PauseRolloutAt(app string, at RolloutAt, reason, actor string) error {
+	return s.setRollout(app, &at, RolloutPaused, reason, actor)
 }
 
 // ResumeRollout lets app's paused rollout move tenants again: the wave
 // that paused it starts over.
 func (s *SQLite) ResumeRollout(app, actor string) error {
-	return s.setRollout(app, RolloutRunning, "", actor)
+	return s.setRollout(app, nil, RolloutRunning, "", actor)
 }
 
-func (s *SQLite) setRollout(app, state, reason, actor string) error {
+func (s *SQLite) setRollout(app string, at *RolloutAt, state, reason, actor string) error {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
-		rollout, err := rolloutOf(current, app, -1)
+		rollout, err := rolloutOf(current, app, at)
 		if err != nil {
 			return err
 		}
@@ -188,21 +233,25 @@ func (s *SQLite) setRollout(app, state, reason, actor string) error {
 }
 
 // AbortRollout ends app's rollout and takes every tenant it moved back to
-// the revision it ran before; their data stays as it is.
+// the revision it ran before; their data stays as it is, that of tenants
+// still waiting for theirs to go back too.
 func (s *SQLite) AbortRollout(app, reason, actor string) ([]string, error) {
 	var back []string
 	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
-		if _, err := rolloutOf(current, app, -1); err != nil {
+		if _, err := rolloutOf(current, app, nil); err != nil {
 			return err
 		}
 		back = nil
 		stamp := formatTime(now)
+		if err := tx.Exec(`UPDATE tenants SET restore = '' WHERE app = ? AND restore != ''`, app); err != nil {
+			return err
+		}
 		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
 			record := current.tenants[name]
 			if record.App != app || record.Archived() || record.AppRevision != 0 || record.BeforeRevision == 0 {
 				continue
 			}
-			if err := tx.Exec(`UPDATE tenants SET app_revision = before_revision, before_revision = 0, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+			if err := tx.Exec(`UPDATE tenants SET app_revision = before_revision, before_revision = 0, served = 0, moved_on = '', generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 				return err
 			}
 			if err := event(tx, now, actor, "rollout.rolled-back", name, app, fmt.Sprintf("back to revision %d: %s", record.BeforeRevision, reason)); err != nil {
@@ -218,31 +267,40 @@ func (s *SQLite) AbortRollout(app, reason, actor string) ([]string, error) {
 	return back, err
 }
 
-// RollBackTenants takes tenants of app's rollout that failed on the newest
-// revision back to the one they ran before, and pauses the rollout for
-// reason. With restore, their data goes back too, to the snapshot taken
-// as their image changed: for tenants that never served on the newest.
-func (s *SQLite) RollBackTenants(app string, tenants []string, restore bool, reason, actor string) error {
+// RollBackTenants takes tenants of app's rollout, as at names it, that
+// failed on the newest revision back to the one they ran before, and
+// pauses the rollout for reason. tenants are their generations as seen
+// failing: one changed since is a change of the rollout, refused. With
+// restore, their data goes back too, to the snapshot taken as their image
+// changed: for tenants that never served on the newest, on the node they
+// moved on, which keeps that snapshot.
+func (s *SQLite) RollBackTenants(app string, at RolloutAt, tenants map[string]int64, restore bool, reason, actor string) error {
 	_, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
-		if _, err := rolloutOf(current, app, -1); err != nil {
+		if _, err := rolloutOf(current, app, &at); err != nil {
 			return err
 		}
 		stamp := formatTime(now)
-		for _, name := range tenants {
+		for _, name := range slices.Sorted(maps.Keys(tenants)) {
 			record, ok := current.tenants[name]
 			if !ok || record.App != app || record.Archived() || record.AppRevision != 0 || record.BeforeRevision == 0 {
 				continue
 			}
+			if record.Generation != tenants[name] {
+				return fmt.Errorf("%w: tenant %s changed since it was seen failing", ErrConflict, name)
+			}
 			image := ""
-			if restore {
+			if restore && !record.Served && record.MovedOn == record.Node {
 				image = spec.Compose(revisionSpec(current, app, record.BeforeRevision), name, record.Overrides).Image
 			}
-			if err := tx.Exec(`UPDATE tenants SET app_revision = before_revision, before_revision = 0, restore = ?, generation = generation + 1, updated_at = ? WHERE name = ?`, image, stamp, name); err != nil {
+			if err := tx.Exec(`UPDATE tenants SET app_revision = before_revision, before_revision = 0, served = 0, moved_on = '', restore = ?, generation = generation + 1, updated_at = ? WHERE name = ?`, image, stamp, name); err != nil {
 				return err
 			}
 			detail := fmt.Sprintf("back to revision %d: %s", record.BeforeRevision, reason)
-			if restore {
+			switch {
+			case image != "":
 				detail += "; its data goes back to the snapshot taken as its image changed"
+			case restore:
+				detail += "; its data stays: it served on the newest revision, or moved since"
 			}
 			if err := event(tx, now, actor, "rollout.rolled-back", name, app, detail); err != nil {
 				return err
@@ -253,6 +311,25 @@ func (s *SQLite) RollBackTenants(app string, tenants []string, restore bool, rea
 		}
 		return event(tx, now, actor, "rollout.paused", "", app, reason)
 	})
+	return err
+}
+
+// MarkServed records that tenant, at generation, was seen healthy on the
+// revision app's rollout, as at names it, moved it to.
+func (s *SQLite) MarkServed(app string, at RolloutAt, tenant string, generation int64) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		if _, err := rolloutOf(current, app, &at); err != nil {
+			return err
+		}
+		record, ok := current.tenants[tenant]
+		if !ok || record.App != app || record.Served || record.Generation != generation || record.AppRevision != 0 || record.BeforeRevision == 0 {
+			return errUnchanged
+		}
+		return tx.Exec(`UPDATE tenants SET served = 1 WHERE name = ?`, tenant)
+	})
+	if err == errUnchanged {
+		return nil
+	}
 	return err
 }
 

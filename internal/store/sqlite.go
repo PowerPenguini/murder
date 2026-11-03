@@ -449,7 +449,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 	if err := closeRows(rows); err != nil {
 		return err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next, app_revision, before_revision, canary, hold, restore FROM tenants`+where("name"), args...)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next, app_revision, before_revision, canary, hold, restore, served, moved_on FROM tenants`+where("name"), args...)
 	if err != nil {
 		return err
 	}
@@ -458,7 +458,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext, &record.AppRevision, &record.BeforeRevision, &record.Canary, &record.Hold, &record.Restore); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext, &record.AppRevision, &record.BeforeRevision, &record.Canary, &record.Hold, &record.Restore, &record.Served, &record.MovedOn); err != nil {
 			rows.Close()
 			return err
 		}
@@ -855,10 +855,15 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			return fmt.Errorf("%w: app %s was changed at %s, after the version read; read it again", ErrConflict, app.Name, formatTime(existing.UpdatedAt))
 		}
 		// A stale attempt's result is discarded with its batch.
-		result = AppChange{Created: !found}
+		result, unchanged = AppChange{Created: !found}, App{}
 		if found && existing.Spec.Equal(app.Spec) && existing.Tag == app.Tag {
 			unchanged = cloneApp(existing)
-			return errUnchanged
+			if !app.AllAtOnce {
+				return errUnchanged
+			}
+			// The same spec at once: what its rollout has yet to move
+			// moves now, and the rollout ends.
+			return s.allAtOnce(tx, current, now, app.Name, &result, actor)
 		}
 		if err := checkTenants(current, app.Name, app.Spec, spec.Tenant.Validate); err != nil {
 			return err
@@ -1000,7 +1005,8 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 	if err != nil {
 		return AppChange{}, err
 	}
-	result.App, result.Changed = cloneApp(next.apps[app.Name]), true
+	// The same spec at once changed which tenants run it, not the app.
+	result.App, result.Changed = cloneApp(next.apps[app.Name]), unchanged.Name == ""
 	return result, nil
 }
 
@@ -1025,6 +1031,34 @@ func changedFields(before, after spec.Tenant) []string {
 	return changed
 }
 
+// allAtOnce moves every live tenant of app its rollout has yet to move to
+// the app's newest revision, held ones aside, and ends the rollout;
+// errUnchanged if there is none.
+func (s *SQLite) allAtOnce(tx *recorder, current *snapshot, now time.Time, app string, result *AppChange, actor string) error {
+	stamp := formatTime(now)
+	for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
+		record := current.tenants[name]
+		if record.App != app || record.Archived() || record.Hold || record.AppRevision == 0 {
+			continue
+		}
+		if err := tx.Exec(`UPDATE tenants SET app_revision = 0, before_revision = 0, served = 0, moved_on = '', generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+			return err
+		}
+		if err := event(tx, now, actor, "app.rolled-out", name, app, "at once"); err != nil {
+			return err
+		}
+		result.Tenants = append(result.Tenants, name)
+	}
+	rollout, rolling := current.rollouts[app]
+	if len(result.Tenants) == 0 && !(rolling && rollout.Active()) {
+		return errUnchanged
+	}
+	if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = 'the rest rolled out at once', updated_at = ? WHERE app = ? AND state IN ('running', 'paused')`, stamp, app); err != nil {
+		return err
+	}
+	return event(tx, now, actor, "rollout.done", "", app, fmt.Sprintf("the rest at once: %d tenants", len(result.Tenants)))
+}
+
 // errUnchanged ends a write that would change nothing.
 var errUnchanged = errors.New("unchanged")
 
@@ -1041,6 +1075,9 @@ func (s *SQLite) DeleteApp(name, actor string) error {
 		}
 		if len(names) > 0 {
 			return fmt.Errorf("%w: tenants %v run app %s (archived ones count until purged)", ErrInUse, names, name)
+		}
+		if err := tx.Exec(`DELETE FROM rollouts WHERE app = ?`, name); err != nil {
+			return err
 		}
 		if err := tx.Exec(`DELETE FROM app_revisions WHERE app = ?`, name); err != nil {
 			return err

@@ -176,6 +176,7 @@ func TestApplyWaitsForTheWavesAndRolloutActs(t *testing.T) {
 	var mu sync.Mutex
 	asked := 0
 	state := store.RolloutRunning
+	changed := true
 	socket, calls := serveAgent(t, func(call string, w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -183,7 +184,7 @@ func TestApplyWaitsForTheWavesAndRolloutActs(t *testing.T) {
 		case call == "PUT /v1/apps/web":
 			var app spec.Tenant
 			_ = json.NewDecoder(r.Body).Decode(&app)
-			_ = json.NewEncoder(w).Encode(api.AppApplied{App: api.App{Name: "web", Spec: app}, Changed: true, Rollout: r.URL.Query().Get("rollout") != "now",
+			_ = json.NewEncoder(w).Encode(api.AppApplied{App: api.App{Name: "web", Spec: app}, Changed: changed, Rollout: changed && r.URL.Query().Get("rollout") != "now",
 				Tenants: []api.Tenant{{Spec: spec.Tenant{Name: "acme"}, App: "web"}}})
 		case call == "GET /v1/apps/web":
 			// Running twice, then as the test says.
@@ -192,7 +193,7 @@ func TestApplyWaitsForTheWavesAndRolloutActs(t *testing.T) {
 			if asked > 2 {
 				current = state
 			}
-			_ = json.NewEncoder(w).Encode(api.App{Name: "web", Rollout: &store.Rollout{App: "web", ToRevision: 2, State: current, Wave: asked, Reason: "acme did not come up"}})
+			_ = json.NewEncoder(w).Encode(api.App{Name: "web", Revision: 2, Rollout: &store.Rollout{App: "web", ToRevision: 2, State: current, Wave: asked, Reason: "acme did not come up"}})
 		case call == "GET /v1/tenants":
 			_ = json.NewEncoder(w).Encode([]api.Tenant{{Spec: spec.Tenant{Name: "acme"}, App: "web"}})
 		case strings.HasPrefix(call, "GET /v1/tenants/"):
@@ -223,6 +224,17 @@ func TestApplyWaitsForTheWavesAndRolloutActs(t *testing.T) {
 	if err := runApp([]string{"apply", file, "-wait", "10s", "-socket", socket}); err == nil || !strings.Contains(err.Error(), "the rollout is paused: acme did not come up") {
 		t.Fatalf("a paused rollout: %v", err)
 	}
+	// So does a retry that changes nothing: it waits for what the first
+	// began.
+	mu.Lock()
+	asked, changed = 0, false
+	mu.Unlock()
+	if err := runApp([]string{"apply", file, "-wait", "10s", "-socket", socket}); err == nil || !strings.Contains(err.Error(), "the rollout is paused") {
+		t.Fatalf("an unchanged retry: %v", err)
+	}
+	mu.Lock()
+	changed = true
+	mu.Unlock()
 	if err := runApp([]string{"apply", file, "-now", "-socket", socket}); err != nil {
 		t.Fatal(err)
 	}

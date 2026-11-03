@@ -214,7 +214,7 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{`ALTER TABLE tenants DROP COLUMN app_revision`, `ALTER TABLE tenants DROP COLUMN before_revision`, `ALTER TABLE tenants DROP COLUMN canary`, `ALTER TABLE tenants DROP COLUMN hold`, `ALTER TABLE tenants DROP COLUMN restore`, `DROP TABLE rollouts`, `DROP TABLE app_revisions`, `ALTER TABLE apps DROP COLUMN tag`, `ALTER TABLE apps DROP COLUMN revision`, `ALTER TABLE apps DROP COLUMN latest`, `ALTER TABLE apps DROP COLUMN latest_at`, `ALTER TABLE nodes DROP COLUMN failed_at`, `ALTER TABLE nodes DROP COLUMN away_until`, `ALTER TABLE nodes DROP COLUMN copies_refused_until`, `DROP TABLE nodes`, `DROP TABLE devices`, `DROP TABLE panel_sessions`, `DROP TABLE panel_enrollments`, `DROP TABLE panel_passkeys`, `DROP TABLE panel_users`, `DROP TABLE panel_secrets`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`, `ALTER TABLE tenants DROP COLUMN rollout`, `ALTER TABLE tenants DROP COLUMN move_to`, `ALTER TABLE tenants DROP COLUMN move_held`, `ALTER TABLE tenants DROP COLUMN replica`, `ALTER TABLE tenants DROP COLUMN replica_ready`, `ALTER TABLE tenants DROP COLUMN replica_next`} {
+	for _, statement := range []string{`ALTER TABLE tenants DROP COLUMN app_revision`, `ALTER TABLE tenants DROP COLUMN before_revision`, `ALTER TABLE tenants DROP COLUMN canary`, `ALTER TABLE tenants DROP COLUMN hold`, `ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN served`, `ALTER TABLE tenants DROP COLUMN moved_on`, `DROP TABLE rollouts`, `DROP TABLE app_revisions`, `ALTER TABLE apps DROP COLUMN tag`, `ALTER TABLE apps DROP COLUMN revision`, `ALTER TABLE apps DROP COLUMN latest`, `ALTER TABLE apps DROP COLUMN latest_at`, `ALTER TABLE nodes DROP COLUMN failed_at`, `ALTER TABLE nodes DROP COLUMN away_until`, `ALTER TABLE nodes DROP COLUMN copies_refused_until`, `DROP TABLE nodes`, `DROP TABLE devices`, `DROP TABLE panel_sessions`, `DROP TABLE panel_enrollments`, `DROP TABLE panel_passkeys`, `DROP TABLE panel_users`, `DROP TABLE panel_secrets`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`, `ALTER TABLE tenants DROP COLUMN rollout`, `ALTER TABLE tenants DROP COLUMN move_to`, `ALTER TABLE tenants DROP COLUMN move_held`, `ALTER TABLE tenants DROP COLUMN replica`, `ALTER TABLE tenants DROP COLUMN replica_ready`, `ALTER TABLE tenants DROP COLUMN replica_next`} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -271,7 +271,7 @@ func TestOpenUpgradesSchemaVersion5(t *testing.T) {
 		`ALTER TABLE tenants DROP COLUMN before_revision`,
 		`ALTER TABLE tenants DROP COLUMN canary`,
 		`ALTER TABLE tenants DROP COLUMN hold`,
-		`ALTER TABLE tenants DROP COLUMN restore`,
+		`ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN served`, `ALTER TABLE tenants DROP COLUMN moved_on`,
 		`DROP TABLE rollouts`,
 		`DROP TABLE app_revisions`,
 		`ALTER TABLE apps DROP COLUMN tag`,

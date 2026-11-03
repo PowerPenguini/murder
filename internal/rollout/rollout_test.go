@@ -142,6 +142,7 @@ func TestATenantThatNeverComesUpGoesBackWithItsData(t *testing.T) {
 	f := newFixture(t, 3)
 	f.sick["t00"] = true
 	f.step(time.Second)
+	f.step(5 * time.Second) // watched from its move on
 	f.step(4 * time.Minute)
 	if rollout := f.rollout(t); rollout.State != store.RolloutRunning {
 		t.Fatalf("gave up early: %+v", rollout)
@@ -216,5 +217,70 @@ func TestOnlyTheLeaderDrives(t *testing.T) {
 	f.step(time.Second)
 	if got := f.onNewest(); len(got) != 0 {
 		t.Fatalf("a follower moved %v", got)
+	}
+}
+
+// A canary that served, then fails once the next wave moved, pauses the
+// rollout: its data, written while it served, stays.
+func TestACanaryThatServedNeverLosesItsData(t *testing.T) {
+	f := newFixture(t, 10, "t07")
+	f.step(time.Second)
+	f.step(5 * time.Second)
+	f.step(2*time.Minute + time.Second)
+	if got := f.onNewest(); len(got) != 2 {
+		t.Fatalf("second wave %v", got)
+	}
+	if t07, _ := f.store.Get("t07"); !t07.Served {
+		t.Fatal("the canary is not known to have served")
+	}
+	// A new leader knows nothing but what the store says.
+	f.driver.watches = nil
+	f.sick["t07"] = true
+	f.step(time.Second)
+	f.step(6 * time.Minute)
+	rollout := f.rollout(t)
+	t07, _ := f.store.Get("t07")
+	if rollout.State != store.RolloutPaused || t07.Restore != "" || t07.AppRevision != 0 {
+		t.Fatalf("rollout %+v, t07 %+v", rollout, t07)
+	}
+}
+
+// A tenant this driver did not watch from its move on may have served:
+// it pauses the rollout, its data as it is.
+func TestATenantNotWatchedAllAlongKeepsItsData(t *testing.T) {
+	f := newFixture(t, 3)
+	f.sick["t00"] = true
+	f.step(time.Second)
+	f.step(6 * time.Minute) // first seen long after it moved
+	rollout := f.rollout(t)
+	t00, _ := f.store.Get("t00")
+	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "did not watch it all along") || t00.Restore != "" || t00.AppRevision != 0 {
+		t.Fatalf("rollout %+v, t00 %+v", rollout, t00)
+	}
+}
+
+func TestSuspendedTenantsDoNotHoldARolloutUp(t *testing.T) {
+	f := newFixture(t, 2)
+	if _, err := f.store.SetSuspended("t00", true, "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.unknown["t00"] = true // nothing runs, nothing answers
+	for range 8 {
+		f.step(2*time.Minute + time.Second)
+	}
+	if rollout := f.rollout(t); rollout.State != store.RolloutDone {
+		t.Fatalf("rollout %+v", rollout)
+	}
+}
+
+// A container first seen after it restarted is no healthy soak.
+func TestAContainerSeenFirstAfterARestartIsNotThrough(t *testing.T) {
+	f := newFixture(t, 2)
+	f.restarts["t00"] = 1
+	f.step(time.Second)
+	f.step(5 * time.Second)
+	f.step(3 * time.Minute)
+	if got := f.onNewest(); len(got) != 1 {
+		t.Fatalf("moved on after a restart: %v", got)
 	}
 }

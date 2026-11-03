@@ -296,7 +296,7 @@ func TestAnAppFromBeforeRevisionsKeepsItsSpecAsTheFirst(t *testing.T) {
 		`ALTER TABLE tenants DROP COLUMN before_revision`,
 		`ALTER TABLE tenants DROP COLUMN canary`,
 		`ALTER TABLE tenants DROP COLUMN hold`,
-		`ALTER TABLE tenants DROP COLUMN restore`,
+		`ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN served`, `ALTER TABLE tenants DROP COLUMN moved_on`,
 		`DROP TABLE rollouts`,
 		`DROP TABLE app_revisions`,
 		`ALTER TABLE apps DROP COLUMN tag`,

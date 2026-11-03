@@ -61,7 +61,7 @@ func (s *Server) promote(app, actor string) error {
 	if len(waiting) == 0 {
 		return nil
 	}
-	return s.store.AdvanceRollout(app, rollout.Wave, waiting, actor)
+	return s.store.AdvanceRollout(app, rollout.At(), waiting, actor)
 }
 
 // setFlags makes a tenant a canary or held, or not.

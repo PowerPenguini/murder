@@ -54,13 +54,22 @@ ran, and a restart, a move or a failover keeps it there too.
   revision before, **its data too**: its node rolls the ZFS dataset back to
   the snapshot taken when the old container stopped. Whatever it wrote
   since is lost; that is the point, as a failed upgrade may have half
-  migrated it. The rollout pauses. Without ZFS, the data stays as it is.
+  migrated it. The rollout pauses. Its data goes back only if the leader
+  watched it from its move on and never saw it healthy (once seen healthy
+  it served, and that is recorded, so a new leader knows too), and only on
+  the node it moved on: elsewhere, or if the leader cannot say, the
+  rollout pauses with the data as it is. Without ZFS, the data stays as it
+  is. A node that should take the data back but has no snapshot of then
+  keeps the tenant stopped; `murder app rollout abort` starts it on its
+  data as it is.
 - A tenant that came up and then fails its health check for 30 seconds, or
   restarts, pauses the rollout and stays as it is, for someone to look.
 - A node that does not say how its tenant runs pauses the rollout after 5
   minutes; nothing goes back.
 - A held tenant (`-hold true`) stays on the revision it runs, out of every
   rollout, until `-hold false`; then it takes the newest revision.
+- A suspended tenant moves with its wave and holds no wave up: nothing of
+  it runs to watch.
 
 ```bash
 murder app rollout web                # its waves: tenants on the new revision, waiting, held
@@ -72,7 +81,9 @@ murder app apply apps/web.yaml -now   # no waves: every tenant now, ending a rol
 ```
 
 `-now` (on `apply`, `update` and `rollback`) is for a fix that cannot wait,
-or for an app with one tenant. A newer change while a rollout runs starts
+or for an app with one tenant; applying the same spec again with `-now`
+moves what its rollout has yet to move. `-wait` waits for the rollout of
+the app's newest revision, changed by this apply or an earlier one. A newer change while a rollout runs starts
 it again from the first wave, with the tenants already moved kept where
 they are until their wave. The audit log names each wave (`app.wave`),
 each tenant taken back and the end (`rollout.done`). Revisions a tenant

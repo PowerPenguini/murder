@@ -206,16 +206,15 @@ func applyApps(ctx context.Context, client *api.Client, paths []string, wait tim
 			fmt.Fprintf(stdout, "%-20s note: %s\n", "", result.Note)
 		}
 		reportTenants(app.name, result)
-		if result.Rollout {
-			rolling = append(rolling, app.name)
-		}
+		// Changed or not: a retry waits for what an earlier apply began.
+		rolling = append(rolling, app.name)
 	}
 	deadline := time.Now().Add(wait)
 	if wait > 0 {
-		failures = append(failures, waitRollouts(ctx, client, rolling, deadline)...)
-	}
-	if wait > 0 {
-		current, err := client.List(ctx)
+		bounded, cancel := context.WithDeadline(ctx, deadline.Add(rolloutPoll))
+		defer cancel()
+		failures = append(failures, waitRollouts(bounded, client, rolling, deadline)...)
+		current, err := client.List(bounded)
 		if err != nil {
 			return err
 		}
@@ -358,11 +357,11 @@ func rollbackApp(ctx context.Context, client *api.Client, name string, to int64,
 // reportApplied says what storing an app changed and, with wait, waits for
 // its live tenants to be healthy.
 func reportApplied(ctx context.Context, client *api.Client, name string, applied api.AppApplied, wait time.Duration) error {
-	if !applied.Changed {
+	if applied.Changed {
+		fmt.Fprintf(stdout, "%-20s revision %d: %s\n", name, applied.App.Revision, shortImage(applied.App.Spec.Image))
+	} else {
 		fmt.Fprintf(stdout, "%-20s unchanged %s\n", name, shortImage(applied.App.Spec.Image))
-		return nil
 	}
-	fmt.Fprintf(stdout, "%-20s revision %d: %s\n", name, applied.App.Revision, shortImage(applied.App.Spec.Image))
 	if applied.Note != "" {
 		fmt.Fprintf(stdout, "%-20s note: %s\n", "", applied.Note)
 	}
@@ -370,20 +369,21 @@ func reportApplied(ctx context.Context, client *api.Client, name string, applied
 	if wait <= 0 {
 		return nil
 	}
+	// Changed or not: a retry waits for what an earlier one began.
 	deadline := time.Now().Add(wait)
-	if applied.Rollout {
-		if failures := waitRollouts(ctx, client, []string{name}, deadline); len(failures) > 0 {
-			return fmt.Errorf("%d problem(s):\n  %s", len(failures), strings.Join(failures, "\n  "))
-		}
-		current, err := client.List(ctx)
-		if err != nil {
-			return err
-		}
-		applied.Tenants = applied.Tenants[:0]
-		for _, tenant := range current {
-			if tenant.App == name && !tenant.Archived() {
-				applied.Tenants = append(applied.Tenants, tenant)
-			}
+	bounded, cancel := context.WithDeadline(ctx, deadline.Add(rolloutPoll))
+	defer cancel()
+	if failures := waitRollouts(bounded, client, []string{name}, deadline); len(failures) > 0 {
+		return fmt.Errorf("%d problem(s):\n  %s", len(failures), strings.Join(failures, "\n  "))
+	}
+	current, err := client.List(bounded)
+	if err != nil {
+		return err
+	}
+	applied.Tenants = applied.Tenants[:0]
+	for _, tenant := range current {
+		if tenant.App == name && !tenant.Archived() {
+			applied.Tenants = append(applied.Tenants, tenant)
 		}
 	}
 	if failures := waitAll(ctx, client, applied.Tenants, max(time.Until(deadline).Round(time.Second), time.Second)); len(failures) > 0 {
@@ -423,7 +423,12 @@ func waitRollouts(ctx context.Context, client *api.Client, apps []string, deadli
 				break
 			}
 			rollout := app.Rollout
-			if rollout == nil || rollout.State == store.RolloutDone {
+			// A rollout of an older revision is not this one's: one that
+			// went at once has none.
+			if rollout == nil || rollout.ToRevision != app.Revision {
+				break
+			}
+			if rollout.State == store.RolloutDone {
 				fmt.Fprintf(stdout, "%-20s rolled out\n", name)
 				break
 			}

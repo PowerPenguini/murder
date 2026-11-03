@@ -25,6 +25,9 @@ var ErrDiskLimit = errors.New("disk limit not applied")
 // ErrSnapshotsUnsupported is returned by drivers that cannot snapshot.
 var ErrSnapshotsUnsupported = errors.New("volume driver does not support snapshots")
 
+// ErrNoSnapshot is a snapshot the driver would keep, but does not have.
+var ErrNoSnapshot = errors.New("no such snapshot")
+
 // Volumes manages tenant data directories. The directories above them are
 // private to root, so no host user can reach into a tenant's data; a setuid
 // file a tenant writes there is useless to them.
@@ -414,7 +417,7 @@ func (z ZFS) RestoreSnapshot(ctx context.Context, tenant, reason string) (string
 		}
 	}
 	if len(taken) == 0 {
-		return "", fmt.Errorf("%w: %s has no %s snapshot", ErrSnapshotsUnsupported, dataset, reason)
+		return "", fmt.Errorf("%w: %s has no %s snapshot", ErrNoSnapshot, dataset, reason)
 	}
 	sort.Strings(taken)
 	newest := taken[len(taken)-1]

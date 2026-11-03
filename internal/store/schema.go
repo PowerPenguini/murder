@@ -117,7 +117,13 @@ CREATE TABLE tenants (
 	hold   INTEGER NOT NULL DEFAULT 0 CHECK (hold IN (0, 1)),
 	-- The image the tenant's data goes back to, from the snapshot taken as
 	-- the image changed, on the tenant's node; empty for none.
-	restore TEXT NOT NULL DEFAULT ''
+	restore TEXT NOT NULL DEFAULT '',
+	-- served is set once the tenant was seen healthy on the revision its
+	-- rollout moved it to: its data, written since, never goes back by
+	-- itself. moved_on is the node it ran on as it moved, which keeps the
+	-- snapshot its data would go back to.
+	served   INTEGER NOT NULL DEFAULT 0 CHECK (served IN (0, 1)),
+	moved_on TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -411,6 +417,8 @@ func upgrade(db *sql.DB) error {
 			`ALTER TABLE tenants ADD COLUMN canary INTEGER NOT NULL DEFAULT 0 CHECK (canary IN (0, 1))`,
 			`ALTER TABLE tenants ADD COLUMN hold INTEGER NOT NULL DEFAULT 0 CHECK (hold IN (0, 1))`,
 			`ALTER TABLE tenants ADD COLUMN restore TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE tenants ADD COLUMN served INTEGER NOT NULL DEFAULT 0 CHECK (served IN (0, 1))`,
+			`ALTER TABLE tenants ADD COLUMN moved_on TEXT NOT NULL DEFAULT ''`,
 			rolloutsTable,
 		} {
 			if _, err := tx.Exec(statement); err != nil {

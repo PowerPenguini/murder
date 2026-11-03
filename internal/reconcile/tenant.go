@@ -372,6 +372,10 @@ func (r *Reconciler) restoreData(ctx context.Context, record store.Record, exist
 		switch {
 		case errors.Is(err, volume.ErrSnapshotsUnsupported):
 			r.log.Warn("no snapshot to take the data back to: the old image runs on the data as the newer one left it", "tenant", tenant, "image", record.Restore)
+		case errors.Is(err, volume.ErrNoSnapshot):
+			// The old image is not started on data the newer one may
+			// have changed past what it reads.
+			return fmt.Errorf("its data should go back to before image %s, but this node has no snapshot of then: it stays stopped; `murder app rollout abort %s` starts it on its data as it is (%w)", record.Restore, record.App, err)
 		case err != nil:
 			return fmt.Errorf("take the data back to the snapshot before the image change: %w", err)
 		default:

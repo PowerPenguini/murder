@@ -373,7 +373,7 @@ func (f *fakeVolumes) RestoreSnapshot(_ context.Context, tenant, reason string) 
 		}
 	}
 	if newest == "" {
-		return "", volume.ErrSnapshotsUnsupported
+		return "", volume.ErrNoSnapshot
 	}
 	f.restored = append(f.restored, newest)
 	if f.runtime != nil {
@@ -1933,14 +1933,17 @@ func TestARolledBackTenantGetsItsDataBack(t *testing.T) {
 	if f.runtime.only(t).spec.Image != imageA {
 		t.Fatal("a tenant moved before its wave")
 	}
-	if err := f.store.AdvanceRollout("acme", 0, []string{"acme"}, "murder"); err != nil {
+	rollout, _ := f.store.Rollout("acme")
+	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
 		t.Fatal(err)
 	}
 	f.reconcile(t)
 	if f.runtime.only(t).spec.Image != imageB {
 		t.Fatal("the wave did not move the tenant")
 	}
-	if err := f.store.RollBackTenants("acme", []string{"acme"}, true, "it never became healthy", "murder"); err != nil {
+	rollout, _ = f.store.Rollout("acme")
+	moved, _ := f.store.Get("acme")
+	if err := f.store.RollBackTenants("acme", rollout.At(), map[string]int64{"acme": moved.Generation}, true, "it never became healthy", "murder"); err != nil {
 		t.Fatal(err)
 	}
 	f.runtime.takeEvents()
@@ -1963,5 +1966,43 @@ func TestARolledBackTenantGetsItsDataBack(t *testing.T) {
 	// Going back took no snapshot of its own: the data is the old image's.
 	if len(f.volumes.snapshots) != 2 {
 		t.Fatalf("snapshots %v", f.volumes.snapshots)
+	}
+}
+
+// Without the snapshot from before the newer image, the old one is not
+// started on what the newer one left; aborting starts it on the data as
+// it is.
+func TestATenantWithoutItsSnapshotStaysStopped(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	app, _ := f.store.App("acme")
+	app.Spec.Image = imageB
+	if _, err := f.store.PutApp(app, "test"); err != nil {
+		t.Fatal(err)
+	}
+	rollout, _ := f.store.Rollout("acme")
+	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	f.volumes.destroyed = append(f.volumes.destroyed, f.volumes.snapshots...)
+	rollout, _ = f.store.Rollout("acme")
+	moved, _ := f.store.Get("acme")
+	if err := f.store.RollBackTenants("acme", rollout.At(), map[string]int64{"acme": moved.Generation}, true, "it never became healthy", "murder"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "no snapshot of then") {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if f.runtime.count() != 0 {
+		t.Fatal("the old image started on the newer one's data")
+	}
+	if _, err := f.store.AbortRollout("acme", "start it as it is", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if c := f.runtime.only(t); c.spec.Image != imageA || !c.Running {
+		t.Fatalf("after the abort: %+v", c)
 	}
 }
