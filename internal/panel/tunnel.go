@@ -62,9 +62,12 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 	if err != nil {
 		return err
 	}
+	// Headers within a time, idle connections closed after one; no
+	// whole-request bound, which a binary's upload and a long action would
+	// outlast: the panel's handler bounds each body itself.
 	servers := []*http.Server{
-		{Handler: handler, ReadHeaderTimeout: 10 * time.Second, TLSConfig: config.TLS},
-		{Handler: redirect(config.Name), ReadHeaderTimeout: 10 * time.Second},
+		{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: IdleTimeout, TLSConfig: config.TLS},
+		{Handler: redirect(config.Name), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: IdleTimeout},
 	}
 	go func() { _ = servers[0].Serve(tls.NewListener(secure, config.TLS)) }()
 	go func() { _ = servers[1].Serve(plain) }()

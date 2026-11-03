@@ -447,10 +447,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	var record store.Record
 	// Under the reconciler's lock, so a concurrent purge cannot interleave
 	// with the check for leftover data.
-	err = s.reconciler.Exclusive(func() error {
-		if err := r.Context().Err(); err != nil {
-			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err))
-		}
+	err = s.exclusive(r, "created", func() error {
 		if existing, err := s.store.Get(request.Name); err == nil && existing.Archived() {
 			return store.ErrArchived
 		} else if err == nil {
@@ -462,6 +459,10 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		}
 		if exists {
 			return statusError{http.StatusConflict, fmt.Errorf("data of an earlier tenant %s is on this node but not in the archive; purge it first", request.Name)}
+		}
+		// The look for data may have taken long.
+		if err := gaveUp(r, "created"); err != nil {
+			return err
 		}
 		record, err = s.store.Create(store.NewTenant{Name: request.Name, App: request.App, Overrides: overrides}, actor(r))
 		return err
@@ -500,8 +501,8 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := r.Context().Err(); err != nil {
-		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
+	if err := gaveUp(r, "changed"); err != nil {
+		writeError(w, err)
 		return
 	}
 	record, changed, err := s.store.Configure(name, request.App, overrides, request.Generation, actor(r))
@@ -517,6 +518,10 @@ func (s *Server) configure(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) suspend(suspended bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := gaveUp(r, "changed"); err != nil {
+			writeError(w, err)
+			return
+		}
 		record, err := s.store.SetSuspended(r.PathValue("name"), suspended, actor(r))
 		if err != nil {
 			writeError(w, err)
@@ -532,6 +537,10 @@ func (s *Server) suspend(suspended bool) http.HandlerFunc {
 // pass, which the change starts, removes its container and network.
 func (s *Server) archive(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if err := gaveUp(r, "archived"); err != nil {
+		writeError(w, err)
+		return
+	}
 	if err := s.store.Archive(name, actor(r)); err != nil {
 		writeError(w, err)
 		return
@@ -545,9 +554,9 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 	var record store.Record
 	// A client that gave up while waiting for a reconcile pass restores
 	// nothing.
-	err := s.reconciler.ExclusiveContext(r.Context(), func() error {
-		if err := r.Context().Err(); err != nil {
-			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was restored: %w", err))
+	err := s.exclusive(r, "restored", func() error {
+		if err := gaveUp(r, "restored"); err != nil {
+			return err
 		}
 		var err error
 		record, err = s.store.Restore(name, actor(r))
@@ -568,14 +577,43 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(err))
 		return
 	}
-	ctx, cancel := detached(r)
-	defer cancel()
-	if err := s.reconciler.Purge(ctx, name, actor(r)); err != nil {
-		writeError(w, err)
+	// Given up while it waits for a pass, or before it begins, the purge
+	// deletes nothing; once begun it runs to its end (Purge detaches it).
+	if err := s.reconciler.Purge(r.Context(), name, actor(r)); err != nil {
+		writeError(w, gone(r, "purged", err))
 		return
 	}
 	s.log.Info("tenant purged", "tenant", name)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// A client that gives up is not changed for: once a handler holds what it
+// waits for (the reconciler's lock), it checks, right before the change is
+// committed, that its client still waits. The store's writes take no
+// context, so a client that gives up while a write waits for the writer's
+// lock, or for this node to catch up with the cluster, still has it made.
+
+// gaveUp refuses a change for a client that gave up; nothing names what
+// was then not done.
+func gaveUp(r *http.Request, nothing string) error {
+	if err := r.Context().Err(); err != nil {
+		return clientGone(fmt.Errorf("the client gave up while waiting; nothing was %s: %w", nothing, err))
+	}
+	return nil
+}
+
+// gone reports err, the client's giving up as such.
+func gone(r *http.Request, nothing string, err error) error {
+	if gaveUp := r.Context().Err(); gaveUp != nil && errors.Is(err, gaveUp) {
+		return clientGone(fmt.Errorf("the client gave up while waiting; nothing was %s: %w", nothing, err))
+	}
+	return err
+}
+
+// exclusive runs fn under the reconciler's lock, waited for only while the
+// client waits.
+func (s *Server) exclusive(r *http.Request, nothing string, fn func() error) error {
+	return gone(r, nothing, s.reconciler.ExclusiveContext(r.Context(), fn))
 }
 
 // detached gives work that changes the runtime its own deadline, so a client

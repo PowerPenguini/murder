@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -81,10 +82,12 @@ type Server struct {
 	// UploadDir keeps uploaded binaries until they are installed; the
 	// system's temporary directory if empty.
 	UploadDir string
-	backend   Backend
-	log       *slog.Logger
-	now       func() time.Time
-	pages     map[string]*template.Template
+	// bodyTime is how long a body may take to arrive; bodyTime if zero.
+	bodyTime time.Duration
+	backend  Backend
+	log      *slog.Logger
+	now      func() time.Time
+	pages    map[string]*template.Template
 }
 
 // New returns a panel asking backend.
@@ -144,7 +147,10 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /auth/logout", s.Auth.logout)
 	}
 	mux.Handle("/", s.signedIn(pages))
-	return s.ownNames(secure(s.sameOrigin(bounded(mux))))
+	// Bounded outermost: a request refused before its body is read still
+	// has its body held to a time, which the server's draining of it
+	// keeps to.
+	return s.bounded(s.ownNames(secure(s.sameOrigin(mux))))
 }
 
 // Bounds of what a request sends: a sign-in's credential is small, a form
@@ -157,24 +163,60 @@ const (
 	uploadBodyTime = 15 * time.Minute
 )
 
+// IdleTimeout is how long the panel's servers keep a connection between
+// requests.
+const IdleTimeout = 2 * time.Minute
+
 // bounded holds every request's body to its bound and time, before anyone,
-// signed in or not, reads it.
-func bounded(next http.Handler) http.Handler {
+// signed in or not, reads it, or refuses the request unread: what is left
+// of a body is drained after the answer, and only within its time. Once
+// the body is read to its end the time no longer runs: on HTTP/1 the
+// connection is then watched for the client leaving, and a deadline there
+// would end the request's context. Requests without a body set none, for
+// that reason too.
+func (s *Server) bounded(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limit, within := int64(formBody), bodyTime
+		if s.bodyTime > 0 {
+			within = s.bodyTime
+		}
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/auth/"):
 			limit = authBody
 		case r.URL.Path == "/cluster/upgrade":
 			limit, within = -1, uploadBodyTime
 		}
+		if r.ContentLength == 0 || r.Body == nil || r.Body == http.NoBody {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if limit > 0 {
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
+		control := http.NewResponseController(w)
 		// Servers that cannot set deadlines (tests' recorders) go without.
-		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(within))
+		if control.SetReadDeadline(time.Now().Add(within)) == nil {
+			r.Body = &untimedAtEnd{ReadCloser: r.Body, control: control}
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// untimedAtEnd lifts the read deadline once its body has been read to its
+// end.
+type untimedAtEnd struct {
+	io.ReadCloser
+	control *http.ResponseController
+	done    bool
+}
+
+func (u *untimedAtEnd) Read(p []byte) (int, error) {
+	n, err := u.ReadCloser.Read(p)
+	if errors.Is(err, io.EOF) && !u.done {
+		u.done = true
+		_ = u.control.SetReadDeadline(time.Time{})
+	}
+	return n, err
 }
 
 // gate serves a page of signing in, which needs no session.

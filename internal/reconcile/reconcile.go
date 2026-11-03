@@ -507,18 +507,40 @@ func (r *Reconciler) Exclusive(fn func() error) error {
 // ExclusiveContext is Exclusive, giving up while waiting for the lock once
 // ctx ends.
 func (r *Reconciler) ExclusiveContext(ctx context.Context, fn func() error) error {
-	for !r.pass.TryLock() {
-		select {
-		case <-ctx.Done():
-			return context.Cause(ctx)
-		case <-time.After(20 * time.Millisecond):
-		}
+	if err := r.lockPass(ctx); err != nil {
+		return err
 	}
 	defer r.pass.Unlock()
 	if r.life.Err() != nil {
 		return ErrStopping
 	}
 	return fn()
+}
+
+// lockPass takes the lock of passes, giving up once ctx ends. It waits in
+// the lock's queue as Lock does, so passes one after another cannot keep
+// it out: a goroutine takes the lock and hands it over, or gives it back
+// if the caller gave up meanwhile.
+func (r *Reconciler) lockPass(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	taken, abandoned := make(chan struct{}), make(chan struct{})
+	go func() {
+		r.pass.Lock()
+		select {
+		case taken <- struct{}{}:
+		case <-abandoned:
+			r.pass.Unlock()
+		}
+	}()
+	select {
+	case <-taken:
+		return nil
+	case <-ctx.Done():
+		close(abandoned)
+		return context.Cause(ctx)
+	}
 }
 
 // ErrStopping refuses work queued behind a pass while the agent stops, so

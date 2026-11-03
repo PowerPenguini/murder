@@ -435,9 +435,11 @@ func (a *Auth) enrollFinish(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, err, http.StatusBadGateway)
 		return
 	}
-	// It signed its person in already.
-	if err := a.agent.UsePasskey(r.Context(), key.ID, "", key.Data); err != nil {
-		a.log.Warn("record a passkey's use", "error", err)
+	// It signed its person in already. Recorded only over the credential
+	// as just added: a sign-in with it meanwhile recorded a counter as far
+	// or further, which this must not take back.
+	if err := a.agent.UsePasskey(r.Context(), key.ID, key.Data, key.Data); err != nil {
+		a.log.Info("a new passkey's use was not recorded: it was used again meanwhile, or the agent did not answer", "error", err)
 	}
 	writeJSON(w, answer)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -53,11 +54,18 @@ func (r *Reconciler) DataExists(ctx context.Context, tenant string) (bool, error
 	return r.volumes.Exists(ctx, tenant)
 }
 
+// purgeTime bounds a purge once it has begun.
+const purgeTime = 10 * time.Minute
+
 // Purge deletes an archived tenant for good: its data, snapshots and saved
 // secrets. It also cleans up data no archive entry accounts for. A live
-// tenant must be archived first.
+// tenant must be archived first. A caller that gives up (ctx) before the
+// deletion begins, while waiting for a pass too, purges nothing; once
+// begun, the deletion runs to its end, so nothing is left half deleted.
 func (r *Reconciler) Purge(ctx context.Context, name, actor string) error {
-	r.pass.Lock()
+	if err := r.lockPass(ctx); err != nil {
+		return err
+	}
 	defer r.pass.Unlock()
 	if r.life.Err() != nil {
 		return ErrStopping
@@ -84,12 +92,19 @@ func (r *Reconciler) Purge(ctx context.Context, name, actor string) error {
 	case err != nil:
 		return err
 	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("%w: the purge was given up before it began; nothing was deleted", context.Cause(ctx))
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), purgeTime)
+	defer cancel()
 	if err := r.clearRuntime(ctx, name); err != nil {
 		return err
 	}
 	if err := r.volumes.Remove(ctx, name); err != nil {
 		return err
 	}
+	// The store takes no context: a write waiting there for the writer's
+	// lock is not given up either.
 	return r.store.Forget(name, actor)
 }
 
