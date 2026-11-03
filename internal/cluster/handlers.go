@@ -368,6 +368,12 @@ func (c *Cluster) handleRemove(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	c.membership.Lock()
 	defer c.membership.Unlock()
+	// A new leader may not have applied a node's addition yet, committed
+	// under the leader before it: it applies what was committed first.
+	if err := c.catchUp(); err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
 	future := c.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)
