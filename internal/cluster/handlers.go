@@ -232,6 +232,11 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// One change of the members at a time, its checks and both its writes:
+	// two hosts joining with one name cannot both pass the checks and leave
+	// the state and the voters naming different addresses.
+	c.membership.Lock()
+	defer c.membership.Unlock()
 	// A node of the same name elsewhere would take the member's place.
 	if address, member := c.memberAddress(name); member && address != request.Address {
 		writeError(w, http.StatusConflict, fmt.Errorf("node %s is already a member at %s; remove it first, or give the new node another name", name, address))
@@ -265,7 +270,13 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if err := c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), 0, commitTimeout).Error(); err != nil {
+	// As of the voters read now: a change of them meanwhile refuses it.
+	configuration := c.raft.GetConfiguration()
+	if err := configuration.Error(); err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	if err := c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), configuration.Index(), commitTimeout).Error(); err != nil {
 		if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
 			// The node may be a voter now, or not: asking again is safe.
 			c.moved(w)
@@ -284,6 +295,8 @@ func (c *Cluster) handleRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
+	c.membership.Lock()
+	defer c.membership.Unlock()
 	future := c.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)

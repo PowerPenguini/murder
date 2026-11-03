@@ -37,6 +37,10 @@ type Monitor struct {
 	Probe func(ctx context.Context, node string) error
 	// Leader reports whether this node leads the cluster.
 	Leader func() bool
+	// Term is the leader's Raft term; nil if not known. A failover acts
+	// only in the term it began in: a leader that lost and won leadership
+	// again meanwhile decides again.
+	Term func() uint64
 	// Fence powers dead nodes off; without it a dead node's tenants fail
 	// over only when an operator says it is off.
 	Fence Fencer
@@ -72,7 +76,9 @@ type Monitor struct {
 	// retry is when a node whose failover failed is tried again.
 	retry   map[string]time.Time
 	leading bool
-	records recordsView
+	// stopWorker ends the failover under way, once leadership is lost.
+	stopWorker context.CancelFunc
+	records    recordsView
 	// writing is set while the records are being written, across
 	// leaderships: one write at a time.
 	writing bool
@@ -129,6 +135,10 @@ func (m *Monitor) Check(ctx context.Context) {
 	if !m.Leader() {
 		m.mu.Lock()
 		m.seen, m.leading = nil, false
+		if m.stopWorker != nil {
+			m.stopWorker()
+			m.stopWorker = nil
+		}
 		m.mu.Unlock()
 		return
 	}
@@ -252,9 +262,15 @@ func (m *Monitor) Check(ctx context.Context) {
 		m.fencing = start.Name
 	}
 	lastSeen := m.seen[start.Name]
+	var worker context.Context
+	if start.Name != "" {
+		// Its own life, not the probe's, but ended once this node no
+		// longer leads.
+		worker, m.stopWorker = context.WithCancel(context.WithoutCancel(ctx))
+	}
 	m.mu.Unlock()
 	if start.Name != "" {
-		go m.failOver(context.WithoutCancel(ctx), start, lastSeen)
+		go m.failOver(worker, start, lastSeen, m.term())
 	}
 }
 
@@ -350,7 +366,7 @@ func (m *Monitor) note(node, why string) {
 // off is confirmed and settle has passed since it last answered, it gives
 // those tenants to their replicas, unless the node answered meanwhile or
 // is no longer off.
-func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.Time) {
+func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.Time, term uint64) {
 	defer func() {
 		m.mu.Lock()
 		m.fencing = ""
@@ -375,6 +391,10 @@ func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.T
 		blocked("no provider to power it off is set up (cluster.failover)" + manual)
 		return
 	}
+	if why := m.unauthorized(ctx, node.Name, lastSeen, term); why != "" {
+		log.Warn("the node is not powered off: "+why, "since", lastSeen)
+		return
+	}
 	log.Warn("a node does not answer: powering it off", "since", lastSeen, "tenants", tenants)
 	fenceCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	err := m.Fence.PowerOff(fenceCtx, node)
@@ -389,15 +409,8 @@ func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.T
 			return
 		}
 	}
-	m.mu.Lock()
-	answered := m.seen[node.Name].After(lastSeen)
-	m.mu.Unlock()
-	if answered {
-		log.Warn("the node answered again before its tenants ran elsewhere: they stay")
-		return
-	}
-	if !m.Leader() {
-		log.Warn("no longer leading: the new leader fails the node over")
+	if why := m.unauthorized(ctx, node.Name, lastSeen, term); why != "" {
+		log.Warn("its tenants stay: "+why, "since", lastSeen)
 		return
 	}
 	check, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -405,6 +418,11 @@ func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.T
 	cancel()
 	if err != nil || !off {
 		blocked(fmt.Sprintf("it is no longer known to be off (off %v, %v)", off, err) + manual)
+		return
+	}
+	// The check of power took a while: the decision is checked again.
+	if why := m.unauthorized(ctx, node.Name, lastSeen, term); why != "" {
+		log.Warn("its tenants stay: "+why, "since", lastSeen)
 		return
 	}
 	outcome, err := m.Store.FailOver(node.Name, "murder (failover)")
@@ -417,6 +435,44 @@ func (m *Monitor) failOver(ctx context.Context, node store.Node, lastSeen time.T
 	delete(m.stuck, node.Name)
 	m.mu.Unlock()
 	log.Warn("the node's tenants run from their replicas", "promoted", outcome.Promoted, "stranded", outcome.Stranded)
+}
+
+// term is the leader's Raft term, 0 if not known.
+func (m *Monitor) term() uint64 {
+	if m.Term == nil {
+		return 0
+	}
+	return m.Term()
+}
+
+// unauthorized says why a failover begun in term may no longer act on
+// node, last seen at lastSeen: empty while this node still leads in that
+// term, hears a majority, and node has not answered since.
+func (m *Monitor) unauthorized(ctx context.Context, node string, lastSeen time.Time, term uint64) string {
+	switch {
+	case ctx.Err() != nil:
+		return "this node no longer leads"
+	case !m.Leader():
+		return "this node no longer leads: the new leader decides"
+	case m.Term != nil && m.Term() != term:
+		return "leadership changed meanwhile: the leader decides again"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.seen[node].After(lastSeen) {
+		return "the node answered again"
+	}
+	now, heard, all := m.now(), 1, m.Store.Nodes()
+	self := m.Store.Node()
+	for _, other := range all {
+		if other.Name != self && now.Sub(m.seen[other.Name]) < m.after() {
+			heard++
+		}
+	}
+	if heard < len(all)/2+1 {
+		return fmt.Sprintf("this leader hears only %d of %d nodes: it may be the one cut off", heard, len(all))
+	}
+	return ""
 }
 
 func (m *Monitor) wait(ctx context.Context, d time.Duration) error {

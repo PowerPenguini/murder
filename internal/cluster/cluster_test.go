@@ -810,3 +810,19 @@ func TestTheLeaderFindsAStateThatDrifted(t *testing.T) {
 	}()
 	eventually(t, "the watch finds the drift", func() bool { return watched.Diverged()[drifted.name] })
 }
+
+// stalled is a Raft future that never ends.
+type stalled struct{}
+
+func (stalled) Error() error { select {} }
+
+// A log that stalls does not hold a write for good.
+func TestAFutureThatNeverEndsIsGivenUp(t *testing.T) {
+	start := time.Now()
+	if err := waitFuture(stalled{}, 50*time.Millisecond); !errors.Is(err, errStalled) {
+		t.Fatalf("waited: %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("waited too long")
+	}
+}

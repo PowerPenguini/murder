@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -213,8 +214,10 @@ func Shared(agent config.Agent) []string {
 	return paths
 }
 
-// freeTunnelAddress is the lowest address of network below devices' that
-// no node uses, nor was given to a host; the caller holds mu.
+// freeTunnelAddress is an address of network below devices' that no node
+// uses, nor was given to a host; the caller holds mu. It is one of the free
+// ones at random: another node inviting at the same moment, which cannot
+// see what this one handed out, rarely picks the same.
 func (b *Book) freeTunnelAddress(network, own string) (netip.Addr, error) {
 	prefix, err := netip.ParsePrefix(network)
 	if err != nil {
@@ -232,12 +235,16 @@ func (b *Book) freeTunnelAddress(network, own string) (netip.Addr, error) {
 	for address := range b.handed {
 		used[address] = true
 	}
+	var free []netip.Addr
 	address := prefix.Masked().Addr().Next()
 	for i := 1; i < 100 && prefix.Contains(address); i++ {
 		if !used[address] {
-			return address, nil
+			free = append(free, address)
 		}
 		address = address.Next()
 	}
-	return netip.Addr{}, fmt.Errorf("no address left for a node in the panel's tunnel %s", network)
+	if len(free) == 0 {
+		return netip.Addr{}, fmt.Errorf("no address left for a node in the panel's tunnel %s", network)
+	}
+	return free[rand.IntN(len(free))], nil
 }

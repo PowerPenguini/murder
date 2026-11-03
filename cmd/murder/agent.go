@@ -397,7 +397,7 @@ func keepRestartPolicies(ctx context.Context, reconciler *reconcile.Reconciler, 
 // read leaves failover to an operator, which the log and metrics say when
 // a node dies, rather than stopping the agent.
 func newMonitor(cfg *config.Cluster, baseDomain, panelName string, st *store.SQLite, member *cluster.Cluster, log *slog.Logger) *failover.Monitor {
-	monitor := &failover.Monitor{Store: st, Probe: member.Ping, Leader: member.Leader, Log: log}
+	monitor := &failover.Monitor{Store: st, Probe: member.Ping, Leader: member.Leader, Term: member.Term, Log: log}
 	if cfg.DNS != nil {
 		wildcard, err := records.Wildcard(baseDomain, cfg.DNS.Zone)
 		var publisher records.Publisher
@@ -453,6 +453,11 @@ func newPublisher(cfg *config.DNS, name string, public []string) (records.Publis
 				clientIP = address.Unmap().String()
 				break
 			}
+		}
+		// Without it, the provider asks a web service for it with no time
+		// limit, and a call that hangs holds every later one.
+		if clientIP == "" {
+			return nil, errors.New("cluster.dns with namecheap needs this node's public IPv4 address in cluster.publicAddresses: Namecheap allows calls from listed addresses only")
 		}
 		return &records.Namecheap{User: user, APIKey: key, ClientIP: clientIP, Zone: zone, Name: name, TTL: cfg.TTL.Duration}, nil
 	}

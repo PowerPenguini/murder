@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -113,6 +114,8 @@ type Cluster struct {
 	// joins answers hosts that bring an invitation.
 	joins  *http.Server
 	client *http.Client
+	// membership keeps joins and removals one at a time on the leader.
+	membership sync.Mutex
 	// barrierTerm is the last term in which this node, as the leader, has
 	// applied everything committed before it.
 	barrierTerm atomic.Uint64
@@ -290,7 +293,7 @@ func (c *Cluster) leaderApplied() (uint64, error) {
 	term := c.raft.CurrentTerm()
 	var err error
 	if c.barrierTerm.Load() != term {
-		if err = c.raft.Barrier(commitTimeout).Error(); err == nil {
+		if err = waitFuture(c.raft.Barrier(commitTimeout), commitTimeout+futureGrace); err == nil {
 			c.barrierTerm.Store(term)
 		}
 	} else {
@@ -352,6 +355,29 @@ func (c *Cluster) propose(ctx context.Context, data []byte) (uint64, error) {
 	}
 }
 
+// futureGrace is how long past its own timeout a Raft future is waited
+// for.
+const futureGrace = 5 * time.Second
+
+// errStalled is a Raft future that did not end in time: what it did, if
+// anything, is not known.
+var errStalled = errors.New("the log did not answer in time")
+
+// waitFuture waits for future at most d. One that does not end by then is
+// errStalled: it may still take effect.
+func waitFuture(future raft.Future, d time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- future.Error() }()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errStalled
+	}
+}
+
 // apply appends data to the log on the leader.
 func (c *Cluster) apply(data []byte) (uint64, error) {
 	// Nothing enters the log that a node of this release cannot apply.
@@ -363,7 +389,9 @@ func (c *Cluster) apply(data []byte) (uint64, error) {
 		return 0, &PeerError{Status: http.StatusBadRequest, Message: err.Error()}
 	}
 	future := c.raft.Apply(data, commitTimeout)
-	if err := future.Error(); err != nil {
+	// Apply's timeout bounds getting into the log only; a log that stalls
+	// (a disk that hangs) must not hold the writer for good.
+	if err := waitFuture(future, commitTimeout+futureGrace); err != nil {
 		if errors.Is(err, raft.ErrNotLeader) {
 			return 0, ErrNotLeader
 		}
@@ -790,6 +818,9 @@ func (c *Cluster) Status() (Status, error) {
 
 // Leader reports whether this node leads the cluster.
 func (c *Cluster) Leader() bool { return c.raft.State() == raft.Leader }
+
+// Term is the node's current Raft term.
+func (c *Cluster) Term() uint64 { return c.raft.CurrentTerm() }
 
 func marshal(value any) []byte {
 	data, err := json.Marshal(value)

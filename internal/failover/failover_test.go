@@ -123,6 +123,8 @@ func newFixture(t *testing.T) *fixture {
 			if onWait != nil {
 				onWait()
 			}
+			// The leader goes on probing meanwhile, as it does every 2 s.
+			f.monitor.Check(context.Background())
 			return nil
 		},
 	}
@@ -527,5 +529,58 @@ func TestABlockedFailoverStaysBlockedWhileItsTenantsAreStuck(t *testing.T) {
 	f.monitor.WriteMetrics(metrics.NewWriter(&page))
 	if !strings.Contains(page.String(), `murder_failover_blocked{node="n3"} 1`) {
 		t.Fatalf("the stuck failover looks settled:\n%s", page.String())
+	}
+}
+
+// A failover begun by a leader that lost leadership since powers nothing
+// off, and runs no tenant elsewhere.
+func TestAFailoverActsOnlyWhileItsLeaderLeads(t *testing.T) {
+	f := newFixture(t)
+	f.check(t)
+	f.mu.Lock()
+	f.leader = false
+	f.mu.Unlock()
+	f.monitor.failOver(context.Background(), f.store.Nodes()[1], f.now().Add(-time.Minute), 0)
+	f.mu.Lock()
+	fenced := len(f.fenced)
+	f.mu.Unlock()
+	if fenced != 0 {
+		t.Fatalf("a former leader powered %v off", f.fenced)
+	}
+	// Leadership lost while the provider says whether the node is off.
+	f.mu.Lock()
+	f.leader = true
+	f.mu.Unlock()
+	f.monitor.Fence = loseOnOff{f}
+	f.monitor.failOver(context.Background(), f.store.Nodes()[1], f.now(), 0)
+	if got := f.nodeOf(t, "a"); got != "n2" {
+		t.Fatalf("a former leader ran a on %s", got)
+	}
+}
+
+// loseOnOff loses leadership as it says the node is off.
+type loseOnOff struct{ f *fixture }
+
+func (l loseOnOff) PowerOff(ctx context.Context, n store.Node) error { return l.f.PowerOff(ctx, n) }
+func (l loseOnOff) Off(context.Context, store.Node) (bool, error) {
+	l.f.mu.Lock()
+	l.f.leader = false
+	l.f.mu.Unlock()
+	return true, nil
+}
+
+// A leader that lost leadership and won it again decides again: the
+// failover of its earlier term stops.
+func TestAFailoverActsOnlyInItsTerm(t *testing.T) {
+	f := newFixture(t)
+	f.check(t)
+	term := uint64(5)
+	f.monitor.Term = func() uint64 { return term }
+	term = 6
+	f.monitor.failOver(context.Background(), f.store.Nodes()[1], f.now().Add(-time.Minute), 5)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.fenced) != 0 {
+		t.Fatalf("a failover of an earlier term powered %v off", f.fenced)
 	}
 }
