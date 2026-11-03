@@ -93,6 +93,16 @@ func (a *demoActor) Freeze(_ context.Context, reason string) error {
 	return nil
 }
 
+func (a *demoActor) ThawIf(_ context.Context, reason string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.nodes.frozen != "" && a.nodes.frozen != reason {
+		return &api.Error{Status: 409, Message: "changes are frozen for another reason now: " + a.nodes.frozen}
+	}
+	a.nodes.frozen = ""
+	return nil
+}
+
 func (a *demoActor) Thaw(context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

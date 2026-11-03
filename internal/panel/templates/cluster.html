@@ -58,7 +58,7 @@
   <p class="lead">{{$d.Frozen}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>, begun by {{.By}}, runs now and takes changes again once it ends.</p>
   {{else}}
   <p class="lead">{{$d.Frozen}}. An upgrade that stopped leaves it so; once every node runs one release, take changes again.</p>
-  <form method="post" class="row spaced"><input type="hidden" name="do" value="thaw">
+  <form method="post" class="row spaced"><input type="hidden" name="do" value="thaw"><input type="hidden" name="frozen" value="{{$d.Frozen}}">
     <input type="text" name="confirm" placeholder="type thaw" data-confirm="thaw" aria-label="type thaw" autocomplete="off" required class="short">
     <button type="submit" class="danger">Take changes again</button></form>
   {{end}}{{end}}

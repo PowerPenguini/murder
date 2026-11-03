@@ -412,6 +412,7 @@ type Store interface {
 	Frozen() string
 	Freeze(reason, actor string) error
 	Thaw(actor string) error
+	ThawIf(reason, actor string) error
 	// Note records an event, frozen or not.
 	Note(action, detail, actor string) error
 

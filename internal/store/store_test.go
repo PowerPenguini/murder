@@ -888,3 +888,21 @@ func TestARotationThawsOnlyItsOwnFreeze(t *testing.T) {
 		t.Fatalf("own freeze: %q, %v", st.Frozen(), err)
 	}
 }
+
+// A thaw for the freeze someone saw ends that one alone: one taken since
+// stays, and the thaw says so.
+func TestAThawEndsTheFreezeItWasFor(t *testing.T) {
+	st, _ := openNew(t, options())
+	if err := st.Freeze(RotationFreeze+"n1", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ThawIf("upgrade to abc", "root"); !errors.Is(err, ErrConflict) || st.Frozen() == "" {
+		t.Fatalf("thawed another freeze: %v, %q", err, st.Frozen())
+	}
+	if err := st.ThawIf(RotationFreeze+"n1", "root"); err != nil || st.Frozen() != "" {
+		t.Fatalf("its own freeze: %v, %q", err, st.Frozen())
+	}
+	if err := st.ThawIf("anything", "root"); err != nil {
+		t.Fatalf("nothing frozen: %v", err)
+	}
+}

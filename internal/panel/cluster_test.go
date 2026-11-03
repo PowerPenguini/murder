@@ -119,7 +119,10 @@ func TestActingOnTheCluster(t *testing.T) {
 	if nodes, _ := cluster.Nodes(ctx); nodes.Frozen == "" || !strings.Contains(body, "type thaw to take changes again") {
 		t.Fatalf("thawed without thaw typed:\n%s", body)
 	}
-	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}}, server.URL)
+	if !strings.Contains(page, `name="frozen" value="an upgrade stopped"`) {
+		t.Fatalf("the thaw form does not say which freeze it ends:\n%s", page)
+	}
+	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}, "frozen": {"an upgrade stopped"}}, server.URL)
 	if nodes, _ := cluster.Nodes(ctx); nodes.Frozen != "" || !strings.Contains(body, "changes are taken again") {
 		t.Fatalf("after thawing:\n%s", body)
 	}
@@ -318,8 +321,14 @@ func TestARotationsFreezeIsNotThawedFromThePanel(t *testing.T) {
 	if !strings.Contains(page, "master key rotation from node fsn-1 runs") || strings.Contains(page, `placeholder="type thaw"`) {
 		t.Fatalf("the cluster page during a rotation:\n%s", page)
 	}
-	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}}, server.URL)
+	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}, "frozen": {store.RotationFreeze + "fsn-1"}}, server.URL)
 	if nodes, _ := cluster.Nodes(context.Background()); nodes.Frozen == "" || !strings.Contains(body, "a master key rotation holds the freeze") {
 		t.Fatalf("thawed a rotation:\n%s", body)
+	}
+	// A form from before the rotation began ends the freeze it showed
+	// alone: the rotation's stays.
+	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}, "frozen": {"an upgrade stopped"}}, server.URL)
+	if nodes, _ := cluster.Nodes(context.Background()); nodes.Frozen == "" || !strings.Contains(body, "frozen for another reason now") {
+		t.Fatalf("a stale form thawed a rotation:\n%s", body)
 	}
 }

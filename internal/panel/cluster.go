@@ -32,6 +32,8 @@ type ClusterAgent interface {
 	RemoveNode(ctx context.Context, node string) error
 	FailOver(ctx context.Context, node string) (store.FailedOver, error)
 	RunBackups(ctx context.Context) ([]api.BackupResult, error)
+	// ThawIf takes changes again only if they are still frozen for reason.
+	ThawIf(ctx context.Context, reason string) error
 }
 
 // Job is work that outlasts a request, such as an upgrade: what it says,
@@ -355,7 +357,10 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", "type thaw to take changes again")
 			return
 		}
-		if nodes, err := agent.Nodes(ctx); err == nil && strings.HasPrefix(nodes.Frozen, store.RotationFreeze) {
+		// The freeze the page showed, and that one alone: one taken since,
+		// a rotation's say, stays (checked as the thaw is written).
+		frozen := r.FormValue("frozen")
+		if strings.HasPrefix(frozen, store.RotationFreeze) {
 			back("problem", "a master key rotation holds the freeze: it takes changes again once it ends (sudo murder key rotate goes on with one that stopped)")
 			return
 		}
@@ -363,7 +368,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", fmt.Sprintf("%q runs now: it takes changes again once it ends", busy.Title))
 			return
 		}
-		if err := agent.Thaw(ctx); err != nil {
+		if err := agent.ThawIf(ctx, frozen); err != nil {
 			back("problem", err.Error())
 			return
 		}

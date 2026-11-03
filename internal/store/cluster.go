@@ -555,6 +555,35 @@ func (s *SQLite) Thaw(actor string) error {
 	return s.thaw("", actor)
 }
 
+// ThawIf takes changes again only if the freeze is the one for reason, as
+// someone saw it: one taken meanwhile, a rotation's say, stays, and the
+// thaw is refused.
+func (s *SQLite) ThawIf(reason, actor string) error {
+	if reason == "" {
+		return errors.New("a thaw needs the freeze it ends")
+	}
+	if frozen := s.Frozen(); frozen != "" && frozen != reason {
+		return fmt.Errorf("%w: changes are frozen for another reason now: %s", ErrConflict, frozen)
+	}
+	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+		switch current.frozen {
+		case "":
+			return errUnchanged
+		case reason:
+		default:
+			return fmt.Errorf("%w: changes are frozen for another reason now: %s", ErrConflict, current.frozen)
+		}
+		if err := tx.Exec(`DELETE FROM meta WHERE key = 'frozen'`); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "changes.thawed", "", "", "")
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
+}
+
 // ThawOwn takes changes again only if the freeze is still the one for
 // reason: one someone else took meanwhile stays.
 func (s *SQLite) ThawOwn(reason, actor string) error {
