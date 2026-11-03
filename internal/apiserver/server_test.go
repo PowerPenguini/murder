@@ -881,6 +881,16 @@ type createCluster struct {
 	Cluster
 	store store.Store
 	data  map[string]bool
+	// caughtUp, if set, is what catching up applies: tenants the leader
+	// took through another node.
+	caughtUp func()
+}
+
+func (c createCluster) CatchUp() error {
+	if c.caughtUp != nil {
+		c.caughtUp()
+	}
+	return nil
 }
 
 func (c createCluster) CreateOn(_ context.Context, node string, tenant store.NewTenant, actor string) (store.Record, error) {
@@ -961,5 +971,59 @@ func TestNewTenantsAtOnceSpread(t *testing.T) {
 	}
 	if counts[self] != 3 || counts["n2"] != 3 || counts["n3"] != 3 {
 		t.Fatalf("placed %v", counts)
+	}
+}
+
+// A placement counts what the leader took through other nodes, which this
+// node may not have applied yet: it catches up first.
+func TestAPlacementCatchesUpFirst(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	self := f.store.Node()
+	for i, node := range []string{self, "n2"} {
+		if err := f.store.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.store.Create(store.NewTenant{Name: "here", App: "web", Node: self}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Two tenants on n2 this node learns of only as it catches up.
+	pending := []string{"away-1", "away-2"}
+	f.server.WithCluster(createCluster{store: f.store, caughtUp: func() {
+		for _, name := range pending {
+			_, _ = f.store.Create(store.NewTenant{Name: name, App: "web", Node: "n2"}, "test")
+		}
+		pending = nil
+	}})
+	applied, err := f.client.Create(ctx, api.TenantRequest{Name: "new", App: "web", Node: store.Auto})
+	if err != nil || applied.Tenant.Node != self {
+		t.Fatalf("placed on %s, %v", applied.Tenant.Node, err)
+	}
+}
+
+// A client that gave up while its create waited for the reconciler's lock
+// creates nothing.
+func TestACreateGivenUpCreatesNothing(t *testing.T) {
+	f := withApp(t)
+	held, release := make(chan struct{}), make(chan struct{})
+	go func() { _ = f.reconciler.Exclusive(func() error { close(held); <-release; return nil }) }()
+	<-held
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		body := strings.NewReader(`{"name":"late","app":"web"}`)
+		f.handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/tenants", body).WithContext(ctx))
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	close(release)
+	<-done
+	if _, err := f.store.Get("late"); err == nil {
+		t.Fatal("created for a client that gave up")
 	}
 }

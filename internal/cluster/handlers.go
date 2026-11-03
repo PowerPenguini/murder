@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/hashicorp/raft"
 
+	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -479,8 +481,12 @@ func (c *Cluster) handleCreate(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			status = http.StatusNotFound
-		case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrFrozen):
+		case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrFrozen), errors.Is(err, store.ErrStale):
 			status = http.StatusConflict
+		case errors.Is(err, reconcile.ErrStopping), errors.Is(err, ErrNoLeader), errors.Is(err, ErrNotLeader):
+			status = http.StatusServiceUnavailable
+		case errors.Is(err, context.Canceled):
+			status = 499
 		case errors.As(err, &invalid), errors.Is(err, store.ErrInvalid):
 			status = http.StatusBadRequest
 		}

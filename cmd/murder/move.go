@@ -109,7 +109,7 @@ func (a *agentMoves) Create(ctx context.Context, tenant store.NewTenant, actor s
 	if err := a.catchUp(); err != nil {
 		return store.Record{}, err
 	}
-	return apiserver.CreateHere(ctx, a.store, a.reconciler, tenant, actor)
+	return apiserver.CreateHere(context.WithoutCancel(ctx), ctx, a.store, a.reconciler, tenant, actor)
 }
 
 // Move moves a tenant to another node, from the node that runs it.

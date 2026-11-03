@@ -449,6 +449,14 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	if request.Node == store.Auto {
 		s.placing.Lock()
 		defer s.placing.Unlock()
+		// What the leader took last, through this node or not, counts:
+		// this node may not have applied it yet.
+		if s.cluster != nil {
+			if err := s.cluster.CatchUp(); err != nil {
+				writeError(w, err)
+				return
+			}
+		}
 	}
 	node, err := s.placeNew(request.Node)
 	if err != nil {
@@ -458,11 +466,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	tenant := store.NewTenant{Name: request.Name, App: request.App, Overrides: overrides, Node: node}
 	var record store.Record
 	if node == s.store.Node() {
-		if err := r.Context().Err(); err != nil {
-			writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err)))
-			return
-		}
-		record, err = CreateHere(ctx, s.store, s.reconciler, tenant, actor(r))
+		record, err = CreateHere(ctx, r.Context(), s.store, s.reconciler, tenant, actor(r))
 	} else if s.cluster == nil {
 		err = errNoCluster
 	} else {
@@ -480,10 +484,15 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 
 // CreateHere creates tenant on this node, under the reconciler's lock, so
 // a purge cannot interleave with the check for data an earlier tenant of
-// its name left here, which the new one would start on.
-func CreateHere(ctx context.Context, st store.Store, reconciler *reconcile.Reconciler, tenant store.NewTenant, actor string) (store.Record, error) {
+// its name left here, which the new one would start on. Nothing is created
+// once asked, the request's context, ends while it waits for the lock; ctx
+// bounds the work itself.
+func CreateHere(ctx, asked context.Context, st store.Store, reconciler *reconcile.Reconciler, tenant store.NewTenant, actor string) (store.Record, error) {
 	var record store.Record
 	err := reconciler.Exclusive(func() error {
+		if err := asked.Err(); err != nil {
+			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err))
+		}
 		if existing, err := st.Get(tenant.Name); err == nil && existing.Archived() {
 			return store.ErrArchived
 		} else if err == nil {
