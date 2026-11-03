@@ -29,6 +29,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/move"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/records"
+	"github.com/PowerPenguini/murder/internal/releases"
 	"github.com/PowerPenguini/murder/internal/replicate"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
@@ -272,6 +273,15 @@ func runAgent(args []string) error {
 	if monitor != nil {
 		go monitor.Run(ctx)
 	}
+	// The leader asks apps' registries for newer images of their tags.
+	var watcher *releases.Watcher
+	if cfg.ImageChecks.Duration > 0 {
+		watcher = &releases.Watcher{Store: st, Registry: docker, Every: cfg.ImageChecks.Duration, Log: log.With("component", "releases")}
+		if member != nil {
+			watcher.Leader = member.Leader
+		}
+		go watcher.Run(ctx)
+	}
 	// The leader compares the nodes' replicated states every few minutes:
 	// they apply the same log, so a difference is a fault to look into.
 	var digests *cluster.Digests
@@ -311,7 +321,7 @@ func runAgent(args []string) error {
 	}
 
 	servers := []*http.Server{apiServer}
-	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator, monitor: monitor, usage: recorder, digests: digests}
+	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator, monitor: monitor, usage: recorder, digests: digests, releases: watcher}
 	if metricsListener != nil {
 		metricsServer := &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, metricsServer)

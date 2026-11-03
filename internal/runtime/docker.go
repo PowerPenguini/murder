@@ -314,6 +314,34 @@ func (d *Docker) Resolve(ctx context.Context, ref string) (string, string, error
 	return image.ID, note, nil
 }
 
+func (d *Docker) Latest(ctx context.Context, tag string) (string, error) {
+	if spec.Pinned(tag) {
+		return "", fmt.Errorf("%s is pinned, not a tag", tag)
+	}
+	repository, name := splitTag(tag)
+	header := http.Header{}
+	if auth, err := d.registryAuth(repository); err != nil {
+		return "", fmt.Errorf("ask the registry about %s: %w", tag, err)
+	} else if auth != "" {
+		header.Set("X-Registry-Auth", auth)
+	}
+	var answer struct {
+		Descriptor struct {
+			Digest string `json:"digest"`
+		} `json:"Descriptor"`
+	}
+	// The engine asks the registry for the tag's manifest, the image index
+	// of a multi-platform image, whose digest a pull records.
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/distribution/" + repository + ":" + name + "/json", header: header}, &answer); err != nil {
+		return "", fmt.Errorf("ask the registry about %s: %w", tag, err)
+	}
+	pinned := familiar(repository) + "@" + answer.Descriptor.Digest
+	if !spec.RegistryPinned(pinned) {
+		return "", fmt.Errorf("ask the registry about %s: it answered digest %q", tag, answer.Descriptor.Digest)
+	}
+	return pinned, nil
+}
+
 // familiar shortens a Docker Hub repository the way the engine reports it:
 // docker.io/library/postgres and index.docker.io/library/postgres are
 // postgres.

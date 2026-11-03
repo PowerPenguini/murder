@@ -686,9 +686,26 @@ it; `murder tenant rotate` gives it a new value.
 connects from it, so trust it for proxy headers.
 
 **Images:**
-- Tags are pinned to the registry digest when applied, so tenants keep the
-  same bytes until the next `app apply` (or `tenant set -image`) of a tag
-  that has moved.
+- Tags are pinned to the digest the registry names for them when stored, so
+  every node runs the same bytes. An app keeps the image its tag was pinned
+  to: applying the same tag again, say with another env, takes no newer
+  image by the way, and says when the registry holds one. `murder app update
+  web` (or `app apply -update`, for CI that pushes a moving tag) takes the
+  tag's newest image and rolls it out; it changes nothing if the registry
+  does not answer. Another tag in the file is pinned anew.
+- The cluster's leader asks the registry every `imageChecks` (5m; 0 never)
+  which image each app's tag names now, without pulling it; a tag on Docker
+  Hub at most hourly, as Hub counts each question as a pull. A newer image
+  is only recorded: `app list` and the panel show it, the audit log says
+  `app.image-found`, and `murder_app_newer_image` is 1 until someone takes
+  it. Nothing rolls out by itself. `murder app check` asks at once.
+  `murder_app_image_check_failing` is 1 for an app whose registry did not
+  answer at the leader's last check. Tenants with an image of their own
+  (`tenant set -image`) keep it; their tags are not followed.
+- Every change of an app is a revision; the last 20 are kept. `murder app
+  history web` lists them and `murder app rollback web` stores the one
+  before the current again (`-to N` another), with its image and tag. An
+  app stored by an older release gets its first revision at its next change.
 - A tag that only exists locally is pinned to the local image.
 - Images are kept in a registry outside the cluster, so a node that takes a
   tenant over can still pull its image when another node is gone. GitHub's
@@ -714,7 +731,7 @@ connects from it, so trust it for proxy headers.
 Day-to-day operations:
 
 ```bash
-murder app list                         # apps, their tenants and images
+murder app list                         # apps, their tenants, images and newer images found
 murder tenant list                      # app, state, health, image, URL; archived tenants too
 murder tenant show acme
 murder tenant secret acme ADMIN_PASSWORD
@@ -725,6 +742,10 @@ murder tenant resume acme -wait 3m
 murder tenant archive acme              # take it out of service; data, secrets and overrides are kept
 murder tenant restore acme -wait 3m     # back with its data, secrets and overrides, on the app's current spec
 murder tenant purge acme -yes           # delete an archived tenant and its data for good
+murder app check                        # ask the registries now for newer images of the apps' tags
+murder app update web -wait 3m          # take the newest image of web's tag and roll it out
+murder app history web                  # web's recent revisions
+murder app rollback web -wait 3m        # back to the revision before the current one
 murder app delete web                   # once no tenant (live or archived) runs it
 murder events -tenant acme              # the audit log: who changed what, and when
 ```

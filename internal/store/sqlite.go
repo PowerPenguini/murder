@@ -67,13 +67,15 @@ type snapshot struct {
 	// cluster names the cluster the state belongs to; empty outside one.
 	cluster string
 	// frozen, while an upgrade runs, says why changes are refused.
-	frozen  string
-	apps    map[string]App
-	tenants map[string]Record
-	nodes   map[string]Node
-	devices map[string]Device
-	panel   panelState
-	images  map[string]bool
+	frozen string
+	apps   map[string]App
+	// revisions are each app's recent revisions, oldest first.
+	revisions map[string][]Revision
+	tenants   map[string]Record
+	nodes     map[string]Node
+	devices   map[string]Device
+	panel     panelState
+	images    map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
 	lastEvent int64
@@ -347,7 +349,7 @@ type querier interface {
 // load reads the whole state. It is small: one row per app and tenant.
 func load(q querier) (*snapshot, error) {
 	state := &snapshot{}
-	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadAllTenants, loadNodes, loadDevices, loadPanel, loadImages} {
+	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadRevisions, loadAllTenants, loadNodes, loadDevices, loadPanel, loadImages} {
 		if err := part(q, state); err != nil {
 			return nil, err
 		}
@@ -380,14 +382,15 @@ func loadMeta(q querier, state *snapshot) error {
 
 func loadApps(q querier, state *snapshot) error {
 	state.apps = map[string]App{}
-	rows, err := q.Query(`SELECT name, spec, created_at, updated_at FROM apps`)
+	rows, err := q.Query(`SELECT name, spec, created_at, updated_at, tag, revision, latest, latest_at FROM apps`)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var app App
 		var specJSON, created, updated string
-		if err := rows.Scan(&app.Name, &specJSON, &created, &updated); err != nil {
+		var latestAt sql.NullString
+		if err := rows.Scan(&app.Name, &specJSON, &created, &updated, &app.Tag, &app.Revision, &app.Latest, &latestAt); err != nil {
 			rows.Close()
 			return err
 		}
@@ -396,6 +399,9 @@ func loadApps(q querier, state *snapshot) error {
 			return fmt.Errorf("app %s: %w", app.Name, err)
 		}
 		app.CreatedAt, app.UpdatedAt = parseTime(created), parseTime(updated)
+		if latestAt.Valid {
+			app.LatestAt = parseTime(latestAt.String)
+		}
 		state.apps[app.Name] = app
 	}
 	if err := closeRows(rows); err != nil {
@@ -729,11 +735,8 @@ func (s *SQLite) transactLocked(signal bool, change func(tx *sql.Tx, current *sn
 }
 
 func event(tx *recorder, now time.Time, actor, action, tenant, app, detail string) error {
-	if actor == "" {
-		actor = "unknown"
-	}
 	return tx.Exec(`INSERT INTO events (at, actor, action, tenant, app, detail) VALUES (?, ?, ?, ?, ?, ?)`,
-		formatTime(now), actor, action, tenant, app, detail)
+		formatTime(now), actorOf(actor), action, tenant, app, detail)
 }
 
 // sealMissing generates a value for every secret of tenant that has none.
@@ -827,6 +830,12 @@ func (s *SQLite) PutApp(app App, actor string) (AppChange, error) {
 }
 
 func (s *SQLite) PutAppIf(app App, cond AppIf, actor string) (AppChange, error) {
+	return s.putApp(app, cond, 0, actor)
+}
+
+// putApp stores app as its newest revision; from, if set, is the earlier
+// revision it brings back.
+func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChange, error) {
 	if err := spec.CheckApp(app.Name, app.Spec, spec.Tenant.Validate); err != nil {
 		return AppChange{}, err
 	}
@@ -845,7 +854,7 @@ func (s *SQLite) PutAppIf(app App, cond AppIf, actor string) (AppChange, error) 
 		}
 		// A stale attempt's result is discarded with its batch.
 		result = AppChange{Created: !found}
-		if found && existing.Spec.Equal(app.Spec) {
+		if found && existing.Spec.Equal(app.Spec) && existing.Tag == app.Tag {
 			unchanged = cloneApp(existing)
 			return errUnchanged
 		}
@@ -853,15 +862,64 @@ func (s *SQLite) PutAppIf(app App, cond AppIf, actor string) (AppChange, error) 
 			return err
 		}
 		stamp := formatTime(now)
-		if err := tx.Exec(`INSERT INTO apps (name, spec, created_at, updated_at) VALUES (?, ?, ?, ?)
-			ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at`,
-			app.Name, marshal(app.Spec), stamp, stamp); err != nil {
+		revision := existing.Revision + 1
+		// An app stored before revisions keeps the spec it had as its
+		// first, to go back to.
+		keepFirst := found && existing.Revision == 0
+		if keepFirst {
+			revision = 2
+		}
+		// What the registry was found to hold stays news only for the same
+		// tag, and only while the app runs another image. What the caller
+		// found in it just now replaces it.
+		latest, latestAt := "", any(nil)
+		switch {
+		case app.Latest != "":
+			if !SameImage(app.Latest, app.Spec.Image) {
+				latest, latestAt = app.Latest, stamp
+				if existing.Latest == app.Latest && existing.Tag == app.Tag {
+					latestAt = formatTime(existing.LatestAt)
+				}
+			}
+		case found && existing.Tag == app.Tag && existing.Latest != "" && !SameImage(existing.Latest, app.Spec.Image):
+			latest, latestAt = existing.Latest, formatTime(existing.LatestAt)
+		}
+		if err := tx.Exec(`INSERT INTO apps (name, spec, created_at, updated_at, tag, revision, latest, latest_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at, tag = excluded.tag,
+				revision = excluded.revision, latest = excluded.latest, latest_at = excluded.latest_at`,
+			app.Name, marshal(app.Spec), stamp, stamp, app.Tag, revision, latest, latestAt); err != nil {
 			return err
 		}
+		if latest != "" && (latest != existing.Latest || existing.Tag != app.Tag) {
+			if err := event(tx, now, actor, "app.image-found", "", app.Name, "image "+latest+" of "+app.Tag); err != nil {
+				return err
+			}
+		}
+		if keepFirst {
+			if err := tx.Exec(`INSERT INTO app_revisions (app, revision, spec, tag, created_at, actor) VALUES (?, 1, ?, ?, ?, ?)`,
+				app.Name, marshal(existing.Spec), existing.Tag, formatTime(existing.UpdatedAt), "murder"); err != nil {
+				return err
+			}
+		}
+		if err := tx.Exec(`INSERT INTO app_revisions (app, revision, spec, tag, created_at, actor) VALUES (?, ?, ?, ?, ?, ?)`,
+			app.Name, revision, marshal(app.Spec), app.Tag, stamp, actorOf(actor)); err != nil {
+			return err
+		}
+		if revision > revisionsKept {
+			if err := tx.Exec(`DELETE FROM app_revisions WHERE app = ? AND revision <= ?`, app.Name, revision-revisionsKept); err != nil {
+				return err
+			}
+		}
 		detail := "image " + app.Spec.Image
+		if app.Tag != "" {
+			detail += " of " + app.Tag
+		}
 		changed := strings.Join(changedFields(existing.Spec, app.Spec), ", ")
 		if found {
 			detail = "changed " + changed + "; " + detail
+		}
+		if from > 0 {
+			detail = fmt.Sprintf("back to revision %d; %s", from, detail)
 		}
 		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
 			record := current.tenants[name]
@@ -939,6 +997,9 @@ func (s *SQLite) DeleteApp(name, actor string) error {
 		}
 		if len(names) > 0 {
 			return fmt.Errorf("%w: tenants %v run app %s (archived ones count until purged)", ErrInUse, names, name)
+		}
+		if err := tx.Exec(`DELETE FROM app_revisions WHERE app = ?`, name); err != nil {
+			return err
 		}
 		if err := tx.Exec(`DELETE FROM apps WHERE name = ?`, name); err != nil {
 			return err

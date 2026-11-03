@@ -139,6 +139,48 @@ func (c *Client) PutAppIf(ctx context.Context, name string, app spec.Tenant, con
 	return applied, c.do(ctx, http.MethodPut, path, app, &applied)
 }
 
+// PutAppNewest is PutApp, pinning a tag to its newest image even when the
+// app was given that tag before: PutApp keeps the image the app has.
+func (c *Client) PutAppNewest(ctx context.Context, name string, app spec.Tenant) (AppApplied, error) {
+	var applied AppApplied
+	return applied, c.do(ctx, http.MethodPut, appPath(name)+"?update=true", app, &applied)
+}
+
+// CheckApp asks the app's registry now which image its tag names.
+func (c *Client) CheckApp(ctx context.Context, name string) (AppCheck, error) {
+	var check AppCheck
+	return check, c.do(ctx, http.MethodPost, appPath(name)+"/check", nil, &check)
+}
+
+// UpdateApp pins the app's tag to its newest image and rolls it out. With
+// updatedAt set it is refused, with a 409, if the app changed since.
+func (c *Client) UpdateApp(ctx context.Context, name string, updatedAt time.Time) (AppApplied, error) {
+	path := appPath(name) + "/update"
+	if !updatedAt.IsZero() {
+		path += "?if=" + url.QueryEscape(updatedAt.UTC().Format(time.RFC3339Nano))
+	}
+	var applied AppApplied
+	return applied, c.do(ctx, http.MethodPost, path, nil, &applied)
+}
+
+// AppRevisions lists the app's recent revisions, newest first.
+func (c *Client) AppRevisions(ctx context.Context, name string) ([]store.Revision, error) {
+	var revisions []store.Revision
+	return revisions, c.do(ctx, http.MethodGet, appPath(name)+"/revisions", nil, &revisions)
+}
+
+// RestoreRevision stores one of the app's revisions again and rolls it
+// out. With updatedAt set it is refused, with a 409, if the app changed
+// since.
+func (c *Client) RestoreRevision(ctx context.Context, name string, revision int64, updatedAt time.Time) (AppApplied, error) {
+	path := appPath(name) + "/revisions/" + strconv.FormatInt(revision, 10) + "/restore"
+	if !updatedAt.IsZero() {
+		path += "?if=" + url.QueryEscape(updatedAt.UTC().Format(time.RFC3339Nano))
+	}
+	var applied AppApplied
+	return applied, c.do(ctx, http.MethodPost, path, nil, &applied)
+}
+
 // DeleteApp removes an app no tenant runs.
 func (c *Client) DeleteApp(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, appPath(name), nil, nil)

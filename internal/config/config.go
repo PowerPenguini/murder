@@ -79,6 +79,9 @@ type Agent struct {
 	// unless diskGB is set (with the zfs driver).
 	Defaults          spec.Limits `yaml:"defaults"`
 	ReconcileInterval Duration    `yaml:"reconcileInterval"`
+	// ImageChecks is how often the cluster's leader asks apps' registries
+	// which image each app's tag names now (5m); 0 asks never.
+	ImageChecks Duration `yaml:"imageChecks"`
 }
 
 // Registry is how the node signs in to one private registry.
@@ -367,6 +370,7 @@ func Parse(data []byte) (Agent, error) {
 		},
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
+		ImageChecks:       Duration{5 * time.Minute},
 	}
 	// An empty document keeps every default; Validate then reports the
 	// missing base domain.
@@ -546,6 +550,9 @@ func (a Agent) Validate() error {
 	}
 	if a.ReconcileInterval.Duration < time.Second {
 		problems = append(problems, "reconcileInterval must be at least 1s")
+	}
+	if a.ImageChecks.Duration != 0 && a.ImageChecks.Duration < time.Minute {
+		problems = append(problems, "imageChecks must be at least 1m, or 0 to ask registries never")
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))

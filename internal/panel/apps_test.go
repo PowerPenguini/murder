@@ -75,9 +75,10 @@ func TestEditingAnApp(t *testing.T) {
 	_, page := get(t, server.URL+"/apps/addhoc")
 	updated := between(page, `name="updated" value="`, `"`)
 	file := between(page, `aria-label="the app's spec">`, "</textarea>")
-	if updated == "" || !strings.Contains(file, "TZ: Europe/Warsaw") {
+	if updated == "" || !strings.Contains(file, "TZ: Europe/Warsaw") || !strings.Contains(file, "image: ghcr.io/powerpenguini/addhoc:stable\n") {
 		t.Fatalf("the app's page:\n%s", page)
 	}
+	before, _ := cluster.AsApps("test").App(ctx, "addhoc")
 	changed := strings.Replace(file, "TZ: Europe/Warsaw", "TZ: Europe/Paris", 1)
 
 	// A save over a change made since the page was read is refused, the
@@ -90,8 +91,8 @@ func TestEditingAnApp(t *testing.T) {
 	if !strings.Contains(body, "app addhoc is changed; it rolls out to 7 tenants") {
 		t.Fatalf("after saving:\n%s", body)
 	}
-	if tenant, _ := cluster.Get(ctx, "acme-logistics"); tenant.Spec.Env["TZ"] != "Europe/Paris" {
-		t.Fatalf("acme-logistics runs %v", tenant.Spec.Env)
+	if tenant, _ := cluster.Get(ctx, "acme-logistics"); tenant.Spec.Env["TZ"] != "Europe/Paris" || tenant.Spec.Image != before.Spec.Image {
+		t.Fatalf("acme-logistics runs %s with %v", tenant.Spec.Image, tenant.Spec.Env)
 	}
 	// A tenant's own settings stay its own.
 	if tenant, _ := cluster.Get(ctx, "iqtms"); tenant.Spec.Env["TZ"] != "Europe/Berlin" {

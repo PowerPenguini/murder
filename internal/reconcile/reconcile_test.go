@@ -253,6 +253,10 @@ func (f *fakeRuntime) Resolve(_ context.Context, ref string) (string, string, er
 	return ref, "", nil
 }
 
+func (f *fakeRuntime) Latest(context.Context, string) (string, error) {
+	return "", errors.New("no registry")
+}
+
 func (f *fakeRuntime) SetRestartPolicy(_ context.Context, id, policy string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

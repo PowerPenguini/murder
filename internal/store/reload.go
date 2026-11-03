@@ -65,6 +65,7 @@ var keyed = map[string]struct {
 var partOf = map[string]string{
 	"meta":              "meta",
 	"events":            "meta",
+	"app_revisions":     "revisions",
 	"nodes":             "nodes",
 	"devices":           "devices",
 	"images":            "images",
@@ -76,11 +77,12 @@ var partOf = map[string]string{
 }
 
 var loaders = map[string]func(querier, *snapshot) error{
-	"meta":    loadMeta,
-	"nodes":   loadNodes,
-	"devices": loadDevices,
-	"images":  loadImages,
-	"panel":   loadPanel,
+	"meta":      loadMeta,
+	"revisions": loadRevisions,
+	"nodes":     loadNodes,
+	"devices":   loadDevices,
+	"images":    loadImages,
+	"panel":     loadPanel,
 }
 
 func (c *changes) note(data sqlite.SQLitePreUpdateData) {
@@ -255,6 +257,7 @@ func snapshotDiff(whole, part *snapshot) string {
 	diff("frozen", whole.frozen, part.frozen)
 	diff("lastEvent", whole.lastEvent, part.lastEvent)
 	diff("apps", whole.apps, part.apps)
+	diff("revisions", whole.revisions, part.revisions)
 	for name := range whole.tenants {
 		if !reflect.DeepEqual(whole.tenants[name], part.tenants[name]) {
 			out = append(out, "tenant "+name)
