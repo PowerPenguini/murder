@@ -2,12 +2,15 @@
 # own database and receipt files in its data directory. The image is
 # backend/Dockerfile of PowerPenguini/AddHoc: one binary serving the API and
 # the web app, as a fixed non-root user, on port 8080. It sets its own
-# security headers and compresses its responses; the edge adds HSTS.
+# security headers and compresses its responses; the edge adds HSTS. AddHoc's
+# CI publishes it, private, to ghcr.io once CI passes on main: :stable is the
+# newest such commit, :sha-<commit> each one. Nodes need a ghcr.io login under
+# registries in the agent config.
 #
 #   murder app apply addhoc.yaml -wait 5m
 #   murder tenant create acme -app addhoc -env APP_ADMIN_EMAIL=owner@acme.pl -wait 5m
 #   murder tenant secret acme APP_ADMIN_PASSWORD     # the first login's password
-image: ghcr.io/powerpenguini/addhoc:latest   # pinned to a digest when applied
+image: ghcr.io/powerpenguini/addhoc:stable   # pinned to a digest when applied
 user: "10001:10001"                          # the image's service user; owns /data
 healthPath: /api/health
 env:
