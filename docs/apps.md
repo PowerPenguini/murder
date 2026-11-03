@@ -20,7 +20,8 @@ secrets: [SESSION_SECRET]       # 32 random bytes, hex; or a mapping such as ADM
 
 ```bash
 murder app apply apps/web.yaml -wait 3m          # store the app; roll it out to its tenants
-murder tenant create acme -app web -wait 3m
+murder tenant create acme -app web -wait 3m       # on the node running the fewest tenants
+murder tenant create delta -app web -node nbg-1   # on that node
 murder tenant create beta -app web -env TZ=Europe/Berlin -memory 768
 murder tenant set gamma -image ghcr.io/example/web:1.5   # a canary
 murder tenant set gamma -app-image                       # back to the app's image

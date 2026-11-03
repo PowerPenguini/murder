@@ -43,6 +43,27 @@ func (d *DemoCluster) Nodes(ctx context.Context) (api.Nodes, error) {
 	return nodes, err
 }
 
+// demoPlacement is the demo's nodes and tenants as the store sees them.
+func (a *demoActor) demoPlacement(ctx context.Context) ([]store.Node, []store.Record) {
+	nodes, _ := a.Nodes(ctx)
+	var out []store.Node
+	for _, n := range nodes.Nodes {
+		out = append(out, n.Node)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var records []store.Record
+	for _, t := range a.tenants {
+		records = append(records, store.Record{Spec: t.Spec, Node: t.Node, Replica: t.Replica, ReplicaReady: t.ReplicaReady, ArchivedAt: t.ArchivedAt})
+	}
+	return out, records
+}
+
+func (a *demoActor) BalanceMoves(ctx context.Context) ([]store.Move, error) {
+	nodes, records := a.demoPlacement(ctx)
+	return store.BalanceMoves(nodes, records), nil
+}
+
 func (a *demoActor) ClusterStatus(ctx context.Context) (cluster.Status, error) {
 	nodes, _ := a.Nodes(ctx)
 	status := cluster.Status{Node: nodes.Self, State: "Leader", Leader: nodes.Leader, Applied: 4812}

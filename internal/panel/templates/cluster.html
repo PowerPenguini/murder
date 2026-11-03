@@ -49,6 +49,25 @@
   </table>
 </section>
 
+{{if gt (len $d.Nodes) 1}}
+<section>
+  <div class="head"><h2>Balance</h2></div>
+  {{if $d.Balance}}
+  <p class="lead">{{len $d.Balance}} {{if eq (len $d.Balance) 1}}move evens{{else}}moves even{{end}} the nodes' tenants:</p>
+  <table>
+    <thead><tr><th>Tenant</th><th>From</th><th>To</th></tr></thead>
+    <tbody>{{range $d.Balance}}<tr><td><a href="/tenants/{{.Tenant}}">{{.Tenant}}</a></td><td>{{.From}}</td><td>{{.To}}</td></tr>{{end}}</tbody>
+  </table>
+  <form method="post" class="row spaced"><input type="hidden" name="do" value="balance">
+    <span class="hint">One after the other, each with its data; a tenant moved onto its copy sends only what changed.</span>
+    <button type="submit"{{if $d.Busy}} disabled{{end}}>Balance</button>
+  </form>
+  {{else}}
+  <p class="lead">No node runs two tenants more than another.</p>
+  {{end}}
+</section>
+{{end}}
+
 {{if $d.Frozen}}
 <section>
   <div class="head"><h2>Changes are frozen</h2></div>

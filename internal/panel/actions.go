@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // ActionAgent is what acting on tenants asks of the agent, in the name of
@@ -127,7 +128,8 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 
 var tenantName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// createTenant makes a tenant of an app, on the node the panel is on.
+// createTenant makes a tenant of an app, on the node chosen: the least
+// loaded unless one is named.
 func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 	agent := s.Actions(s.actor(userOf(r)))
 	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
@@ -138,7 +140,11 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/tenants", http.StatusSeeOther)
 		return
 	}
-	applied, err := agent.Create(ctx, api.TenantRequest{Name: name, App: r.FormValue("app")})
+	node := r.FormValue("node")
+	if node == "" {
+		node = store.Auto
+	}
+	applied, err := agent.Create(ctx, api.TenantRequest{Name: name, App: r.FormValue("app"), Node: node})
 	if err != nil {
 		flash(w, r, "problem", err.Error())
 		http.Redirect(w, r, "/tenants", http.StatusSeeOther)

@@ -547,7 +547,7 @@ func TestLeftoverDataBlocksCreateUntilPurged(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(f.dataRoot, "acme"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Create(ctx, tenantOf("acme")); err == nil || !strings.Contains(err.Error(), "purge it first") {
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err == nil || !strings.Contains(err.Error(), "purge it there first") {
 		t.Fatalf("create over leftover data = %v", err)
 	}
 	if err := f.client.Purge(ctx, "acme"); err != nil {
@@ -872,6 +872,169 @@ func TestStoringAnAppOnlyAsRead(t *testing.T) {
 	f.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/v1/apps/web?if=yesterday", strings.NewReader(`{"image":"x","user":"1:1"}`)))
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "if must be") {
 		t.Fatalf("a bad if: %d %s", recorder.Code, recorder.Body)
+	}
+}
+
+// createCluster creates tenants on other nodes as they would, refusing
+// those whose name has data left there.
+type createCluster struct {
+	Cluster
+	store store.Store
+	data  map[string]bool
+	// caughtUp, if set, is what catching up applies: tenants the leader
+	// took through another node.
+	caughtUp func()
+}
+
+func (c createCluster) CatchUp() error {
+	if c.caughtUp != nil {
+		c.caughtUp()
+	}
+	return nil
+}
+
+func (c createCluster) CreateOn(_ context.Context, node string, tenant store.NewTenant, actor string) (store.Record, error) {
+	if c.data[node+"/"+tenant.Name] {
+		return store.Record{}, &cluster.PeerError{Status: http.StatusConflict, Message: "data of an earlier tenant " + tenant.Name + " is on node " + node + " but not in the archive"}
+	}
+	return c.store.Create(tenant, actor)
+}
+
+func TestNewTenantsGoWhereTheyAreAskedTo(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	self := f.store.Node()
+	for i, node := range []string{self, "n2", "n3"} {
+		if err := f.store.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.server.WithCluster(createCluster{store: f.store, data: map[string]bool{"n3/stale": true}})
+	create := func(name, node string) (api.Applied, error) {
+		return f.client.Create(ctx, api.TenantRequest{Name: name, App: "web", Node: node})
+	}
+	// Here by default; auto spreads them, this node first among equals.
+	for _, c := range []struct{ name, node, want string }{
+		{"a", "", self}, {"b", store.Auto, "n2"}, {"c", store.Auto, "n3"}, {"d", store.Auto, self}, {"e", "n2", "n2"},
+	} {
+		applied, err := create(c.name, c.node)
+		if err != nil || applied.Tenant.Node != c.want {
+			t.Fatalf("%s on %q: %+v, %v", c.name, c.node, applied.Tenant.Node, err)
+		}
+	}
+	if _, err := create("x", "nowhere"); err == nil || !strings.Contains(err.Error(), "not in the cluster") {
+		t.Fatalf("an unknown node: %v", err)
+	}
+	// What a failure left on the node it would go to stops it.
+	if _, err := create("stale", "n3"); err == nil || !strings.Contains(err.Error(), "on node n3 but not in the archive") {
+		t.Fatalf("leftover data elsewhere: %v", err)
+	}
+	if _, err := f.store.Get("stale"); err == nil {
+		t.Fatal("the tenant was created anyway")
+	}
+	// The plan to balance them: none needed now.
+	moves, err := f.client.BalanceMoves(ctx)
+	if err != nil || len(moves) != 0 {
+		t.Fatalf("moves %+v, %v", moves, err)
+	}
+}
+
+// Creates at once through one node spread over the nodes.
+func TestNewTenantsAtOnceSpread(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	self := f.store.Node()
+	for i, node := range []string{self, "n2", "n3"} {
+		if err := f.store.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.server.WithCluster(createCluster{store: f.store})
+	var wg sync.WaitGroup
+	for i := range 9 {
+		wg.Go(func() {
+			if _, err := f.client.Create(ctx, api.TenantRequest{Name: fmt.Sprintf("t%d", i), App: "web", Node: store.Auto}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	counts := map[string]int{}
+	for _, record := range f.store.List() {
+		counts[record.Node]++
+	}
+	if counts[self] != 3 || counts["n2"] != 3 || counts["n3"] != 3 {
+		t.Fatalf("placed %v", counts)
+	}
+}
+
+// A placement counts what the leader took through other nodes, which this
+// node may not have applied yet: it catches up first.
+func TestAPlacementCatchesUpFirst(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	self := f.store.Node()
+	for i, node := range []string{self, "n2"} {
+		if err := f.store.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.store.Create(store.NewTenant{Name: "here", App: "web", Node: self}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Two tenants on n2 this node learns of only as it catches up.
+	pending := []string{"away-1", "away-2"}
+	f.server.WithCluster(createCluster{store: f.store, caughtUp: func() {
+		for _, name := range pending {
+			_, _ = f.store.Create(store.NewTenant{Name: name, App: "web", Node: "n2"}, "test")
+		}
+		pending = nil
+	}})
+	applied, err := f.client.Create(ctx, api.TenantRequest{Name: "new", App: "web", Node: store.Auto})
+	if err != nil || applied.Tenant.Node != self {
+		t.Fatalf("placed on %s, %v", applied.Tenant.Node, err)
+	}
+}
+
+// A client that gave up while its create waited for the reconciler's lock
+// creates nothing.
+func TestACreateGivenUpCreatesNothing(t *testing.T) {
+	f := withApp(t)
+	held, release := make(chan struct{}), make(chan struct{})
+	go func() { _ = f.reconciler.Exclusive(func() error { close(held); <-release; return nil }) }()
+	<-held
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		body := strings.NewReader(`{"name":"late","app":"web"}`)
+		f.handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/tenants", body).WithContext(ctx))
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	close(release)
+	<-done
+	if _, err := f.store.Get("late"); err == nil {
+		t.Fatal("created for a client that gave up")
+	}
+}
+
+// Another node that is stopping answers 503: the client gets it, to try
+// again, not a 500.
+func TestAnotherNodesTryAgainReachesTheClient(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeError(w, fmt.Errorf("node n2: %w", &cluster.PeerError{Status: http.StatusServiceUnavailable, Message: "the agent is stopping"}))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", w.Code)
 	}
 }
 

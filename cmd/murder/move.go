@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/move"
 	"github.com/PowerPenguini/murder/internal/reconcile"
@@ -101,6 +102,15 @@ func (a *agentMoves) catchUp() error {
 }
 
 func (a *agentMoves) Status(tenant string) (any, bool) { return a.reconciler.Status(tenant) }
+
+// Create creates a tenant another node was asked for, to run here, once
+// this node has what the cluster has applied (the tenant's app, say).
+func (a *agentMoves) Create(ctx context.Context, tenant store.NewTenant, actor string) (store.Record, error) {
+	if err := a.catchUp(); err != nil {
+		return store.Record{}, err
+	}
+	return apiserver.CreateHere(context.WithoutCancel(ctx), ctx, a.store, a.reconciler, tenant, actor)
+}
 
 // Move moves a tenant to another node, from the node that runs it.
 func (a *agentMoves) Move(ctx context.Context, tenant, to, actor string) error {

@@ -77,10 +77,11 @@ const (
 	JobUpgrade JobKind = "upgrade"
 	JobDrain   JobKind = "drain"
 	JobBackups JobKind = "backups"
+	JobBalance JobKind = "balance"
 )
 
 // exclusive kinds change the cluster: one runs at a time.
-func (k JobKind) exclusive() bool { return k == JobUpgrade || k == JobDrain }
+func (k JobKind) exclusive() bool { return k == JobUpgrade || k == JobDrain || k == JobBalance }
 
 // Jobs are a panel's recent jobs, newest first. The socket's panel and
 // the tunnel's share them, so that one change of the cluster runs at a time
@@ -254,6 +255,8 @@ type clusterData struct {
 	Busy, Upgrading *Job
 	Jobs            []*Job
 	Self            string
+	// Balance are the moves that would even the nodes' tenants.
+	Balance []store.Move
 }
 
 func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
@@ -266,6 +269,9 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := clusterData{Frozen: nodes.Frozen, Self: nodes.Self, Rotating: strings.HasPrefix(nodes.Frozen, store.RotationFreeze)}
+	if moves, err := agent.BalanceMoves(ctx); err == nil {
+		data.Balance = moves
+	}
 	data.Nodes = make([]nodeRow, len(nodes.Nodes))
 	var wg sync.WaitGroup
 	for i, node := range nodes.Nodes {
@@ -322,6 +328,10 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 	defer cancel()
 	switch r.FormValue("do") {
+	case "balance":
+		toJob(s.Jobs.Start(JobBalance, "balance the tenants", user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+			return clusterops.Balance(ctx, agent, false, out)
+		}))
 	case "drain":
 		to := r.FormValue("to")
 		if to == "" || to == node {
