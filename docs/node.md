@@ -8,8 +8,10 @@ Every server runs the same processes: `murder agent`, `murder edge` and, if want
   its own container, network and data volume. A container is replaced when its
   spec changes (requests for the tenant wait meanwhile, on every edge, until
   the new container answers, instead of failing), and the volume is
-  snapshotted first if the image changed; a
-  tenant keeps the last five of those snapshots. Each pass removes registry
+  snapshotted first if the image changed: once while the old container
+  runs (a failed snapshot leaves it running, unchanged), and again once it
+  has stopped, so the snapshot to go back to holds every write; it
+  replaces the first. A tenant keeps the last five of those snapshots. Each pass removes registry
   images no tenant needs: a tenant needs the image it runs, the one its data
   has and the one before, so a rollback by one release needs no registry.
   Images are compared by ID, one a container still uses is tried again an

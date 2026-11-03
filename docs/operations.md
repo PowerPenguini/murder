@@ -11,6 +11,11 @@ the missing ones and the commands that install them. Then it:
 
 - installs the binary as `/usr/local/bin/murder`, the systemd units, the
   sysctl settings and, with ZFS, the Docker drop-in, all from the binary;
+- turns on Docker's `live-restore` (in `/etc/docker/daemon.json`, the
+  rest kept, the old file beside it as `daemon.json.before-murder`; a
+  reload, no container restarts): a restart of Docker, as its upgrade
+  does, then leaves tenants running. Swarm mode forbids it; setup says so.
+  The agent warns at start while it is off;
 - creates the dataset `<pool>/murder/tenants`;
 - writes `/etc/murder/agent.yaml` with only what differs from the defaults,
   and the tokens it was given as `0600` files beside it;

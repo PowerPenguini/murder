@@ -3,6 +3,8 @@ package setup
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
@@ -81,6 +83,12 @@ type Step struct {
 	Do  func(ctx context.Context) error
 }
 
+// Skipped is a step that left the host as it was, for a reason the
+// operator should read; setup goes on.
+type Skipped struct{ Reason string }
+
+func (s Skipped) Error() string { return s.Reason }
+
 // Install is what setup puts on a host.
 type Install struct {
 	// Config is the agent's config.
@@ -92,6 +100,8 @@ type Install struct {
 	ZFSPool string
 	// Panel starts the panel too.
 	Panel bool
+	// LiveRestore turns on Docker's live-restore.
+	LiveRestore bool
 }
 
 // Install is what setup installs for the settings.
@@ -108,6 +118,42 @@ func (s Settings) Install() Install {
 		in.Secrets[file] = []byte(s.DNSToken + "\n")
 	}
 	return in
+}
+
+// liveRestore sets "live-restore" in Docker's config, keeping the rest,
+// and has Docker read it again: a reload, which restarts no container.
+func liveRestore(ctx context.Context, host Host) error {
+	var settings map[string]any
+	if data, err := host.ReadFile(DaemonConfig); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return Skipped{fmt.Sprintf("%s is not a JSON object setup can change (%v): add \"live-restore\": true to it by hand, then `systemctl reload docker`", DaemonConfig, err)}
+		}
+		// Readable by root alone, the original and the copy: it may hold
+		// a registry mirror's or a proxy's credentials.
+		if err := host.WriteFile(DaemonConfig+".before-murder", data, 0o600); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if settings == nil { // no file, or "null"
+		settings = map[string]any{}
+	}
+	settings["live-restore"] = true
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := host.MkdirAll(path.Dir(DaemonConfig), 0o755); err != nil {
+		return err
+	}
+	if err := host.WriteFile(DaemonConfig, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	if _, err := host.Run(ctx, "systemctl", "reload", "docker"); err != nil {
+		return fmt.Errorf("have Docker read %s again: %w", DaemonConfig, err)
+	}
+	return nil
 }
 
 // Units are the services setup enables and starts, in order.
@@ -176,6 +222,11 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 		_, err = host.Run(ctx, "systemctl", "daemon-reload")
 		return err
 	})
+	if in.LiveRestore {
+		add("have Docker keep containers running while it restarts (live-restore)", func(ctx context.Context) error {
+			return liveRestore(ctx, host)
+		})
+	}
 	if in.ZFSPool != "" {
 		parent := in.ZFSPool + "/murder/tenants"
 		add("create the ZFS dataset "+parent, func(ctx context.Context) error {

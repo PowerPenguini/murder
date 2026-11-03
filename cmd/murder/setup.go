@@ -118,7 +118,9 @@ func runSetup(args []string) error {
 		return err
 	}
 	describe(settings)
-	steps, err := setup.Steps(host, settings.Install(), opts.Force, func() error { return runInit([]string{"-config", setup.ConfigFile}) })
+	in := settings.Install()
+	in.LiveRestore = facts.WantsLiveRestore()
+	steps, err := setup.Steps(host, in, opts.Force, func() error { return runInit([]string{"-config", setup.ConfigFile}) })
 	if err != nil {
 		return err
 	}
@@ -170,7 +172,11 @@ func install(ctx context.Context, steps []setup.Step) (*api.Client, error) {
 	fmt.Fprintln(stdout)
 	for _, step := range steps {
 		fmt.Fprintln(stdout, "→ "+step.Say)
-		if err := step.Do(ctx); err != nil {
+		var skipped setup.Skipped
+		switch err := step.Do(ctx); {
+		case errors.As(err, &skipped):
+			fmt.Fprintln(stdout, "  skipped: "+skipped.Reason)
+		case err != nil:
 			return nil, fmt.Errorf("%s: %w", step.Say, err)
 		}
 	}
@@ -230,6 +236,7 @@ func joinCluster(ctx context.Context, host setup.System, facts setup.Facts, opts
 	if err != nil {
 		return err
 	}
+	in.LiveRestore = facts.WantsLiveRestore()
 	steps, err := setup.Steps(host, in, opts.Force, func() error { return runInit([]string{"-config", setup.ConfigFile}) })
 	if err != nil {
 		return err

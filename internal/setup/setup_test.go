@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"net/netip"
@@ -27,13 +28,15 @@ type fakeHost struct {
 func newFakeHost() *fakeHost {
 	return &fakeHost{
 		commands: map[string]string{
-			"systemctl --version":                            "systemd 255",
-			"docker version --format {{.Server.APIVersion}}": "1.51\n",
-			"nft --version":                                  "nftables v1.0.9",
-			"zpool list -H -o name":                          "tank\n",
-			"sysctl -q -p " + SysctlFile:                     "",
-			"systemctl daemon-reload":                        "",
-			"zfs create -p tank/murder/tenants":              "",
+			"systemctl --version":                                                    "systemd 255",
+			"docker version --format {{.Server.APIVersion}}":                         "1.51\n",
+			"docker info --format {{.LiveRestoreEnabled}} {{.Swarm.LocalNodeState}}": "false inactive\n",
+			"systemctl reload docker":                                                "",
+			"nft --version":                                                          "nftables v1.0.9",
+			"zpool list -H -o name":                                                  "tank\n",
+			"sysctl -q -p " + SysctlFile:                                             "",
+			"systemctl daemon-reload":                                                "",
+			"zfs create -p tank/murder/tenants":                                      "",
 		},
 		files:    map[string][]byte{"/sys/fs/cgroup/cgroup.controllers": []byte("cpu memory")},
 		modes:    map[string]fs.FileMode{},
@@ -294,5 +297,56 @@ func TestPlainDirectoriesNeedNoZFS(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(host.ran, "\n"), "murder-panel") {
 		t.Fatal("the panel was started without a cluster")
+	}
+}
+
+func TestSetupTurnsLiveRestoreOn(t *testing.T) {
+	host := newFakeHost()
+	facts := Inspect(context.Background(), host)
+	if !facts.WantsLiveRestore() {
+		t.Fatalf("facts %+v want no live-restore", facts)
+	}
+	host.files[DaemonConfig] = []byte(`{"log-driver": "json-file", "log-opts": {"max-size": "10m"}}`)
+	if err := liveRestore(context.Background(), host); err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(host.files[DaemonConfig], &settings); err != nil || settings["live-restore"] != true || settings["log-driver"] != "json-file" || settings["log-opts"] == nil {
+		t.Fatalf("daemon.json %s, %v", host.files[DaemonConfig], err)
+	}
+	if !strings.Contains(string(host.files[DaemonConfig+".before-murder"]), "max-size") || !slices.Contains(host.ran, "systemctl reload docker") {
+		t.Fatalf("backup %q, ran %v", host.files[DaemonConfig+".before-murder"], host.ran)
+	}
+	// Root alone reads them: they may hold credentials.
+	if host.modes[DaemonConfig] != 0o600 || host.modes[DaemonConfig+".before-murder"] != 0o600 {
+		t.Fatalf("modes %v", host.modes)
+	}
+	// A file setup cannot read is left as it is, and setup goes on.
+	var skipped Skipped
+	for _, broken := range []string{"{ not json", "[1, 2]"} {
+		host.files[DaemonConfig] = []byte(broken)
+		if err := liveRestore(context.Background(), host); !errors.As(err, &skipped) || !strings.Contains(err.Error(), "by hand") || string(host.files[DaemonConfig]) != broken {
+			t.Fatalf("daemon.json %q: %v", broken, err)
+		}
+	}
+	// "null" is no settings.
+	host.files[DaemonConfig] = []byte("null")
+	if err := liveRestore(context.Background(), host); err != nil || !strings.Contains(string(host.files[DaemonConfig]), `"live-restore": true`) {
+		t.Fatalf("a null daemon.json %q, %v", host.files[DaemonConfig], err)
+	}
+	// No file yet: one is written.
+	delete(host.files, DaemonConfig)
+	if err := liveRestore(context.Background(), host); err != nil || !strings.Contains(string(host.files[DaemonConfig]), `"live-restore": true`) {
+		t.Fatalf("a new daemon.json %q, %v", host.files[DaemonConfig], err)
+	}
+	// On already, or in swarm mode, setup leaves Docker alone.
+	host.commands["docker info --format {{.LiveRestoreEnabled}} {{.Swarm.LocalNodeState}}"] = "true inactive"
+	if Inspect(context.Background(), host).WantsLiveRestore() {
+		t.Fatal("live-restore is on already")
+	}
+	host.commands["docker info --format {{.LiveRestoreEnabled}} {{.Swarm.LocalNodeState}}"] = "false active"
+	swarm := Inspect(context.Background(), host)
+	if swarm.WantsLiveRestore() || !strings.Contains(strings.Join(swarm.Warnings(), "\n"), "swarm mode") {
+		t.Fatalf("swarm: wants %v, warnings %v", swarm.WantsLiveRestore(), swarm.Warnings())
 	}
 }
