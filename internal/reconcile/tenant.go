@@ -99,6 +99,12 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err := r.checkData(ctx, record); err != nil {
 		return Status{}, err
 	}
+	if record.Restore != "" {
+		if err := r.restoreData(ctx, record, existing); err != nil {
+			return Status{}, err
+		}
+		existing, record.DataImage = nil, record.Restore
+	}
 	uid, gid := tenant.Owner()
 	dataPath, err := r.volumes.Ensure(ctx, tenant.Name, uid, gid, tenant.Limits.Or(r.config.DefaultLimits).DiskGB)
 	if errors.Is(err, volume.ErrDiskLimit) {
@@ -339,6 +345,43 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 	}
 	r.log.Info("started tenant container", "tenant", tenant.Name, "container", id, "generation", record.Generation)
 	return id, true, nil
+}
+
+// snapshotRestorer puts a tenant's data back to its newest snapshot taken
+// for reason, destroying the newer ones; ZFS can. It reports
+// volume.ErrSnapshotsUnsupported when there is none to go back to.
+type snapshotRestorer interface {
+	RestoreSnapshot(ctx context.Context, tenant, reason string) (string, error)
+}
+
+// restoreData takes a tenant's data back to the snapshot taken as its image
+// changed, as its Restore asks: a rollout took it back to an image that
+// owned the data before, and the newer image never served. Its containers
+// go first; the old image then starts on the data as it left it.
+func (r *Reconciler) restoreData(ctx context.Context, record store.Record, existing []runtime.Container) error {
+	tenant := record.Spec.Name
+	if err := r.removeContainers(ctx, existing); err != nil {
+		return err
+	}
+	if record.DataImage != record.Restore {
+		restorer, ok := r.volumes.(snapshotRestorer)
+		snapshot, err := "", volume.ErrSnapshotsUnsupported
+		if ok {
+			snapshot, err = restorer.RestoreSnapshot(ctx, tenant, "image-change")
+		}
+		switch {
+		case errors.Is(err, volume.ErrSnapshotsUnsupported):
+			r.log.Warn("no snapshot to take the data back to: the old image runs on the data as the newer one left it", "tenant", tenant, "image", record.Restore)
+		case err != nil:
+			return fmt.Errorf("take the data back to the snapshot before the image change: %w", err)
+		default:
+			r.log.Info("took the data back to the snapshot before the image change", "tenant", tenant, "snapshot", snapshot, "image", record.Restore)
+		}
+		if err := r.store.Observe(tenant, record.Restore); err != nil {
+			return fmt.Errorf("record the data's image: %w", err)
+		}
+	}
+	return r.store.Restored(tenant, record.Restore)
 }
 
 // snapshotDestroyer destroys one snapshot of a tenant's data, by the name

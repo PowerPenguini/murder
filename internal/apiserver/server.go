@@ -88,6 +88,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/apps/{name}/update", s.updateApp)
 	mux.HandleFunc("GET /v1/apps/{name}/revisions", s.appRevisions)
 	mux.HandleFunc("POST /v1/apps/{name}/revisions/{revision}/restore", s.restoreRevision)
+	mux.HandleFunc("POST /v1/apps/{name}/rollout/{action}", s.rolloutAction)
+	mux.HandleFunc("PUT /v1/tenants/{name}/flags", s.setFlags)
 	mux.HandleFunc("GET /v1/tenants", s.list)
 	mux.HandleFunc("POST /v1/tenants", s.create)
 	mux.HandleFunc("GET /v1/tenants/{name}", s.get)
@@ -118,6 +120,7 @@ func (s *Server) view(record store.Record) api.Tenant {
 		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node, Replica: record.Replica, ReplicaReady: record.ReplicaReady, ReplicaNext: record.ReplicaNext,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
+		AppRevision: record.AppRevision, Canary: record.Canary, Hold: record.Hold,
 	}
 	view.Elsewhere = record.Node != s.store.Node()
 	if !view.Elsewhere && s.replicas != nil {
@@ -137,6 +140,9 @@ func (s *Server) view(record store.Record) api.Tenant {
 
 func (s *Server) appView(app store.App) api.App {
 	view := api.App{Name: app.Name, Spec: app.Spec, Tag: app.Tag, Revision: app.Revision, Latest: app.Latest, LatestAt: app.LatestAt, Tenants: []string{}, CreatedAt: app.CreatedAt, UpdatedAt: app.UpdatedAt}
+	if rollout, err := s.store.Rollout(app.Name); err == nil {
+		view.Rollout = &rollout
+	}
 	for _, record := range s.store.List() {
 		if record.App == app.Name && !record.Archived() {
 			view.Tenants = append(view.Tenants, record.Spec.Name)
@@ -263,7 +269,7 @@ func (s *Server) storeApp(w http.ResponseWriter, r *http.Request, name string, a
 		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
 		return
 	}
-	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app, Tag: tag, Latest: latest}, cond, actor(r))
+	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app, Tag: tag, Latest: latest, AllAtOnce: atOnce(r)}, cond, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -312,9 +318,13 @@ func (s *Server) pinTag(ctx context.Context, tag string, strict bool) (string, s
 	return s.resolve(ctx, tag)
 }
 
+// atOnce reports whether a request moves every tenant to an app's change
+// now (?rollout=now), not in waves.
+func atOnce(r *http.Request) bool { return r.URL.Query().Get("rollout") == "now" }
+
 // writeAppChange answers with a stored app and the tenants it rolls out to.
 func (s *Server) writeAppChange(w http.ResponseWriter, change store.AppChange, note string) {
-	result := api.AppApplied{App: s.appView(change.App), Created: change.Created, Changed: change.Changed, Tenants: []api.Tenant{}, Note: note}
+	result := api.AppApplied{App: s.appView(change.App), Created: change.Created, Changed: change.Changed, Rollout: change.Rollout, Tenants: []api.Tenant{}, Note: note}
 	for _, tenant := range change.Tenants {
 		if record, err := s.store.Get(tenant); err == nil {
 			result.Tenants = append(result.Tenants, s.view(record))

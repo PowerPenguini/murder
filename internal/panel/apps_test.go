@@ -271,3 +271,33 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 		t.Fatalf("checking a pinned app:\n%s", body)
 	}
 }
+
+func TestARolloutFromThePanel(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	ctx := context.Background()
+	agent := cluster.AsApps("test")
+	_, page := get(t, server.URL+"/apps/web")
+	if !strings.Contains(page, "Revision 3: running, wave 2") || !strings.Contains(page, `value="pause"`) || !strings.Contains(page, `value="promote"`) {
+		t.Fatalf("the app's page:\n%s", page)
+	}
+	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"pause"}}, server.URL)
+	if !strings.Contains(body, "the rollout is paused") || !strings.Contains(body, `value="resume"`) {
+		t.Fatalf("after pausing:\n%s", body)
+	}
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"abort"}, "confirm": {"we"}}, server.URL)
+	if !strings.Contains(body, "type the app&#39;s name") {
+		t.Fatalf("aborted without the name:\n%s", body)
+	}
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"abort"}, "confirm": {"web"}}, server.URL)
+	if app, _ := agent.App(ctx, "web"); app.Rollout.State != "aborted" || strings.Contains(body, `value="pause"`) {
+		t.Fatalf("after aborting: %+v\n%s", app.Rollout, body)
+	}
+	// A tenant's flags.
+	_, body = submit(t, client, server, "/tenants/atlas/settings", url.Values{"do": {"flags"}, "canary": {"on"}}, server.URL)
+	if !strings.Contains(body, "atlas takes rollouts first: it is a canary") {
+		t.Fatalf("after the flags:\n%s", body)
+	}
+	if tenant, _ := agent.Get(ctx, "atlas"); !tenant.Canary || tenant.Hold {
+		t.Fatalf("atlas %+v", tenant)
+	}
+}

@@ -239,7 +239,7 @@ func TestAppsArePinnedAndRolledOutToTheirTenants(t *testing.T) {
 	}
 	next := appSpec()
 	next.Image = "ghcr.io/example/app:1.5"
-	moved, err := f.client.PutApp(ctx, "web", next)
+	moved, err := f.client.AtOnce().PutApp(ctx, "web", next)
 	if err != nil || !moved.Changed || len(moved.Tenants) != 2 || moved.Tenants[0].Spec.Image != pinnedTag("ghcr.io/example/app:1.5") || moved.Tenants[0].Generation != 2 {
 		t.Fatalf("app upgrade = %+v, %v", moved, err)
 	}

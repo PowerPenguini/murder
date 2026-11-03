@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -166,5 +167,70 @@ func TestAppApplyWithUpdateAsksForTheNewestImage(t *testing.T) {
 	}
 	if got := strings.Join(calls(), ","); got != "PUT /v1/apps/web?update=true,PUT /v1/apps/web" {
 		t.Fatalf("calls %s", got)
+	}
+}
+
+func TestApplyWaitsForTheWavesAndRolloutActs(t *testing.T) {
+	rolloutPoll = 10 * time.Millisecond
+	defer func() { rolloutPoll = 5 * time.Second }()
+	var mu sync.Mutex
+	asked := 0
+	state := store.RolloutRunning
+	socket, calls := serveAgent(t, func(call string, w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case call == "PUT /v1/apps/web":
+			var app spec.Tenant
+			_ = json.NewDecoder(r.Body).Decode(&app)
+			_ = json.NewEncoder(w).Encode(api.AppApplied{App: api.App{Name: "web", Spec: app}, Changed: true, Rollout: r.URL.Query().Get("rollout") != "now",
+				Tenants: []api.Tenant{{Spec: spec.Tenant{Name: "acme"}, App: "web"}}})
+		case call == "GET /v1/apps/web":
+			// Running twice, then as the test says.
+			asked++
+			current := store.RolloutRunning
+			if asked > 2 {
+				current = state
+			}
+			_ = json.NewEncoder(w).Encode(api.App{Name: "web", Rollout: &store.Rollout{App: "web", ToRevision: 2, State: current, Wave: asked, Reason: "acme did not come up"}})
+		case call == "GET /v1/tenants":
+			_ = json.NewEncoder(w).Encode([]api.Tenant{{Spec: spec.Tenant{Name: "acme"}, App: "web"}})
+		case strings.HasPrefix(call, "GET /v1/tenants/"):
+			_ = json.NewEncoder(w).Encode(api.Tenant{Spec: spec.Tenant{Name: "acme"}, App: "web", Status: &reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true, CheckedAt: time.Now()}})
+		case call == "POST /v1/apps/web/rollout/pause":
+			_ = json.NewEncoder(w).Encode(api.App{Name: "web"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"unexpected call"}`))
+		}
+	})
+	file := writeFile(t, t.TempDir(), "web.yaml", "image: ghcr.io/example/web:stable\nuser: \"101:101\"\n")
+	mu.Lock()
+	state = store.RolloutDone
+	mu.Unlock()
+	out := capture(t)
+	if err := runApp([]string{"apply", file, "-wait", "10s", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "rolls out in waves to acme (murder app rollout web)") || !strings.Contains(out.String(), "web                  rolled out") || !strings.Contains(out.String(), "acme is healthy") {
+		t.Fatalf("output:\n%s", out)
+	}
+	// A rollout that pauses fails the wait, saying why.
+	mu.Lock()
+	asked, state = 0, store.RolloutPaused
+	mu.Unlock()
+	capture(t)
+	if err := runApp([]string{"apply", file, "-wait", "10s", "-socket", socket}); err == nil || !strings.Contains(err.Error(), "the rollout is paused: acme did not come up") {
+		t.Fatalf("a paused rollout: %v", err)
+	}
+	if err := runApp([]string{"apply", file, "-now", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runApp([]string{"rollout", "pause", "web", "-socket", socket}); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(calls(), "\n")
+	if !strings.Contains(got, "PUT /v1/apps/web?rollout=now") || !strings.Contains(got, "POST /v1/apps/web/rollout/pause") {
+		t.Fatalf("calls:\n%s", got)
 	}
 }

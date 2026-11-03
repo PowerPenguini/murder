@@ -32,6 +32,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/records"
 	"github.com/PowerPenguini/murder/internal/releases"
 	"github.com/PowerPenguini/murder/internal/replicate"
+	"github.com/PowerPenguini/murder/internal/rollout"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -287,6 +288,27 @@ func runAgent(args []string) error {
 	if monitor != nil {
 		go monitor.Run(ctx)
 	}
+	// The leader moves apps' rollouts on, wave after wave.
+	driver := &rollout.Driver{Store: st, Log: log.With("component", "rollout"),
+		Status: func(ctx context.Context, record store.Record) (reconcile.Status, bool) {
+			if record.Node == node {
+				return reconciler.Status(record.Spec.Name)
+			}
+			if member == nil {
+				return reconcile.Status{}, false
+			}
+			ask, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			var status reconcile.Status
+			if err := member.StatusOn(ask, record.Node, record.Spec.Name, &status); err != nil {
+				return reconcile.Status{}, false
+			}
+			return status, true
+		}}
+	if member != nil {
+		driver.Leader = member.Leader
+	}
+	go driver.Run(ctx)
 	// The leader asks apps' registries for newer images of their tags.
 	var watcher *releases.Watcher
 	if cfg.ImageChecks.Duration > 0 {

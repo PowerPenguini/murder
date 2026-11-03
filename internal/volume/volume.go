@@ -391,6 +391,39 @@ func (z ZFS) Snapshot(ctx context.Context, tenant, reason string) (string, error
 	return name, nil
 }
 
+// RestoreSnapshot rolls the tenant's dataset back to its newest snapshot
+// Murder took for reason, destroying the snapshots after it, and returns
+// its name. It reports ErrSnapshotsUnsupported when there is none.
+func (z ZFS) RestoreSnapshot(ctx context.Context, tenant, reason string) (string, error) {
+	if err := checkTenant(tenant); err != nil {
+		return "", err
+	}
+	if !snapshotReason(reason) {
+		return "", fmt.Errorf("snapshot reason %q must be lowercase letters and hyphens", reason)
+	}
+	dataset := z.dataset(tenant)
+	output, err := z.Run(ctx, "zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-d", "1", dataset)
+	if err != nil {
+		return "", err
+	}
+	prefix := dataset + "@murder-" + reason + "-"
+	var taken []string
+	for _, name := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(name, prefix) {
+			taken = append(taken, name)
+		}
+	}
+	if len(taken) == 0 {
+		return "", fmt.Errorf("%w: %s has no %s snapshot", ErrSnapshotsUnsupported, dataset, reason)
+	}
+	sort.Strings(taken)
+	newest := taken[len(taken)-1]
+	if _, err := z.Run(ctx, "zfs", "rollback", "-r", newest); err != nil {
+		return "", err
+	}
+	return newest, nil
+}
+
 // Prune lists the dataset's own snapshots and destroys the oldest ones
 // Murder took for reason; their names sort by time. Other snapshots, such
 // as an operator's, are never touched. One that cannot be destroyed (held,

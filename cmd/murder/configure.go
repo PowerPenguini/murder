@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -32,6 +33,8 @@ func configureTenant(command string, args []string) error {
 	cpus := flags.Float64("cpus", 0, "CPU limit; 0 is the app's")
 	pids := flags.Int("pids", 0, "process limit; 0 is the app's")
 	disk := flags.Int("disk", 0, "data limit in GB (zfs volumes only); 0 is the app's")
+	canary := flags.String("canary", "", "with set: true makes the tenant take its app's rollouts first, false not")
+	hold := flags.String("hold", "", "with set: true leaves the tenant out of its app's rollouts, on the revision it runs; false lets it follow again")
 	var env, unsetEnv, secrets, unsetSecrets listFlag
 	flags.Var(&env, "env", "add or replace an env value: KEY=VALUE (repeatable)")
 	flags.Var(&unsetEnv, "unset-env", "drop an env override: KEY (repeatable)")
@@ -51,6 +54,31 @@ func configureTenant(command string, args []string) error {
 	client := api.NewClient(*socket)
 
 	request := api.TenantRequest{App: *app}
+	var flagsOnly api.TenantFlags
+	for flagName, into := range map[string]**bool{"canary": &flagsOnly.Canary, "hold": &flagsOnly.Hold} {
+		if !given[flagName] {
+			continue
+		}
+		if command != "set" {
+			return fmt.Errorf("-%s only makes sense with tenant set", flagName)
+		}
+		value, err := strconv.ParseBool(map[string]string{"canary": *canary, "hold": *hold}[flagName])
+		if err != nil {
+			return fmt.Errorf("-%s takes true or false", flagName)
+		}
+		*into = &value
+	}
+	if flagsOnly.Canary != nil || flagsOnly.Hold != nil {
+		tenant, err := client.SetFlags(ctx, name, flagsOnly)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s: canary %v, held %v\n", name, tenant.Canary, tenant.Hold)
+		// Only the flags given: nothing else to change.
+		if len(given) == len(flagsOnlyNames(given)) {
+			return nil
+		}
+	}
 	if command == "set" {
 		current, err := client.Get(ctx, name)
 		if err != nil {
@@ -146,4 +174,16 @@ func configureTenant(command string, args []string) error {
 		return nil // nothing runs until it is restored
 	}
 	return waitHealthy(ctx, client, result.Tenant, *wait)
+}
+
+// flagsOnlyNames are the given flags that set a tenant's rollout flags,
+// or name the socket.
+func flagsOnlyNames(given map[string]bool) []string {
+	var names []string
+	for _, name := range []string{"canary", "hold", "socket"} {
+		if given[name] {
+			names = append(names, name)
+		}
+	}
+	return names
 }

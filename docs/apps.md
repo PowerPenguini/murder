@@ -2,7 +2,8 @@
 
 A tenant runs an **app**: a spec shared by every tenant of it, kept in git and
 applied from CI or by hand. The tenant adds only what is its own: a name and a
-few overrides. Changing an app rolls the change out to all its tenants.
+few overrides. Changing an app rolls the change out to its tenants, in
+waves (see [Rollouts](#rollouts)).
 
 An app spec needs only an image and a user; everything else has a default.
 The app is named after its file:
@@ -19,10 +20,10 @@ secrets: [SESSION_SECRET]       # 32 random bytes, hex; or a mapping such as ADM
 ```
 
 ```bash
-murder app apply apps/web.yaml -wait 3m          # store the app; roll it out to its tenants
+murder app apply apps/web.yaml -wait 10m         # store the app; roll it out to its tenants, in waves
 murder tenant create acme -app web -wait 3m
 murder tenant create beta -app web -env TZ=Europe/Berlin -memory 768
-murder tenant set gamma -image ghcr.io/example/web:1.5   # a canary
+murder tenant set gamma -image ghcr.io/example/web:1.5   # an image of its own
 murder tenant set gamma -app-image                       # back to the app's image
 ```
 
@@ -32,8 +33,50 @@ change rolls out to. A change that would make a live tenant invalid is
 refused as a whole, before the image is pulled. Archived tenants run the
 app's current spec when restored; one that no longer fits is refused then
 and can be fixed with `tenant set` while archived. `-wait` is
-one budget for all the apps' tenants, watched side by side, so a retry after
-a failed rollout fails until they are healthy.
+one budget for all the apps' rollouts and tenants, watched side by side,
+so a retry after a failed rollout fails until they are healthy.
+
+## Rollouts
+
+A change of an app, applied, updated or rolled back, moves its tenants in
+waves, driven by the cluster's leader:
+
+1. the canaries (`murder tenant set NAME -canary true`), or the first tenant
+   by name when there are none; they must stay healthy for 2 minutes;
+2. a tenth of the tenants, then half, then the rest; each wave must stay
+   healthy for a minute before the next moves.
+
+A tenant is through when it runs the new revision, healthy, without its
+container restarting. Until its wave moves, a tenant keeps the revision it
+ran, and a restart, a move or a failover keeps it there too.
+
+- A tenant that does not come up healthy within 5 minutes goes back to the
+  revision before, **its data too**: its node rolls the ZFS dataset back to
+  the snapshot taken when the old container stopped. Whatever it wrote
+  since is lost; that is the point, as a failed upgrade may have half
+  migrated it. The rollout pauses. Without ZFS, the data stays as it is.
+- A tenant that came up and then fails its health check for 30 seconds, or
+  restarts, pauses the rollout and stays as it is, for someone to look.
+- A node that does not say how its tenant runs pauses the rollout after 5
+  minutes; nothing goes back.
+- A held tenant (`-hold true`) stays on the revision it runs, out of every
+  rollout, until `-hold false`; then it takes the newest revision.
+
+```bash
+murder app rollout web                # its waves: tenants on the new revision, waiting, held
+murder app rollout pause web          # stop after the wave that runs
+murder app rollout resume web
+murder app rollout promote web        # every waiting tenant now
+murder app rollout abort web          # every moved tenant back to the revision before; data stays
+murder app apply apps/web.yaml -now   # no waves: every tenant now, ending a rollout that runs
+```
+
+`-now` (on `apply`, `update` and `rollback`) is for a fix that cannot wait,
+or for an app with one tenant. A newer change while a rollout runs starts
+it again from the first wave, with the tenants already moved kept where
+they are until their wave. The audit log names each wave (`app.wave`),
+each tenant taken back and the end (`rollout.done`). Revisions a tenant
+still runs are kept beyond the last 20.
 
 **Overrides** are the tenant's own `-image`, `-env`, `-secret` and limits
 (`-memory`, `-cpus`, `-pids`, `-disk`). `tenant set` changes only the flags it is
@@ -114,7 +157,8 @@ murder tenant purge acme -yes           # delete an archived tenant and its data
 murder app check                        # ask the registries now for newer images of the apps' tags
 murder app update web -wait 3m          # take the newest image of web's tag and roll it out
 murder app history web                  # web's recent revisions
-murder app rollback web -wait 3m        # back to the revision before the current one
+murder app rollback web -wait 3m        # back to the revision before the current one, in waves
+murder app rollout web                  # how web's rollout goes
 murder app delete web                   # once no tenant (live or archived) runs it
 murder events -tenant acme              # the audit log: who changed what, and when
 ```

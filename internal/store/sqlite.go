@@ -71,11 +71,13 @@ type snapshot struct {
 	apps   map[string]App
 	// revisions are each app's recent revisions, oldest first.
 	revisions map[string][]Revision
-	tenants   map[string]Record
-	nodes     map[string]Node
-	devices   map[string]Device
-	panel     panelState
-	images    map[string]bool
+	// rollouts are each app's newest rollout.
+	rollouts map[string]Rollout
+	tenants  map[string]Record
+	nodes    map[string]Node
+	devices  map[string]Device
+	panel    panelState
+	images   map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
 	lastEvent int64
@@ -349,7 +351,7 @@ type querier interface {
 // load reads the whole state. It is small: one row per app and tenant.
 func load(q querier) (*snapshot, error) {
 	state := &snapshot{}
-	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadRevisions, loadAllTenants, loadNodes, loadDevices, loadPanel, loadImages} {
+	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadRevisions, loadRollouts, loadAllTenants, loadNodes, loadDevices, loadPanel, loadImages} {
 		if err := part(q, state); err != nil {
 			return nil, err
 		}
@@ -447,7 +449,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 	if err := closeRows(rows); err != nil {
 		return err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next FROM tenants`+where("name"), args...)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next, app_revision, before_revision, canary, hold, restore FROM tenants`+where("name"), args...)
 	if err != nil {
 		return err
 	}
@@ -456,7 +458,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext, &record.AppRevision, &record.BeforeRevision, &record.Canary, &record.Hold, &record.Restore); err != nil {
 			rows.Close()
 			return err
 		}
@@ -464,7 +466,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 			rows.Close()
 			return fmt.Errorf("tenant %s: %w", name, err)
 		}
-		record.Spec = spec.Compose(state.apps[record.App].Spec, name, record.Overrides)
+		record.Spec = spec.Compose(revisionSpec(state, record.App, record.AppRevision), name, record.Overrides)
 		record.Spec.Suspended = suspended
 		record.Sealed = sealed[name]
 		record.CreatedAt, record.UpdatedAt = parseTime(created), parseTime(updated)
@@ -905,11 +907,6 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			app.Name, revision, marshal(app.Spec), app.Tag, stamp, actorOf(actor)); err != nil {
 			return err
 		}
-		if revision > revisionsKept {
-			if err := tx.Exec(`DELETE FROM app_revisions WHERE app = ? AND revision <= ?`, app.Name, revision-revisionsKept); err != nil {
-				return err
-			}
-		}
 		detail := "image " + app.Spec.Image
 		if app.Tag != "" {
 			detail += " of " + app.Tag
@@ -921,6 +918,13 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 		if from > 0 {
 			detail = fmt.Sprintf("back to revision %d; %s", from, detail)
 		}
+		// In waves, every live tenant keeps the revision it runs until the
+		// rollout moves it; at once, each moves now. Held tenants stay.
+		waves := found && !app.AllAtOnce
+		oldRevision := existing.Revision
+		if keepFirst {
+			oldRevision = 1
+		}
 		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
 			record := current.tenants[name]
 			if record.App != app.Name || record.Archived() {
@@ -928,13 +932,30 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			}
 			composed := spec.Compose(app.Spec, name, record.Overrides)
 			composed.Suspended = record.Spec.Suspended
-			if composed.Equal(record.Spec) {
+			if composed.Equal(record.Spec) && record.AppRevision == 0 {
 				continue
 			}
-			if err := tx.Exec(`UPDATE tenants SET generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+			if err := s.sealMissing(tx, now, composed, record.Sealed); err != nil {
 				return err
 			}
-			if err := s.sealMissing(tx, now, composed, record.Sealed); err != nil {
+			if record.Hold {
+				if record.AppRevision == 0 {
+					if err := tx.Exec(`UPDATE tenants SET app_revision = ?, before_revision = 0 WHERE name = ?`, oldRevision, name); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			result.Tenants = append(result.Tenants, name)
+			if waves {
+				if record.AppRevision == 0 {
+					if err := tx.Exec(`UPDATE tenants SET app_revision = ?, before_revision = 0 WHERE name = ?`, oldRevision, name); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if err := tx.Exec(`UPDATE tenants SET app_revision = 0, before_revision = 0, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 				return err
 			}
 			// The tenant's own trail shows the app changes that replaced
@@ -942,7 +963,30 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			if err := event(tx, now, actor, "app.rolled-out", name, app.Name, "app changed "+changed); err != nil {
 				return err
 			}
-			result.Tenants = append(result.Tenants, name)
+		}
+		_, rolling := current.rollouts[app.Name]
+		switch {
+		case waves && len(result.Tenants) > 0:
+			result.Rollout = true
+			if err := tx.Exec(`INSERT INTO rollouts (app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor) VALUES (?, ?, 'running', 0, ?, '', ?, ?, ?)
+				ON CONFLICT (app) DO UPDATE SET to_revision = excluded.to_revision, state = 'running', wave = 0, wave_started = excluded.wave_started,
+					reason = '', started_at = excluded.started_at, updated_at = excluded.updated_at, actor = excluded.actor`,
+				app.Name, revision, stamp, stamp, stamp, actorOf(actor)); err != nil {
+				return err
+			}
+			detail += fmt.Sprintf("; rolls out in waves to %d tenants", len(result.Tenants))
+		case rolling && !waves:
+			if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = 'replaced by a change rolled out at once', updated_at = ? WHERE app = ? AND state IN ('running', 'paused')`, stamp, app.Name); err != nil {
+				return err
+			}
+		}
+		// Revisions tenants run, or go back to, stay.
+		if revision > revisionsKept {
+			if err := tx.Exec(`DELETE FROM app_revisions WHERE app = ? AND revision <= ?
+				AND revision NOT IN (SELECT app_revision FROM tenants WHERE app = ?)
+				AND revision NOT IN (SELECT before_revision FROM tenants WHERE app = ?)`, app.Name, revision-revisionsKept, app.Name, app.Name); err != nil {
+				return err
+			}
 		}
 		action := "app.updated"
 		if result.Created {
@@ -1047,12 +1091,11 @@ func liveTenant(state *snapshot, name string) (Record, error) {
 }
 
 // prepare returns the spec a tenant of app with overrides runs, validated.
-func prepare(state *snapshot, name, appName string, overrides spec.Overrides) (spec.Tenant, error) {
-	app, ok := state.apps[appName]
-	if !ok {
+func prepare(state *snapshot, name, appName string, revision int64, overrides spec.Overrides) (spec.Tenant, error) {
+	if _, ok := state.apps[appName]; !ok {
 		return spec.Tenant{}, fmt.Errorf("app %s: %w", appName, ErrNotFound)
 	}
-	tenant := spec.Compose(app.Spec, name, overrides)
+	tenant := spec.Compose(revisionSpec(state, appName, revision), name, overrides)
 	return tenant, tenant.Validate()
 }
 
@@ -1067,7 +1110,7 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 		} else if ok {
 			return ErrExists
 		}
-		composed, err := prepare(current, tenant.Name, tenant.App, overrides)
+		composed, err := prepare(current, tenant.Name, tenant.App, 0, overrides)
 		if err != nil {
 			return err
 		}
@@ -1140,12 +1183,18 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 			unchanged = record.clone()
 			return errUnchanged
 		}
-		composed, err := prepare(current, name, app, overrides)
+		// Another app runs its newest revision; the same app the one the
+		// tenant runs.
+		revision, before := record.AppRevision, record.BeforeRevision
+		if record.App != app {
+			revision, before = 0, 0
+		}
+		composed, err := prepare(current, name, app, revision, overrides)
 		if err != nil {
 			return err
 		}
-		if err := tx.Exec(`UPDATE tenants SET app = ?, overrides = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
-			app, marshal(overrides), formatTime(now), name); err != nil {
+		if err := tx.Exec(`UPDATE tenants SET app = ?, overrides = ?, app_revision = ?, before_revision = ?, generation = generation + 1, updated_at = ? WHERE name = ?`,
+			app, marshal(overrides), revision, before, formatTime(now), name); err != nil {
 			return err
 		}
 		// An archived tenant gets missing secrets when it is restored.
@@ -1295,11 +1344,12 @@ func (s *SQLite) Restore(name, actor string) (Record, error) {
 		if err := notMoving(record); err != nil {
 			return err
 		}
-		composed, err := prepare(current, name, record.App, record.Overrides)
+		// A restored tenant runs the app's newest revision.
+		composed, err := prepare(current, name, record.App, 0, record.Overrides)
 		if err != nil {
 			return fmt.Errorf("tenant %s cannot run app %s as it is now; change it with \"murder tenant set\" first: %w", name, record.App, err)
 		}
-		if err := tx.Exec(`UPDATE tenants SET archived_at = NULL, generation = generation + 1, updated_at = ? WHERE name = ?`,
+		if err := tx.Exec(`UPDATE tenants SET archived_at = NULL, app_revision = 0, before_revision = 0, restore = '', generation = generation + 1, updated_at = ? WHERE name = ?`,
 			formatTime(now), name); err != nil {
 			return err
 		}

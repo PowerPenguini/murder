@@ -20,7 +20,9 @@ import (
 const tenantUsage = `Usage: murder tenant <command> [options]
 
   create NAME -app APP [overrides]   add a tenant running an app
-  set NAME [-app APP] [overrides]    change a tenant's app or overrides
+  set NAME [-app APP] [overrides]    change a tenant's app or overrides;
+                                     -canary true|false, -hold true|false set how
+                                     its app's rollouts treat it
   list                   list tenants, archived ones too, and their state
   show NAME              print a tenant as JSON
   suspend NAME           stop a tenant, keeping its address (visitors get 503)

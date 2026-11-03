@@ -2,6 +2,9 @@ package apiserver
 
 import (
 	"context"
+
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/store"
 	"strings"
 	"testing"
 	"time"
@@ -33,9 +36,9 @@ func TestAnAppKeepsItsImageUntilItIsUpdated(t *testing.T) {
 		t.Fatalf("a change of env %+v, %v", applied, err)
 	}
 	// An update made on an outdated read is refused.
-	_, err = f.client.UpdateApp(ctx, "web", app.UpdatedAt)
+	_, err = f.client.AtOnce().UpdateApp(ctx, "web", app.UpdatedAt)
 	checkStatus(t, "an update over a change made meanwhile", err, 409)
-	updated, err := f.client.UpdateApp(ctx, "web", time.Time{})
+	updated, err := f.client.AtOnce().UpdateApp(ctx, "web", time.Time{})
 	if err != nil || !updated.Changed || updated.App.Spec.Image != moved || updated.App.Latest != "" || updated.App.Spec.Env["TZ"] != "UTC" || updated.App.Revision != 3 {
 		t.Fatalf("update %+v, %v", updated, err)
 	}
@@ -48,7 +51,7 @@ func TestAnAppKeepsItsImageUntilItIsUpdated(t *testing.T) {
 	// Apply with update takes the newest at once.
 	newest := "ghcr.io/example/app@sha256:" + strings.Repeat("8", 64)
 	f.runtime.setLatest(tag, newest)
-	taken, err := f.client.PutAppNewest(ctx, "web", next)
+	taken, err := f.client.AtOnce().PutAppNewest(ctx, "web", next)
 	if err != nil || taken.App.Spec.Image != newest {
 		t.Fatalf("apply with update %+v, %v", taken, err)
 	}
@@ -57,13 +60,13 @@ func TestAnAppKeepsItsImageUntilItIsUpdated(t *testing.T) {
 	if err != nil || len(revisions) != 4 || revisions[0].Revision != 4 || revisions[3].Spec.Image != pinnedTag(tag) {
 		t.Fatalf("revisions %+v, %v", revisions, err)
 	}
-	_, err = f.client.RestoreRevision(ctx, "web", 1, app.UpdatedAt)
+	_, err = f.client.AtOnce().RestoreRevision(ctx, "web", 1, app.UpdatedAt)
 	checkStatus(t, "a restore over a change made meanwhile", err, 409)
-	back, err := f.client.RestoreRevision(ctx, "web", 1, taken.App.UpdatedAt)
+	back, err := f.client.AtOnce().RestoreRevision(ctx, "web", 1, taken.App.UpdatedAt)
 	if err != nil || back.App.Spec.Image != pinnedTag(tag) || back.App.Revision != 5 || len(back.Tenants) != 1 || back.App.Spec.Env["TZ"] != "" {
 		t.Fatalf("back to revision 1: %+v, %v", back, err)
 	}
-	_, err = f.client.RestoreRevision(ctx, "web", 99, time.Time{})
+	_, err = f.client.AtOnce().RestoreRevision(ctx, "web", 99, time.Time{})
 	checkStatus(t, "an unknown revision", err, 404)
 	_, err = f.client.AppRevisions(ctx, "nope")
 	checkStatus(t, "revisions of no app", err, 404)
@@ -84,7 +87,7 @@ func TestAnAppGivenPinnedHasNoTagToAskAbout(t *testing.T) {
 	}
 	_, err = f.client.CheckApp(ctx, "web")
 	checkStatus(t, "check a pinned app", err, 422)
-	_, err = f.client.UpdateApp(ctx, "web", time.Time{})
+	_, err = f.client.AtOnce().UpdateApp(ctx, "web", time.Time{})
 	checkStatus(t, "update a pinned app", err, 422)
 	_, err = f.client.CheckApp(ctx, "nope")
 	checkStatus(t, "check no app", err, 404)
@@ -103,7 +106,7 @@ func TestAnUpdateTakesOnlyTheRegistrysAnswer(t *testing.T) {
 	// The registry does not answer: an update changes nothing, rather than
 	// falling back to whatever this node has.
 	f.runtime.setLatest(tag, "")
-	_, err := f.client.UpdateApp(ctx, "web", time.Time{})
+	_, err := f.client.AtOnce().UpdateApp(ctx, "web", time.Time{})
 	checkStatus(t, "an update while the registry does not answer", err, 502)
 	if after, _ := f.client.App(ctx, "web"); after.Spec.Image != before.Spec.Image || after.Revision != before.Revision {
 		t.Fatalf("a refused update changed the app: %+v", after)
@@ -116,7 +119,7 @@ func TestAnUpdateTakesOnlyTheRegistrysAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.runtime.setLatest(tag, d3)
-	updated, err := f.client.UpdateApp(ctx, "web", time.Time{})
+	updated, err := f.client.AtOnce().UpdateApp(ctx, "web", time.Time{})
 	if err != nil || updated.App.Spec.Image != d3 || updated.App.Latest != "" {
 		t.Fatalf("update %+v, %v", updated.App, err)
 	}
@@ -127,7 +130,7 @@ func TestAnUpdateTakesOnlyTheRegistrysAnswer(t *testing.T) {
 	if err != nil || same.Changed || same.App.Spec.Image != d3 || same.App.Latest != d4 || !strings.Contains(same.Note, "murder app update web") {
 		t.Fatalf("the same tag again %+v, %v", same, err)
 	}
-	if _, err := f.client.PutAppNewest(ctx, "web", appSpec()); err != nil {
+	if _, err := f.client.AtOnce().PutAppNewest(ctx, "web", appSpec()); err != nil {
 		t.Fatal(err)
 	}
 	if app, _ := f.client.App(ctx, "web"); app.Spec.Image != d4 || app.Latest != "" {
@@ -143,11 +146,66 @@ func TestApplyWithUpdateTakesANewTagAsAPlainApplyWould(t *testing.T) {
 	next := appSpec()
 	next.Image = "ghcr.io/example/app:dev"
 	f.runtime.setLatest(next.Image, "")
-	applied, err := f.client.PutAppNewest(ctx, "web", next)
+	applied, err := f.client.AtOnce().PutAppNewest(ctx, "web", next)
 	if err != nil || applied.App.Spec.Image != pinnedTag(next.Image) || applied.App.Tag != next.Image {
 		t.Fatalf("a new tag with -update: %+v, %v", applied.App, err)
 	}
 	// The same tag again, the registry still silent: refused, unchanged.
-	_, err = f.client.PutAppNewest(ctx, "web", next)
+	_, err = f.client.AtOnce().PutAppNewest(ctx, "web", next)
 	checkStatus(t, "an update of the followed tag without the registry", err, 502)
+}
+
+func TestAnAppChangeRollsOutInWavesThroughTheAPI(t *testing.T) {
+	f := withApp(t)
+	ctx := context.Background()
+	for _, name := range []string{"acme", "beta", "gamma"} {
+		if _, err := f.client.Create(ctx, tenantOf(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	yes := true
+	if tenant, err := f.client.SetFlags(ctx, "gamma", api.TenantFlags{Canary: &yes}); err != nil || !tenant.Canary {
+		t.Fatalf("flags %+v, %v", tenant, err)
+	}
+	next := appSpec()
+	next.Image = "ghcr.io/example/app:1.5"
+	applied, err := f.client.PutApp(ctx, "web", next)
+	if err != nil || !applied.Rollout || len(applied.Tenants) != 3 || applied.App.Rollout == nil || applied.App.Rollout.State != store.RolloutRunning {
+		t.Fatalf("applied %+v, %v", applied, err)
+	}
+	// Nothing moved: every tenant runs the revision it ran.
+	for _, tenant := range applied.Tenants {
+		if tenant.AppRevision != 1 || tenant.Spec.Image != pinnedTag("ghcr.io/example/app:1.4") {
+			t.Fatalf("%s moved: %+v", tenant.Spec.Name, tenant)
+		}
+	}
+	app, err := f.client.RolloutAction(ctx, "web", "pause")
+	if err != nil || app.Rollout.State != store.RolloutPaused {
+		t.Fatalf("pause %+v, %v", app.Rollout, err)
+	}
+	_, err = f.client.RolloutAction(ctx, "web", "promote")
+	checkStatus(t, "promote a paused rollout", err, 409)
+	if app, err = f.client.RolloutAction(ctx, "web", "resume"); err != nil || app.Rollout.State != store.RolloutRunning {
+		t.Fatalf("resume %+v, %v", app.Rollout, err)
+	}
+	// Promote moves every tenant waiting, at once.
+	if _, err := f.client.RolloutAction(ctx, "web", "promote"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"acme", "beta", "gamma"} {
+		if tenant, _ := f.client.Get(ctx, name); tenant.AppRevision != 0 || tenant.Spec.Image != pinnedTag("ghcr.io/example/app:1.5") {
+			t.Fatalf("%s after promote: %+v", name, tenant)
+		}
+	}
+	// Abort takes them back.
+	if app, err = f.client.RolloutAction(ctx, "web", "abort"); err != nil || app.Rollout.State != store.RolloutAborted {
+		t.Fatalf("abort %+v, %v", app.Rollout, err)
+	}
+	if tenant, _ := f.client.Get(ctx, "acme"); tenant.AppRevision != 1 || tenant.Spec.Image != pinnedTag("ghcr.io/example/app:1.4") {
+		t.Fatalf("acme after abort: %+v", tenant)
+	}
+	_, err = f.client.RolloutAction(ctx, "web", "dance")
+	checkStatus(t, "an unknown action", err, 400)
+	_, err = f.client.RolloutAction(ctx, "nope", "pause")
+	checkStatus(t, "no such app", err, 404)
 }

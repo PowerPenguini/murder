@@ -178,8 +178,8 @@ func TestAppChangesReachTheirTenants(t *testing.T) {
 	next := appSpec()
 	next.Image = otherImage
 	next.Secrets["NEW"] = spec.Secret{Kind: "password"}
-	change, err := st.PutApp(App{Name: "web", Spec: next}, "bob")
-	if err != nil || !change.Changed || !slices.Equal(change.Tenants, []string{"acme", "pinned"}) {
+	change, err := st.PutApp(App{Name: "web", Spec: next, AllAtOnce: true}, "bob")
+	if err != nil || !change.Changed || !slices.Equal(change.Tenants, []string{"acme", "pinned"}) || change.Rollout {
 		t.Fatalf("app change = %+v, %v", change, err)
 	}
 	after, _ := st.Get("acme")
@@ -195,7 +195,7 @@ func TestAppChangesReachTheirTenants(t *testing.T) {
 	// Only the image changes now; the pinned tenant runs its own image.
 	final := next
 	final.Image = image
-	change, err = st.PutApp(App{Name: "web", Spec: final}, "bob")
+	change, err = st.PutApp(App{Name: "web", Spec: final, AllAtOnce: true}, "bob")
 	if err != nil || !slices.Equal(change.Tenants, []string{"acme"}) {
 		t.Fatalf("image change = %+v, %v", change, err)
 	}
@@ -570,7 +570,7 @@ func TestEventsKeepNoEnvValuesAndShowRollouts(t *testing.T) {
 	_, _, _ = st.Configure("acme", "web", spec.Overrides{Env: map[string]string{"SMTP_PASSWORD": "hunter3"}}, 0, "a")
 	next := appSpec()
 	next.Env = map[string]string{"MODE": "prod"}
-	_, _ = st.PutApp(App{Name: "web", Spec: next}, "b")
+	_, _ = st.PutApp(App{Name: "web", Spec: next, AllAtOnce: true}, "b")
 	_ = st.Archive("acme", "c")
 	events, err := st.Events(EventQuery{Tenant: "acme"})
 	if err != nil {

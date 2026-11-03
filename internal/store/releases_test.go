@@ -88,10 +88,10 @@ func TestARevisionCanBeStoredAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.RestoreRevision("web", 1, AppIf{UpdatedAt: second.App.CreatedAt.Add(-time.Hour)}, "bob"); !errors.Is(err, ErrConflict) {
+	if _, err := st.RestoreRevision("web", 1, AppIf{UpdatedAt: second.App.CreatedAt.Add(-time.Hour)}, true, "bob"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("a restore over a change made meanwhile: %v", err)
 	}
-	back, err := st.RestoreRevision("web", 1, AppIf{UpdatedAt: second.App.UpdatedAt}, "bob")
+	back, err := st.RestoreRevision("web", 1, AppIf{UpdatedAt: second.App.UpdatedAt}, true, "bob")
 	if err != nil || back.App.Revision != 3 || back.App.Spec.Image != pinnedV1 || back.App.Tag != "ghcr.io/example/web:stable" || len(back.Tenants) != 1 {
 		t.Fatalf("back to revision 1: %+v, %v", back, err)
 	}
@@ -102,11 +102,11 @@ func TestARevisionCanBeStoredAgain(t *testing.T) {
 	if len(events) != 1 || events[0].Actor != "bob" || !strings.HasPrefix(events[0].Detail, "back to revision 1;") {
 		t.Fatalf("events %+v", events)
 	}
-	if _, err := st.RestoreRevision("web", 9, AppIf{}, "bob"); !errors.Is(err, ErrNotFound) {
+	if _, err := st.RestoreRevision("web", 9, AppIf{}, true, "bob"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("an unknown revision: %v", err)
 	}
 	// The revision the app already runs changes nothing.
-	if same, err := st.RestoreRevision("web", 3, AppIf{}, "bob"); err != nil || same.Changed {
+	if same, err := st.RestoreRevision("web", 3, AppIf{}, true, "bob"); err != nil || same.Changed {
 		t.Fatalf("the newest revision again: %+v, %v", same, err)
 	}
 }
@@ -292,6 +292,12 @@ func TestAnAppFromBeforeRevisionsKeepsItsSpecAsTheFirst(t *testing.T) {
 	}
 	for _, statement := range []string{
 		schema,
+		`ALTER TABLE tenants DROP COLUMN app_revision`,
+		`ALTER TABLE tenants DROP COLUMN before_revision`,
+		`ALTER TABLE tenants DROP COLUMN canary`,
+		`ALTER TABLE tenants DROP COLUMN hold`,
+		`ALTER TABLE tenants DROP COLUMN restore`,
+		`DROP TABLE rollouts`,
 		`DROP TABLE app_revisions`,
 		`ALTER TABLE apps DROP COLUMN tag`,
 		`ALTER TABLE apps DROP COLUMN revision`,
