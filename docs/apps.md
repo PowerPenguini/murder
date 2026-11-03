@@ -54,11 +54,12 @@ ran, and a restart, a move or a failover keeps it there too.
   revision before, **its data too**: its node rolls the ZFS dataset back to
   the snapshot taken when the old container stopped. Whatever it wrote
   since is lost; that is the point, as a failed upgrade may have half
-  migrated it. The rollout pauses. Its data goes back only if the leader
-  that moved it looked at it every few seconds since, its rollout running
-  all along, and never saw it healthy (once seen healthy it served, and
-  that is recorded, so a new leader knows too), and only while it runs on
-  the node it moved on. Otherwise (a new leader, a pause, a move) the
+  migrated it. The rollout pauses. Its data goes back only if it never
+  passed a health check on the new revision (its node records that it did
+  before it serves a request, so a new leader knows too), the leader that
+  moved it looked at it every few seconds since with nothing changing the
+  rollout meanwhile (no pause or resume, however brief), and only while it
+  runs on the node it moved on. Otherwise (a new leader, a pause, a move) the
   rollout pauses with the tenant's revision and data as they are. Without ZFS, the data stays as it
   is. A node that should take the data back but has no snapshot of then
   keeps the tenant stopped; `murder app rollout abort` starts it on its

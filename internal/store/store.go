@@ -306,6 +306,7 @@ type Store interface {
 	PauseRollout(app, reason, actor string) error
 	PauseRolloutAt(app string, at RolloutAt, reason, actor string) error
 	MarkServed(app string, at RolloutAt, tenant string, generation int64) error
+	Served(tenant string, generation int64) error
 	RolloutState() ([]Rollout, []Record)
 	ResumeRollout(app, actor string) error
 	AbortRollout(app, reason, actor string) ([]string, error)

@@ -32,6 +32,8 @@ type Rollout struct {
 	StartedAt time.Time `json:"startedAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 	Actor     string    `json:"actor"`
+	// Epoch counts its changes of state: each wave, pause and resume.
+	Epoch int64 `json:"epoch"`
 }
 
 // Active reports whether the rollout may still move tenants.
@@ -41,7 +43,7 @@ func (r Rollout) Active() bool { return r.State == RolloutRunning || r.State == 
 // saw then is refused once the rollout has moved on, been replaced, paused
 // or resumed.
 func (r Rollout) At() RolloutAt {
-	return RolloutAt{ToRevision: r.ToRevision, Wave: r.Wave, WaveStarted: r.WaveStarted}
+	return RolloutAt{ToRevision: r.ToRevision, Wave: r.Wave, WaveStarted: r.WaveStarted, Epoch: r.Epoch}
 }
 
 // RolloutAt is a rollout at one wave: its revision, the wave and when it
@@ -50,6 +52,7 @@ type RolloutAt struct {
 	ToRevision  int64
 	Wave        int
 	WaveStarted time.Time
+	Epoch       int64
 }
 
 // RolloutState is every rollout and tenant as of one moment.
@@ -68,14 +71,14 @@ func (s *SQLite) RolloutState() ([]Rollout, []Record) {
 
 func loadRollouts(q querier, state *snapshot) error {
 	state.rollouts = map[string]Rollout{}
-	rows, err := q.Query(`SELECT app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor FROM rollouts`)
+	rows, err := q.Query(`SELECT app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor, epoch FROM rollouts`)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var r Rollout
 		var waveStarted, started, updated string
-		if err := rows.Scan(&r.App, &r.ToRevision, &r.State, &r.Wave, &waveStarted, &r.Reason, &started, &updated, &r.Actor); err != nil {
+		if err := rows.Scan(&r.App, &r.ToRevision, &r.State, &r.Wave, &waveStarted, &r.Reason, &started, &updated, &r.Actor, &r.Epoch); err != nil {
 			rows.Close()
 			return err
 		}
@@ -126,7 +129,7 @@ func rolloutOf(state *snapshot, app string, at *RolloutAt) (Rollout, error) {
 		return Rollout{}, fmt.Errorf("app %s has no rollout: %w", app, ErrNotFound)
 	case !rollout.Active():
 		return Rollout{}, fmt.Errorf("%w: the rollout of app %s is %s", ErrConflict, app, rollout.State)
-	case at != nil && !(rollout.ToRevision == at.ToRevision && rollout.Wave == at.Wave && rollout.WaveStarted.Equal(at.WaveStarted)):
+	case at != nil && !(rollout.ToRevision == at.ToRevision && rollout.Wave == at.Wave && rollout.WaveStarted.Equal(at.WaveStarted) && rollout.Epoch == at.Epoch):
 		return Rollout{}, fmt.Errorf("%w: the rollout of app %s moved on (revision %d, wave %d)", ErrConflict, app, rollout.ToRevision, rollout.Wave)
 	}
 	return rollout, nil
@@ -158,7 +161,7 @@ func (s *SQLite) AdvanceRollout(app string, at RolloutAt, tenants []string, acto
 				return err
 			}
 		}
-		return tx.Exec(`UPDATE rollouts SET wave = ?, wave_started = ?, updated_at = ? WHERE app = ?`, wave+1, stamp, stamp, app)
+		return tx.Exec(`UPDATE rollouts SET wave = ?, wave_started = ?, updated_at = ?, epoch = epoch + 1 WHERE app = ?`, wave+1, stamp, stamp, app)
 	})
 	return err
 }
@@ -182,7 +185,7 @@ func (s *SQLite) FinishRollout(app string, at RolloutAt, actor string) error {
 		if err := tx.Exec(`UPDATE tenants SET before_revision = 0, served = 0, moved_on = '' WHERE app = ? AND app_revision = 0`, app); err != nil {
 			return err
 		}
-		if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = '', updated_at = ? WHERE app = ?`, stamp, app); err != nil {
+		if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = '', updated_at = ?, epoch = epoch + 1 WHERE app = ?`, stamp, app); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "rollout.done", "", app, fmt.Sprintf("revision %d, in %d waves", rollout.ToRevision, rollout.Wave))
@@ -217,7 +220,7 @@ func (s *SQLite) setRollout(app string, at *RolloutAt, state, reason, actor stri
 			return errUnchanged
 		}
 		stamp := formatTime(now)
-		if err := tx.Exec(`UPDATE rollouts SET state = ?, reason = ?, wave_started = ?, updated_at = ? WHERE app = ?`, state, reason, stamp, stamp, app); err != nil {
+		if err := tx.Exec(`UPDATE rollouts SET state = ?, reason = ?, wave_started = ?, updated_at = ?, epoch = epoch + 1 WHERE app = ?`, state, reason, stamp, stamp, app); err != nil {
 			return err
 		}
 		action := "rollout.resumed"
@@ -259,7 +262,7 @@ func (s *SQLite) AbortRollout(app, reason, actor string) ([]string, error) {
 			}
 			back = append(back, name)
 		}
-		if err := tx.Exec(`UPDATE rollouts SET state = 'aborted', reason = ?, updated_at = ? WHERE app = ?`, reason, stamp, app); err != nil {
+		if err := tx.Exec(`UPDATE rollouts SET state = 'aborted', reason = ?, updated_at = ?, epoch = epoch + 1 WHERE app = ?`, reason, stamp, app); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "rollout.aborted", "", app, reason)
@@ -308,11 +311,28 @@ func (s *SQLite) RollBackTenants(app string, at RolloutAt, tenants map[string]in
 				return err
 			}
 		}
-		if err := tx.Exec(`UPDATE rollouts SET state = 'paused', reason = ?, updated_at = ? WHERE app = ?`, reason, stamp, app); err != nil {
+		if err := tx.Exec(`UPDATE rollouts SET state = 'paused', reason = ?, updated_at = ?, epoch = epoch + 1 WHERE app = ?`, reason, stamp, app); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "rollout.paused", "", app, reason)
 	})
+	return err
+}
+
+// Served records, from the node that runs it, that tenant at generation
+// passed a health check on the revision its rollout moved it to: before it
+// is served, so no data it then takes goes back by itself.
+func (s *SQLite) Served(tenant string, generation int64) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[tenant]
+		if !ok || record.Served || record.Generation != generation || record.AppRevision != 0 || record.BeforeRevision == 0 {
+			return errUnchanged
+		}
+		return tx.Exec(`UPDATE tenants SET served = 1 WHERE name = ?`, tenant)
+	})
+	if err == errUnchanged {
+		return nil
+	}
 	return err
 }
 

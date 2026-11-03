@@ -86,9 +86,9 @@ type watch struct {
 	// served if it never saw it healthy. Any gap ends that for good.
 	moved    bool
 	lastSeen time.Time
-	// at is the rollout as last seen: a pause and resume start its wave
-	// again, unwatched meanwhile.
-	at             store.RolloutAt
+	// epoch is the rollout's as last seen: any change of it since (a pause,
+	// a resume, a wave this driver did not move) was not watched.
+	epoch          int64
 	gap            bool
 	container      string
 	restarts       int
@@ -197,8 +197,9 @@ func (d *Driver) drive(ctx context.Context, rollout store.Rollout, records []sto
 	if d.watches == nil {
 		d.watches = map[string]*watch{}
 	}
+	// The store took the wave as one more change of the rollout.
 	for _, name := range next {
-		d.watches[name] = &watch{generation: generations[name] + 1, moved: true, lastSeen: now}
+		d.watches[name] = &watch{generation: generations[name] + 1, moved: true, lastSeen: now, epoch: rollout.Epoch + 1}
 	}
 	return nil
 }
@@ -279,12 +280,17 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 		}
 		d.mu.Unlock()
 		now := d.now()
-		if !w.lastSeen.IsZero() && now.Sub(w.lastSeen) > coverage || w.at.Wave == rollout.Wave && !w.at.WaveStarted.IsZero() && !w.at.WaveStarted.Equal(rollout.WaveStarted) {
-			// Not looked at for long, or paused and resumed meanwhile.
+		if !w.lastSeen.IsZero() && now.Sub(w.lastSeen) > coverage || w.epoch != rollout.Epoch {
+			// Not looked at for long, or the rollout changed meanwhile (a
+			// pause and resume, say), however briefly.
 			w.gap, w.healthySince = true, time.Time{}
 		}
-		w.lastSeen, w.at = now, at
+		w.lastSeen, w.epoch = now, rollout.Epoch
 		status, known := d.Status(ctx, record)
+		// A result its node checked long ago says nothing of now.
+		if known && now.Sub(status.CheckedAt) > coverage {
+			known = false
+		}
 		served := record.Served || w.everHealthy
 		if !known || status.Generation < record.Generation {
 			// Not known, or not yet of this generation: no time counts
@@ -322,8 +328,10 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 		}
 		switch {
 		case healthy:
+			// Soaked by the checks its node made, as they were made: the
+			// same result read again is no more time healthy.
 			if w.healthySince.IsZero() {
-				w.healthySince = now
+				w.healthySince = status.CheckedAt
 			}
 			w.everHealthy, w.unhealthySince = true, time.Time{}
 			if !record.Served && !w.marked {
@@ -332,7 +340,7 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 				}
 				w.marked = true
 			}
-			if now.Sub(w.healthySince) < soak {
+			if status.CheckedAt.Sub(w.healthySince) < soak {
 				through = false
 			}
 		case served:

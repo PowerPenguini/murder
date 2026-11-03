@@ -104,6 +104,9 @@ type Reconciler struct {
 	imageRetryAt map[string]time.Time
 	mu           sync.RWMutex
 	statuses     map[string]Status
+	// served is the generation of each tenant recorded as served on the
+	// revision its rollout moved it to; under mu.
+	served map[string]int64
 	// passAt is when the last whole pass ended, passErrors how many errors
 	// it had.
 	passAt     time.Time

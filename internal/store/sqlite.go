@@ -975,13 +975,13 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			result.Rollout = true
 			if err := tx.Exec(`INSERT INTO rollouts (app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor) VALUES (?, ?, 'running', 0, ?, '', ?, ?, ?)
 				ON CONFLICT (app) DO UPDATE SET to_revision = excluded.to_revision, state = 'running', wave = 0, wave_started = excluded.wave_started,
-					reason = '', started_at = excluded.started_at, updated_at = excluded.updated_at, actor = excluded.actor`,
+					reason = '', started_at = excluded.started_at, updated_at = excluded.updated_at, actor = excluded.actor, epoch = rollouts.epoch + 1`,
 				app.Name, revision, stamp, stamp, stamp, actorOf(actor)); err != nil {
 				return err
 			}
 			detail += fmt.Sprintf("; rolls out in waves to %d tenants", len(result.Tenants))
 		case rolling && !waves:
-			if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = 'replaced by a change rolled out at once', updated_at = ? WHERE app = ? AND state IN ('running', 'paused')`, stamp, app.Name); err != nil {
+			if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = 'replaced by a change rolled out at once', updated_at = ?, epoch = epoch + 1 WHERE app = ? AND state IN ('running', 'paused')`, stamp, app.Name); err != nil {
 				return err
 			}
 		}
@@ -1053,7 +1053,7 @@ func (s *SQLite) allAtOnce(tx *recorder, current *snapshot, now time.Time, app s
 	if len(result.Tenants) == 0 && !(rolling && rollout.Active()) {
 		return errUnchanged
 	}
-	if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = 'the rest rolled out at once', updated_at = ? WHERE app = ? AND state IN ('running', 'paused')`, stamp, app); err != nil {
+	if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = 'the rest rolled out at once', updated_at = ?, epoch = epoch + 1 WHERE app = ? AND state IN ('running', 'paused')`, stamp, app); err != nil {
 		return err
 	}
 	return event(tx, now, actor, "rollout.done", "", app, fmt.Sprintf("the rest at once: %d tenants", len(result.Tenants)))

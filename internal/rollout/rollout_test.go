@@ -32,6 +32,10 @@ type fixture struct {
 	sick     map[string]bool
 	unknown  map[string]bool
 	restarts map[string]int
+	// stuck tenants' nodes answer with the result of a check made at
+	// stuckAt, again and again, their checks held up.
+	stuck   map[string]bool
+	stuckAt map[string]time.Time
 }
 
 func newFixture(t *testing.T, tenants int, canaries ...string) *fixture {
@@ -63,14 +67,18 @@ func newFixture(t *testing.T, tenants int, canaries ...string) *fixture {
 			t.Fatal(err)
 		}
 	}
-	f := &fixture{store: st, clock: time.Now(), sick: map[string]bool{}, unknown: map[string]bool{}, restarts: map[string]int{}}
+	f := &fixture{store: st, clock: time.Now(), sick: map[string]bool{}, unknown: map[string]bool{}, restarts: map[string]int{}, stuck: map[string]bool{}, stuckAt: map[string]time.Time{}}
 	f.driver = &Driver{Store: st, Now: func() time.Time { return f.clock }, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Status: func(_ context.Context, record store.Record) (reconcile.Status, bool) {
 			name := record.Spec.Name
 			if f.unknown[name] {
 				return reconcile.Status{}, false
 			}
-			return reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: !f.sick[name], Generation: record.Generation, ContainerID: "c-" + name + "-" + record.Spec.Image[7:12], Restarts: f.restarts[name]}, true
+			checked := f.clock
+			if f.stuck[name] {
+				checked = f.stuckAt[name]
+			}
+			return reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: !f.sick[name], Generation: record.Generation, ContainerID: "c-" + name + "-" + record.Spec.Image[7:12], Restarts: f.restarts[name], CheckedAt: checked}, true
 		}}
 	app.Image = imageB
 	if change, err := st.PutApp(store.App{Name: "web", Spec: app}, "alice"); err != nil || !change.Rollout {
@@ -345,5 +353,41 @@ func TestATenantMovedSinceItsWaveKeepsItsRevision(t *testing.T) {
 	t00, _ := f.store.Get("t00")
 	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "moved since its wave") || t00.Restore != "" || t00.AppRevision != 0 {
 		t.Fatalf("rollout %+v, t00 restore %q revision %d", rollout, t00.Restore, t00.AppRevision)
+	}
+}
+
+// A pause and resume between the move and the first look are seen too:
+// the tenant may have served meanwhile, so its data stays.
+func TestAPauseBeforeTheFirstLookEndsWhatTheDriverKnows(t *testing.T) {
+	f := newFixture(t, 3)
+	f.sick["t00"] = true
+	f.clock = f.clock.Add(time.Second)
+	f.driver.Step(context.Background()) // t00 moves
+	if err := f.store.PauseRollout("web", "a look", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.ResumeRollout("web", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.step(6 * time.Minute)
+	t00, _ := f.store.Get("t00")
+	if t00.Restore != "" || t00.AppRevision != 0 {
+		t.Fatalf("t00 restore %q revision %d", t00.Restore, t00.AppRevision)
+	}
+	if rollout := f.rollout(t); rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "did not watch it all along") {
+		t.Fatalf("rollout %+v", rollout)
+	}
+}
+
+// A healthy result read again and again, its node's checks held up, is
+// no soak: the next wave waits.
+func TestTheSameResultReadAgainIsNoSoak(t *testing.T) {
+	f := newFixture(t, 3)
+	f.step(time.Second)
+	f.step(5 * time.Second)
+	f.stuck["t00"], f.stuckAt["t00"] = true, f.clock
+	f.step(3 * time.Minute)
+	if got := f.onNewest(); len(got) != 1 {
+		t.Fatalf("moved on with no fresh check: %v", got)
 	}
 }

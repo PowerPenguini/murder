@@ -60,7 +60,10 @@ CREATE TABLE rollouts (
 	reason        TEXT NOT NULL,
 	started_at    TEXT NOT NULL,
 	updated_at    TEXT NOT NULL,
-	actor         TEXT NOT NULL
+	actor         TEXT NOT NULL,
+	-- epoch counts the rollout's changes of state (waves, pauses, resumes):
+	-- a decision made on one epoch is refused on another.
+	epoch         INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 -- The specs an app was stored with, the recent ones, to go back to.
@@ -445,7 +448,10 @@ const rolloutsTable = `CREATE TABLE rollouts (
 	reason        TEXT NOT NULL,
 	started_at    TEXT NOT NULL,
 	updated_at    TEXT NOT NULL,
-	actor         TEXT NOT NULL
+	actor         TEXT NOT NULL,
+	-- epoch counts the rollout's changes of state (waves, pauses, resumes):
+	-- a decision made on one epoch is refused on another.
+	epoch         INTEGER NOT NULL DEFAULT 0
 ) STRICT`
 
 // revisionsTable is the table schema 14 added.

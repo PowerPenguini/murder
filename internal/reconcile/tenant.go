@@ -471,5 +471,33 @@ func (r *Reconciler) checkHealth(ctx context.Context, record store.Record) (bool
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return false, "health check: HTTP " + strconv.Itoa(response.StatusCode)
 	}
+	r.noteServed(record)
 	return true, ""
+}
+
+// noteServed records, once per generation, that a tenant a rollout moved
+// passed a health check on its new revision: before it is served, so its
+// rollout never takes back the data it then takes. Recorded by the node
+// that serves it, it does not depend on the leader looking at that moment.
+func (r *Reconciler) noteServed(record store.Record) {
+	if record.AppRevision != 0 || record.BeforeRevision == 0 || record.Served {
+		return
+	}
+	name := record.Spec.Name
+	r.mu.Lock()
+	done := r.served[name] == record.Generation
+	r.mu.Unlock()
+	if done {
+		return
+	}
+	if err := r.store.Served(name, record.Generation); err != nil {
+		r.log.Warn("record that a tenant served on its new revision", "tenant", name, "error", err)
+		return
+	}
+	r.mu.Lock()
+	if r.served == nil {
+		r.served = map[string]int64{}
+	}
+	r.served[name] = record.Generation
+	r.mu.Unlock()
 }

@@ -31,6 +31,9 @@ type State interface {
 	// Restored records that a tenant's data went back to image, as its
 	// Restore asked.
 	Restored(name, image string) error
+	// Served records that a tenant a rollout moved passed a health
+	// check on its new revision, at generation.
+	Served(name string, generation int64) error
 }
 
 // The agent passes its store.

@@ -1937,7 +1937,9 @@ func TestARolledBackTenantGetsItsDataBack(t *testing.T) {
 	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
 		t.Fatal(err)
 	}
-	f.reconcile(t)
+	// The newer image never passes its health check.
+	f.failHealth()
+	f.reconcileOnce(t)
 	if f.runtime.only(t).spec.Image != imageB {
 		t.Fatal("the wave did not move the tenant")
 	}
@@ -1985,7 +1987,8 @@ func TestATenantWithoutItsSnapshotStaysStopped(t *testing.T) {
 	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
 		t.Fatal(err)
 	}
-	f.reconcile(t)
+	f.failHealth()
+	f.reconcileOnce(t)
 	f.volumes.destroyed = append(f.volumes.destroyed, f.volumes.snapshots...)
 	rollout, _ = f.store.Rollout("acme")
 	moved, _ := f.store.Get("acme")
@@ -2004,5 +2007,49 @@ func TestATenantWithoutItsSnapshotStaysStopped(t *testing.T) {
 	f.reconcile(t)
 	if c := f.runtime.only(t); c.spec.Image != imageA || !c.Running {
 		t.Fatalf("after the abort: %+v", c)
+	}
+}
+
+// A tenant a wave moved is recorded as served by its own node once it
+// passes a health check, before anyone looks: its rollout then never takes
+// its data back.
+func TestATenantMovedByAWaveIsRecordedServedOnceHealthy(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	app, _ := f.store.App("acme")
+	app.Spec.Image = imageB
+	if _, err := f.store.PutApp(app, "test"); err != nil {
+		t.Fatal(err)
+	}
+	rollout, _ := f.store.Rollout("acme")
+	if err := f.store.AdvanceRollout("acme", rollout.At(), []string{"acme"}, "murder"); err != nil {
+		t.Fatal(err)
+	}
+	if moved, _ := f.store.Get("acme"); moved.Served {
+		t.Fatal("served before it ran")
+	}
+	f.reconcile(t)
+	if served, _ := f.store.Get("acme"); !served.Served {
+		t.Fatalf("not recorded as served once healthy: %+v", served)
+	}
+}
+
+// failHealth has every tenant's health check fail from now on.
+func (f *fixture) failHealth() {
+	f.reconciler.backend = func(store.Record) (string, error) { return "127.0.0.1:1", nil }
+}
+
+// reconcileOnce is reconcile, whatever the passes say of health.
+func (f *fixture) reconcileOnce(t *testing.T) {
+	t.Helper()
+	for {
+		_ = f.reconciler.Reconcile(context.Background())
+		f.reconciler.pulls.wait()
+		select {
+		case <-f.reconciler.pulls.done:
+		default:
+			return
+		}
 	}
 }
