@@ -55,10 +55,11 @@ ran, and a restart, a move or a failover keeps it there too.
   the snapshot taken when the old container stopped. Whatever it wrote
   since is lost; that is the point, as a failed upgrade may have half
   migrated it. The rollout pauses. Its data goes back only if the leader
-  watched it from its move on and never saw it healthy (once seen healthy
-  it served, and that is recorded, so a new leader knows too), and only on
-  the node it moved on: elsewhere, or if the leader cannot say, the
-  rollout pauses with the data as it is. Without ZFS, the data stays as it
+  that moved it looked at it every few seconds since, its rollout running
+  all along, and never saw it healthy (once seen healthy it served, and
+  that is recorded, so a new leader knows too), and only while it runs on
+  the node it moved on. Otherwise (a new leader, a pause, a move) the
+  rollout pauses with the tenant's revision and data as they are. Without ZFS, the data stays as it
   is. A node that should take the data back but has no snapshot of then
   keeps the tenant stopped; `murder app rollout abort` starts it on its
   data as it is.

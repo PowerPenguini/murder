@@ -289,18 +289,20 @@ func (s *SQLite) RollBackTenants(app string, at RolloutAt, tenants map[string]in
 				return fmt.Errorf("%w: tenant %s changed since it was seen failing", ErrConflict, name)
 			}
 			image := ""
-			if restore && !record.Served && record.MovedOn == record.Node {
+			if restore {
+				// The old image never starts on data the newer one may
+				// have changed, unless the data goes back too.
+				if record.Served || record.MovedOn != record.Node {
+					return fmt.Errorf("%w: tenant %s served on the newest revision or moved since its wave: its data cannot go back", ErrConflict, name)
+				}
 				image = spec.Compose(revisionSpec(current, app, record.BeforeRevision), name, record.Overrides).Image
 			}
 			if err := tx.Exec(`UPDATE tenants SET app_revision = before_revision, before_revision = 0, served = 0, moved_on = '', restore = ?, generation = generation + 1, updated_at = ? WHERE name = ?`, image, stamp, name); err != nil {
 				return err
 			}
 			detail := fmt.Sprintf("back to revision %d: %s", record.BeforeRevision, reason)
-			switch {
-			case image != "":
+			if image != "" {
 				detail += "; its data goes back to the snapshot taken as its image changed"
-			case restore:
-				detail += "; its data stays: it served on the newest revision, or moved since"
 			}
 			if err := event(tx, now, actor, "rollout.rolled-back", name, app, detail); err != nil {
 				return err

@@ -79,8 +79,18 @@ func newFixture(t *testing.T, tenants int, canaries ...string) *fixture {
 	return f
 }
 
-// step moves the clock on and has the driver look.
+// step moves the clock on, the driver looking every five seconds as it
+// does.
 func (f *fixture) step(d time.Duration) {
+	for d > 0 {
+		next := min(d, 5*time.Second)
+		f.clock, d = f.clock.Add(next), d-next
+		f.driver.Step(context.Background())
+	}
+}
+
+// jump moves the clock on with the driver not looking meanwhile.
+func (f *fixture) jump(d time.Duration) {
 	f.clock = f.clock.Add(d)
 	f.driver.Step(context.Background())
 }
@@ -235,6 +245,7 @@ func TestACanaryThatServedNeverLosesItsData(t *testing.T) {
 	}
 	// A new leader knows nothing but what the store says.
 	f.driver.watches = nil
+	f.driver.Leader = func() bool { return true }
 	f.sick["t07"] = true
 	f.step(time.Second)
 	f.step(6 * time.Minute)
@@ -251,7 +262,7 @@ func TestATenantNotWatchedAllAlongKeepsItsData(t *testing.T) {
 	f := newFixture(t, 3)
 	f.sick["t00"] = true
 	f.step(time.Second)
-	f.step(6 * time.Minute) // first seen long after it moved
+	f.jump(6 * time.Minute) // looked at again long after it moved
 	rollout := f.rollout(t)
 	t00, _ := f.store.Get("t00")
 	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "did not watch it all along") || t00.Restore != "" || t00.AppRevision != 0 {
@@ -278,9 +289,61 @@ func TestAContainerSeenFirstAfterARestartIsNotThrough(t *testing.T) {
 	f := newFixture(t, 2)
 	f.restarts["t00"] = 1
 	f.step(time.Second)
-	f.step(5 * time.Second)
-	f.step(3 * time.Minute)
+	// Its soak starts at the look after the one that saw the restart.
+	f.step(2 * time.Minute)
 	if got := f.onNewest(); len(got) != 1 {
 		t.Fatalf("moved on after a restart: %v", got)
+	}
+	f.step(30 * time.Second)
+	if got := f.onNewest(); len(got) != 2 {
+		t.Fatalf("not moved on after a whole soak: %v", got)
+	}
+}
+
+// Paused and resumed, a tenant was not watched meanwhile: it may have
+// served, so its data stays.
+func TestAPauseEndsWhatTheDriverKnows(t *testing.T) {
+	f := newFixture(t, 3)
+	f.sick["t00"] = true
+	f.step(time.Second)
+	f.step(10 * time.Second)
+	if err := f.store.PauseRollout("web", "a look", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.step(10 * time.Second)
+	if err := f.store.ResumeRollout("web", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.step(6 * time.Minute)
+	rollout := f.rollout(t)
+	t00, _ := f.store.Get("t00")
+	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "did not watch it all along") || t00.Restore != "" || t00.AppRevision != 0 {
+		t.Fatalf("rollout %+v, t00 restore %q revision %d", rollout, t00.Restore, t00.AppRevision)
+	}
+}
+
+// One that moved to another node since its wave keeps its revision and
+// data: that node has no snapshot of before.
+func TestATenantMovedSinceItsWaveKeepsItsRevision(t *testing.T) {
+	f := newFixture(t, 3)
+	if err := f.store.PutNode(store.Node{Name: "n1", Address: "10.0.0.1:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.PutNode(store.Node{Name: "n2", Address: "10.0.0.2:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.sick["t00"] = true
+	f.step(time.Second)
+	if _, err := f.store.StartMove("t00", "n2", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.FinishMove("t00", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.step(6 * time.Minute)
+	rollout := f.rollout(t)
+	t00, _ := f.store.Get("t00")
+	if rollout.State != store.RolloutPaused || !strings.Contains(rollout.Reason, "moved since its wave") || t00.Restore != "" || t00.AppRevision != 0 {
+		t.Fatalf("rollout %+v, t00 restore %q revision %d", rollout, t00.Restore, t00.AppRevision)
 	}
 }

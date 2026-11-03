@@ -282,10 +282,11 @@ func TestDataGoesBackOnlyWhereItsSnapshotIs(t *testing.T) {
 	if _, err := st.FinishMove("a", "test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RollBackTenants("web", at(t, st), generations(st, "a"), true, "a never became healthy", "murder"); err != nil {
-		t.Fatal(err)
+	// Its data cannot go back, so neither does its revision.
+	if err := st.RollBackTenants("web", at(t, st), generations(st, "a"), true, "a never became healthy", "murder"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a moved since its wave: %v", err)
 	}
-	if a, _ := st.Get("a"); a.Restore != "" || a.AppRevision != 1 {
+	if a, _ := st.Get("a"); a.Restore != "" || a.AppRevision != 0 {
 		t.Fatalf("a moved since its wave: %+v", a)
 	}
 }
