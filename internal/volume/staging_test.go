@@ -294,3 +294,31 @@ func TestRollingBackAHalfSwappedCopyKeepsIt(t *testing.T) {
 		t.Fatalf("datasets %v; calls %v", fake.datasets, fake.calls)
 	}
 }
+
+// Asked whether a copy whose swap stopped half way is a copy, IsReplica
+// finishes the swap and says yes: a caller told no would remove the copy.
+// An old copy of no swap in progress stays aside.
+func TestIsReplicaFinishesAHalfSwappedCopy(t *testing.T) {
+	fake, z := newReplicaZFS()
+	copyOf := func(swap string) *fakeDataset {
+		return &fakeDataset{owner: "acme", role: replicaRole, canmount: "noauto", mountpoint: "/srv/murder/tenants/acme", swap: swap}
+	}
+	old := copyOf("t1")
+	fake.datasets["tank/murder/murder-previous:acme"] = old
+	fake.datasets["tank/murder/murder-incoming:acme"] = copyOf("t1")
+	if replica, err := z.IsReplica(context.Background(), "acme"); err != nil || !replica {
+		t.Fatalf("IsReplica = %v, %v", replica, err)
+	}
+	if fake.datasets["tank/murder/acme"] != old || len(fake.datasets) != 1 || old.swap != "" {
+		t.Fatalf("datasets %v", fake.datasets)
+	}
+
+	fake, z = newReplicaZFS()
+	fake.datasets["tank/murder/murder-previous:acme"] = copyOf("t1")
+	if replica, err := z.IsReplica(context.Background(), "acme"); err != nil || replica {
+		t.Fatalf("IsReplica of an old copy alone = %v, %v", replica, err)
+	}
+	if fake.datasets["tank/murder/acme"] != nil || fake.datasets["tank/murder/murder-previous:acme"] == nil {
+		t.Fatalf("datasets %v", fake.datasets)
+	}
+}

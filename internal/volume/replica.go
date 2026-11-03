@@ -38,7 +38,8 @@ type Replicas interface {
 	// DropReplica destroys the tenant's copy on this node; live data, one
 	// not marked as a copy, is refused.
 	DropReplica(ctx context.Context, tenant string) error
-	// IsReplica reports whether the tenant's data here is a copy.
+	// IsReplica reports whether the tenant's data here is a copy, once a
+	// whole copy's swap that stopped half way is finished.
 	IsReplica(ctx context.Context, tenant string) (bool, error)
 	// RollbackReplica takes the tenant's copy back to its newest replica
 	// snapshot, dropping what a move added since; a copy without one goes.
@@ -425,12 +426,34 @@ func (z ZFS) RollbackReplica(ctx context.Context, tenant string) error {
 	return err
 }
 
+// IsReplica finishes first a whole copy's swap that stopped half way, as
+// Exists does: the tenant's copy then waits under a staging name, and a
+// caller told there is no copy would remove the tenant's data, staging
+// copies and all, rather than keep the copy.
 func (z ZFS) IsReplica(ctx context.Context, tenant string) (bool, error) {
 	if err := checkTenant(tenant); err != nil {
 		return false, err
 	}
-	current, exists, err := z.properties(ctx, z.dataset(tenant))
-	return exists && current.owner == tenant && current.role == replicaRole, err
+	dataset := z.dataset(tenant)
+	current, exists, err := z.properties(ctx, dataset)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		defer lockDataset(dataset)()
+		if current, exists, err = z.properties(ctx, dataset); err != nil {
+			return false, err
+		}
+		if !exists {
+			if restored, err := z.restoreSwap(ctx, tenant); err != nil || !restored {
+				return false, err
+			}
+			if current, exists, err = z.properties(ctx, dataset); err != nil {
+				return false, err
+			}
+		}
+	}
+	return exists && current.owner == tenant && current.role == replicaRole, nil
 }
 
 func (z ZFS) Datasets(ctx context.Context) ([]Dataset, error) {
