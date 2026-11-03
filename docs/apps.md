@@ -79,7 +79,7 @@ connects from it, so trust it for proxy headers.
 - Images are kept in a registry outside the cluster, so a node that takes a
   tenant over can still pull its image when another node is gone. GitHub's
   container registry (ghcr.io) is the one set up here; any other works the
-  same way. Images are named in full (`ghcr.io/powerpenguini/addhoc:stable`).
+  same way. Images are named in full (`ghcr.io/example/web:stable`).
 - Private registries need a login on every node, under `registries` in
   the agent config: the registry's host, a user and a file holding the
   token, read at every pull, so a token replaced there is used at once.

@@ -8,7 +8,7 @@ socketGroup: murder                # members may run the murder CLI without root
 dockerSocket: /var/run/docker.sock
 registries:                        # private registries: images are pulled with these logins
   - host: ghcr.io                  # GitHub's container registry; another registry is another entry
-    username: powerpenguini
+    username: your-github-user
     tokenFile: /etc/murder/ghcr.token   # a token that may only read packages (0600)
 # registryAuthFile: /etc/murder/registry.json   # or a docker config.json with "auths"
 networkPool: 10.240.0.0/16         # one /28 per tenant network (the tenant at .2); must not overlap host or Docker networks
