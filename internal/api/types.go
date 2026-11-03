@@ -44,11 +44,11 @@ type Tenant struct {
 	AppRevision    int64 `json:"appRevision,omitempty"`
 	BeforeRevision int64 `json:"beforeRevision,omitempty"`
 	// Canary tenants take an app's rollout first; held ones are left out.
-	Canary    bool      `json:"canary,omitempty"`
-	Hold      bool      `json:"hold,omitempty"`
+	Canary bool `json:"canary,omitempty"`
+	Hold   bool `json:"hold,omitempty"`
 	// Restoring says the tenant waits for its data to go back to the
 	// snapshot from before its rollout moved it.
-	Restoring bool `json:"restoring,omitempty"`
+	Restoring bool      `json:"restoring,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 	// ArchivedAt is set for an archived tenant, which runs nothing until it
