@@ -18,7 +18,7 @@ import (
 type Cluster interface {
 	Status() (cluster.Status, error)
 	NodeInfo(ctx context.Context, node string) (upgrade.Info, error)
-	Install(ctx context.Context, node string, binary io.Reader, sha string) error
+	Install(ctx context.Context, node string, binary io.Reader, sha, freeze string) error
 	Bootstrap(ctx context.Context, actor string) error
 	Join(ctx context.Context, peer, actor string) error
 	Remove(ctx context.Context, node, actor string) error

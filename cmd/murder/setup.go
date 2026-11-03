@@ -16,6 +16,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
+	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/setup"
 )
 
@@ -138,7 +139,7 @@ func runSetup(args []string) error {
 	if interactive && !ask.yes("\nGo on?", true) {
 		return errors.New("nothing was changed")
 	}
-	client, err := install(ctx, steps)
+	client, err := install(ctx, steps, setup.ConfigFile)
 	if err != nil {
 		return err
 	}
@@ -167,8 +168,9 @@ func stopFor(problems []string) error {
 	return errors.New("setup stopped; nothing was changed")
 }
 
-// install takes the steps and waits for the agent to answer.
-func install(ctx context.Context, steps []setup.Step) (*api.Client, error) {
+// install takes the steps and waits for the agent to answer, on the
+// socket of the config at configPath, which the steps wrote.
+func install(ctx context.Context, steps []setup.Step, configPath string) (*api.Client, error) {
 	fmt.Fprintln(stdout)
 	for _, step := range steps {
 		fmt.Fprintln(stdout, "→ "+step.Say)
@@ -180,7 +182,11 @@ func install(ctx context.Context, steps []setup.Step) (*api.Client, error) {
 			return nil, fmt.Errorf("%s: %w", step.Say, err)
 		}
 	}
-	client := api.NewClient(defaultSocket())
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, err
+	}
+	client := api.NewClient(cfg.Socket)
 	if err := waitForAgent(ctx, client, time.Minute); err != nil {
 		return nil, fmt.Errorf("%w (journalctl -u murder-agent says why)", err)
 	}
@@ -241,7 +247,7 @@ func joinCluster(ctx context.Context, host setup.System, facts setup.Facts, opts
 	if err != nil {
 		return err
 	}
-	client, err := install(ctx, steps)
+	client, err := install(ctx, steps, setup.ConfigFile)
 	if err != nil {
 		return err
 	}
@@ -263,12 +269,6 @@ func joinCluster(ctx context.Context, host setup.System, facts setup.Facts, opts
 	}
 	fmt.Fprintf(stdout, "  - open %s in the provider's firewall; keep %d and %d to the private network\n", ports, peer.Port(), agent.Edge.RelayPort)
 	return nil
-}
-
-// defaultSocket is the agent's socket as the CLI finds it.
-func defaultSocket() string {
-	flags := flag.NewFlagSet("", flag.ContinueOnError)
-	return *socketPath(flags)
 }
 
 // waitForAgent waits until the agent answers on its socket.

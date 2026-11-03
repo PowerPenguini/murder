@@ -14,7 +14,7 @@ import (
 // Upgrader is this node's part in an upgrade.
 type Upgrader interface {
 	Info() upgrade.Info
-	Install(ctx context.Context, binary io.Reader, sha string) error
+	Install(ctx context.Context, binary io.Reader, sha, freeze string) error
 }
 
 // WithUpgrader takes upgrades on this node.
@@ -51,21 +51,35 @@ func (s *Server) freeze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(errors.New("a freeze needs a reason")))
 		return
 	}
-	if err := s.store.Freeze(reason, actor(r)); err != nil {
+	var err error
+	if from := r.URL.Query().Get("replaces"); from != "" {
+		err = s.store.TakeOverFreeze(from, reason, actor(r))
+	} else {
+		err = s.store.Freeze(reason, actor(r))
+	}
+	if err != nil {
 		writeError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// thaw takes changes again; with ?if=, only if the freeze is still that
-// one.
+// thaw takes changes again. With ?if= (the panel) or ?reason= (an
+// upgrade's coordinator), only if the freeze is still that one: another,
+// a rotation's or an upgrade that took this one over, stays and the thaw is
+// refused with 409.
 func (s *Server) thaw(w http.ResponseWriter, r *http.Request) {
-	thaw := func() error { return s.store.Thaw(actor(r)) }
-	if r.URL.Query().Has("if") {
-		thaw = func() error { return s.store.ThawIf(r.URL.Query().Get("if"), actor(r)) }
+	query := r.URL.Query()
+	var err error
+	switch {
+	case query.Has("if"):
+		err = s.store.ThawIf(query.Get("if"), actor(r))
+	case query.Get("reason") != "":
+		err = s.store.ThawIf(query.Get("reason"), actor(r))
+	default:
+		err = s.store.Thaw(actor(r))
 	}
-	if err := thaw(); err != nil {
+	if err != nil {
 		writeError(w, err)
 		return
 	}
@@ -95,7 +109,7 @@ func (s *Server) nodeInfo(w http.ResponseWriter, r *http.Request) {
 // installOn installs a binary on this node, or sends it to another node of
 // the cluster.
 func (s *Server) installOn(w http.ResponseWriter, r *http.Request) {
-	node, sha := r.PathValue("node"), r.Header.Get(api.ShaHeader)
+	node, sha, freeze := r.PathValue("node"), r.Header.Get(api.ShaHeader), r.Header.Get(api.FreezeHeader)
 	if sha == "" {
 		writeError(w, badRequest(errors.New("the binary's SHA-256 is missing")))
 		return
@@ -104,13 +118,13 @@ func (s *Server) installOn(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch {
 	case s.local(node) && s.upgrader != nil:
-		if err = s.upgrader.Install(r.Context(), body, sha); err != nil {
-			err = statusError{http.StatusUnprocessableEntity, err}
+		if err = s.upgrader.Install(r.Context(), body, sha, freeze); err != nil {
+			err = statusError{installStatus(err), err}
 		}
 	case s.local(node) || s.cluster == nil:
 		err = statusError{http.StatusConflict, fmt.Errorf("node %s takes no upgrades from here", node)}
 	default:
-		err = s.cluster.Install(r.Context(), node, body, sha)
+		err = s.cluster.Install(r.Context(), node, body, sha, freeze)
 	}
 	if err != nil {
 		writeError(w, err)
@@ -124,4 +138,17 @@ func (s *Server) installOn(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("record the upgrade", "node", node, "error", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// installStatus tells a node that refused a binary, and runs its old one
+// (422), from one that took no binary because the upgrade no longer holds
+// the freeze (412), or another install restarts it (409).
+func installStatus(err error) int {
+	switch {
+	case errors.Is(err, upgrade.ErrNotOwner):
+		return http.StatusPreconditionFailed
+	case errors.Is(err, upgrade.ErrRestarting):
+		return http.StatusConflict
+	}
+	return http.StatusUnprocessableEntity
 }

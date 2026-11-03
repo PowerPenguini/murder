@@ -123,7 +123,13 @@ func (a *fakeAgent) NodeInfo(_ context.Context, name string) (upgrade.Info, erro
 	return info, nil
 }
 
-func (a *fakeAgent) Install(_ context.Context, name string, binary io.Reader, sha string) error {
+func (a *fakeAgent) Nodes(context.Context) (api.Nodes, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return api.Nodes{Self: a.self, Frozen: a.frozen}, nil
+}
+
+func (a *fakeAgent) Install(_ context.Context, name string, binary io.Reader, sha, freeze string) error {
 	data, err := io.ReadAll(binary)
 	if err != nil {
 		return err
@@ -132,6 +138,9 @@ func (a *fakeAgent) Install(_ context.Context, name string, binary io.Reader, sh
 	defer a.mu.Unlock()
 	node := a.node(name)
 	sum := sha256.Sum256(data)
+	if freeze != "" && a.frozen != freeze {
+		return &api.Error{Status: http.StatusPreconditionFailed, Message: "the upgrade no longer holds the freeze"}
+	}
 	if !strings.HasPrefix(a.frozen, store.UpgradeFreeze) {
 		return &api.Error{Status: http.StatusConflict, Message: "changes are not frozen for an upgrade"}
 	}
@@ -156,12 +165,12 @@ func (a *fakeAgent) Install(_ context.Context, name string, binary io.Reader, sh
 	return nil
 }
 
-// Freeze refuses as store.Freeze does: an upgrade takes over another
-// upgrade's freeze, nothing else's.
+// Freeze, TakeOverFreeze and ThawOwn refuse as the store and the API do:
+// a freeze for another reason stays.
 func (a *fakeAgent) Freeze(_ context.Context, reason string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.frozen != "" && a.frozen != reason && !(strings.HasPrefix(a.frozen, store.UpgradeFreeze) && strings.HasPrefix(reason, store.UpgradeFreeze)) {
+	if a.frozen != "" && a.frozen != reason {
 		return &api.Error{Status: http.StatusConflict, Message: "changes are frozen: " + a.frozen}
 	}
 	a.frozen = reason
@@ -169,12 +178,29 @@ func (a *fakeAgent) Freeze(_ context.Context, reason string) error {
 	return nil
 }
 
-func (a *fakeAgent) Thaw(context.Context) error {
+func (a *fakeAgent) TakeOverFreeze(_ context.Context, from, reason string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.frozen = ""
-	a.thawed++
+	if a.frozen != from {
+		return &api.Error{Status: http.StatusConflict, Message: "changes are frozen: " + a.frozen}
+	}
+	a.frozen = reason
+	a.freezes++
 	return nil
+}
+
+func (a *fakeAgent) ThawOwn(_ context.Context, reason string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch a.frozen {
+	case "":
+		return nil
+	case reason:
+		a.frozen = ""
+		a.thawed++
+		return nil
+	}
+	return &api.Error{Status: http.StatusConflict, Message: "changes are frozen: " + a.frozen + ", not " + reason}
 }
 
 func (a *fakeAgent) List(context.Context) ([]api.Tenant, error) {
@@ -242,7 +268,9 @@ func TestTheFreezeNamesTheUpgrade(t *testing.T) {
 	agent.stuck = map[string]bool{"n2": true}
 	path, sum := binary(t)
 	_ = Upgrade(context.Background(), agent, path, time.Second, io.Discard)
-	if agent.frozen != store.UpgradeFreeze+sum[:12] {
+	// It names the binary, the node that coordinates it and an operation
+	// of its own.
+	if !strings.HasPrefix(agent.frozen, store.UpgradeFreeze+sum[:12]+" from node n1, operation ") {
 		t.Fatalf("frozen for %q", agent.frozen)
 	}
 }
@@ -388,9 +416,164 @@ func TestARefusalLeavesNodesThatDifferFrozen(t *testing.T) {
 	agent.refuse = map[string]bool{"n2": true}
 	agent.frozen = store.UpgradeFreeze + "x"
 	path, _ := binary(t)
-	err := Upgrade(context.Background(), agent, path, 5*time.Second, io.Discard)
+	err := TakeOver(context.Background(), agent, path, 5*time.Second, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "the nodes ran different binaries before this upgrade") || agent.frozen == "" || agent.thawed != 0 {
 		t.Fatalf("upgrade: %v, frozen %q, thawed %d", err, agent.frozen, agent.thawed)
+	}
+}
+
+// An upgrade never takes over the freeze of another, which may still run,
+// unless told to: neither one of another binary, nor one of the same binary
+// coordinated from another node.
+func TestAnUpgradeTakesOverAnotherOnlyWhenTold(t *testing.T) {
+	path, sum := binary(t)
+	for _, held := range []string{store.UpgradeFreeze + "x", store.UpgradeFreeze + sum[:12] + " from node n2, operation 01"} {
+		agent := newFakeAgent(old3())
+		agent.frozen = held
+		err := Upgrade(context.Background(), agent, path, 5*time.Second, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "changes are frozen for another upgrade") || !strings.Contains(err.Error(), "-take-over") || agent.frozen != held || len(agent.installed) != 0 {
+			t.Fatalf("over %q: %v, frozen %q, installed %v", held, err, agent.frozen, agent.installed)
+		}
+		var out bytes.Buffer
+		if err := TakeOver(context.Background(), agent, path, 5*time.Second, &out); err != nil {
+			t.Fatal(err)
+		}
+		if agent.frozen != "" || !strings.Contains(out.String(), "taking over the freeze of another upgrade") || len(agent.installed) != 3 {
+			t.Fatalf("a takeover of %q: frozen %q, installed %v:\n%s", held, agent.frozen, agent.installed, out.String())
+		}
+	}
+}
+
+// An upgrade this node coordinated, to the same binary, resumes under a
+// freeze of its own: the one it was installs nothing more.
+func TestAnUpgradeResumesItsOwnUnderANewFreeze(t *testing.T) {
+	agent := newFakeAgent(old3())
+	path, sum := binary(t)
+	agent.running["n2"] = sum
+	held := store.UpgradeFreeze + sum[:12] + " from node n1, operation 01"
+	agent.frozen = held
+	var out bytes.Buffer
+	if err := Upgrade(context.Background(), agent, path, 5*time.Second, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(agent.installed, []string{"n3", "n1"}) || agent.frozen != "" || !strings.Contains(out.String(), "resuming the upgrade that stopped") {
+		t.Fatalf("installed %v, frozen %q:\n%s", agent.installed, agent.frozen, out.String())
+	}
+	file, _ := os.Open(path)
+	defer file.Close()
+	agent.frozen = store.UpgradeFreeze + "y"
+	if err := agent.Install(context.Background(), "n2", file, sum, held); status(err) != http.StatusPreconditionFailed {
+		t.Fatalf("an install under the freeze taken over: %v", err)
+	}
+}
+
+// racingAgent is a cluster where another upgrade begins between this one's
+// look at the nodes and its freeze, and upgrades n3 first.
+type racingAgent struct {
+	*fakeAgent
+	path, sum string
+}
+
+func (a racingAgent) Freeze(ctx context.Context, reason string) error {
+	other := store.UpgradeFreeze + a.sum[:12] + " from node n2, operation 01"
+	if err := a.fakeAgent.Freeze(ctx, other); err != nil {
+		return err
+	}
+	file, err := os.Open(a.path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := a.fakeAgent.Install(ctx, "n3", file, a.sum, other); err != nil {
+		return err
+	}
+	return a.fakeAgent.Freeze(ctx, reason)
+}
+
+// Two upgrades at once: the one that froze first goes on; the other
+// changes nothing, and leaves the freeze alone, even though its first node
+// would refuse and the nodes ran one release when it looked.
+func TestAnUpgradeLeavesOneThatFrozeFirstAlone(t *testing.T) {
+	path, sum := binary(t)
+	agent := newFakeAgent(old3())
+	agent.refuse = map[string]bool{"n2": true}
+	err := Upgrade(context.Background(), racingAgent{agent, path, sum}, path, time.Second, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "freeze changes") || !strings.HasPrefix(agent.frozen, store.UpgradeFreeze) || agent.thawed != 0 {
+		t.Fatalf("upgrade: %v, frozen %q, thawed %d", err, agent.frozen, agent.thawed)
+	}
+	if !slices.Equal(agent.installed, []string{"n3"}) {
+		t.Fatalf("installed %v", agent.installed)
+	}
+}
+
+// What the nodes run is read again under the upgrade's own freeze: one
+// that took over another, which had upgraded a node, keeps changes frozen
+// when its first node refuses.
+func TestAnUpgradeReadsTheNodesOnceFrozen(t *testing.T) {
+	path, sum := binary(t)
+	agent := newFakeAgent(old3())
+	agent.refuse = map[string]bool{"n2": true}
+	agent.frozen = store.UpgradeFreeze + "x from node n2, operation 01"
+	looked := 0
+	client := lookingAgent{agent, func(node string) {
+		// The other upgrade installed on n3 after this one looked at
+		// every node, before it froze.
+		if looked++; looked == 4 {
+			agent.running["n3"] = sum
+		}
+	}}
+	err := TakeOver(context.Background(), client, path, time.Second, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "the nodes ran different binaries before this upgrade") || agent.frozen == "" || agent.thawed != 0 {
+		t.Fatalf("upgrade: %v, frozen %q, thawed %d", err, agent.frozen, agent.thawed)
+	}
+}
+
+// lookingAgent calls look before each node's answer.
+type lookingAgent struct {
+	*fakeAgent
+	look func(node string)
+}
+
+func (a lookingAgent) NodeInfo(ctx context.Context, node string) (upgrade.Info, error) {
+	a.look(node)
+	return a.fakeAgent.NodeInfo(ctx, node)
+}
+
+// An upgrade whose freeze another took over while it ran installs nothing
+// more and takes no changes again.
+func TestAnUpgradeStopsOnceItsFreezeIsTakenOver(t *testing.T) {
+	path, _ := binary(t)
+	agent := newFakeAgent(old3())
+	took := store.UpgradeFreeze + "y from node n3, operation 02"
+	client := lookingAgent{agent, func(string) {
+		if len(agent.installed) == 1 && strings.Contains(agent.frozen, " from node n1,") {
+			agent.frozen = took
+		}
+	}}
+	err := Upgrade(context.Background(), client, path, 5*time.Second, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "took no binary") || !strings.Contains(err.Error(), "installs nothing more") || agent.frozen != took || agent.thawed != 0 {
+		t.Fatalf("upgrade: %v, frozen %q, thawed %d", err, agent.frozen, agent.thawed)
+	}
+	if !slices.Equal(agent.installed, []string{"n2"}) {
+		t.Fatalf("installed %v", agent.installed)
+	}
+}
+
+// A node that ran the binary already is not sent it again, but waited for
+// as one just upgraded: an upgrade resumed takes changes again only once
+// every node has caught up and reconciled.
+func TestAResumedUpgradeWaitsForNodesThatRanTheBinary(t *testing.T) {
+	path, sum := binary(t)
+	agent := newFakeAgent(map[string]string{"n1": sum, "n2": sum, "n3": sum})
+	agent.frozen = store.UpgradeFreeze + sum[:12]
+	agent.stale = map[string]int{"n1": 100, "n2": 100, "n3": 100}
+	err := Upgrade(context.Background(), agent, path, time.Second, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "n2 runs the new binary but is not ready") || !strings.Contains(err.Error(), "has not reconciled") || agent.frozen == "" || agent.thawed != 0 || len(agent.installed) != 0 {
+		t.Fatalf("upgrade: %v, frozen %q, thawed %d, installed %v", err, agent.frozen, agent.thawed, agent.installed)
+	}
+	agent.stale = map[string]int{"n1": 2, "n2": 2, "n3": 2}
+	if err := Upgrade(context.Background(), agent, path, 10*time.Second, io.Discard); err != nil || agent.frozen != "" || len(agent.installed) != 0 {
+		t.Fatalf("upgrade: %v, frozen %q, installed %v", err, agent.frozen, agent.installed)
 	}
 }
 
@@ -494,5 +677,22 @@ func TestADrainStopsAtTheFirstTenantThatDoesNotMove(t *testing.T) {
 	}
 	if !slices.Equal(agent.moved, []string{"a"}) {
 		t.Fatalf("moved %v", agent.moved)
+	}
+}
+
+// An upgrade that ends takes changes again only if the freeze is still its
+// own: one another upgrade took over at the last moment stays.
+func TestAnUpgradeThawsOnlyItsOwnFreeze(t *testing.T) {
+	path, _ := binary(t)
+	agent := newFakeAgent(old3())
+	took := store.UpgradeFreeze + "y from node n3, operation 02"
+	client := lookingAgent{agent, func(string) {
+		if len(agent.installed) == 3 {
+			agent.frozen = took
+		}
+	}}
+	err := Upgrade(context.Background(), client, path, 5*time.Second, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "another upgrade took the freeze over meanwhile") || agent.frozen != took || agent.thawed != 0 {
+		t.Fatalf("upgrade: %v, frozen %q, thawed %d", err, agent.frozen, agent.thawed)
 	}
 }

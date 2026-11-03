@@ -76,7 +76,8 @@
   {{else}}{{with $d.Upgrading}}
   <p class="lead">{{$d.Frozen}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>, begun by {{.By}}, runs now and takes changes again once it ends.</p>
   {{else}}
-  <p class="lead">{{$d.Frozen}}. An upgrade that stopped leaves it so; once every node runs one release, take changes again.</p>
+  <p class="lead">{{$d.Frozen}}.</p>
+  <p>Taking changes again here is only for an upgrade that stopped, once every node runs one release. Never use it while an upgrade runs from another node's panel or command line: this panel sees only the jobs it began, and nodes of two releases would then take changes.</p>
   <form method="post" class="row spaced"><input type="hidden" name="do" value="thaw"><input type="hidden" name="frozen" value="{{$d.Frozen}}">
     <input type="text" name="confirm" placeholder="type thaw" data-confirm="thaw" aria-label="type thaw" autocomplete="off" required class="short">
     <button type="submit" class="danger">Take changes again</button></form>

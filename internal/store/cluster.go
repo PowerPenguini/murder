@@ -521,21 +521,20 @@ const RotationFreeze = "master key rotation from node "
 
 // Freeze refuses changes from now on, on every node, and says why. A freeze
 // for the same reason again is no change: an upgrade that stopped resumes
-// under its own freeze. Freezes, thaws and notes are written as of the
-// first schema version that writes batches, which every release since
-// applies: nodes of two releases take them during an upgrade.
+// under its own freeze. Any other freeze, another upgrade's too, is
+// refused: an upgrade takes another one's over only with TakeOverFreeze.
+// Freezes, thaws and notes are written as of the first schema version
+// that writes batches, which every release since applies: nodes of two
+// releases take them during an upgrade.
 func (s *SQLite) Freeze(reason, actor string) error {
 	if reason == "" {
 		return errors.New("a freeze needs a reason")
 	}
 	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
-		switch {
-		case current.frozen == reason:
+		switch current.frozen {
+		case reason:
 			return errUnchanged
-		case current.frozen == "":
-		// An upgrade that stopped is taken over by one with a fixed
-		// binary, under its own freeze: nodes stay apart until then.
-		case strings.HasPrefix(current.frozen, UpgradeFreeze) && strings.HasPrefix(reason, UpgradeFreeze):
+		case "":
 		default:
 			return fmt.Errorf("%w: %s", ErrFrozen, current.frozen)
 		}
@@ -599,6 +598,35 @@ func (s *SQLite) thaw(reason, actor string) error {
 			return err
 		}
 		return event(tx, now, actor, "changes.thawed", "", "", "")
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
+}
+
+// TakeOverFreeze puts the upgrade freeze reason in place of the upgrade
+// freeze from, and only of that one: an upgrade resumes, or takes over one
+// that stopped, under a freeze of its own, and one that took the freeze
+// meanwhile keeps it. Both must be upgrade freezes.
+func (s *SQLite) TakeOverFreeze(from, reason, actor string) error {
+	if !strings.HasPrefix(from, UpgradeFreeze) || !strings.HasPrefix(reason, UpgradeFreeze) {
+		return errors.New("only an upgrade takes over an upgrade's freeze")
+	}
+	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+		switch current.frozen {
+		case reason:
+			return errUnchanged
+		case from:
+		case "":
+			return fmt.Errorf("%w: changes are no longer frozen for %q", ErrConflict, from)
+		default:
+			return fmt.Errorf("%w: %s", ErrFrozen, current.frozen)
+		}
+		if err := tx.Exec(`UPDATE meta SET value = ? WHERE key = 'frozen'`, reason); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "changes.frozen", "", "", reason+" (took over from "+from+")")
 	})
 	if errors.Is(err, errUnchanged) {
 		return nil

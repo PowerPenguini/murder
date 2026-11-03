@@ -417,7 +417,13 @@ type Store interface {
 	Frozen() string
 	Freeze(reason, actor string) error
 	Thaw(actor string) error
+	// ThawIf thaws only the freeze for reason and refuses with ErrConflict
+	// when another one is in place; ThawOwn thaws only the freeze for
+	// reason and leaves another one alone. TakeOverFreeze puts one
+	// upgrade's freeze in place of another's, only of that one.
 	ThawIf(reason, actor string) error
+	ThawOwn(reason, actor string) error
+	TakeOverFreeze(from, reason, actor string) error
 	// Note records an event, frozen or not.
 	Note(action, detail, actor string) error
 
