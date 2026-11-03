@@ -71,7 +71,7 @@ These changes go together in one schema version:
   keeping the most to one keeping at least two fewer, as after a node
   joins or comes back from a failure (schema 10: `tenants.replica_next`).
   The owner sends the new node a whole copy while still sending the
-  replica its changes, and only once that copy is whole does it become the
+  replica its changes every pass, and only once that copy is whole does it become the
   replica, ready (`SwitchReplica`); the old node then drops its copy. So a
   tenant never lacks a whole copy while its copy moves. A failover, a move
   of the tenant, or the new node failing or leaving stops the move of the
@@ -113,8 +113,25 @@ moving elsewhere keep being replicated.
 5. The replica node prunes its received snapshots to the newest 3. The owner
    prunes its own `replica` snapshots to the newest 3.
 
-Up to 4 tenants are sent at once. Archived tenants are replicated too: their
-data rarely changes, so step 1 skips them.
+Each copy, a tenant's on one node, has one send at a time, and no send
+waits for another tenant's: a pass begins the sends of copies with none
+under way and leaves one still under way, such as a whole copy that takes
+hours, to finish. Up to 4 ready replicas get their changes at once, and,
+apart, up to 4 copies not whole yet (a replica's first, or a copy moving to
+another node), so whole copies never hold up the changes of other tenants.
+While a tenant's copy moves, its replica keeps getting its changes every
+pass, but the owner prunes none of its `replica` snapshots until the move
+ends: the one the moving copy is sent from is the base of the new replica's
+first changes.
+
+A send whose stream moves nothing for 2 minutes, or whose other node
+answers nothing for 2 minutes once the stream ended, fails, and so does
+asking a node for its snapshots that long: a node that answers pings but
+stalls never holds a copy up. A stall on the other node's side counts
+toward giving up a copy not whole yet, as its other failures do.
+
+Archived tenants are replicated too: their data rarely changes, so step 1
+skips them.
 
 **What the replica node refuses**, checked against its own view of the
 state:

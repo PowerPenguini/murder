@@ -365,12 +365,17 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	case "backups":
 		toJob(s.Jobs.Start(JobBackups, "back up the tenants of "+s.nodeName(ctx, agent), user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			results, err := agent.RunBackups(ctx)
+			failed := 0
 			for _, result := range results {
 				if result.Error != "" {
-					fmt.Fprintf(out, "%s: failed: %s\n", result.Tenant, result.Error)
+					failed++
+					fmt.Fprintf(out, "%s: failed: %s\n", result.Label(), result.Error)
 				} else {
-					fmt.Fprintf(out, "%s: %s\n", result.Tenant, result.Key)
+					fmt.Fprintf(out, "%s: %s\n", result.Label(), result.Key)
 				}
+			}
+			if err == nil && failed > 0 {
+				err = fmt.Errorf("%d of %d backups failed", failed, len(results))
 			}
 			return err
 		}))

@@ -85,9 +85,9 @@ func runBackups(args []string) error {
 		for _, result := range results {
 			if result.Error != "" {
 				failed++
-				fmt.Fprintf(stdout, "%s: %s\n", result.Tenant, result.Error)
+				fmt.Fprintf(stdout, "%s: %s\n", result.Label(), result.Error)
 			} else {
-				fmt.Fprintf(stdout, "%s: %s (%.1f MB)\n", result.Tenant, result.Key, float64(result.Size)/1e6)
+				fmt.Fprintf(stdout, "%s: %s (%.1f MB)\n", result.Label(), result.Key, float64(result.Size)/1e6)
 			}
 		}
 		if failed > 0 {
@@ -373,7 +373,7 @@ func (a *agentBackups) RunNow(ctx context.Context) ([]api.BackupResult, error) {
 	}
 	var answers []api.BackupResult
 	for _, r := range results {
-		answers = append(answers, api.BackupResult{Tenant: r.Tenant, Key: r.Key, Size: r.Size, Error: r.Error})
+		answers = append(answers, api.BackupResult{Tenant: r.Tenant, State: r.State, Key: r.Key, Size: r.Size, Error: r.Error})
 	}
 	return answers, nil
 }

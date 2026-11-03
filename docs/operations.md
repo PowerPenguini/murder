@@ -196,7 +196,7 @@ backups:
 sudo murder backups setup                       # make the bucket, or check it fits the mode
 sudo murder backups now                         # this node's tenants, now
 sudo murder backups list acme
-sudo murder backups verify acme -identity key.txt   # read it through, compare every file with its snapshot
+sudo murder backups verify acme -identity key.txt   # read it through as a restore would, compare it with its snapshot
 sudo murder tenant archive acme
 sudo murder backups restore acme -at 2026-11-01T18:50:55Z -identity key.txt
 sudo murder tenant restore acme
@@ -216,12 +216,31 @@ it exists, Murder makes no new empty dataset for that tenant, so the old
 data is not hidden by mistake. A `murder-copy-…` dataset is a restore that
 was interrupted and can be removed the same way.
 
+An archived tenant is backed up too, by the next run, until its newest
+backup holds its data as it was archived (nothing written since that
+backup's snapshot), and then no more, on request or not: writes between the
+last hourly backup and archiving reach the bucket, and a tenant made and
+archived between two runs gets its backup. Data that changes after all, as
+when a restore replaces it, is backed up again.
+
+A verification reads the newest backup by the rules a restore unpacks it by
+(each path once, every entry in a directory an earlier one made, never below
+a symlink, only files, directories and symlinks), so a backup that verifies
+is one that restores. While the snapshot it was made of is still on the
+node, it then compares what a restore puts back: the same entries, of the
+same types, owners, modes and times, symlinks to the same targets, files
+with the same content.
+
 With `identityFile` set on a node, it verifies its tenants' backups weekly
 by itself. An agent that restarts makes no new backup of a tenant backed up
 less than a run ago. `/metrics` has
 `murder_tenant_backup_last_success_timestamp_seconds` and
-`murder_tenant_backup_failing` for each tenant; `murder backups now` exits
-with an error when any backup failed. An S3 key file missing or unreadable does not stop
+`murder_tenant_backup_failing` for each tenant, and, on the leader,
+`murder_state_backup_last_success_timestamp_seconds` and
+`murder_state_backup_failing` for the cluster's state (a node that stops
+leading drops them). `murder backups now` lists the state's backup beside
+the tenants' on the leader, and exits with an error when any of them failed,
+the state's included; the panel's backup job fails alike. An S3 key file missing or unreadable does not stop
 the agent: it runs without backups, logs why every minute and sets
 `murder_backups_ready` to 0 until the file is fixed. A missing
 `identityFile` skips only the verifications. A recipient that is no age key

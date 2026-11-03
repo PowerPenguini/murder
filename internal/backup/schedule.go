@@ -26,12 +26,15 @@ type State interface {
 	SnapshotFile() (string, error)
 }
 
-// Result is how backing up one tenant went.
+// Result is how backing up one tenant, or the cluster's state, went.
 type Result struct {
 	Tenant string
-	Key    string
-	Size   int64
-	Error  string
+	// State says the result is the cluster's state's, which the leader
+	// backs up; Tenant is then empty.
+	State bool
+	Key   string
+	Size  int64
+	Error string
 }
 
 // Replaced is how replacing a tenant's data with a copy went: Aside names
@@ -90,13 +93,21 @@ type Scheduler struct {
 	// its last try failed, for /metrics.
 	last    map[string]time.Time
 	failing map[string]bool
+	// stateTried is whether this node, leading, backed the state up since
+	// it last led; stateLast is when that last worked, stateFailing
+	// whether its last try failed.
+	stateTried   bool
+	stateLast    time.Time
+	stateFailing bool
 }
 
 // tenantData is what a scheduler needs of the volume driver besides what
-// Backups need: whether a tenant has data on this node, and its dataset.
+// Backups need: whether a tenant has data on this node, its dataset, and
+// how much it took on since one of its snapshots.
 type tenantData interface {
 	Exists(ctx context.Context, tenant string) (bool, error)
 	Dataset(tenant string) string
+	Written(ctx context.Context, tenant, snapshot string) (int64, error)
 }
 
 // The volume driver backups run with gives a scheduler what it needs.
@@ -157,7 +168,9 @@ func (a *Scheduler) lock(ctx context.Context) error {
 
 func (a *Scheduler) unlock() { <-a.running }
 
-// RunNow runs a backup of this node's tenants now.
+// RunNow runs a backup of this node's tenants now, and of the cluster's
+// state if this node leads; a backup that failed is a result with an
+// Error.
 func (a *Scheduler) RunNow(ctx context.Context) ([]Result, error) {
 	if err := a.lock(ctx); err != nil {
 		return nil, err
@@ -264,20 +277,37 @@ func (a *Scheduler) checkBucket(ctx context.Context) {
 }
 
 // own lists the tenants whose backups are this node's: those it runs,
-// with data, not moving away and not archived (an archived tenant's data
-// stays as its last backups have it).
-func (a *Scheduler) own(ctx context.Context) []string {
-	var names []string
+// archived or not, with data and not moving away.
+func (a *Scheduler) own(ctx context.Context) []store.Record {
+	var records []store.Record
 	for _, record := range a.state.List() {
-		if record.Node != a.state.Node() || record.MoveTo != "" || record.Archived() {
+		if record.Node != a.state.Node() || record.MoveTo != "" {
 			continue
 		}
 		if exists, err := a.data.Exists(ctx, record.Spec.Name); err != nil || !exists {
 			continue
 		}
-		names = append(names, record.Spec.Name)
+		records = append(records, record)
 	}
-	return names
+	return records
+}
+
+// captured reports whether the tenant's newest backup holds its data as it
+// is: the snapshot it was made of is here, and nothing was written since.
+// An archived tenant is backed up until its data, as it was archived, is;
+// then no more, as nothing changes it.
+func (a *Scheduler) captured(ctx context.Context, tenant string) bool {
+	list, err := a.backups.List(ctx, tenant)
+	if err != nil || len(list) == 0 {
+		return false
+	}
+	newest := list[len(list)-1]
+	written, err := a.data.Written(ctx, tenant, "murder-"+snapshotReason+"-"+newest.At.Format(stamp))
+	if err != nil || written != 0 {
+		return false
+	}
+	a.record(tenant, newest.At, false)
+	return true
 }
 
 func (a *Scheduler) record(tenant string, at time.Time, failed bool) {
@@ -305,11 +335,18 @@ func (a *Scheduler) recent(ctx context.Context, tenant string) bool {
 }
 
 // run backs this node's tenants up: all of them when forced, otherwise
-// those without a backup since about a run's interval.
+// those without a backup since about a run's interval. An archived tenant
+// is backed up, forced or not, until its newest backup holds its data as
+// it is, and then no more.
 func (a *Scheduler) run(ctx context.Context, force bool) []Result {
 	var results []Result
-	for _, name := range a.own(ctx) {
-		if !force && a.recent(ctx, name) {
+	for _, record := range a.own(ctx) {
+		name := record.Spec.Name
+		if record.Archived() {
+			if a.captured(ctx, name) {
+				continue
+			}
+		} else if !force && a.recent(ctx, name) {
 			continue
 		}
 		made, err := a.backups.BackUp(ctx, name, a.data.Dataset(name))
@@ -334,23 +371,46 @@ func (a *Scheduler) run(ctx context.Context, force bool) []Result {
 	}
 	// The state is the cluster's: its leader keeps it, and thins out the
 	// backups of tenants no longer in it.
-	if a.leader() {
-		if path, err := a.state.SnapshotFile(); err != nil {
-			a.log.Error("copy the state for a backup", "error", err)
-		} else {
-			if made, err := a.backups.BackUpState(ctx, path); err != nil {
-				a.log.Error("back the state up", "error", err)
-			} else {
-				a.log.Info("backed the state up", "key", made.Key)
-			}
-			os.Remove(path)
-			if _, err := a.backups.PruneState(ctx); err != nil {
-				a.log.Warn("delete old copies of the state", "error", err)
-			}
-		}
-		a.pruneGone(ctx)
+	if !a.leader() {
+		a.mu.Lock()
+		a.stateTried = false
+		a.mu.Unlock()
+		return results
 	}
+	results = append(results, a.backUpState(ctx))
+	a.pruneGone(ctx)
 	return results
+}
+
+// backUpState backs the cluster's state up, and thins out its old copies
+// once it worked.
+func (a *Scheduler) backUpState(ctx context.Context) Result {
+	result := Result{State: true}
+	made, err := func() (Backup, error) {
+		path, err := a.state.SnapshotFile()
+		if err != nil {
+			return Backup{}, fmt.Errorf("copy the state for a backup: %w", err)
+		}
+		defer os.Remove(path)
+		return a.backups.BackUpState(ctx, path)
+	}()
+	a.mu.Lock()
+	a.stateTried, a.stateFailing = true, err != nil
+	if err == nil && made.At.After(a.stateLast) {
+		a.stateLast = made.At
+	}
+	a.mu.Unlock()
+	if err != nil {
+		result.Error = err.Error()
+		a.log.Error("back the state up", "error", err)
+		return result
+	}
+	result.Key, result.Size = made.Key, made.Size
+	a.log.Info("backed the state up", "key", made.Key)
+	if _, err := a.backups.PruneState(ctx); err != nil {
+		a.log.Warn("delete old copies of the state", "error", err)
+	}
+	return result
 }
 
 // pruneGone thins out the backups of purged tenants as any others, down
@@ -393,7 +453,8 @@ func (a *Scheduler) loadIdentity() bool {
 }
 
 func (a *Scheduler) verifyAll(ctx context.Context) {
-	for _, name := range a.own(ctx) {
+	for _, record := range a.own(ctx) {
+		name := record.Spec.Name
 		verified, err := a.backups.Verify(ctx, name, a.data.Dataset(name), a.identity)
 		if err != nil {
 			a.log.Error("a backup does not restore", "tenant", name, "error", err)
@@ -404,7 +465,8 @@ func (a *Scheduler) verifyAll(ctx context.Context) {
 }
 
 // WriteMetrics writes whether backups are set up, when each tenant was
-// last backed up, and whether its last backup failed.
+// last backed up, and whether its last backup failed; and, on the leader,
+// the same of the cluster's state.
 func (a *Scheduler) WriteMetrics(out *metrics.Writer) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -420,6 +482,14 @@ func (a *Scheduler) WriteMetrics(out *metrics.Writer) {
 	out.Family("murder_tenant_backup_failing", "gauge", "1 if the tenant's last backup failed.")
 	for _, name := range names {
 		out.Sample("murder_tenant_backup_failing", metrics.Bool(a.failing[name]), "tenant", name)
+	}
+	out.Family("murder_state_backup_last_success_timestamp_seconds", "gauge", "When the newest backup of the cluster's state that worked was made; on the leader only.")
+	if a.stateTried && !a.stateLast.IsZero() {
+		out.Sample("murder_state_backup_last_success_timestamp_seconds", metrics.Timestamp(a.stateLast))
+	}
+	out.Family("murder_state_backup_failing", "gauge", "1 if the last backup of the cluster's state failed; on the leader only.")
+	if a.stateTried {
+		out.Sample("murder_state_backup_failing", metrics.Bool(a.stateFailing))
 	}
 }
 

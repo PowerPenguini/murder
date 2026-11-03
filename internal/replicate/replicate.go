@@ -62,7 +62,11 @@ type Replicator struct {
 	Parallel int
 	// Keep is how many replica snapshots each side keeps; 3 if zero.
 	Keep int
-	Now  func() time.Time
+	// Stall fails a send whose stream moves nothing for this long, or whose
+	// other node answers nothing for this long once it is all sent; 2
+	// minutes if zero.
+	Stall time.Duration
+	Now   func() time.Time
 
 	mu sync.Mutex
 	// synced is when each tenant's copy last matched its data, failing
@@ -74,6 +78,18 @@ type Replicator struct {
 	copyFailures map[string]int
 	// caughtUp is set, by Run only, once this node first caught up.
 	caughtUp bool
+	// busy holds, by tenant and node, the copies a send runs for;
+	// changeSlots and wholeSlots bound the sends of copies whole and not.
+	busy                    map[string]bool
+	changeSlots, wholeSlots chan struct{}
+	// moves counts, by tenant, the copies moving to another node now, and
+	// movesSeen every start and end of one.
+	moves     map[string]int
+	movesSeen map[string]uint64
+	// snapshotting takes each tenant's snapshots one at a time.
+	snapshotting map[string]*sync.Mutex
+	// running waits for every send under way.
+	running sync.WaitGroup
 }
 
 // ReplicaReason names the snapshots replication takes.
@@ -86,6 +102,13 @@ func (r *Replicator) now() time.Time {
 	return time.Now()
 }
 
+func (r *Replicator) stall() time.Duration {
+	if r.Stall > 0 {
+		return r.Stall
+	}
+	return 2 * time.Minute
+}
+
 func (r *Replicator) keep() int {
 	if r.Keep > 0 {
 		return r.Keep
@@ -93,8 +116,10 @@ func (r *Replicator) keep() int {
 	return 3
 }
 
-// Run replicates until ctx ends.
+// Run replicates until ctx ends, and returns once every send it began
+// ended.
 func (r *Replicator) Run(ctx context.Context) {
+	defer r.running.Wait()
 	every := r.Every
 	if every == 0 {
 		every = 15 * time.Second
@@ -109,15 +134,17 @@ func (r *Replicator) Run(ctx context.Context) {
 	}
 }
 
-// step is one round of Run. Nothing is done before this node has once
-// caught up with the cluster: a node back from the dead would otherwise
-// send, from its old state, tenants that have since run elsewhere.
-func (r *Replicator) step(ctx context.Context) {
+// step is one round of Run: it begins the round's sends, whose wait it
+// returns, and does not wait for them. Nothing is done before this node
+// has once caught up with the cluster: a node back from the dead would
+// otherwise send, from its old state, tenants that have since run
+// elsewhere.
+func (r *Replicator) step(ctx context.Context) *sync.WaitGroup {
 	if !r.caughtUp {
 		if r.CatchUp != nil {
 			if err := r.CatchUp(); err != nil {
 				r.Log.Debug("wait for the cluster before replicating", "error", err)
-				return
+				return &sync.WaitGroup{}
 			}
 		}
 		r.caughtUp = true
@@ -130,17 +157,28 @@ func (r *Replicator) step(ctx context.Context) {
 			r.Log.Info("gave tenants their replicas", "tenants", placed)
 		}
 	}
-	r.Pass(ctx)
+	started := r.start(ctx)
 	if err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
 		r.Log.Warn("tidy the copies on this node", "error", err)
 	}
+	return started
 }
 
 // Pass sends every tenant of this node with a replica what changed since
-// its copy's newest snapshot. A tenant moving to its replica's node waits:
-// the move brings that copy up to date. A copy moving to another node
-// (ReplicaNext) is sent there too, and replaces the replica once whole.
-func (r *Replicator) Pass(ctx context.Context) {
+// its copy's newest snapshot, and waits for the sends. A tenant moving to
+// its replica's node waits: the move brings that copy up to date. A copy
+// moving to another node (ReplicaNext) is sent there too, and replaces the
+// replica once whole.
+func (r *Replicator) Pass(ctx context.Context) { r.start(ctx).Wait() }
+
+// start begins the sends of a pass and returns what waits for them. Each
+// copy, a tenant's on one node, has one send at a time: one still under way,
+// as a whole copy that takes hours, is left to finish, and the copies of
+// other tenants, and the tenant's replica while its copy moves, go on
+// without it. Sends of copies not whole yet, a replica's first and those
+// moving, take slots of their own, so they never hold up the changes of
+// ready replicas.
+func (r *Replicator) start(ctx context.Context) *sync.WaitGroup {
 	var tenants, moving []store.Record
 	current := map[string]bool{}
 	for _, record := range r.Store.List() {
@@ -183,66 +221,146 @@ func (r *Replicator) Pass(ctx context.Context) {
 		}
 	}
 	r.mu.Unlock()
-	parallel := r.Parallel
-	if parallel <= 0 {
-		parallel = 4
-	}
-	slots := make(chan struct{}, parallel)
-	var wg sync.WaitGroup
+	var started sync.WaitGroup
 	for _, record := range tenants {
-		slots <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() { <-slots; wg.Done() }()
-			err := r.Replicate(ctx, record.Spec.Name, record.Replica)
-			if !record.ReplicaReady && ctx.Err() == nil {
-				r.copyFailed(record.Spec.Name, record.Replica, err)
-			}
-			// Once the copy holds the whole data, it may take over.
-			if err == nil && !record.ReplicaReady {
-				err = r.Store.ReplicaReady(record.Spec.Name, record.Replica)
-			}
-			r.mu.Lock()
-			if r.failing == nil {
-				r.failing = map[string]string{}
-			}
-			if err != nil {
-				r.failing[record.Spec.Name] = err.Error()
-			} else {
-				delete(r.failing, record.Spec.Name)
-			}
-			r.mu.Unlock()
-			if err != nil && ctx.Err() == nil {
-				r.Log.Warn("send a tenant's changes to its replica", "tenant", record.Spec.Name, "replica", record.Replica, "error", err)
-			}
-		}()
+		r.launch(ctx, &started, record.Spec.Name, record.Replica, !record.ReplicaReady, func() { r.update(ctx, record) })
 	}
-	// Copies moving to another node go once the replicas are sent: two
-	// sends of one tenant at once would snapshot and prune it side by side.
-	wg.Wait()
 	for _, record := range moving {
-		slots <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() { <-slots; wg.Done() }()
-			name, next := record.Spec.Name, record.ReplicaNext
-			switched := false
-			err := r.replicate(ctx, name, next, false)
-			if ctx.Err() == nil {
-				r.copyFailed(name, next, err)
-			}
-			if err == nil {
-				switched, err = r.Store.SwitchReplica(name, next)
-			}
-			switch {
-			case err != nil && ctx.Err() == nil:
-				r.Log.Warn("send a tenant's copy to the node it moves to", "tenant", name, "to", next, "error", err)
-			case switched:
-				r.Log.Info("a tenant's copy moved", "tenant", name, "from", record.Replica, "to", next)
-			}
-		}()
+		r.launch(ctx, &started, record.Spec.Name, record.ReplicaNext, true, func() { r.relocate(ctx, record) })
 	}
-	wg.Wait()
+	return &started
+}
+
+// launch runs job, a send of tenant's copy on node, unless one runs
+// already; whole says the copy is not whole yet, so the send may take
+// hours.
+func (r *Replicator) launch(ctx context.Context, started *sync.WaitGroup, tenant, node string, whole bool, job func()) {
+	key := copyKey(tenant, node)
+	r.mu.Lock()
+	if r.busy[key] {
+		r.mu.Unlock()
+		return
+	}
+	if r.busy == nil {
+		r.busy = map[string]bool{}
+	}
+	r.busy[key] = true
+	slots := r.slots(whole)
+	r.mu.Unlock()
+	started.Add(1)
+	r.running.Add(1)
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			delete(r.busy, key)
+			r.mu.Unlock()
+			started.Done()
+			r.running.Done()
+		}()
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		defer func() { <-slots }()
+		job()
+	}()
+}
+
+// slots bounds the sends at once, of copies whole or not; the caller holds
+// mu.
+func (r *Replicator) slots(whole bool) chan struct{} {
+	if r.changeSlots == nil {
+		parallel := r.Parallel
+		if parallel <= 0 {
+			parallel = 4
+		}
+		r.changeSlots, r.wholeSlots = make(chan struct{}, parallel), make(chan struct{}, parallel)
+	}
+	if whole {
+		return r.wholeSlots
+	}
+	return r.changeSlots
+}
+
+// update sends a tenant's replica what changed, or all of it while it has
+// no whole copy yet.
+func (r *Replicator) update(ctx context.Context, record store.Record) {
+	err := r.Replicate(ctx, record.Spec.Name, record.Replica)
+	if !record.ReplicaReady && ctx.Err() == nil {
+		r.copyFailed(record.Spec.Name, record.Replica, err)
+	}
+	// Once the copy holds the whole data, it may take over.
+	if err == nil && !record.ReplicaReady {
+		err = r.Store.ReplicaReady(record.Spec.Name, record.Replica)
+	}
+	r.mu.Lock()
+	if r.failing == nil {
+		r.failing = map[string]string{}
+	}
+	if err != nil {
+		r.failing[record.Spec.Name] = err.Error()
+	} else {
+		delete(r.failing, record.Spec.Name)
+	}
+	r.mu.Unlock()
+	if err != nil && ctx.Err() == nil {
+		r.Log.Warn("send a tenant's changes to its replica", "tenant", record.Spec.Name, "replica", record.Replica, "error", err)
+	}
+}
+
+// relocate sends a tenant's copy to the node it moves to, whole, and makes
+// that node the replica once it is.
+func (r *Replicator) relocate(ctx context.Context, record store.Record) {
+	name, next := record.Spec.Name, record.ReplicaNext
+	// The replica's changes keep going meanwhile, but prune nothing: the
+	// snapshot this copy is sent from is the base of the next node's
+	// first changes.
+	r.relocating(name, 1)
+	defer r.relocating(name, -1)
+	switched := false
+	err := r.replicate(ctx, name, next, false)
+	if ctx.Err() == nil {
+		r.copyFailed(name, next, err)
+	}
+	if err == nil {
+		switched, err = r.Store.SwitchReplica(name, next)
+	}
+	switch {
+	case err != nil && ctx.Err() == nil:
+		r.Log.Warn("send a tenant's copy to the node it moves to", "tenant", name, "to", next, "error", err)
+	case switched:
+		r.Log.Info("a tenant's copy moved", "tenant", name, "from", record.Replica, "to", next)
+	}
+}
+
+// relocating counts a copy of tenant starting (1) or ending (-1) its move.
+func (r *Replicator) relocating(tenant string, by int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.moves == nil {
+		r.moves, r.movesSeen = map[string]int{}, map[string]uint64{}
+	}
+	r.moves[tenant] += by
+	if r.moves[tenant] == 0 {
+		delete(r.moves, tenant)
+	}
+	r.movesSeen[tenant]++
+}
+
+// pruneTurn is what a send of tenant's replica, begun now, gives mayPrune.
+func (r *Replicator) pruneTurn(tenant string) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.movesSeen[tenant]
+}
+
+// mayPrune reports whether a send of tenant's replica, begun at turn, may
+// prune its snapshots: no copy of it moved since, or moves now.
+func (r *Replicator) mayPrune(tenant string, turn uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.moves[tenant] == 0 && r.movesSeen[tenant] == turn
 }
 
 // Replicate brings the copy of tenant on node up to date with its data:
@@ -253,13 +371,18 @@ func (r *Replicator) Replicate(ctx context.Context, tenant, node string) error {
 }
 
 // replicate is Replicate; track says the copy is the replica's, whose
-// last match the metrics report.
+// last match the metrics report and whose sends prune the snapshots. A copy
+// moving to another node prunes none: the replica's next sends would take
+// its base.
 func (r *Replicator) replicate(ctx context.Context, tenant, node string, track bool) error {
+	turn := r.pruneTurn(tenant)
 	snapshots, err := r.Volumes.Snapshots(ctx, tenant, ReplicaReason)
 	if err != nil {
 		return err
 	}
-	theirs, err := r.Peer.Snapshots(ctx, node, tenant)
+	asked, cancel := context.WithTimeout(ctx, r.stall())
+	theirs, err := r.Peer.Snapshots(asked, node, tenant)
+	cancel()
 	if err != nil {
 		return fmt.Errorf("ask node %s for its copy: %w", node, peerFailure{err})
 	}
@@ -277,7 +400,7 @@ func (r *Replicator) replicate(ctx context.Context, tenant, node string, track b
 		}
 	}
 	taken := r.now()
-	full, err := r.Volumes.Snapshot(ctx, tenant, ReplicaReason)
+	full, err := r.snapshot(ctx, tenant)
 	if err != nil {
 		return err
 	}
@@ -290,13 +413,37 @@ func (r *Replicator) replicate(ctx context.Context, tenant, node string, track b
 		}
 		return err
 	}
-	if track {
-		r.markSynced(tenant, taken)
+	if !track {
+		return nil
+	}
+	r.markSynced(tenant, taken)
+	if !r.mayPrune(tenant, turn) {
+		return nil
 	}
 	if err := r.Volumes.Prune(ctx, tenant, ReplicaReason, r.keep()); err != nil {
 		r.Log.Warn("prune replica snapshots", "tenant", tenant, "error", err)
 	}
 	return nil
+}
+
+// snapshot takes a replica snapshot of tenant. The replica's send and a
+// moving copy's may take one at once: they take them one at a time, a
+// millisecond apart, as the names are timed to the millisecond.
+func (r *Replicator) snapshot(ctx context.Context, tenant string) (string, error) {
+	r.mu.Lock()
+	if r.snapshotting == nil {
+		r.snapshotting = map[string]*sync.Mutex{}
+	}
+	lock := r.snapshotting[tenant]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		r.snapshotting[tenant] = lock
+	}
+	r.mu.Unlock()
+	lock.Lock()
+	defer lock.Unlock()
+	defer time.Sleep(time.Millisecond)
+	return r.Volumes.Snapshot(ctx, tenant, ReplicaReason)
 }
 
 // NewestCommon is the newest of the snapshots ours and theirs both list,
@@ -311,7 +458,16 @@ func NewestCommon(ours, theirs []string) string {
 }
 
 func (r *Replicator) send(ctx context.Context, tenant, node, base, snapshot string) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	reader, writer := io.Pipe()
+	stream := &watched{r: reader, last: time.Now()}
+	// A stream that stalls ends, so neither side waits on it for ever.
+	unwatch := watch(ctx, stream, r.stall(), func(err error) {
+		cancel(err)
+		_ = reader.CloseWithError(err)
+		_ = writer.CloseWithError(err)
+	})
 	sent := make(chan error, 1)
 	go func() {
 		err := r.Volumes.SendSnapshot(ctx, tenant, base, snapshot, writer)
@@ -319,7 +475,7 @@ func (r *Replicator) send(ctx context.Context, tenant, node, base, snapshot stri
 		sent <- err
 		_ = writer.CloseWithError(err)
 	}()
-	received := r.Peer.Send(ctx, node, tenant, base == "", reader)
+	received := r.Peer.Send(ctx, node, tenant, base == "", stream)
 	// Whose failure: a send that failed here first ended the stream; a
 	// send that failed only once the other node gave up is its failure.
 	var sentErr error
@@ -332,6 +488,14 @@ func (r *Replicator) send(ctx context.Context, tenant, node, base, snapshot stri
 		sentErr = <-sent
 	}
 	_ = reader.CloseWithError(received)
+	unwatch()
+	var stalled stallError
+	if (sentErr != nil || received != nil) && errors.As(context.Cause(ctx), &stalled) {
+		if stalled.here {
+			return errors.Join(stalled, sentErr)
+		}
+		return peerFailure{fmt.Errorf("node %s: %w", node, stalled)}
+	}
 	switch {
 	case failedHere:
 		return errors.Join(sentErr, received)
@@ -339,6 +503,75 @@ func (r *Replicator) send(ctx context.Context, tenant, node, base, snapshot stri
 		return peerFailure{received}
 	}
 	return sentErr
+}
+
+// watched is a stream to another node, which notes when it last moved and
+// whether the other node is reading it.
+type watched struct {
+	r       io.Reader
+	mu      sync.Mutex
+	last    time.Time
+	reading bool
+}
+
+func (w *watched) Read(p []byte) (int, error) {
+	w.mu.Lock()
+	w.reading = true
+	w.mu.Unlock()
+	n, err := w.r.Read(p)
+	w.mu.Lock()
+	w.reading = false
+	if n > 0 || err != nil {
+		w.last = time.Now()
+	}
+	w.mu.Unlock()
+	return n, err
+}
+
+// stallError is a stream that moved nothing for a while: here says this
+// node had nothing to give while the other read, rather than the other
+// reading nothing, or answering nothing once it had all.
+type stallError struct {
+	after time.Duration
+	here  bool
+}
+
+func (s stallError) Error() string {
+	if s.here {
+		return fmt.Sprintf("this node sent nothing for %s", s.after)
+	}
+	return fmt.Sprintf("the stream moved nothing for %s", s.after)
+}
+
+// watch calls stop once stream has not moved for stall, until the returned
+// function is called; it returns once watching ended.
+func watch(ctx context.Context, stream *watched, stall time.Duration, stop func(error)) func() {
+	quit, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(max(stall/8, time.Millisecond))
+		defer tick.Stop()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			stream.mu.Lock()
+			idle, here := time.Since(stream.last), stream.reading
+			stream.mu.Unlock()
+			if idle >= stall {
+				stop(stallError{after: stall, here: here})
+				return
+			}
+		}
+	}()
+	return func() {
+		close(quit)
+		<-done
+	}
 }
 
 // peerFailure is a failure of the node a copy goes to, not of this one.

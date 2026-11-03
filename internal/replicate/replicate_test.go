@@ -493,12 +493,12 @@ func TestNothingIsSentBeforeCatchingUp(t *testing.T) {
 	r, p := f.replicator("n1")
 	behind := errors.New("no leader")
 	r.CatchUp = func() error { return behind }
-	r.step(context.Background())
+	r.step(context.Background()).Wait()
 	if len(p.sends) != 0 {
 		t.Fatalf("sent before catching up: %v", p.sends)
 	}
 	r.CatchUp = func() error { return nil }
-	r.step(context.Background())
+	r.step(context.Background()).Wait()
 	if !slices.Equal(p.sends, []string{"acme→n2 whole=true"}) {
 		t.Fatalf("sends = %v", p.sends)
 	}
@@ -506,7 +506,7 @@ func TestNothingIsSentBeforeCatchingUp(t *testing.T) {
 	// for itself.
 	r.CatchUp = func() error { return behind }
 	f.nodes["n1"].volumes.write("acme")
-	r.step(context.Background())
+	r.step(context.Background()).Wait()
 	if len(p.sends) != 2 {
 		t.Fatalf("sends = %v", p.sends)
 	}
@@ -563,14 +563,14 @@ func TestPlacementWaitsForTheThaw(t *testing.T) {
 	r, _ := f.replicator("n1")
 	r.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	r.Leader = func() bool { return true }
-	r.step(context.Background())
+	r.step(context.Background()).Wait()
 	if record, _ := n1.store.Get("later"); record.Replica != "" || strings.Contains(logged.String(), "replicas") {
 		t.Fatalf("placed while frozen: %q; logged %s", record.Replica, logged.String())
 	}
 	if err := n1.store.Thaw("test"); err != nil {
 		t.Fatal(err)
 	}
-	r.step(context.Background())
+	r.step(context.Background()).Wait()
 	if record, _ := n1.store.Get("later"); record.Replica == "" {
 		t.Fatal("not placed once thawed")
 	}
@@ -619,8 +619,11 @@ func TestACopyMovesToAnotherNode(t *testing.T) {
 		t.Fatalf("acme: %+v", record)
 	}
 	p.sends = nil
+	f.clock = f.clock.Add(15 * time.Second)
 	n1.volumes.write("acme")
 	r.Pass(ctx)
+	// The two go side by side: the copy moving holds up no change.
+	slices.Sort(p.sends)
 	if !slices.Equal(p.sends, []string{"acme→n2 whole=false", "acme→n3 whole=true"}) {
 		t.Fatalf("sends = %v", p.sends)
 	}
@@ -756,5 +759,164 @@ func TestAReplicaThatNeverGetsItsCopyIsReplaced(t *testing.T) {
 		if node.Name == "n2" && !node.CopiesRefusedUntil.IsZero() {
 			t.Fatalf("n2 still refused: %+v", node)
 		}
+	}
+}
+
+// heldPeer holds sends to one node until released, as a whole copy that
+// takes hours would.
+type heldPeer struct {
+	*peer
+	node     string
+	entered  chan struct{}
+	released chan struct{}
+}
+
+func (p *heldPeer) Send(ctx context.Context, to, tenant string, whole bool, data io.Reader) error {
+	if to == p.node {
+		p.entered <- struct{}{}
+		select {
+		case <-p.released:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return p.peer.Send(ctx, to, tenant, whole, data)
+}
+
+// A copy moving to another node, for hours, holds up no other send: the
+// other tenants' replicas and the tenant's own keep getting their changes
+// every pass, and the snapshot the copy is sent from stays for the
+// changes that follow it.
+func TestACopyMovingHoldsUpNoOtherSend(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	n1, n2, n3 := f.nodes["n1"], f.nodes["n2"], f.nodes["n3"]
+	f.change(t, func(st *store.SQLite) {
+		if err := st.RemoveNode("n3", "test"); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"b", "c"} {
+			if _, err := st.Create(store.NewTenant{Name: name, App: "web", Node: "n1"}, "test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.PlaceReplicas("test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, name := range []string{"acme", "b", "c"} {
+		n1.volumes.write(name)
+	}
+	r, p := f.replicator("n1")
+	r.Pass(ctx)
+	f.change(t, func(st *store.SQLite) {
+		for _, name := range []string{"acme", "b", "c"} {
+			if err := st.ReplicaReady(name, "n2"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.PutNode(store.Node{Name: "n3", Address: "10.0.0.3:7400"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.PlaceReplicas("test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if record, _ := n1.store.Get("acme"); record.ReplicaNext != "n3" {
+		t.Fatalf("acme: %+v", record)
+	}
+	held := &heldPeer{peer: p, node: "n3", entered: make(chan struct{}, 1), released: make(chan struct{})}
+	r.Peer = held
+	f.clock = f.clock.Add(15 * time.Second)
+	moving := r.start(ctx)
+	<-held.entered
+	// Only the copy moving is left under way.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+		r.mu.Lock()
+		left := len(r.busy)
+		r.mu.Unlock()
+		if left == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d sends still under way", left)
+		}
+	}
+	for range 5 {
+		f.clock = f.clock.Add(15 * time.Second)
+		for _, name := range []string{"acme", "b", "c"} {
+			n1.volumes.write(name)
+		}
+		r.start(ctx).Wait()
+		for _, name := range []string{"acme", "b", "c"} {
+			if got, want := n2.volumes.data[name].version, n1.volumes.data[name].version; got != want {
+				t.Fatalf("%s's replica is at version %d, its data at %d, while acme's copy moves", name, got, want)
+			}
+		}
+	}
+	if kept := len(n1.volumes.data["acme"].snapshots); kept <= r.keep() {
+		t.Fatalf("acme's snapshots pruned to %d while its copy moved", kept)
+	}
+	close(held.released)
+	moving.Wait()
+	record, _ := n1.store.Get("acme")
+	if record.Replica != "n3" || !record.ReplicaReady {
+		t.Fatalf("after the copy moved: %+v", record)
+	}
+	// The new replica's first changes go on the snapshot it was sent.
+	p.sends = nil
+	f.clock = f.clock.Add(15 * time.Second)
+	n1.volumes.write("acme")
+	r.Pass(ctx)
+	if !slices.Contains(p.sends, "acme→n3 whole=false") {
+		t.Fatalf("sends = %v", p.sends)
+	}
+	if got, want := n3.volumes.data["acme"].version, n1.volumes.data["acme"].version; got != want {
+		t.Fatalf("the new replica is at version %d, the data at %d", got, want)
+	}
+	if kept := len(n1.volumes.data["acme"].snapshots); kept > r.keep() {
+		t.Fatalf("%d snapshots kept once the copy moved", kept)
+	}
+}
+
+// stalledPeer takes no byte of a stream, nor answers, until the sender
+// gives up; its node still answers otherwise.
+type stalledPeer struct{ *peer }
+
+func (p stalledPeer) Send(ctx context.Context, to, tenant string, whole bool, data io.Reader) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// A send whose stream stops moving fails, rather than holding the copy up
+// for ever, and counts against the node that stalled it.
+func TestAStalledSendFails(t *testing.T) {
+	f := newFixture(t)
+	n1 := f.nodes["n1"]
+	n1.volumes.write("acme")
+	r, p := f.replicator("n1")
+	r.Peer = stalledPeer{p}
+	r.Stall = 20 * time.Millisecond
+	for range copyGiveUp {
+		done := make(chan struct{})
+		go func() {
+			r.Pass(context.Background())
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a stalled send is still waited for")
+		}
+	}
+	r.mu.Lock()
+	why := r.failing["acme"]
+	r.mu.Unlock()
+	if !strings.Contains(why, "moved nothing") {
+		t.Fatalf("failing: %q", why)
+	}
+	// The first copy never got there: the replica is given up.
+	if record, _ := n1.store.Get("acme"); record.Replica != "" {
+		t.Fatalf("after %d stalled sends: %+v", copyGiveUp, record)
 	}
 }
