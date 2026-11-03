@@ -105,12 +105,15 @@ func (m *MemoryAuth) AddPasskey(_ context.Context, request api.PasskeyRequest) e
 	return nil
 }
 
-func (m *MemoryAuth) UsePasskey(_ context.Context, id, data string) error {
+func (m *MemoryAuth) UsePasskey(_ context.Context, id, previous, data string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key, ok := m.passkeys[id]
 	if !ok {
 		return store.ErrNotFound
+	}
+	if previous != "" && key.Data != previous {
+		return store.ErrConflict
 	}
 	key.Data, key.UsedAt = data, time.Now()
 	m.passkeys[id] = key
@@ -139,6 +142,14 @@ func (m *MemoryAuth) StartPanelSession(_ context.Context, request api.SessionReq
 			return store.ErrConflict
 		}
 	}
+	// As the store: sessions ended a while ago go, ended ones stay as
+	// marks that their sign-ins' challenges were used.
+	now := time.Now()
+	for hash, other := range m.sessions {
+		if other.ExpiresAt.Before(now.Add(-endedKept)) {
+			delete(m.sessions, hash)
+		}
+	}
 	m.sessions[request.Hash] = request
 	return nil
 }
@@ -156,9 +167,17 @@ func (m *MemoryAuth) PanelSession(_ context.Context, hash string, _ bool) (store
 func (m *MemoryAuth) EndPanelSession(_ context.Context, hash string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.sessions, hash)
+	// Ended, not deleted: its challenge stays a mark that it was used.
+	if session, ok := m.sessions[hash]; ok && session.ExpiresAt.After(time.Now()) {
+		session.ExpiresAt = time.Now()
+		m.sessions[hash] = session
+	}
 	return nil
 }
+
+// endedKept is how long ended sessions are kept, longer than a sign-in's
+// ceremony lasts, as the store keeps them.
+const endedKept = 15 * time.Minute
 
 func (m *MemoryAuth) PanelSecret(context.Context, string) (string, error) {
 	m.mu.Lock()

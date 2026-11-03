@@ -1897,6 +1897,88 @@ func TestATenantIsNotStartedOnMissingData(t *testing.T) {
 	}
 }
 
+// A caller waiting for the lock with a context waits in line: a pass that
+// comes after it does not go first, so passes one after another cannot
+// keep it out.
+func TestExclusiveContextWaitsInLine(t *testing.T) {
+	f := newFixture(t)
+	var mu sync.Mutex
+	var order []string
+	note := func(what string) { mu.Lock(); order = append(order, what); mu.Unlock() }
+	f.reconciler.pass.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	waited := make(chan error, 1)
+	go func() {
+		waited <- f.reconciler.ExclusiveContext(ctx, func() error { note("the caller"); return nil })
+	}()
+	time.Sleep(50 * time.Millisecond)
+	passed := make(chan struct{})
+	go func() {
+		defer close(passed)
+		f.reconciler.pass.Lock()
+		note("a later pass")
+		time.Sleep(100 * time.Millisecond)
+		f.reconciler.pass.Unlock()
+	}()
+	time.Sleep(50 * time.Millisecond)
+	f.reconciler.pass.Unlock()
+	if err := <-waited; err != nil {
+		t.Fatal(err)
+	}
+	<-passed
+	if order[0] != "the caller" {
+		t.Fatalf("a pass that came later went first: %v", order)
+	}
+}
+
+// A caller that gave up waiting runs nothing, and the lock it would have
+// had is given back.
+func TestExclusiveContextGivenUpGivesTheLockBack(t *testing.T) {
+	f := newFixture(t)
+	f.reconciler.pass.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := f.reconciler.ExclusiveContext(ctx, func() error { t.Error("ran after giving up"); return nil }); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("given up: %v", err)
+	}
+	f.reconciler.pass.Unlock()
+	locked := make(chan struct{})
+	go func() { f.reconciler.pass.Lock(); close(locked) }()
+	select {
+	case <-locked:
+		f.reconciler.pass.Unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("the lock was kept by a caller that gave up")
+	}
+}
+
+// A purge given up while it waits for a pass deletes nothing.
+func TestAPurgeGivenUpWhileWaitingDeletesNothing(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.archive(t, "acme")
+	f.reconciler.pass.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.reconciler.Purge(ctx, "acme", "test") }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	// The pass ends; a purge that kept waiting would now go on.
+	time.Sleep(20 * time.Millisecond)
+	f.reconciler.pass.Unlock()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("a purge given up: %v", err)
+	}
+	if exists, err := f.volumes.Exists(context.Background(), "acme"); err != nil || !exists {
+		t.Fatalf("data deleted by a purge given up: %v %v", exists, err)
+	}
+	if _, err := f.store.Get("acme"); err != nil {
+		t.Fatalf("the archived tenant was forgotten: %v", err)
+	}
+}
+
 // resealAll seals every secret again: the same values, new ciphertexts, as
 // a master key rotation leaves them.
 func (f *fixture) resealAll(t *testing.T) {

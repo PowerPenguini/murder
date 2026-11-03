@@ -233,9 +233,14 @@ func nodeAddresses(nodes []tunnel.Node) string {
 func runConnect(args []string) error {
 	flags := flag.NewFlagSet("admin connect", flag.ContinueOnError)
 	devicePath := flags.String("device", "", "the device's WireGuard configuration, from murder admin device add -out")
-	listen := flags.String("listen", "127.0.0.1:8443", "local address to listen on")
+	listen := flags.String("listen", "127.0.0.1:8443", "local address to listen on; its port must be 8443, the one the panel signs in at")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	// Passkeys and the panel's own check of where a request comes from
+	// take https://<panel name> and :8443 alone.
+	if _, port, err := net.SplitHostPort(*listen); err != nil || port != "8443" {
+		return fmt.Errorf("-listen %s: the port must be 8443; the panel signs in at that one alone (another address is fine, as 127.0.0.2:8443)", *listen)
 	}
 	if *devicePath == "" {
 		return errors.New("-device is the device's configuration file")

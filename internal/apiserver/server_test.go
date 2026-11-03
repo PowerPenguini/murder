@@ -158,6 +158,13 @@ type apiFixture struct {
 
 func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
+	return newAPIFixtureWith(t, func(d volume.Dir) volume.Volumes { return d })
+}
+
+// newAPIFixtureWith is newAPIFixture with the volumes volumes makes of
+// its data directory.
+func newAPIFixtureWith(t *testing.T, volumes func(volume.Dir) volume.Volumes) *apiFixture {
+	t.Helper()
 	keyPath := filepath.Join(t.TempDir(), "master.key")
 	if err := secrets.CreateKey(keyPath); err != nil {
 		t.Fatal(err)
@@ -175,7 +182,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	rt := &memoryRuntime{}
 	dataRoot := filepath.Join(t.TempDir(), "tenants")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	reconciler := reconcile.New(st, rt, volume.Dir{Root: dataRoot}, key, reconcile.Config{BaseDomain: "example.test", HealthTimeout: 100 * time.Millisecond}, log)
+	reconciler := reconcile.New(st, rt, volumes(volume.Dir{Root: dataRoot}), key, reconcile.Config{BaseDomain: "example.test", HealthTimeout: 100 * time.Millisecond}, log)
 	served := NewServer(st, reconciler, rt, key, log)
 	handler := served.Handler()
 	server := httptest.NewServer(handler)
