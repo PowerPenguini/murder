@@ -55,7 +55,24 @@
     </div>
   </div>
 </section>
-{{end}}{{end}}
+{{else}}{{if $d.Restoring}}
+<section class="near">
+  <div class="head"><h2>Rollout</h2></div>
+  <div class="notice bad">
+    <p class="flat">{{range $i, $t := $d.Restoring}}{{if $i}}, {{end}}{{$t}}{{end}} wait{{if eq (len $d.Restoring) 1}}s{{end}} for their data from before the rollout, which their node may not have: they stay stopped until it does.</p>
+    <details class="drop">
+      <summary class="button">Abort</summary>
+      <div class="pop">
+        <form method="post" class="stack"><input type="hidden" name="do" value="abort">
+          <span class="hint">They start on their data as it is, on the revision before. Type the app's name.</span>
+          <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="the app's name" autocomplete="off" required>
+          <div><button type="submit" class="danger">Start them as they are</button></div>
+        </form>
+      </div>
+    </details>
+  </div>
+</section>
+{{end}}{{end}}{{end}}
 
 <section data-still class="near">
   <form method="post" class="stack">

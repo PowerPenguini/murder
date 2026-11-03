@@ -162,6 +162,8 @@ type appData struct {
 	Archived []string
 	// Revisions are its recent revisions, newest first.
 	Revisions []store.Revision
+	// Restoring are its tenants waiting for their data to go back.
+	Restoring []string
 }
 
 func (s *Server) app(w http.ResponseWriter, r *http.Request) {
@@ -199,8 +201,12 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, p
 		if t.App == data.App.Name && t.Archived() {
 			data.Archived = append(data.Archived, t.Spec.Name)
 		}
+		if t.App == data.App.Name && t.Restoring {
+			data.Restoring = append(data.Restoring, t.Spec.Name)
+		}
 	}
 	slices.Sort(data.Archived)
+	slices.Sort(data.Restoring)
 	if data.Revisions, err = s.Apps(s.actor(userOf(r))).AppRevisions(ctx, data.App.Name); err != nil {
 		s.fail(w, r, err)
 		return

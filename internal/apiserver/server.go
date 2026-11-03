@@ -127,7 +127,7 @@ func (s *Server) view(record store.Record) api.Tenant {
 		Spec: record.Spec, App: record.App, Overrides: record.Overrides, Node: record.Node, Replica: record.Replica, ReplicaReady: record.ReplicaReady, ReplicaNext: record.ReplicaNext,
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
-		AppRevision: record.AppRevision, BeforeRevision: record.BeforeRevision, Canary: record.Canary, Hold: record.Hold,
+		AppRevision: record.AppRevision, BeforeRevision: record.BeforeRevision, Canary: record.Canary, Hold: record.Hold, Restoring: record.Restore != "",
 	}
 	view.Elsewhere = record.Node != s.store.Node()
 	if !view.Elsewhere && s.replicas != nil {

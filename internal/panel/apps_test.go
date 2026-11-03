@@ -313,3 +313,23 @@ func TestARolloutFromThePanel(t *testing.T) {
 		t.Fatalf("atlas %+v", tenant)
 	}
 }
+
+// A tenant still waiting for its data once its app's rollout is done is
+// stopped: the app's page still offers to start it as it is.
+func TestATenantWaitingForItsDataCanBeStartedAsItIs(t *testing.T) {
+	cluster, server, _ := newAppsPanel(t)
+	cluster.mu.Lock()
+	tenant := cluster.tenants["atlas"]
+	tenant.Restoring = true
+	cluster.tenants["atlas"] = tenant
+	app := cluster.apps["web"]
+	done := *app.Rollout
+	done.State = store.RolloutDone
+	app.Rollout = &done
+	cluster.apps["web"] = app
+	cluster.mu.Unlock()
+	_, page := get(t, server.URL+"/apps/web")
+	if !strings.Contains(page, "atlas waits for their data from before the rollout") || !strings.Contains(page, `value="abort"`) || strings.Contains(page, `value="pause"`) {
+		t.Fatalf("the app's page:\n%s", page)
+	}
+}
