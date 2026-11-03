@@ -547,7 +547,7 @@ func TestLeftoverDataBlocksCreateUntilPurged(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(f.dataRoot, "acme"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Create(ctx, tenantOf("acme")); err == nil || !strings.Contains(err.Error(), "purge it first") {
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err == nil || !strings.Contains(err.Error(), "purge it there first") {
 		t.Fatalf("create over leftover data = %v", err)
 	}
 	if err := f.client.Purge(ctx, "acme"); err != nil {
