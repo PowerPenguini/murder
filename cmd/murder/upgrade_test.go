@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -199,6 +200,82 @@ func TestANodeInstallsOnlyUnderTheSendersFreeze(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(executable); string(data) != "old" {
 		t.Fatal("a binary was installed")
+	}
+}
+
+// takeOverReader takes the freeze over as the binary arrives, as another
+// upgrade may while an upload stalls.
+type takeOverReader struct {
+	io.Reader
+	takeOver func()
+	once     sync.Once
+}
+
+func (r *takeOverReader) Read(p []byte) (int, error) {
+	r.once.Do(r.takeOver)
+	return r.Reader.Read(p)
+}
+
+// The freeze is checked again, caught up, once the binary has arrived:
+// one another upgrade took over, or a person thawed, while it arrived
+// installs nothing and restarts nothing.
+func TestAFreezeTakenOverDuringTheUploadInstallsNothing(t *testing.T) {
+	ours := store.UpgradeFreeze + "abc from node n1, operation 01"
+	for _, test := range []struct {
+		name   string
+		freeze string // as the sender says; "" as releases before
+		change func(*store.SQLite) error
+	}{
+		{"taken over", ours, func(st *store.SQLite) error {
+			return st.TakeOverFreeze(ours, store.UpgradeFreeze+"def from node n2, operation 02", "root")
+		}},
+		{"taken over, the sender of a release before", "", func(st *store.SQLite) error {
+			return st.TakeOverFreeze(ours, store.UpgradeFreeze+"def from node n2, operation 02", "root")
+		}},
+		{"thawed", ours, func(st *store.SQLite) error { return st.Thaw("root") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			st := openStore(t)
+			dir := t.TempDir()
+			old := []byte("#!/bin/sh\necho '{\"binary\":\"old\",\"schema\":" + fmt.Sprint(store.SchemaVersion) + "}'\n")
+			executable := filepath.Join(dir, "murder")
+			if err := os.WriteFile(executable, old, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			current, _ := upgrade.Hash(executable)
+			if err := st.Freeze(ours, "root"); err != nil {
+				t.Fatal(err)
+			}
+			restarted := 0
+			caughtUp := 0
+			upgrader := &agentUpgrader{store: st, catchUp: func() error { caughtUp++; return nil }, Node: &upgrade.Node{
+				Executable: executable, Current: upgrade.Version{Binary: current, Schema: store.SchemaVersion},
+				EdgePIDFile: filepath.Join(dir, "edge.pid"), Database: filepath.Join(dir, "murder.db"),
+				Snapshot: func() (string, error) {
+					path := filepath.Join(dir, "copy")
+					return path, os.WriteFile(path, []byte("copy"), 0o600)
+				},
+				Restart: func() { restarted++ },
+				Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+			}}
+			binary := []byte("#!/bin/sh\necho '{\"binary\":\"new\",\"schema\":" + fmt.Sprint(store.SchemaVersion) + "}'\n")
+			sum := sha256.Sum256(binary)
+			body := &takeOverReader{Reader: strings.NewReader(string(binary)), takeOver: func() {
+				if err := test.change(st); err != nil {
+					t.Error(err)
+				}
+			}}
+			err := upgrader.Install(context.Background(), body, hex.EncodeToString(sum[:]), test.freeze)
+			if !errors.Is(err, upgrade.ErrNotOwner) || caughtUp != 2 {
+				t.Fatalf("install whose freeze went as it arrived: %v (caught up %d times)", err, caughtUp)
+			}
+			if data, _ := os.ReadFile(executable); string(data) != string(old) || restarted != 0 {
+				t.Fatalf("installed %q, restarted %d", data, restarted)
+			}
+			if _, err := upgrade.LastInstall(executable); !errors.Is(err, upgrade.ErrNothingToRollBack) {
+				t.Fatalf("a record of an install: %v", err)
+			}
+		})
 	}
 }
 

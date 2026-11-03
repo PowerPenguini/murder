@@ -97,7 +97,11 @@ the same upgrade again, on the node it ran from, resumes it where it stopped. An
 freeze of another, which may still run on another node: once sure that one
 stopped and runs nowhere, `murder upgrade -take-over ./murder` takes it
 over, say with a fixed binary. An upgrade whose freeze was taken over, or
-thawed, installs nothing more. `murder upgrade -thaw` (or the panel's "take
+thawed, installs nothing more: the node checks the freeze again, caught up
+with the cluster, once the binary has arrived and before it replaces the
+one in place, and again once its edge has handed over; if it went
+meanwhile, the node keeps (or puts back) its old binary, edge included,
+and does not restart. `murder upgrade -thaw` (or the panel's "take
 changes again") ends any freeze: it is for an upgrade that stopped, safe
 only once every node runs one release, and must never be used while an
 upgrade runs on another node. The panel begins no upgrade while changes are

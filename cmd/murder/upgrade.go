@@ -68,14 +68,15 @@ type agentUpgrader struct {
 // no binary is installed while changes are taken. Given the freeze of the
 // upgrade that sends it, only under that one: an upgrade whose freeze
 // another took over, or a person thawed, installs nothing more. Upgrades
-// of releases before say no freeze.
+// of releases before say no freeze: theirs is the freeze found first. The
+// freeze is checked again, caught up, once the binary has arrived, before
+// it replaces the one in place, and before the agent restarts: one taken
+// over or thawed meanwhile installs nothing.
 func (a *agentUpgrader) Install(ctx context.Context, binary io.Reader, sha, freeze string) error {
-	if a.catchUp != nil {
-		if err := a.catchUp(); err != nil {
-			return err
-		}
+	frozen, err := a.frozen()
+	if err != nil {
+		return err
 	}
-	frozen := a.store.Frozen()
 	switch {
 	case freeze != "" && frozen == "":
 		return fmt.Errorf("%w: changes were taken again here", upgrade.ErrNotOwner)
@@ -84,7 +85,29 @@ func (a *agentUpgrader) Install(ctx context.Context, binary io.Reader, sha, free
 	case !strings.HasPrefix(frozen, store.UpgradeFreeze):
 		return fmt.Errorf("changes are not frozen for an upgrade here (%q): murder upgrade freezes them first", frozen)
 	}
-	return a.Node.Install(ctx, binary, sha)
+	holds := func() error {
+		now, err := a.frozen()
+		switch {
+		case err != nil:
+			return err
+		case now == "":
+			return fmt.Errorf("%w: changes were taken again here while the binary arrived; nothing was installed", upgrade.ErrNotOwner)
+		case now != frozen:
+			return fmt.Errorf("%w: changes are frozen here for %q since the binary was sent; nothing was installed", upgrade.ErrNotOwner, now)
+		}
+		return nil
+	}
+	return a.Node.InstallHolding(ctx, binary, sha, holds)
+}
+
+// frozen is the freeze here once caught up with the cluster.
+func (a *agentUpgrader) frozen() (string, error) {
+	if a.catchUp != nil {
+		if err := a.catchUp(); err != nil {
+			return "", err
+		}
+	}
+	return a.store.Frozen(), nil
 }
 
 func (a *agentUpgrader) Info() upgrade.Info {

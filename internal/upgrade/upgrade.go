@@ -124,6 +124,20 @@ var ErrDowngrade = errors.New("the binary has an older schema version")
 // edge running, there is nothing to hand over. If the edge does not take
 // the new binary, the old one is put back and nothing else changes.
 func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
+	return n.InstallHolding(ctx, r, sha, nil)
+}
+
+// InstallHolding installs as Install does, while holds, if set, says the
+// upgrade that sends the binary still holds the freeze. The sender may lose
+// it while the binary arrives, or while the edge hands over: holds is asked
+// again, under the install lock, once the binary has arrived and been
+// checked, before anything is replaced, and again before the agent
+// restarts. If it fails before the restart, the old binary goes back, and
+// the edge to it, and nothing else changes.
+func (n *Node) InstallHolding(ctx context.Context, r io.Reader, sha string, holds func() error) error {
+	if holds == nil {
+		holds = func() error { return nil }
+	}
 	n.installMu.Lock()
 	defer n.installMu.Unlock()
 	switch n.restarting {
@@ -172,6 +186,10 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 	if version.Schema < n.Current.Schema {
 		return fmt.Errorf("%w: %d, this node runs %d", ErrDowngrade, version.Schema, n.Current.Schema)
 	}
+	// The binary has arrived and runs: is it still the sender's to install?
+	if err := holds(); err != nil {
+		return err
+	}
 	// The database as it is, for a rollback after the new release changed
 	// it. Changes are frozen during an upgrade: nothing is lost going back.
 	copied, err := n.Snapshot()
@@ -211,9 +229,36 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 		}
 		return err
 	}
+	// The handover takes a while: the freeze may have gone meanwhile.
+	if err := holds(); err != nil {
+		return errors.Join(err, n.putBack(ctx, previous, sha))
+	}
 	n.Log.Info("installed a new murder binary; the agent restarts into it", "binary", sha, "schema", version.Schema)
 	n.restarting = sha
 	n.Restart()
+	return nil
+}
+
+// putBack undoes an install whose edge handed over, before the agent
+// restarts: the old binary goes back in place, and the edge, if one runs,
+// hands over to it. An edge that does not at once is watched, and asked
+// again, as after a handover that failed.
+func (n *Node) putBack(ctx context.Context, previous, sha string) error {
+	if err := os.Rename(previous, n.Executable); err != nil {
+		return fmt.Errorf("put the old binary back: %w", err)
+	}
+	_ = os.Remove(recordPath(n.Executable))
+	// The sender may be gone: the edge goes back all the same.
+	if err := n.handOverEdge(context.WithoutCancel(ctx)); err != nil {
+		revert, stop := context.WithCancel(context.Background())
+		n.revertMu.Lock()
+		n.stopRevert = stop
+		n.revertMu.Unlock()
+		// Any edge still running the new binary is handed back.
+		go n.revertLateEdge(revert, 0, sha)
+		return fmt.Errorf("hand the edge back to the old binary: %w", err)
+	}
+	n.Log.Warn("put the old binary back: the upgrade lost the freeze while the edge handed over", "binary", sha)
 	return nil
 }
 
