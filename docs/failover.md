@@ -107,9 +107,16 @@ moving elsewhere keep being replicated.
    - Changes are received with `-F`, which rolls back anything written to
      the copy since its newest snapshot.
    - A whole dataset is received beside the old copy
-     (`murder-incoming-<name>`) and renamed over it once it is all there,
-     so the node keeps a copy throughout.
-   - Receiving and promotion share a per-dataset lock.
+     (`murder-incoming:<name>`), which goes aside (`murder-previous:<name>`)
+     while the new one is renamed into place, so the node keeps a copy
+     throughout. Tenant names hold no colon, so one tenant's staging names
+     are never another's. A swap cut short, say by a crash, is finished
+     before the tenant's data is next used: the old copy goes back.
+     Datasets an older release left under its names
+     (`murder-incoming-<name>`, `murder-incoming-<name>-old`) are told
+     apart by the tenant they were made for.
+   - Receiving, promotion, dropping a copy and putting data aside share a
+     per-dataset lock.
 5. The replica node prunes its received snapshots to the newest 3. The owner
    prunes its own `replica` snapshots to the newest 3.
 

@@ -65,9 +65,20 @@ const ReplicaReason = replicaReason
 // never a tenant's (tenant names cannot begin with "murder-").
 const asidePrefix = "murder-failed-"
 
-// incomingPrefix begins the name of a whole copy while it is received: the
-// copy it replaces stays until it is all there.
-const incomingPrefix = "murder-incoming-"
+// A whole copy is received as murder-incoming:<tenant>, and the copy it
+// replaces waits as murder-previous:<tenant> until the new one is in its
+// place. Tenant names cannot hold a colon, so no tenant's staging name is
+// another's, nor a tenant's.
+const (
+	incomingPrefix = "murder-incoming:"
+	previousPrefix = "murder-previous:"
+)
+
+// legacyStagingPrefix began both staging names before: murder-incoming-
+// <tenant> for the copy received and murder-incoming-<tenant>-old for the
+// one it replaced. The names of tenant "acme" and "acme-old" collide there,
+// so such a dataset is only taken for a tenant's when it was made for it.
+const legacyStagingPrefix = "murder-incoming-"
 
 // datasetLocks serializes, per dataset, receiving a copy and making a copy
 // the tenant's data: a copy never takes over half received, nor is a copy
@@ -175,6 +186,17 @@ func (z ZFS) ReceiveReplica(ctx context.Context, tenant string, whole bool, r io
 	if err != nil {
 		return err
 	}
+	if !exists {
+		// A whole copy's swap that stopped half way: its old copy first
+		// goes back where it belongs.
+		if exists, err = z.restoreSwap(ctx, tenant); err != nil {
+			return err
+		} else if exists {
+			if current, _, err = z.properties(ctx, dataset); err != nil {
+				return err
+			}
+		}
+	}
 	if exists && (current.owner != tenant || current.role != replicaRole || current.mounted == "yes") {
 		return fmt.Errorf("dataset %s is not a copy of tenant %s: it is not replaced", dataset, tenant)
 	}
@@ -189,39 +211,107 @@ func (z ZFS) ReceiveReplica(ctx context.Context, tenant string, whole bool, r io
 		}
 		return z.Prune(ctx, tenant, replicaReason, keep)
 	}
+	// What an earlier whole receive left of the tenant's goes, never
+	// another tenant's.
+	for _, kind := range []stagingKind{incoming, previous} {
+		if err := z.destroyStaged(ctx, tenant, kind); err != nil {
+			return err
+		}
+	}
 	// A whole copy goes in beside the old one, which it replaces once all
 	// of it is there: the node keeps a copy all along.
-	incoming := z.Parent + "/" + incomingPrefix + tenant
-	if _, err := z.Run(ctx, "zfs", "destroy", "-r", incoming); err != nil && !strings.Contains(err.Error(), "does not exist") {
-		return err
-	}
-	if err := z.pipe()(ctx, r, io.Discard, "zfs", append(args, incoming)...); err != nil {
-		_, _ = z.Run(context.WithoutCancel(ctx), "zfs", "destroy", "-r", incoming)
+	incomingName, previousName := z.Parent+"/"+incomingPrefix+tenant, z.Parent+"/"+previousPrefix+tenant
+	if err := z.pipe()(ctx, r, io.Discard, "zfs", append(args, incomingName)...); err != nil {
+		if _, cleanErr := z.Run(context.WithoutCancel(ctx), "zfs", "destroy", "-r", incomingName); cleanErr != nil && !strings.Contains(cleanErr.Error(), "does not exist") {
+			return fmt.Errorf("%w; destroying what was received failed too (the next whole copy does): %w", err, cleanErr)
+		}
 		return err
 	}
 	// The old copy goes aside first and only then away: at every moment one
-	// of the two holds a whole copy.
-	old := z.Parent + "/" + incomingPrefix + tenant + "-old"
+	// of the two holds a whole copy, and a swap that stops half way is
+	// finished by restoreSwap.
 	if exists {
-		if _, err := z.Run(ctx, "zfs", "destroy", "-r", old); err != nil && !strings.Contains(err.Error(), "does not exist") {
-			return err
-		}
-		if _, err := z.Run(ctx, "zfs", "rename", dataset, old); err != nil {
+		if _, err := z.Run(ctx, "zfs", "rename", dataset, previousName); err != nil {
 			return err
 		}
 	}
-	if _, err := z.Run(ctx, "zfs", "rename", incoming, dataset); err != nil {
+	if _, err := z.Run(ctx, "zfs", "rename", incomingName, dataset); err != nil {
 		if exists {
-			_, _ = z.Run(context.WithoutCancel(ctx), "zfs", "rename", old, dataset)
+			if _, undoErr := z.Run(context.WithoutCancel(ctx), "zfs", "rename", previousName, dataset); undoErr != nil {
+				return fmt.Errorf("%w; putting the old copy back from %s failed too (it is tried again before the tenant's data is next used): %w", err, previousName, undoErr)
+			}
 		}
 		return err
 	}
 	if exists {
-		if _, err := z.Run(ctx, "zfs", "destroy", "-r", old); err != nil {
+		if _, err := z.Run(ctx, "zfs", "destroy", "-r", previousName); err != nil {
 			return err
 		}
 	}
 	return z.Prune(ctx, tenant, replicaReason, keep)
+}
+
+// stagingKind is what a staging dataset holds: a whole copy received, or
+// the copy it replaces.
+type stagingKind int
+
+const (
+	incoming stagingKind = iota
+	previous
+)
+
+// staged lists the tenant's staging datasets of kind: under today's name
+// and under the name an older release gave. One counts only if it is a copy
+// made for the tenant, unmounted; the old names of tenants "acme" and
+// "acme-old" are told apart that way.
+func (z ZFS) staged(ctx context.Context, tenant string, kind stagingKind) ([]string, error) {
+	names := []string{z.Parent + "/" + incomingPrefix + tenant, z.Parent + "/" + legacyStagingPrefix + tenant}
+	if kind == previous {
+		names = []string{z.Parent + "/" + previousPrefix + tenant, z.Parent + "/" + legacyStagingPrefix + tenant + "-old"}
+	}
+	var found []string
+	for _, name := range names {
+		current, exists, err := z.properties(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if exists && current.owner == tenant && current.role == replicaRole && current.mounted != "yes" {
+			found = append(found, name)
+		}
+	}
+	return found, nil
+}
+
+// destroyStaged destroys the tenant's staging datasets of kind. The
+// caller holds the tenant's dataset lock.
+func (z ZFS) destroyStaged(ctx context.Context, tenant string, kind stagingKind) error {
+	names, err := z.staged(ctx, tenant, kind)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if _, err := z.Run(ctx, "zfs", "destroy", "-r", name); err != nil && !strings.Contains(err.Error(), "does not exist") {
+			return err
+		}
+	}
+	return nil
+}
+
+// restoreSwap finishes a whole copy's swap that stopped half way, after the
+// old copy went aside and before the new one took its place, as a crash
+// leaves it: the old copy, whole, goes back to the tenant's name, and the
+// new one, which nothing vouched for yet, goes. It reports whether the
+// tenant has data now. The caller holds the tenant's dataset lock, and the
+// tenant's dataset does not exist.
+func (z ZFS) restoreSwap(ctx context.Context, tenant string) (bool, error) {
+	aside, err := z.staged(ctx, tenant, previous)
+	if err != nil || len(aside) == 0 {
+		return false, err
+	}
+	if _, err := z.Run(ctx, "zfs", "rename", aside[0], z.dataset(tenant)); err != nil {
+		return false, fmt.Errorf("tenant %s's copy waits in %s, after a swap that stopped half way; putting it back failed: %w", tenant, aside[0], err)
+	}
+	return true, z.destroyStaged(ctx, tenant, incoming)
 }
 
 func (z ZFS) RollbackReplica(ctx context.Context, tenant string) error {
@@ -229,14 +319,14 @@ func (z ZFS) RollbackReplica(ctx context.Context, tenant string) error {
 		return err
 	}
 	dataset := z.dataset(tenant)
+	defer lockDataset(dataset)()
 	snapshots, err := z.Snapshots(ctx, tenant, replicaReason)
 	if err != nil {
 		return err
 	}
 	if len(snapshots) == 0 {
-		return z.DropReplica(ctx, tenant)
+		return z.dropReplica(ctx, tenant)
 	}
-	defer lockDataset(dataset)()
 	current, exists, err := z.properties(ctx, dataset)
 	if err != nil || !exists {
 		return err
@@ -281,10 +371,19 @@ func (z ZFS) Datasets(ctx context.Context) ([]Dataset, error) {
 	return datasets, nil
 }
 
+// DropReplica holds the dataset's lock from the check to the destroy: a
+// copy that takes over meanwhile (Ensure mounts it under the same lock) is
+// never destroyed.
 func (z ZFS) DropReplica(ctx context.Context, tenant string) error {
 	if err := checkTenant(tenant); err != nil {
 		return err
 	}
+	defer lockDataset(z.dataset(tenant))()
+	return z.dropReplica(ctx, tenant)
+}
+
+// dropReplica is DropReplica for a caller holding the dataset's lock.
+func (z ZFS) dropReplica(ctx context.Context, tenant string) error {
 	dataset := z.dataset(tenant)
 	current, exists, err := z.properties(ctx, dataset)
 	if err != nil || !exists {
@@ -299,7 +398,8 @@ func (z ZFS) DropReplica(ctx context.Context, tenant string) error {
 
 // PutAside unmounts the dataset and renames it murder-failed-<tenant>-<why>-
 // <time>, with canmount off: nothing mounts or uses it, and Murder never
-// destroys it; the operator looks at it, then destroys it.
+// destroys it; the operator looks at it, then destroys it. It holds the
+// dataset's lock, so no receive or promotion runs beside it.
 func (z ZFS) PutAside(ctx context.Context, tenant, why string) (string, error) {
 	if err := checkTenant(tenant); err != nil {
 		return "", err
@@ -308,6 +408,7 @@ func (z ZFS) PutAside(ctx context.Context, tenant, why string) (string, error) {
 		return "", fmt.Errorf("reason %q", why)
 	}
 	dataset := z.dataset(tenant)
+	defer lockDataset(dataset)()
 	current, exists, err := z.properties(ctx, dataset)
 	if err != nil {
 		return "", err

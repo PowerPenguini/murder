@@ -258,6 +258,16 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (s
 		return "", err
 	}
 	if !exists {
+		// A copy's swap that stopped half way left the copy aside.
+		if exists, err = z.restoreSwap(ctx, tenant); err != nil {
+			return "", err
+		} else if exists {
+			if current, _, err = z.properties(ctx, dataset); err != nil {
+				return "", err
+			}
+		}
+	}
+	if !exists {
 		// A restore that failed half way may have left the tenant's data
 		// aside: a new, empty dataset would hide that its data is there.
 		if replaced, err := z.replacedOf(ctx, tenant); err != nil {
@@ -316,12 +326,23 @@ func diskLimit(diskGB int) string {
 	return strconv.Itoa(diskGB) + " GB"
 }
 
+// Exists finishes first a whole copy's swap that stopped half way, which
+// left the tenant's copy under a staging name: a tenant that took the copy
+// over would otherwise find no data.
 func (z ZFS) Exists(ctx context.Context, tenant string) (bool, error) {
 	if err := checkTenant(tenant); err != nil {
 		return false, err
 	}
-	_, exists, err := z.properties(ctx, z.dataset(tenant))
-	return exists, err
+	dataset := z.dataset(tenant)
+	_, exists, err := z.properties(ctx, dataset)
+	if err != nil || exists {
+		return exists, err
+	}
+	defer lockDataset(dataset)()
+	if _, exists, err = z.properties(ctx, dataset); err != nil || exists {
+		return exists, err
+	}
+	return z.restoreSwap(ctx, tenant)
 }
 
 func (z ZFS) LateMounts() bool { return true }
@@ -437,7 +458,8 @@ func snapshotReason(reason string) bool {
 }
 
 // Remove destroys the tenant's dataset only if Murder created it for this
-// tenant and it is mounted where Murder put it.
+// tenant and it is mounted where Murder put it, and what a whole copy's
+// receive left of the tenant's.
 func (z ZFS) Remove(ctx context.Context, tenant string) error {
 	if err := checkTenant(tenant); err != nil {
 		return err
@@ -446,12 +468,22 @@ func (z ZFS) Remove(ctx context.Context, tenant string) error {
 	// into place.
 	defer lockDataset(z.dataset(tenant))()
 	current, exists, err := z.properties(ctx, z.dataset(tenant))
-	if err != nil || !exists {
+	if err == nil && !exists {
+		exists, err = z.restoreSwap(ctx, tenant)
+		if err == nil && exists {
+			current, _, err = z.properties(ctx, z.dataset(tenant))
+		}
+	}
+	if err != nil {
 		return err
 	}
-	if err := z.owned(tenant, current.owner, current.mountpoint); err != nil {
-		return err
+	if exists {
+		if err := z.owned(tenant, current.owner, current.mountpoint); err != nil {
+			return err
+		}
+		if _, err := z.Run(ctx, "zfs", "destroy", "-r", z.dataset(tenant)); err != nil {
+			return err
+		}
 	}
-	_, err = z.Run(ctx, "zfs", "destroy", "-r", z.dataset(tenant))
-	return err
+	return errors.Join(z.destroyStaged(ctx, tenant, incoming), z.destroyStaged(ctx, tenant, previous))
 }

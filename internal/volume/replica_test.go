@@ -65,8 +65,8 @@ func TestACopyIsReceivedUnmountedAndMarked(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Beside, then in place of, any copy there.
-	want := "zfs receive -u -o canmount=noauto -o io.murder:role=replica -o mountpoint=/srv/murder/tenants/acme tank/murder/murder-incoming-acme"
-	if fake.piped[0] != want || !fake.ran("zfs rename tank/murder/murder-incoming-acme tank/murder/acme") || fake.datasets["tank/murder/acme"] == nil {
+	want := "zfs receive -u -o canmount=noauto -o io.murder:role=replica -o mountpoint=/srv/murder/tenants/acme tank/murder/murder-incoming:acme"
+	if fake.piped[0] != want || !fake.ran("zfs rename tank/murder/murder-incoming:acme tank/murder/acme") || fake.datasets["tank/murder/acme"] == nil {
 		t.Fatalf("received with %q, want %q; calls %v", fake.piped[0], want, fake.calls)
 	}
 	if err := z.ReceiveReplica(ctx, "acme", false, strings.NewReader("x"), 3); err != nil {
@@ -81,11 +81,11 @@ func TestACopyIsReceivedUnmountedAndMarked(t *testing.T) {
 	if err := z.ReceiveReplica(ctx, "acme", true, strings.NewReader("x"), 3); err != nil {
 		t.Fatal(err)
 	}
-	aside := slices.Index(fake.calls, "zfs rename tank/murder/acme tank/murder/murder-incoming-acme-old")
-	inPlace := slices.Index(fake.calls, "zfs rename tank/murder/murder-incoming-acme tank/murder/acme")
+	aside := slices.Index(fake.calls, "zfs rename tank/murder/acme tank/murder/murder-previous:acme")
+	inPlace := slices.Index(fake.calls, "zfs rename tank/murder/murder-incoming:acme tank/murder/acme")
 	gone := -1
 	for i, call := range fake.calls {
-		if call == "zfs destroy -r tank/murder/murder-incoming-acme-old" {
+		if call == "zfs destroy -r tank/murder/murder-previous:acme" {
 			gone = i
 		}
 	}

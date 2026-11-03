@@ -156,6 +156,7 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 		if dataset == f.held {
 			return []byte("cannot destroy snapshot " + dataset + ": dataset is busy\n"), errors.New("exit status 1")
 		}
+		delete(f.datasets, dataset)
 		return nil, nil
 	case "list":
 		if !strings.Contains(call, "-t snapshot") {
