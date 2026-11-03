@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -44,10 +45,20 @@ func (s *Server) panelAuthRoutes(mux *http.ServeMux) {
 		}
 	}))
 	mux.HandleFunc("PUT /v1/panel/passkeys/{id}", rootOnly(func(w http.ResponseWriter, r *http.Request) {
-		var data string
-		if readJSON(w, r, &data) {
-			s.panelDone(w, s.store.UsePasskey(r.PathValue("id"), data))
+		// The credential as the sign-in checked it and as it is now; a
+		// panel of a release before sends the new one alone.
+		var raw json.RawMessage
+		if !readJSON(w, r, &raw) {
+			return
 		}
+		var use api.PasskeyUse
+		if err := json.Unmarshal(raw, &use.Data); err != nil {
+			if err := json.Unmarshal(raw, &use); err != nil {
+				writeError(w, badRequest(err))
+				return
+			}
+		}
+		s.panelDone(w, s.store.UsePasskeyIf(r.PathValue("id"), use.Previous, use.Data))
 	}))
 	mux.HandleFunc("DELETE /v1/panel/passkeys/{id}", rootOnly(func(w http.ResponseWriter, r *http.Request) {
 		s.panelDone(w, s.store.RemovePasskey(r.PathValue("id"), actor(r)))

@@ -5,12 +5,22 @@ import (
 	"net/http"
 )
 
-// BackupResult is one tenant's backup, or why it failed.
+// BackupResult is one tenant's backup, or the cluster's state's (State),
+// or why it failed.
 type BackupResult struct {
 	Tenant string `json:"tenant"`
+	State  bool   `json:"state,omitempty"`
 	Key    string `json:"key,omitempty"`
 	Size   int64  `json:"size,omitempty"`
 	Error  string `json:"error,omitempty"`
+}
+
+// Label names what the result is the backup of.
+func (r BackupResult) Label() string {
+	if r.State {
+		return "the cluster's state"
+	}
+	return r.Tenant
 }
 
 // ReplaceRequest asks for a tenant's data to be replaced by a copy.

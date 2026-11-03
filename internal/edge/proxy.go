@@ -68,8 +68,9 @@ type Proxy struct {
 	// its own node: each request once, however many edges it went
 	// through. The agent measures its tenants by them.
 	served *metrics.Edge
-	// hold is how long a request for a tenant that is moving waits for it.
-	hold time.Duration
+	// holdMoving is how long a request for a tenant that is moving waits
+	// for it.
+	holdMoving time.Duration
 	// local passes requests to tenants on this node, forward to other
 	// nodes' edges (nil outside a cluster), relayed takes requests other
 	// edges passed on.
@@ -81,6 +82,26 @@ type Proxy struct {
 	// upgraded counts connections taken over for a protocol switch, such as
 	// WebSockets, which a server shutting down does not wait for.
 	upgraded atomic.Int64
+	// held takes a place for each request held before it is passed on:
+	// waiting for its tenant to arrive, or for its body to be kept. A
+	// request that finds none is not held.
+	held chan struct{}
+}
+
+// MaxHeld is how many requests an edge holds at once before passing them
+// on.
+const MaxHeld = 4096
+
+// hold takes a place for a request to be held, if one is free; release
+// gives it back.
+func (p *Proxy) hold() (release func(), ok bool) {
+	select {
+	case p.held <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-p.held }) }, true
+	default:
+		return func() {}, false
+	}
 }
 
 // WaitUpgraded returns once every connection taken over for a protocol
@@ -188,7 +209,7 @@ func hopOf(r *http.Request) *hop { return r.Context().Value(hopKey{}).(*hop) }
 
 // NewProxy returns a proxy for tenants below baseDomain.
 func NewProxy(baseDomain string, routes Routes, log *slog.Logger) *Proxy {
-	p := &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, stats: metrics.NewEdge(), served: metrics.NewEdge(), hold: HoldMoving}
+	p := &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, stats: metrics.NewEdge(), served: metrics.NewEdge(), holdMoving: HoldMoving, held: make(chan struct{}, MaxHeld)}
 	p.local = p.reverseProxy(newTransport(nil), false)
 	p.relayed = p.reverseProxy(newTransport(nil), true)
 	return p
@@ -245,11 +266,7 @@ func (t relayTransport) RoundTrip(request *http.Request) (*http.Response, error)
 	if request.Header.Get("Upgrade") != "" {
 		return t.upgrades.RoundTrip(request)
 	}
-	request, release, err := replayable(request)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
+	// Its body was kept, if it could be, before (see Proxy.serve).
 	return t.multiplexed.RoundTrip(request)
 }
 
@@ -269,7 +286,9 @@ var replayKept atomic.Int64
 
 // replayable returns request with a small body of known length read into
 // memory, so the transport can send it again, and a function that gives
-// the memory back once the request is done.
+// the memory back once the request is done. The client may send the body
+// slowly, but not stop: the public servers give up on a body that does not
+// move (UploadDeadline).
 func replayable(request *http.Request) (*http.Request, func(), error) {
 	none := func() {}
 	size := request.ContentLength
@@ -366,6 +385,9 @@ func (p *Proxy) reverseProxy(transport http.RoundTripper, relayed bool) *httputi
 				}
 				out.SetXForwarded()
 			}
+			// Only an edge keeping its connection warm says this, and only
+			// to another edge's relay, never through a tenant's request.
+			out.Out.Header.Del(warmHeader)
 			if h.hops > 0 {
 				out.Out.Header.Set(hopsHeader, strconv.Itoa(h.hops))
 			} else {
@@ -439,7 +461,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) { p.serve(w, r
 func (p *Proxy) Relay() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Another edge keeping its connection warm: nothing to count.
-		if r.Method == http.MethodHead && r.Header.Get(warmHeader) != "" {
+		if p.warming(r) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -450,14 +472,30 @@ func (p *Proxy) Relay() http.Handler {
 // warmHeader marks a request that only keeps a relay connection open.
 const warmHeader = "X-Murder-Warm"
 
-// route looks a tenant up, waiting while it moves.
+// warming tells the request Warm sends: HEAD / of the relay itself, not of
+// a tenant, with nothing else to it.
+func (p *Proxy) warming(r *http.Request) bool {
+	if r.Method != http.MethodHead || r.URL.Path != "/" || r.URL.RawQuery != "" || r.Header.Get(warmHeader) != "1" || r.ContentLength > 0 || r.Header.Get(hopsHeader) != "" {
+		return false
+	}
+	_, tenant := p.Tenant(r.Host)
+	return !tenant
+}
+
+// route looks a tenant up, waiting while it moves, unless too many
+// requests are held already.
 func (p *Proxy) route(r *http.Request, tenant string) (Route, bool) {
 	route, ok := p.routes.Route(tenant)
 	watch, watched := p.routes.(watcher)
 	if !ok || !route.Moving || !watched {
 		return route, ok
 	}
-	deadline := time.NewTimer(p.hold)
+	release, held := p.hold()
+	defer release()
+	if !held {
+		return route, ok
+	}
+	deadline := time.NewTimer(p.holdMoving)
 	defer deadline.Stop()
 	for route.Moving {
 		changed := watch.Watch()
@@ -476,6 +514,12 @@ func (p *Proxy) route(r *http.Request, tenant string) (Route, bool) {
 }
 
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
+	// The time to the response counts from here, a wait for a moving
+	// tenant included.
+	arrived := time.Now()
+	if refuseConnect(w, r) {
+		return
+	}
 	tenant, ok := p.Tenant(r.Host)
 	if !ok {
 		p.stats.Unrouted()
@@ -495,7 +539,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 		http.Error(w, "unknown tenant", http.StatusNotFound)
 		return
 	}
-	recorder := &recorder{ResponseWriter: w, start: time.Now(), upgraded: &p.upgraded}
+	recorder := &recorder{ResponseWriter: w, start: arrived, upgraded: &p.upgraded}
 	w = recorder
 	// A request the client gave up before any response is not counted.
 	local := false
@@ -539,7 +583,36 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 		unavailable()
 		return
 	}
+	// A body for another edge is kept, so that it can be sent again should
+	// that edge hand over meanwhile; while too many requests are held, it
+	// streams through.
+	if h.hops > 0 && r.Header.Get("Upgrade") == "" {
+		if release, held := p.hold(); held {
+			kept, free, err := replayable(r)
+			release()
+			if err != nil {
+				// The client stopped sending it, or left.
+				http.Error(w, "the request's body did not arrive", http.StatusRequestTimeout)
+				return
+			}
+			defer free()
+			r = kept
+		}
+	}
 	proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), hopKey{}, h)))
+}
+
+// refuseConnect answers a CONNECT 501 and reports true. The edge is no
+// forward proxy, and a tunnel through it to a tenant is nothing a tenant
+// serves: passed on, it would reach the tenant as an ordinary request
+// with no takeover. (Go's HTTP/2 server announces no extended CONNECT,
+// so WebSockets come as HTTP/1.1 upgrades.)
+func refuseConnect(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodConnect {
+		return false
+	}
+	http.Error(w, "CONNECT is not served here", http.StatusNotImplemented)
+	return true
 }
 
 // RedirectToHTTPS sends plain HTTP requests for tenant hosts to HTTPS once
@@ -547,6 +620,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 // instead of redirecting to a port that does not answer.
 func (p *Proxy) RedirectToHTTPS(ready func() bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refuseConnect(w, r) {
+			return
+		}
 		if _, ok := p.Tenant(r.Host); !ok {
 			http.Error(w, "unknown host", http.StatusNotFound)
 			return

@@ -133,6 +133,8 @@ func (z ZFS) ReplaceWithCopy(ctx context.Context, tenant, name string) (string, 
 		return "", fmt.Errorf("copy %s of tenant %s: %w", name, tenant, ErrNotACopy)
 	}
 	dataset, mountpoint := z.dataset(tenant), filepath.Join(z.MountRoot, tenant)
+	// Not beside a copy's receive or promotion.
+	defer lockDataset(dataset)()
 	current, hasData, err := z.properties(ctx, dataset)
 	if err != nil {
 		return "", err

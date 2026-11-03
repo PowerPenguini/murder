@@ -71,9 +71,12 @@ These changes go together in one schema version:
   keeping the most to one keeping at least two fewer, as after a node
   joins or comes back from a failure (schema 10: `tenants.replica_next`).
   The owner sends the new node a whole copy while still sending the
-  replica its changes, and only once that copy is whole does it become the
-  replica, ready (`SwitchReplica`); the old node then drops its copy. So a
-  tenant never lacks a whole copy while its copy moves. A failover, a move
+  replica its changes every pass. Once that copy is whole the owner sends
+  it the changes since, again and again, until its newest snapshot is no
+  more than a pass older than the replica's last match; only then does it
+  become the replica, ready (`SwitchReplica`), and the old node drops its
+  copy. So a tenant never lacks a whole copy while its copy moves, and a
+  failover right after the switch loses no more than one before it would. A failover, a move
   of the tenant, or the new node failing or leaving stops the move of the
   copy; a failover promotes the old, whole copy. A copy not whole yet, a
   replica's first or a moving one, is given up after 4 sends in a row that
@@ -107,14 +110,47 @@ moving elsewhere keep being replicated.
    - Changes are received with `-F`, which rolls back anything written to
      the copy since its newest snapshot.
    - A whole dataset is received beside the old copy
-     (`murder-incoming-<name>`) and renamed over it once it is all there,
-     so the node keeps a copy throughout.
-   - Receiving and promotion share a per-dataset lock.
+     (`murder-incoming:<name>`), which goes aside (`murder-previous:<name>`)
+     while the new one is renamed into place, so the node keeps a copy
+     throughout. Tenant names hold no colon, so one tenant's staging names
+     are never another's. Before the swap, the old copy takes the token
+     the new one was received with (`io.murder:swap`). A swap cut short,
+     say by a crash, is finished before the tenant's data is next used:
+     the old copy goes back, but only while the new one is still beside it
+     with the same token. The token is cleared once the swap is done, so a
+     leftover old copy is never put back, for this tenant or a later one
+     of the same name. Dropping a copy and purging a tenant destroy its
+     staging datasets first. Datasets an older release left under its names
+     (`murder-incoming-<name>`, `murder-incoming-<name>-old`) are told
+     apart by the tenant they were made for, and only ever destroyed.
+   - A whole copy is never received over a dataset under the incoming name
+     that is not the tenant's unmounted copy; that dataset is left alone.
+   - Receiving, promotion, dropping a copy and putting data aside share a
+     per-dataset lock.
 5. The replica node prunes its received snapshots to the newest 3. The owner
    prunes its own `replica` snapshots to the newest 3.
 
-Up to 4 tenants are sent at once. Archived tenants are replicated too: their
-data rarely changes, so step 1 skips them.
+Each copy, a tenant's on one node, has one send at a time, and no send
+waits for another tenant's: a pass begins the sends of copies with none
+under way and leaves one still under way, such as a whole copy that takes
+hours, to finish. Up to 4 ready replicas get their changes at once, and,
+apart, up to 4 copies not whole yet (a replica's first, or a copy moving to
+another node), so whole copies never hold up the changes of other tenants.
+While a tenant's copy moves, its replica keeps getting its changes every
+pass, but the owner prunes none of its `replica` snapshots until the move
+ends: the one the moving copy was last sent is the base of its next
+changes. A send that waited for its slot while the replica moved sends
+nothing, and only a send to the tenant's replica, with no copy moving,
+prunes.
+
+A send whose stream moves nothing for 2 minutes, or whose other node
+answers nothing for 2 minutes once the stream ended, fails, and so does
+asking a node for its snapshots that long: a node that answers pings but
+stalls never holds a copy up. A stall on the other node's side counts
+toward giving up a copy not whole yet, as its other failures do.
+
+Archived tenants are replicated too: their data rarely changes, so step 1
+skips them.
 
 **What the replica node refuses**, checked against its own view of the
 state:
