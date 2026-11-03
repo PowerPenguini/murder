@@ -71,9 +71,12 @@ These changes go together in one schema version:
   keeping the most to one keeping at least two fewer, as after a node
   joins or comes back from a failure (schema 10: `tenants.replica_next`).
   The owner sends the new node a whole copy while still sending the
-  replica its changes every pass, and only once that copy is whole does it become the
-  replica, ready (`SwitchReplica`); the old node then drops its copy. So a
-  tenant never lacks a whole copy while its copy moves. A failover, a move
+  replica its changes every pass. Once that copy is whole the owner sends
+  it the changes since, again and again, until its newest snapshot is no
+  more than a pass older than the replica's last match; only then does it
+  become the replica, ready (`SwitchReplica`), and the old node drops its
+  copy. So a tenant never lacks a whole copy while its copy moves, and a
+  failover right after the switch loses no more than one before it would. A failover, a move
   of the tenant, or the new node failing or leaving stops the move of the
   copy; a failover promotes the old, whole copy. A copy not whole yet, a
   replica's first or a moving one, is given up after 4 sends in a row that
@@ -121,8 +124,10 @@ apart, up to 4 copies not whole yet (a replica's first, or a copy moving to
 another node), so whole copies never hold up the changes of other tenants.
 While a tenant's copy moves, its replica keeps getting its changes every
 pass, but the owner prunes none of its `replica` snapshots until the move
-ends: the one the moving copy is sent from is the base of the new replica's
-first changes.
+ends: the one the moving copy was last sent is the base of its next
+changes. A send that waited for its slot while the replica moved sends
+nothing, and only a send to the tenant's replica, with no copy moving,
+prunes.
 
 A send whose stream moves nothing for 2 minutes, or whose other node
 answers nothing for 2 minutes once the stream ended, fails, and so does

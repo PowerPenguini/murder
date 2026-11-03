@@ -763,7 +763,7 @@ func TestAReplicaThatNeverGetsItsCopyIsReplaced(t *testing.T) {
 }
 
 // heldPeer holds sends to one node until released, as a whole copy that
-// takes hours would.
+// takes hours would; entered, buffered, learns of the first.
 type heldPeer struct {
 	*peer
 	node     string
@@ -773,7 +773,10 @@ type heldPeer struct {
 
 func (p *heldPeer) Send(ctx context.Context, to, tenant string, whole bool, data io.Reader) error {
 	if to == p.node {
-		p.entered <- struct{}{}
+		select {
+		case p.entered <- struct{}{}:
+		default:
+		}
 		select {
 		case <-p.released:
 		case <-ctx.Done():
@@ -918,5 +921,190 @@ func TestAStalledSendFails(t *testing.T) {
 	// The first copy never got there: the replica is given up.
 	if record, _ := n1.store.Get("acme"); record.Replica != "" {
 		t.Fatalf("after %d stalled sends: %+v", copyGiveUp, record)
+	}
+}
+
+// relocationFixture gives acme, b and c their whole copies on n2, then has
+// placement move acme's copy to n3, which joined later.
+func relocationFixture(t *testing.T) (*fixture, *Replicator, *peer) {
+	t.Helper()
+	f := newFixture(t)
+	n1 := f.nodes["n1"]
+	f.change(t, func(st *store.SQLite) {
+		if err := st.RemoveNode("n3", "test"); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"b", "c"} {
+			if _, err := st.Create(store.NewTenant{Name: name, App: "web", Node: "n1"}, "test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.PlaceReplicas("test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, name := range []string{"acme", "b", "c"} {
+		n1.volumes.write(name)
+	}
+	r, p := f.replicator("n1")
+	r.Pass(context.Background())
+	f.change(t, func(st *store.SQLite) {
+		for _, name := range []string{"acme", "b", "c"} {
+			if err := st.ReplicaReady(name, "n2"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.PutNode(store.Node{Name: "n3", Address: "10.0.0.3:7400"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.PlaceReplicas("test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if record, _ := n1.store.Get("acme"); record.ReplicaNext != "n3" {
+		t.Fatalf("acme: %+v", record)
+	}
+	p.sends = nil
+	return f, r, p
+}
+
+// A copy that took long to move gets the changes the replica got meanwhile
+// before it takes the replica's place: a failover right after the switch
+// loses none of them.
+func TestAMovedCopyCatchesUpBeforeItIsTheReplica(t *testing.T) {
+	f, r, p := relocationFixture(t)
+	ctx := context.Background()
+	n1, n2, n3 := f.nodes["n1"], f.nodes["n2"], f.nodes["n3"]
+	held := &heldPeer{peer: p, node: "n3", entered: make(chan struct{}, 1), released: make(chan struct{})}
+	r.Peer = held
+	f.clock = f.clock.Add(15 * time.Second)
+	n1.volumes.write("acme")
+	record, _ := n1.store.Get("acme")
+	moved := make(chan struct{})
+	go func() {
+		r.relocate(ctx, record)
+		close(moved)
+	}()
+	<-held.entered
+	// Hours of changes reach the replica while the whole copy goes.
+	for range 5 {
+		f.clock = f.clock.Add(15 * time.Second)
+		n1.volumes.write("acme")
+		r.update(ctx, record)
+	}
+	if got, want := n2.volumes.data["acme"].version, n1.volumes.data["acme"].version; got != want {
+		t.Fatalf("the replica is at version %d, the data at %d", got, want)
+	}
+	close(held.released)
+	<-moved
+	record, _ = n1.store.Get("acme")
+	if record.Replica != "n3" || !record.ReplicaReady {
+		t.Fatalf("after the copy moved: %+v", record)
+	}
+	if got, want := n3.volumes.data["acme"].version, n2.volumes.data["acme"].version; got != want {
+		t.Fatalf("the new replica is at version %d, the old one was at %d", got, want)
+	}
+	if !slices.Contains(p.sends, "acme→n3 whole=false") {
+		t.Fatalf("no changes followed the whole copy: %v", p.sends)
+	}
+}
+
+// fallingBehind makes every send to a node take long enough for the
+// replica to get newer changes meanwhile.
+type fallingBehind struct {
+	*peer
+	node string
+	r    *Replicator
+	f    *fixture
+}
+
+func (p *fallingBehind) Send(ctx context.Context, to, tenant string, whole bool, data io.Reader) error {
+	err := p.peer.Send(ctx, to, tenant, whole, data)
+	if to == p.node {
+		p.f.clock = p.f.clock.Add(time.Minute)
+		p.f.nodes["n1"].volumes.write(tenant)
+		p.r.markSynced(tenant, p.f.clock)
+	}
+	return err
+}
+
+// A moving copy whose sends never catch up with the replica does not take
+// its place; it does once a send of its changes is quick.
+func TestAMovingCopyBehindTheReplicaDoesNotSwitch(t *testing.T) {
+	f, r, p := relocationFixture(t)
+	ctx := context.Background()
+	n1, n3 := f.nodes["n1"], f.nodes["n3"]
+	r.Peer = &fallingBehind{peer: p, node: "n3", r: r, f: f}
+	f.clock = f.clock.Add(15 * time.Second)
+	record, _ := n1.store.Get("acme")
+	r.relocate(ctx, record)
+	if record, _ := n1.store.Get("acme"); record.Replica != "n2" || record.ReplicaNext != "n3" {
+		t.Fatalf("a copy behind its replica took its place: %+v", record)
+	}
+	if len(p.sends) < 2 {
+		t.Fatalf("sends = %v", p.sends)
+	}
+	r.Peer = p
+	f.clock = f.clock.Add(time.Second)
+	r.relocate(ctx, record)
+	record, _ = n1.store.Get("acme")
+	if record.Replica != "n3" || record.ReplicaNext != "" {
+		t.Fatalf("a copy caught up did not take over: %+v", record)
+	}
+	if got, want := n3.volumes.data["acme"].version, n1.volumes.data["acme"].version; got != want {
+		t.Fatalf("the new replica is at version %d, the data at %d", got, want)
+	}
+}
+
+// A send to the replica that waited for its slot while the copy moved
+// sends nothing to the old node, and prunes nothing the new one needs.
+func TestASendToAReplicaThatMovedIsDropped(t *testing.T) {
+	f, r, p := relocationFixture(t)
+	ctx := context.Background()
+	n1, n3 := f.nodes["n1"], f.nodes["n3"]
+	stale, _ := n1.store.Get("acme")
+	f.clock = f.clock.Add(15 * time.Second)
+	n1.volumes.write("acme")
+	r.relocate(ctx, stale)
+	if record, _ := n1.store.Get("acme"); record.Replica != "n3" {
+		t.Fatalf("after the copy moved: %+v", record)
+	}
+	theirs, _ := n3.receiver.Snapshots(ctx, "n1", "acme")
+	base := theirs[len(theirs)-1]
+	p.sends = nil
+	for range 5 {
+		f.clock = f.clock.Add(15 * time.Second)
+		n1.volumes.write("acme")
+		r.update(ctx, stale)
+	}
+	if len(p.sends) != 0 {
+		t.Fatalf("sent to the node that is no longer the replica: %v", p.sends)
+	}
+	if _, ok := n1.volumes.data["acme"].snapshots[base]; !ok {
+		t.Fatalf("the new replica's base %s was pruned", base)
+	}
+}
+
+// While a copy moves, as the state says, the replica's sends prune
+// nothing, even between the moving copy's sends: the copy's base stays.
+func TestNothingIsPrunedWhileACopyMoves(t *testing.T) {
+	f, r, _ := relocationFixture(t)
+	ctx := context.Background()
+	n1, n3 := f.nodes["n1"], f.nodes["n3"]
+	f.clock = f.clock.Add(15 * time.Second)
+	n1.volumes.write("acme")
+	if _, err := r.replicate(ctx, "acme", "n3", false); err != nil {
+		t.Fatal(err)
+	}
+	theirs, _ := n3.receiver.Snapshots(ctx, "n1", "acme")
+	base := theirs[len(theirs)-1]
+	record, _ := n1.store.Get("acme")
+	for range 5 {
+		f.clock = f.clock.Add(15 * time.Second)
+		n1.volumes.write("acme")
+		r.update(ctx, record)
+	}
+	if _, ok := n1.volumes.data["acme"].snapshots[base]; !ok {
+		t.Fatalf("the moving copy's base %s was pruned", base)
 	}
 }

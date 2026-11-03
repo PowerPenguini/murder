@@ -109,6 +109,13 @@ func (r *Replicator) stall() time.Duration {
 	return 2 * time.Minute
 }
 
+func (r *Replicator) every() time.Duration {
+	if r.Every > 0 {
+		return r.Every
+	}
+	return 15 * time.Second
+}
+
 func (r *Replicator) keep() int {
 	if r.Keep > 0 {
 		return r.Keep
@@ -120,10 +127,7 @@ func (r *Replicator) keep() int {
 // ended.
 func (r *Replicator) Run(ctx context.Context) {
 	defer r.running.Wait()
-	every := r.Every
-	if every == 0 {
-		every = 15 * time.Second
-	}
+	every := r.every()
 	for {
 		r.step(ctx)
 		select {
@@ -286,6 +290,14 @@ func (r *Replicator) slots(whole bool) chan struct{} {
 // update sends a tenant's replica what changed, or all of it while it has
 // no whole copy yet.
 func (r *Replicator) update(ctx context.Context, record store.Record) {
+	// The send may have waited for its slot while the copy moved: a node
+	// no longer the replica gets nothing.
+	record, ok := r.placed(record.Spec.Name, func(now store.Record) bool {
+		return now.Replica == record.Replica && now.MoveTo != now.Replica
+	})
+	if !ok {
+		return
+	}
 	err := r.Replicate(ctx, record.Spec.Name, record.Replica)
 	if !record.ReplicaReady && ctx.Err() == nil {
 		r.copyFailed(record.Spec.Name, record.Replica, err)
@@ -309,21 +321,41 @@ func (r *Replicator) update(ctx context.Context, record store.Record) {
 	}
 }
 
-// relocate sends a tenant's copy to the node it moves to, whole, and makes
-// that node the replica once it is.
+// catchUpRounds bounds the sends of changes a moving copy gets in one go
+// once whole; one still behind then gets more on the passes that follow.
+const catchUpRounds = 5
+
+// relocate sends a tenant's copy to the node it moves to, whole, then the
+// changes since, and makes that node the replica once its copy is about
+// as current as the replica's: a whole copy can take hours, and the
+// replica got every change meanwhile.
 func (r *Replicator) relocate(ctx context.Context, record store.Record) {
 	name, next := record.Spec.Name, record.ReplicaNext
+	record, ok := r.placed(name, func(now store.Record) bool { return now.ReplicaNext == next && now.MoveTo == "" })
+	if !ok {
+		return
+	}
 	// The replica's changes keep going meanwhile, but prune nothing: the
 	// snapshot this copy is sent from is the base of the next node's
 	// first changes.
 	r.relocating(name, 1)
 	defer r.relocating(name, -1)
-	switched := false
-	err := r.replicate(ctx, name, next, false)
+	switched, current := false, false
+	var err error
+	for range catchUpRounds {
+		var matched time.Time
+		matched, err = r.replicate(ctx, name, next, false)
+		if err != nil {
+			break
+		}
+		if current = r.current(name, matched); current {
+			break
+		}
+	}
 	if ctx.Err() == nil {
 		r.copyFailed(name, next, err)
 	}
-	if err == nil {
+	if err == nil && current {
 		switched, err = r.Store.SwitchReplica(name, next)
 	}
 	switch {
@@ -331,7 +363,26 @@ func (r *Replicator) relocate(ctx context.Context, record store.Record) {
 		r.Log.Warn("send a tenant's copy to the node it moves to", "tenant", name, "to", next, "error", err)
 	case switched:
 		r.Log.Info("a tenant's copy moved", "tenant", name, "from", record.Replica, "to", next)
+	case err == nil && !current && ctx.Err() == nil:
+		r.Log.Info("a tenant's moving copy is still behind its replica; it gets more changes next pass", "tenant", name, "to", next)
 	}
+}
+
+// placed is tenant's record now, if this node still runs it and still is
+// to send the copy that wants says: a send may wait long for its slot.
+func (r *Replicator) placed(tenant string, wants func(store.Record) bool) (store.Record, bool) {
+	record, err := r.Store.Get(tenant)
+	if err != nil || record.Node != r.Store.Node() || !wants(record) {
+		return store.Record{}, false
+	}
+	return record, true
+}
+
+// current reports whether a copy that matched tenant's data at matched is
+// about as current as its replica: no more than a pass behind its last
+// match.
+func (r *Replicator) current(tenant string, matched time.Time) bool {
+	return !matched.Before(r.Synced(tenant).Add(-r.every()))
 }
 
 // relocating counts a copy of tenant starting (1) or ending (-1) its move.
@@ -355,9 +406,15 @@ func (r *Replicator) pruneTurn(tenant string) uint64 {
 	return r.movesSeen[tenant]
 }
 
-// mayPrune reports whether a send of tenant's replica, begun at turn, may
-// prune its snapshots: no copy of it moved since, or moves now.
-func (r *Replicator) mayPrune(tenant string, turn uint64) bool {
+// mayPrune reports whether a send of tenant's copy on node, begun at
+// turn, may prune its snapshots: node is still its replica, and no copy
+// of it moves, as the state says, or moved here since. Pruning keeps the
+// newest snapshots, the replica's base among them; a moving copy's base
+// may be older, and a node no longer the replica has another's base.
+func (r *Replicator) mayPrune(tenant, node string, turn uint64) bool {
+	if _, ok := r.placed(tenant, func(now store.Record) bool { return now.Replica == node && now.ReplicaNext == "" }); !ok {
+		return false
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.moves[tenant] == 0 && r.movesSeen[tenant] == turn
@@ -367,42 +424,44 @@ func (r *Replicator) mayPrune(tenant string, turn uint64) bool {
 // the changes since the newest snapshot both have, or the whole data if
 // they have none in common. Nothing is sent when nothing changed.
 func (r *Replicator) Replicate(ctx context.Context, tenant, node string) error {
-	return r.replicate(ctx, tenant, node, true)
+	_, err := r.replicate(ctx, tenant, node, true)
+	return err
 }
 
-// replicate is Replicate; track says the copy is the replica's, whose
-// last match the metrics report and whose sends prune the snapshots. A copy
-// moving to another node prunes none: the replica's next sends would take
-// its base.
-func (r *Replicator) replicate(ctx context.Context, tenant, node string, track bool) error {
+// replicate is Replicate, and reports when the copy last matched the data;
+// track says the copy is the replica's, whose last match the metrics
+// report and whose sends prune the snapshots. A copy moving to another
+// node prunes none: the replica's next sends would take its base.
+func (r *Replicator) replicate(ctx context.Context, tenant, node string, track bool) (time.Time, error) {
 	turn := r.pruneTurn(tenant)
 	snapshots, err := r.Volumes.Snapshots(ctx, tenant, ReplicaReason)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	asked, cancel := context.WithTimeout(ctx, r.stall())
 	theirs, err := r.Peer.Snapshots(asked, node, tenant)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("ask node %s for its copy: %w", node, peerFailure{err})
+		return time.Time{}, fmt.Errorf("ask node %s for its copy: %w", node, peerFailure{err})
 	}
 	base := NewestCommon(snapshots, theirs)
 	if base != "" {
+		checked := r.now()
 		written, err := r.Volumes.Written(ctx, tenant, base)
 		if err != nil {
-			return err
+			return time.Time{}, err
 		}
 		if written == 0 {
 			if track {
-				r.markSynced(tenant, r.now())
+				r.markSynced(tenant, checked)
 			}
-			return nil
+			return checked, nil
 		}
 	}
 	taken := r.now()
 	full, err := r.snapshot(ctx, tenant)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	_, snapshot, _ := strings.Cut(full, "@")
 	if err := r.send(ctx, tenant, node, base, snapshot); err != nil {
@@ -411,19 +470,19 @@ func (r *Replicator) replicate(ctx context.Context, tenant, node string, track b
 		if destroyErr := r.Volumes.DestroySnapshot(context.WithoutCancel(ctx), tenant, snapshot); destroyErr != nil {
 			err = errors.Join(err, destroyErr)
 		}
-		return err
+		return time.Time{}, err
 	}
 	if !track {
-		return nil
+		return taken, nil
 	}
 	r.markSynced(tenant, taken)
-	if !r.mayPrune(tenant, turn) {
-		return nil
+	if !r.mayPrune(tenant, node, turn) {
+		return taken, nil
 	}
 	if err := r.Volumes.Prune(ctx, tenant, ReplicaReason, r.keep()); err != nil {
 		r.Log.Warn("prune replica snapshots", "tenant", tenant, "error", err)
 	}
-	return nil
+	return taken, nil
 }
 
 // snapshot takes a replica snapshot of tenant. The replica's send and a
