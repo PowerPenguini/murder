@@ -49,39 +49,39 @@ func submit(t *testing.T, client *http.Client, server *httptest.Server, path str
 func TestActingOnTenants(t *testing.T) {
 	cluster, server, client := newActingPanel(t)
 	ctx := context.Background()
-	_, body := submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"suspend"}}, server.URL)
-	if !strings.Contains(body, "iqtms is suspended") || !strings.Contains(body, ">suspended<") {
+	_, body := submit(t, client, server, "/tenants/atlas", url.Values{"do": {"suspend"}}, server.URL)
+	if !strings.Contains(body, "atlas is suspended") || !strings.Contains(body, ">suspended<") {
 		t.Fatalf("after suspending:\n%s", body)
 	}
 	// Said once: a reload does not say it again.
-	if response, err := client.Get(server.URL + "/tenants/iqtms"); err == nil {
+	if response, err := client.Get(server.URL + "/tenants/atlas"); err == nil {
 		again, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		if strings.Contains(string(again), "iqtms is suspended") {
+		if strings.Contains(string(again), "atlas is suspended") {
 			t.Fatal("the action's notice shown twice")
 		}
 	}
-	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "iqtms", Limit: 1}); events[0].Action != "tenant.suspended" || events[0].Actor != "murder-panel socket" {
+	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "atlas", Limit: 1}); events[0].Action != "tenant.suspended" || events[0].Actor != "murder-panel socket" {
 		t.Fatalf("event %+v", events[0])
 	}
 	// Archiving without the name typed does nothing.
-	_, body = submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"archive"}, "confirm": {"iqtm"}}, server.URL)
+	_, body = submit(t, client, server, "/tenants/atlas", url.Values{"do": {"archive"}, "confirm": {"atla"}}, server.URL)
 	if !strings.Contains(body, "type the tenant&#39;s name") {
 		t.Fatalf("an archive unconfirmed:\n%s", body)
 	}
-	if tenant, _ := cluster.Get(ctx, "iqtms"); tenant.Archived() {
+	if tenant, _ := cluster.Get(ctx, "atlas"); tenant.Archived() {
 		t.Fatal("archived unconfirmed")
 	}
-	submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"archive"}, "confirm": {"iqtms"}}, server.URL)
-	if tenant, _ := cluster.Get(ctx, "iqtms"); !tenant.Archived() {
+	submit(t, client, server, "/tenants/atlas", url.Values{"do": {"archive"}, "confirm": {"atlas"}}, server.URL)
+	if tenant, _ := cluster.Get(ctx, "atlas"); !tenant.Archived() {
 		t.Fatal("not archived")
 	}
 	// Purged, it is gone, and the page is the tenants'.
-	response, body := submit(t, client, server, "/tenants/iqtms", url.Values{"do": {"purge"}, "confirm": {"iqtms"}}, server.URL)
-	if response.Request.URL.Path != "/tenants" || !strings.Contains(body, "iqtms is purged") {
+	response, body := submit(t, client, server, "/tenants/atlas", url.Values{"do": {"purge"}, "confirm": {"atlas"}}, server.URL)
+	if response.Request.URL.Path != "/tenants" || !strings.Contains(body, "atlas is purged") {
 		t.Fatalf("after purging: %s", response.Request.URL)
 	}
-	if _, err := cluster.Get(ctx, "iqtms"); err == nil {
+	if _, err := cluster.Get(ctx, "atlas"); err == nil {
 		t.Fatal("purged, still there")
 	}
 	// A move, and a tenant made.

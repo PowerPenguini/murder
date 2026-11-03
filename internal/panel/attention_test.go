@@ -83,7 +83,7 @@ func TestAttentionOnThePages(t *testing.T) {
 	if !strings.Contains(page, `data-confirm="baltic-freight"`) {
 		t.Fatalf("archiving does not wait for the name:\n%s", page)
 	}
-	if _, page = get(t, server.URL+"/tenants/iqtms"); strings.Contains(page, `class="problem`) {
+	if _, page = get(t, server.URL+"/tenants/atlas"); strings.Contains(page, `class="problem`) {
 		t.Fatalf("a tenant that runs as it should is said to have a problem:\n%s", page)
 	}
 }

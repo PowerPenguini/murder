@@ -68,6 +68,10 @@ between servers, is not something they solve.
 3. Three servers: Raft replicates the same store changes to every node's
    SQLite; ZFS replication; `drain`.
 4. Automatic failover: leases, power-off fencing, promotion, alerts.
-5. Wave rollouts with canaries and rollback.
+5. Wave rollouts with canaries and rollback. Started: apps follow an image
+   tag, a newer image is offered, and every change is a revision to go back
+   to; waves and canaries are next.
 6. Shared services: provider proxy with per-tenant metering, catalog
    publishing.
+
+Stages 1 to 4 are done, as is the administration panel.

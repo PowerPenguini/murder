@@ -40,7 +40,7 @@ func TestUsePages(t *testing.T) {
 	}
 
 	plain := newTestServer(t, Demo{Now: demoNow})
-	if _, page = get(t, plain.URL+"/tenants/iqtms"); strings.Contains(page, "Use, last 24 hours") {
+	if _, page = get(t, plain.URL+"/tenants/atlas"); strings.Contains(page, "Use, last 24 hours") {
 		t.Fatal("a backend that measures nothing shows use")
 	}
 }

@@ -95,8 +95,8 @@ func TestEditingAnApp(t *testing.T) {
 		t.Fatalf("acme-logistics runs %s with %v", tenant.Spec.Image, tenant.Spec.Env)
 	}
 	// A tenant's own settings stay its own.
-	if tenant, _ := cluster.Get(ctx, "iqtms"); tenant.Spec.Env["TZ"] != "Europe/Berlin" {
-		t.Fatalf("iqtms runs %v", tenant.Spec.Env)
+	if tenant, _ := cluster.Get(ctx, "atlas"); tenant.Spec.Env["TZ"] != "Europe/Berlin" {
+		t.Fatalf("atlas runs %v", tenant.Spec.Env)
 	}
 
 	// An app tenants run is not deleted; one without is, its name typed.
@@ -117,18 +117,18 @@ func TestEditingAnApp(t *testing.T) {
 func TestATenantsSettings(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
-	_, page := get(t, server.URL+"/tenants/iqtms/settings")
+	_, page := get(t, server.URL+"/tenants/atlas/settings")
 	for _, want := range []string{"FEATURE_PLANNER=on", "ADMIN_PASSWORD password 20", `value="768"`, "SESSION_KEY", "app addhoc"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the settings page lacks %q:\n%s", want, page)
 		}
 	}
-	before, _ := cluster.Get(ctx, "iqtms")
+	before, _ := cluster.Get(ctx, "atlas")
 	form := url.Values{"do": {"save"}, "app": {"addhoc"}, "generation": {strconv.FormatInt(before.Generation, 10)},
 		"env": {"TZ=Europe/Warsaw\nbroken"}, "secrets": {"ADMIN_PASSWORD password 20\nAPI_TOKEN base64 48"}, "memoryMB": {"1024"}, "cpus": {"1.5"}}
 
 	// A form that does not read is shown again, as typed.
-	_, body := submit(t, client, server, "/tenants/iqtms/settings", form, server.URL)
+	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
 	if !strings.Contains(body, "env line 2: NAME=value") || !strings.Contains(body, "API_TOKEN base64 48") {
 		t.Fatalf("a bad env line:\n%s", body)
 	}
@@ -138,32 +138,32 @@ func TestATenantsSettings(t *testing.T) {
 		stale[key] = values
 	}
 	stale.Set("generation", "1")
-	if _, body = submit(t, client, server, "/tenants/iqtms/settings", stale, server.URL); !strings.Contains(body, "someone changed iqtms since") {
+	if _, body = submit(t, client, server, "/tenants/atlas/settings", stale, server.URL); !strings.Contains(body, "someone changed atlas since") {
 		t.Fatalf("a stale save:\n%s", body)
 	}
 
-	_, body = submit(t, client, server, "/tenants/iqtms/settings", form, server.URL)
-	if !strings.Contains(body, "iqtms&#39;s settings are changed") {
+	_, body = submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	if !strings.Contains(body, "atlas&#39;s settings are changed") {
 		t.Fatalf("after saving:\n%s", body)
 	}
-	after, _ := cluster.Get(ctx, "iqtms")
+	after, _ := cluster.Get(ctx, "atlas")
 	want := spec.Overrides{Env: map[string]string{"TZ": "Europe/Warsaw"}, Secrets: spec.Secrets{"ADMIN_PASSWORD": {Kind: "password", Bytes: 20}, "API_TOKEN": {Kind: "base64", Bytes: 48}},
 		Limits: spec.Limits{MemoryMB: 1024, CPUs: 1.5}}
 	if !after.Overrides.Equal(want) || after.Spec.Env["FEATURE_PLANNER"] != "" || after.Spec.Limits.MemoryMB != 1024 || after.Generation != before.Generation+1 {
-		t.Fatalf("iqtms after saving: %+v, env %v, generation %d", after.Overrides, after.Spec.Env, after.Generation)
+		t.Fatalf("atlas after saving: %+v, env %v, generation %d", after.Overrides, after.Spec.Env, after.Generation)
 	}
 
 	// A secret gets a new value with its name typed; its value is never
 	// on the page.
-	_, body = submit(t, client, server, "/tenants/iqtms/settings", url.Values{"do": {"rotate"}, "key": {"API_TOKEN"}, "confirm": {"api"}}, server.URL)
+	_, body = submit(t, client, server, "/tenants/atlas/settings", url.Values{"do": {"rotate"}, "key": {"API_TOKEN"}, "confirm": {"api"}}, server.URL)
 	if !strings.Contains(body, "type the secret&#39;s name") {
 		t.Fatalf("rotated without the name typed:\n%s", body)
 	}
-	_, body = submit(t, client, server, "/tenants/iqtms/settings", url.Values{"do": {"rotate"}, "key": {"API_TOKEN"}, "confirm": {"API_TOKEN"}}, server.URL)
+	_, body = submit(t, client, server, "/tenants/atlas/settings", url.Values{"do": {"rotate"}, "key": {"API_TOKEN"}, "confirm": {"API_TOKEN"}}, server.URL)
 	if !strings.Contains(body, "API_TOKEN has a new value") {
 		t.Fatalf("after rotating:\n%s", body)
 	}
-	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "iqtms", Limit: 1}); events[0].Action != "secret.rotated" || events[0].Detail != "API_TOKEN" {
+	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "atlas", Limit: 1}); events[0].Action != "secret.rotated" || events[0].Detail != "API_TOKEN" {
 		t.Fatalf("the audit log: %+v", events[0])
 	}
 }
