@@ -3,6 +3,7 @@ package volume
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -69,13 +70,33 @@ func (d Dir) Receive(ctx context.Context, tenant string, _ bool, r io.Reader) er
 // sockets and pipes, which hold no data, are left out; the copy made while
 // the tenant is stopped is the whole one.
 func writeTar(ctx context.Context, path string, w io.Writer) error {
+	archive := tar.NewWriter(w)
+	err := walkTree(ctx, path, func(header *tar.Header, content io.Reader) error {
+		if err := archive.WriteHeader(header); err != nil {
+			return err
+		}
+		if content == nil {
+			return nil
+		}
+		_, err := io.Copy(archive, content)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	return archive.Close()
+}
+
+// walkTree calls visit with the header of every entry below path, as
+// writeTar writes it, and the content of a regular file: header.Size
+// bytes, a file that shrank since padded with zeros.
+func walkTree(ctx context.Context, path string, visit func(header *tar.Header, content io.Reader) error) error {
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	archive := tar.NewWriter(w)
-	err = fs.WalkDir(root.FS(), ".", func(name string, _ fs.DirEntry, err error) error {
+	return fs.WalkDir(root.FS(), ".", func(name string, _ fs.DirEntry, err error) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
@@ -128,25 +149,13 @@ func writeTar(ctx context.Context, path string, w io.Writer) error {
 			header.Uid, header.Gid = int(stat.Uid), int(stat.Gid)
 		}
 		header.Uname, header.Gname = "", ""
-		if err := archive.WriteHeader(header); err != nil {
-			return err
-		}
 		if file == nil {
-			return nil
-		}
-		copied, err := io.Copy(archive, io.LimitReader(file, header.Size))
-		if err != nil {
-			return err
+			return visit(header, nil)
 		}
 		// It shrank since: the rest is zeros, and the stopped copy has it
 		// as it is.
-		_, err = io.CopyN(archive, zeros{}, header.Size-copied)
-		return err
+		return visit(header, io.LimitReader(io.MultiReader(file, zeros{}), header.Size))
 	})
-	if err != nil {
-		return err
-	}
-	return archive.Close()
 }
 
 // zeros reads as zero bytes.
@@ -157,9 +166,70 @@ func (zeros) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// readTar unpacks a stream writeTar wrote below path, never leaving it,
-// also through a symlink an earlier entry made. Ownership is kept where the
-// process may set it (as root on a node); setuid and setgid bits are not.
+// errLeftOut is an entry readTar leaves out: devices, hard links and the
+// like have no place in a tenant's data, and writeTar writes none.
+var errLeftOut = errors.New("an entry of a type that is not unpacked")
+
+// tarTree follows the tree unpacking a tar stream makes, entry by entry,
+// so that a stream is held to the same rules whether it is unpacked or
+// only read through: within the tenant's data, each path once, and each
+// file, directory or symlink in a directory an entry made.
+type tarTree struct {
+	// kinds is what each path is: its entry's type, or a directory made on
+	// the way to one; entries the paths an entry gave.
+	kinds   map[string]byte
+	entries map[string]bool
+}
+
+// add checks the next entry of a stream and returns where it goes, below
+// the data's root.
+func (t *tarTree) add(header *tar.Header) (string, error) {
+	if t.kinds == nil {
+		t.kinds, t.entries = map[string]byte{".": tar.TypeDir}, map[string]bool{}
+	}
+	name := filepath.FromSlash(header.Name)
+	if !filepath.IsLocal(name) && name != "." {
+		return "", fmt.Errorf("entry %q leaves the tenant's data", header.Name)
+	}
+	name = filepath.Clean(name)
+	switch header.Typeflag {
+	case tar.TypeDir, tar.TypeReg, tar.TypeSymlink:
+	default:
+		return name, fmt.Errorf("entry %q: %w", header.Name, errLeftOut)
+	}
+	if t.entries[name] {
+		return "", fmt.Errorf("entry %q comes twice", header.Name)
+	}
+	// Never below a file or a symlink: one would lead elsewhere.
+	parent := filepath.Dir(name)
+	for above := parent; above != "."; above = filepath.Dir(above) {
+		if kind, ok := t.kinds[above]; ok && kind != tar.TypeDir {
+			return "", fmt.Errorf("entry %q is below %s, which is no directory", header.Name, above)
+		}
+	}
+	if header.Typeflag != tar.TypeDir {
+		if t.kinds[parent] != tar.TypeDir {
+			return "", fmt.Errorf("entry %q is in a directory no entry made", header.Name)
+		}
+		if _, ok := t.kinds[name]; ok {
+			return "", fmt.Errorf("entry %q is a directory already", header.Name)
+		}
+	}
+	t.entries[name] = true
+	t.kinds[name] = header.Typeflag
+	if header.Typeflag == tar.TypeDir {
+		for above := parent; above != "."; above = filepath.Dir(above) {
+			if _, ok := t.kinds[above]; !ok {
+				t.kinds[above] = tar.TypeDir
+			}
+		}
+	}
+	return name, nil
+}
+
+// readTar unpacks a stream writeTar wrote below path, never leaving it.
+// Ownership is kept where the process may set it (as root on a node);
+// setuid and setgid bits are not.
 func readTar(ctx context.Context, path string, r io.Reader) error {
 	root, err := os.OpenRoot(path)
 	if err != nil {
@@ -168,6 +238,7 @@ func readTar(ctx context.Context, path string, r io.Reader) error {
 	defer root.Close()
 	archive := tar.NewReader(r)
 	asRoot := os.Geteuid() == 0
+	var tree tarTree
 	var directories []*tar.Header
 	for {
 		header, err := archive.Next()
@@ -180,13 +251,12 @@ func readTar(ctx context.Context, path string, r io.Reader) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		name := filepath.FromSlash(header.Name)
-		if !filepath.IsLocal(name) && name != "." {
-			return fmt.Errorf("entry %q leaves the tenant's data", header.Name)
+		name, err := tree.add(header)
+		if errors.Is(err, errLeftOut) {
+			continue
 		}
-		mode := fs.FileMode(header.Mode).Perm()
-		if header.Mode&0o1000 != 0 {
-			mode |= fs.ModeSticky
+		if err != nil {
+			return err
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -207,8 +277,6 @@ func readTar(ctx context.Context, path string, r io.Reader) error {
 			if err := root.Symlink(header.Linkname, name); err != nil {
 				return fmt.Errorf("%s: %w", header.Name, err)
 			}
-		default:
-			continue // devices, hard links and the like have no place here
 		}
 		if asRoot {
 			if err := root.Lchown(name, header.Uid, header.Gid); err != nil {
@@ -216,7 +284,7 @@ func readTar(ctx context.Context, path string, r io.Reader) error {
 			}
 		}
 		if header.Typeflag != tar.TypeSymlink {
-			if err := root.Chmod(name, mode); err != nil {
+			if err := root.Chmod(name, restoredMode(header)); err != nil {
 				return err
 			}
 			if err := root.Chtimes(name, header.ModTime, header.ModTime); err != nil {
@@ -227,6 +295,119 @@ func readTar(ctx context.Context, path string, r io.Reader) error {
 	// Directory times last: their files changed them.
 	for _, header := range directories {
 		_ = root.Chtimes(filepath.FromSlash(header.Name), header.ModTime, header.ModTime)
+	}
+	return nil
+}
+
+// restoredMode is the mode readTar gives an entry: its permissions and
+// sticky bit, never setuid or setgid.
+func restoredMode(header *tar.Header) fs.FileMode {
+	mode := fs.FileMode(header.Mode).Perm()
+	if header.Mode&0o1000 != 0 {
+		mode |= fs.ModeSticky
+	}
+	return mode
+}
+
+// TarEntry is an entry of a tar stream as ReadTar would unpack it: what it
+// is, its owner, mode and time, a symlink's target, and a file's size and
+// SHA-256.
+type TarEntry struct {
+	Type     byte
+	Uid, Gid int
+	Mode     int64
+	ModTime  time.Time
+	Link     string
+	Size     int64
+	Sum      [sha256.Size]byte
+}
+
+func tarEntry(header *tar.Header, content io.Reader) (TarEntry, error) {
+	entry := TarEntry{Type: header.Typeflag, Uid: header.Uid, Gid: header.Gid, Mode: header.Mode, ModTime: header.ModTime, Link: header.Linkname, Size: header.Size}
+	if header.Typeflag == tar.TypeReg {
+		hash := sha256.New()
+		n, err := io.Copy(hash, content)
+		if err != nil {
+			return entry, err
+		}
+		entry.Size = n
+		hash.Sum(entry.Sum[:0])
+	}
+	return entry, nil
+}
+
+// ScanTar reads a tar stream through by the rules ReadTar unpacks it by,
+// unpacking nothing, and returns its entries by path below the root. An
+// entry ReadTar would refuse fails it, and so does one it would leave out:
+// WriteTar writes none.
+func ScanTar(ctx context.Context, r io.Reader) (map[string]TarEntry, error) {
+	archive := tar.NewReader(r)
+	var tree tarTree
+	entries := map[string]TarEntry{}
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			return entries, nil
+		}
+		if err != nil {
+			return entries, err
+		}
+		if err := ctx.Err(); err != nil {
+			return entries, err
+		}
+		name, err := tree.add(header)
+		if err != nil {
+			return entries, err
+		}
+		entry, err := tarEntry(header, archive)
+		if err != nil {
+			return entries, fmt.Errorf("%s: %w", header.Name, err)
+		}
+		entries[name] = entry
+	}
+}
+
+// CompareTar reports how entries, as ScanTar read them, differ from the
+// tree below path as WriteTar would write it, in what ReadTar puts back:
+// the entries, their types, owners, modes and times, symlinks' targets and
+// files' content.
+func CompareTar(ctx context.Context, path string, entries map[string]TarEntry) error {
+	found := 0
+	err := walkTree(ctx, path, func(header *tar.Header, content io.Reader) error {
+		name := filepath.Clean(filepath.FromSlash(header.Name))
+		got, ok := entries[name]
+		if !ok {
+			return fmt.Errorf("%s is not in the backup", name)
+		}
+		found++
+		want, err := tarEntry(header, content)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		switch {
+		case got.Type != want.Type:
+			return fmt.Errorf("%s is of another type in the backup", name)
+		case got.Uid != want.Uid || got.Gid != want.Gid:
+			return fmt.Errorf("%s has another owner in the backup", name)
+		case got.Link != want.Link:
+			return fmt.Errorf("%s links elsewhere in the backup", name)
+		case want.Type == tar.TypeSymlink:
+			return nil // a symlink's mode and time are not put back
+		case got.Mode != want.Mode:
+			return fmt.Errorf("%s has another mode in the backup", name)
+		// A tar header keeps whole seconds.
+		case !got.ModTime.Equal(want.ModTime) && !got.ModTime.Equal(want.ModTime.Round(time.Second)):
+			return fmt.Errorf("%s has another time in the backup", name)
+		case got.Size != want.Size || got.Sum != want.Sum:
+			return fmt.Errorf("%s differs from its snapshot in the backup", name)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if found != len(entries) {
+		return fmt.Errorf("the backup holds %d entries, its snapshot %d", len(entries), found)
 	}
 	return nil
 }

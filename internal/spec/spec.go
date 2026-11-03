@@ -146,6 +146,11 @@ func (l Limits) Problems() []string {
 	if l.MemoryMB < 0 || l.CPUs < 0 || l.PIDs < 0 || l.DiskGB < 0 {
 		problems = append(problems, "limits must not be negative")
 	}
+	// Docker takes a hundredth of a CPU at least; less would come out as
+	// no limit at all.
+	if l.CPUs > 0 && l.CPUs < minCPUs {
+		problems = append(problems, fmt.Sprintf("cpus must be at least %g (0 is the default)", minCPUs))
+	}
 	if l.MemoryMB > maxMemoryMB || l.CPUs > maxCPUs || l.PIDs > maxPIDs || l.DiskGB > maxDiskGB {
 		problems = append(problems, fmt.Sprintf("limits must be at most %d MB memory, %d CPUs, %d processes and %d GB disk", maxMemoryMB, maxCPUs, maxPIDs, maxDiskGB))
 	}
@@ -174,6 +179,7 @@ func (l Limits) Or(defaults Limits) Limits {
 const (
 	maxMemoryMB = 1 << 24 // 16 TB
 	maxCPUs     = 4096
+	minCPUs     = 0.01
 	maxPIDs     = 1 << 22
 	maxDiskGB   = 1 << 20 // 1 PB
 )

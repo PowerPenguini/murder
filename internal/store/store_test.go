@@ -819,3 +819,90 @@ func TestRollReplacesOnlyLiveTenants(t *testing.T) {
 		t.Fatalf("roll an archived tenant: %v", err)
 	}
 }
+
+func TestSecretsAreSealedAgainInOneChange(t *testing.T) {
+	st, _ := openNew(t, options())
+	if _, err := st.PutApp(App{Name: "web", Spec: appSpec()}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a", "b"} {
+		if _, err := st.Create(NewTenant{Name: name, App: "web"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, _ := st.Get("a")
+	if len(a.Sealed) == 0 {
+		t.Fatal("the app has no secrets")
+	}
+	reseal := func(tenant, name, sealed string) (string, bool, error) {
+		if strings.HasPrefix(sealed, "again:") {
+			return sealed, false, nil
+		}
+		return "again:" + sealed, true, nil
+	}
+	count, err := st.ResealSecrets(reseal, "root")
+	if err != nil || count != 2*len(a.Sealed) {
+		t.Fatalf("resealed %d, %v", count, err)
+	}
+	b, _ := st.Get("b")
+	for name, sealed := range b.Sealed {
+		if !strings.HasPrefix(sealed, "again:") {
+			t.Fatalf("%s of b: %q", name, sealed)
+		}
+	}
+	if b.Generation != 1 {
+		t.Fatalf("sealing again changed b's generation to %d", b.Generation)
+	}
+	// Again, nothing to seal; still a change, and one while frozen.
+	if err := st.Freeze("master key rotation from test", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := st.ResealSecrets(reseal, "root"); err != nil || count != 0 {
+		t.Fatalf("again: %d, %v", count, err)
+	}
+	events, _ := st.Events(EventQuery{Limit: 2})
+	if events[0].Action != "secrets.resealed" || events[0].Detail != "0 secrets sealed with the master key in use" {
+		t.Fatalf("events %+v", events)
+	}
+	failing := func(tenant, name, sealed string) (string, bool, error) { return "", false, errors.New("does not open") }
+	if _, err := st.ResealSecrets(failing, "root"); err == nil || !strings.Contains(err.Error(), "does not open") {
+		t.Fatalf("a value that does not open: %v", err)
+	}
+}
+
+func TestARotationThawsOnlyItsOwnFreeze(t *testing.T) {
+	st, _ := openNew(t, options())
+	if err := st.Freeze("upgrade to abc", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ThawOwn(RotationFreeze+"n1", "root"); err != nil || st.Frozen() != "upgrade to abc" {
+		t.Fatalf("thawed another's freeze: %q, %v", st.Frozen(), err)
+	}
+	if err := st.Thaw("root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Freeze(RotationFreeze+"n1", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ThawOwn(RotationFreeze+"n1", "root"); err != nil || st.Frozen() != "" {
+		t.Fatalf("own freeze: %q, %v", st.Frozen(), err)
+	}
+}
+
+// A thaw for the freeze someone saw ends that one alone: one taken since
+// stays, and the thaw says so.
+func TestAThawEndsTheFreezeItWasFor(t *testing.T) {
+	st, _ := openNew(t, options())
+	if err := st.Freeze(RotationFreeze+"n1", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ThawIf("upgrade to abc", "root"); !errors.Is(err, ErrConflict) || st.Frozen() == "" {
+		t.Fatalf("thawed another freeze: %v, %q", err, st.Frozen())
+	}
+	if err := st.ThawIf(RotationFreeze+"n1", "root"); err != nil || st.Frozen() != "" {
+		t.Fatalf("its own freeze: %v, %q", err, st.Frozen())
+	}
+	if err := st.ThawIf("anything", "root"); err != nil {
+		t.Fatalf("nothing frozen: %v", err)
+	}
+}

@@ -63,7 +63,8 @@ func newNode(t *testing.T, name string) *node {
 
 func newTunedNode(t *testing.T, name string, tune func(*raft.Config)) *node {
 	t.Helper()
-	n := &node{t: t, name: name, dir: t.TempDir(), key: masterKey(t, 7), address: "127.0.0.1:0", fatal: make(chan error, 1), tune: tune}
+	n := &node{t: t, name: name, dir: t.TempDir(), address: "127.0.0.1:0", fatal: make(chan error, 1), tune: tune}
+	n.key = keyFile(t, filepath.Join(n.dir, "master.key"), 7)
 	if err := store.Init(filepath.Join(n.dir, "murder.db"), name); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func (n *node) start() {
 	}
 	c, err := Start(Config{
 		Node: n.name, Address: n.address, Dir: filepath.Join(n.dir, "raft"),
-		Seed: n.key.Derive("cluster ca"), Store: st, Replicas: n.replicas,
+		Seeds: n.key.DeriveAll("cluster ca"), Store: st, Replicas: n.replicas, Keys: nodeKeys{n},
 		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Fatal: func(err error) { n.fatal <- err },
 		raft: func(config *raft.Config) {

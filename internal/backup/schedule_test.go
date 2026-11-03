@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -34,12 +35,39 @@ func (v *dirVolumes) Exists(_ context.Context, tenant string) (bool, error) {
 
 func (v *dirVolumes) Dataset(tenant string) string { return dataset(tenant) }
 
+// Written counts the writes since snapshot, the short name of one of the
+// tenant's, as bytes.
+func (v *dirVolumes) Written(_ context.Context, tenant, snapshot string) (int64, error) {
+	name := dataset(tenant) + "@" + snapshot
+	if _, err := os.Stat(v.snapshotPath(name)); err != nil {
+		return 0, err
+	}
+	return int64(v.writes[tenant] - v.taken[name]), nil
+}
+
+// tenantResults leaves the state's result out.
+func tenantResults(results []Result) []Result {
+	var tenants []Result
+	for _, result := range results {
+		if !result.State {
+			tenants = append(tenants, result)
+		}
+	}
+	return tenants
+}
+
 // fakeState is a desired state of a few tenants.
 type fakeState struct {
 	node      string
 	records   []store.Record
 	dir       string
 	snapshots []string
+	stale     []string
+}
+
+func (s *fakeState) ReplicaStale(name, why, _ string) error {
+	s.stale = append(s.stale, name+": "+why)
+	return nil
 }
 
 func (s *fakeState) Node() string         { return s.node }
@@ -71,9 +99,9 @@ func newScheduler(state State, setUp func() (*Backups, error), leader func() boo
 	})
 }
 
-// A run backs up the tenants this node runs, with data, not archived and
-// not moving away; the leader also backs the state up, and removes its
-// copy of it.
+// A run backs up the tenants this node runs, with data and not moving
+// away, archived ones until their data as archived is backed up; the
+// leader also backs the state up, and removes its copy of it.
 func TestARunBacksUpThisNodesTenants(t *testing.T) {
 	f := newFixture(t, Test)
 	archived := record("archived", "n1")
@@ -91,7 +119,8 @@ func TestARunBacksUpThisNodesTenants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Tenant != "acme" || results[0].Error != "" || results[0].Key == "" {
+	if len(results) != 3 || results[0].Tenant != "acme" || results[0].Error != "" || results[0].Key == "" ||
+		results[1].Tenant != "archived" || results[1].Error != "" || !results[2].State || results[2].Error != "" || results[2].Key == "" {
 		t.Fatalf("results %+v", results)
 	}
 	states, err := f.backups.States(context.Background())
@@ -103,18 +132,20 @@ func TestARunBacksUpThisNodesTenants(t *testing.T) {
 	}
 	var page strings.Builder
 	s.WriteMetrics(metrics.NewWriter(&page))
-	for _, want := range []string{"\nmurder_backups_ready 1\n", `murder_tenant_backup_failing{tenant="acme"} 0`, `murder_tenant_backup_last_success_timestamp_seconds{tenant="acme"}`} {
+	for _, want := range []string{"\nmurder_backups_ready 1\n", `murder_tenant_backup_failing{tenant="acme"} 0`, `murder_tenant_backup_last_success_timestamp_seconds{tenant="acme"}`,
+		"\nmurder_state_backup_failing 0\n", "\nmurder_state_backup_last_success_timestamp_seconds "} {
 		if !strings.Contains(page.String(), want) {
 			t.Fatalf("metrics lack %s:\n%s", want, page.String())
 		}
 	}
 	// A scheduled run skips a tenant backed up within its interval, as
-	// after an agent restart; a run on request does not.
+	// after an agent restart; a run on request does not. Neither backs up
+	// an archived tenant whose backup holds its data as it is.
 	f.clock = f.clock.Add(10 * time.Minute)
-	if got := s.run(context.Background(), false); len(got) != 0 {
+	if got := tenantResults(s.run(context.Background(), false)); len(got) != 0 {
 		t.Fatalf("a scheduled run right after one made %+v", got)
 	}
-	if got := s.run(context.Background(), true); len(got) != 1 {
+	if got := tenantResults(s.run(context.Background(), true)); len(got) != 1 || got[0].Tenant != "acme" {
 		t.Fatalf("a run on request made %+v", got)
 	}
 }
@@ -149,7 +180,7 @@ func TestAFailedBackupIsReported(t *testing.T) {
 	f.clock = f.clock.Add(100 * 24 * time.Hour)
 	f.store.failPut = errors.New("bucket gone")
 	results, err := s.RunNow(context.Background())
-	if err != nil || len(results) != 1 || !strings.Contains(results[0].Error, "bucket gone") {
+	if err != nil || len(tenantResults(results)) != 1 || !strings.Contains(results[0].Error, "bucket gone") {
 		t.Fatalf("results %+v, %v", results, err)
 	}
 	var page strings.Builder
@@ -239,12 +270,17 @@ func TestABackupReplacesOnlyAnArchivedTenantOfThisNode(t *testing.T) {
 	if err := st.Archive("acme", "test"); err != nil {
 		t.Fatal(err)
 	}
+	before, _ := st.Get("acme")
 	result, err := a.ReplaceTenant(ctx, "acme", "murder-copy-acme-restore-1")
 	if err != nil || result.Error != "" || result.Aside != "tank/murder/murder-replaced-acme" {
 		t.Fatalf("an archived tenant: %+v, %v", result, err)
 	}
 	if len(volumes.replaced) != 1 || exclusive != 3 {
 		t.Fatalf("replaced %v, under the reconciler's lock %d times", volumes.replaced, exclusive)
+	}
+	// Its copy on another node no longer matches: no failover takes it.
+	if replaced, _ := st.Get("acme"); replaced.ReplicaReady {
+		t.Fatalf("after the replacement: ready %v (was %v)", replaced.ReplicaReady, before.ReplicaReady)
 	}
 	// A run under way holds the replacement off; a caller that gives up
 	// stops waiting.
@@ -261,6 +297,47 @@ func TestABackupReplacesOnlyAnArchivedTenantOfThisNode(t *testing.T) {
 	a.exclusive = func(fn func() error) error { cancel(); return fn() }
 	if _, err := a.ReplaceTenant(waiting, "acme", "murder-copy-acme-restore-3"); !errors.Is(err, context.Canceled) || len(volumes.replaced) != 1 {
 		t.Fatalf("given up under the lock: %v, replaced %v", err, volumes.replaced)
+	}
+}
+
+// A replacement holds the tenant's sends to its copies from before its
+// copy is marked stale until the data is replaced: none begun before
+// reports the old data whole after. A caller that gives up waiting for
+// the hold replaces nothing.
+func TestAReplacementHoldsTheTenantsSends(t *testing.T) {
+	acme := record("acme", "n1")
+	acme.ArchivedAt = time.Now()
+	state := &fakeState{node: "n1", records: []store.Record{acme}}
+	volumes := &replaceVolumes{}
+	var steps []string
+	a := NewScheduler(SchedulerConfig{
+		State: state, Log: discard(), Exclusive: func(fn func() error) error { return fn() },
+		Hold: func(ctx context.Context, tenant string) (func(), error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			steps = append(steps, fmt.Sprintf("hold %s, stale %d, replaced %d", tenant, len(state.stale), len(volumes.replaced)))
+			return func() {
+				steps = append(steps, fmt.Sprintf("release %s, stale %d, replaced %d", tenant, len(state.stale), len(volumes.replaced)))
+			}, nil
+		},
+	})
+	a.backups = &Backups{Volumes: volumes}
+	if _, err := a.ReplaceTenant(context.Background(), "acme", "murder-copy-acme-restore-1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"hold acme, stale 0, replaced 0", "release acme, stale 1, replaced 1"}
+	if !slices.Equal(steps, want) {
+		t.Fatalf("steps %v, want %v", steps, want)
+	}
+	gaveUp, cancel := context.WithCancel(context.Background())
+	a.exclusive = func(fn func() error) error { return fn() }
+	a.hold = func(ctx context.Context, tenant string) (func(), error) {
+		cancel()
+		return nil, ctx.Err()
+	}
+	if _, err := a.ReplaceTenant(gaveUp, "acme", "murder-copy-acme-restore-2"); !errors.Is(err, context.Canceled) || len(volumes.replaced) != 1 || len(state.stale) != 1 {
+		t.Fatalf("given up while held off: %v, replaced %v, stale %v", err, volumes.replaced, state.stale)
 	}
 }
 
@@ -341,5 +418,97 @@ func TestBackupsNeedTenantData(t *testing.T) {
 	a := newScheduler(&fakeState{node: "n1"}, func() (*Backups, error) { return &Backups{Volumes: &replaceVolumes{}}, nil }, nil)
 	if err := a.ready(); err == nil || a.backups != nil {
 		t.Fatalf("set up without tenant data: %v", err)
+	}
+}
+
+// Writes made after a tenant's last backup and before it was archived
+// reach the bucket: an archived tenant is backed up until its newest
+// backup holds its data as archived, forced or not, and then no more.
+func TestAnArchivedTenantGetsItsFinalBackup(t *testing.T) {
+	f := newFixture(t, Test)
+	state := &fakeState{node: "n1", dir: t.TempDir(), records: []store.Record{record("acme", "n1"), record("brief", "n1")}}
+	f.volumes.write(t, "acme", "db", "old")
+	s := newScheduler(state, func() (*Backups, error) { return f.backups, nil }, nil)
+	if _, err := s.RunNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// acme takes writes, then both are archived before the next run;
+	// brief, made since, never had a backup.
+	f.clock = f.clock.Add(10 * time.Minute)
+	f.volumes.write(t, "acme", "db", "final archived data")
+	f.volumes.write(t, "brief", "db", "made and archived between runs")
+	state.records = append(state.records[:1], record("brief", "n1"))
+	for i := range state.records {
+		state.records[i].ArchivedAt = f.clock
+	}
+	// A scheduled run backs them up at once, though acme's backup is
+	// recent; a run on request then backs up nothing more.
+	f.clock = f.clock.Add(time.Minute)
+	if got := tenantResults(s.run(context.Background(), false)); len(got) != 2 || got[0].Error != "" || got[1].Error != "" {
+		t.Fatalf("the first run after archiving made %+v", got)
+	}
+	for range 3 {
+		f.clock = f.clock.Add(time.Hour)
+		results, err := s.RunNow(context.Background())
+		if err != nil || len(tenantResults(results)) != 0 {
+			t.Fatalf("a run on an archived tenant backed up made %+v, %v", results, err)
+		}
+	}
+	for tenant, want := range map[string]string{"acme": "final archived data", "brief": "made and archived between runs"} {
+		list, err := f.backups.List(context.Background(), tenant)
+		if err != nil || len(list) == 0 {
+			t.Fatalf("%s's backups: %v, %v", tenant, list, err)
+		}
+		_, restored, err := f.backups.Fill(context.Background(), tenant, list[len(list)-1].At, f.identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if data, _ := os.ReadFile(filepath.Join(f.volumes.root, "copies", restored, "db")); string(data) != want {
+			t.Fatalf("%s's newest backup holds %q", tenant, data)
+		}
+	}
+	// Data that changes after all, as a restore replacing it, is backed up
+	// again.
+	f.volumes.write(t, "acme", "db", "restored")
+	if got := tenantResults(s.run(context.Background(), false)); len(got) != 1 || got[0].Tenant != "acme" {
+		t.Fatalf("a changed archived tenant: %+v", got)
+	}
+}
+
+// A failed backup of the cluster's state is a failed result, as a tenant's
+// is, and the metrics say so; a node that no longer leads reports nothing
+// of the state.
+func TestAFailedStateBackupIsReported(t *testing.T) {
+	f := newFixture(t, Test)
+	leads := true
+	state := &fakeState{node: "n1", dir: t.TempDir()}
+	f.store.failPut = errors.New("S3 unavailable")
+	s := newScheduler(state, func() (*Backups, error) { return f.backups, nil }, func() bool { return leads })
+	results, err := s.RunNow(context.Background())
+	if err != nil || len(results) != 1 || !results[0].State || !strings.Contains(results[0].Error, "S3 unavailable") {
+		t.Fatalf("results %+v, %v", results, err)
+	}
+	var page strings.Builder
+	s.WriteMetrics(metrics.NewWriter(&page))
+	if !strings.Contains(page.String(), "\nmurder_state_backup_failing 1\n") || strings.Contains(page.String(), "\nmurder_state_backup_last_success_timestamp_seconds ") {
+		t.Fatalf("metrics:\n%s", page.String())
+	}
+	f.store.failPut = nil
+	if results, err := s.RunNow(context.Background()); err != nil || len(results) != 1 || results[0].Error != "" || results[0].Key == "" {
+		t.Fatalf("results %+v, %v", results, err)
+	}
+	page.Reset()
+	s.WriteMetrics(metrics.NewWriter(&page))
+	if !strings.Contains(page.String(), "\nmurder_state_backup_failing 0\n") || !strings.Contains(page.String(), "\nmurder_state_backup_last_success_timestamp_seconds ") {
+		t.Fatalf("metrics:\n%s", page.String())
+	}
+	leads = false
+	if results, err := s.RunNow(context.Background()); err != nil || len(results) != 0 {
+		t.Fatalf("results %+v, %v", results, err)
+	}
+	page.Reset()
+	s.WriteMetrics(metrics.NewWriter(&page))
+	if strings.Contains(page.String(), "\nmurder_state_backup_failing ") {
+		t.Fatalf("a follower reports the state's backups:\n%s", page.String())
 	}
 }

@@ -68,8 +68,18 @@ func (c *Client) AddPasskey(ctx context.Context, request PasskeyRequest) error {
 	return c.do(ctx, http.MethodPost, "/v1/panel/passkeys", request, nil)
 }
 
-func (c *Client) UsePasskey(ctx context.Context, id, data string) error {
-	return c.do(ctx, http.MethodPut, "/v1/panel/passkeys/"+url.PathEscape(id), data, nil)
+// PasskeyUse records a sign-in with a passkey: its credential as the
+// sign-in checked it (Previous) and as it is after (Data).
+type PasskeyUse struct {
+	Data     string `json:"data"`
+	Previous string `json:"previous,omitempty"`
+}
+
+// UsePasskey records a sign-in, refused (409) if the passkey was used
+// meanwhile, its credential no longer previous; previous empty records it
+// whatever it is.
+func (c *Client) UsePasskey(ctx context.Context, id, previous, data string) error {
+	return c.do(ctx, http.MethodPut, "/v1/panel/passkeys/"+url.PathEscape(id), PasskeyUse{Data: data, Previous: previous}, nil)
 }
 
 func (c *Client) RemovePasskey(ctx context.Context, id string) error {

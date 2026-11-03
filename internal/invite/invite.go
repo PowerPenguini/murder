@@ -28,6 +28,8 @@ type Store interface {
 	Cluster() string
 	Nodes() []store.Node
 	Note(action, detail, actor string) error
+	// Frozen says why the cluster takes no changes now, if it does not.
+	Frozen() string
 }
 
 // Book is a node's invitations, kept in memory: a restarted agent forgets
@@ -65,6 +67,9 @@ func (b *Book) Create(valid time.Duration, actor string) (cluster.Invite, time.T
 	}
 	if valid <= 0 || valid > MaxValid {
 		return cluster.Invite{}, time.Time{}, fmt.Errorf("an invitation is valid for up to %s", MaxValid)
+	}
+	if frozen := b.Store.Frozen(); frozen != "" {
+		return cluster.Invite{}, time.Time{}, fmt.Errorf("the cluster takes no new node now (%s): invite it once that ends", frozen)
 	}
 	// A host would refuse what this node cannot send whole: say so now,
 	// not once the invitation is spent.
@@ -118,6 +123,11 @@ func (b *Book) Redeem(_ context.Context, secret []byte, node string) (cluster.Bu
 	}
 	if !nodePattern.MatchString(node) {
 		return cluster.Bundle{}, fmt.Errorf("node name %q: letters, digits, dots and hyphens", node)
+	}
+	// During a master key rotation, the key ring sent now would be out of
+	// date by the time the host joins.
+	if frozen := b.Store.Frozen(); frozen != "" {
+		return cluster.Bundle{}, fmt.Errorf("the cluster takes no new node now (%s): try again once that ends", frozen)
 	}
 	for _, member := range b.Store.Nodes() {
 		if member.Name == node {

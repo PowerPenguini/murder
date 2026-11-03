@@ -3,6 +3,7 @@ package move
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -21,12 +22,15 @@ import (
 // target is the other node: it receives into a directory of its own.
 type target struct {
 	// snapshots are those of the copy the target keeps as replica.
-	snapshots   []string
-	volumes     volume.Dir
-	received    []bool
-	discarded   bool
-	failReceive error
-	status      reconcile.Status
+	snapshots []string
+	// snapshotsWait, if set, holds the snapshots' lookup until its
+	// context ends.
+	snapshotsWait bool
+	volumes       volume.Dir
+	received      []bool
+	discarded     bool
+	failReceive   error
+	status        reconcile.Status
 	// statusErr until moved, then status.
 	st *store.SQLite
 }
@@ -49,7 +53,11 @@ func (p *target) Status(_ context.Context, node, tenant string) (reconcile.Statu
 	return p.status, nil
 }
 
-func (p *target) Snapshots(context.Context, string, string) ([]string, error) {
+func (p *target) Snapshots(ctx context.Context, _, _ string) ([]string, error) {
+	if p.snapshotsWait {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return p.snapshots, nil
 }
 
@@ -89,8 +97,11 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if err := st.PutNode(store.Node{Name: "n2", Address: "10.0.0.2:7400"}, "test"); err != nil {
-		t.Fatal(err)
+	// This node is a member of its cluster, as bootstrapping makes it.
+	for i, name := range []string{"n1", "n2"} {
+		if err := st.PutNode(store.Node{Name: name, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	app := spec.Tenant{Image: "sha256:" + strings.Repeat("a", 64), HealthPath: "/health", User: "1000:1000"}
 	if _, err := st.PutApp(store.App{Name: "web", Spec: app}, "test"); err != nil {
@@ -312,9 +323,6 @@ func (d listedDir) Snapshots(context.Context, string, string) ([]string, error) 
 // snapshot both have; onto another node, it sends everything.
 func TestAMoveOntoTheReplicaStartsFromItsCopy(t *testing.T) {
 	f := newFixture(t)
-	if err := f.st.PutNode(store.Node{Name: "n1", Address: "10.0.0.1:7400"}, "test"); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := f.st.PlaceReplicas("test"); err != nil {
 		t.Fatal(err)
 	}
@@ -332,5 +340,36 @@ func TestAMoveOntoTheReplicaStartsFromItsCopy(t *testing.T) {
 	f.target.snapshots = []string{"murder-replica-0"}
 	if base := f.mover.replicaBase(context.Background(), "acme", "n2"); base != "" {
 		t.Fatalf("base without one in common: %q", base)
+	}
+}
+
+// A move given up while it asked the target for its copy's snapshots does
+// not begin.
+func TestAMoveGivenUpWhileAskingForTheCopyDoesNotBegin(t *testing.T) {
+	f := newFixture(t)
+	if err := f.st.PutNode(store.Node{Name: "n1", Address: "10.0.0.1:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.st.PlaceReplicas("test"); err != nil {
+		t.Fatal(err)
+	}
+	f.target.snapshotsWait = true
+	f.mover.Volumes = listedDir{Dir: f.source}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := f.mover.Move(ctx, "acme", "n2", "test"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a move given up: %v", err)
+	}
+	events, err := f.st.Events(store.EventQuery{Tenant: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Action == "tenant.moving" {
+			t.Fatal("the move began after it was given up")
+		}
+	}
+	if len(f.target.received) > 0 {
+		t.Fatal("data was sent")
 	}
 }

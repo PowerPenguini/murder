@@ -85,9 +85,9 @@ func runBackups(args []string) error {
 		for _, result := range results {
 			if result.Error != "" {
 				failed++
-				fmt.Fprintf(stdout, "%s: %s\n", result.Tenant, result.Error)
+				fmt.Fprintf(stdout, "%s: %s\n", result.Label(), result.Error)
 			} else {
-				fmt.Fprintf(stdout, "%s: %s (%.1f MB)\n", result.Tenant, result.Key, float64(result.Size)/1e6)
+				fmt.Fprintf(stdout, "%s: %s (%.1f MB)\n", result.Label(), result.Key, float64(result.Size)/1e6)
 			}
 		}
 		if failed > 0 {
@@ -350,13 +350,13 @@ type agentBackups struct{ *backup.Scheduler }
 // newAgentBackups refuses a config that is wrong, such as a recipient that
 // is no age key: only files that may be missing or unreadable for a while,
 // the S3 keys and the identity, wait for a fix. leader is nil on a node
-// alone.
-func newAgentBackups(cfg config.Agent, st backup.State, exclusive func(func() error) error, leader func() bool, log *slog.Logger) (*agentBackups, error) {
+// alone, hold on a node that sends no copies.
+func newAgentBackups(cfg config.Agent, st backup.State, exclusive func(func() error) error, leader func() bool, hold func(context.Context, string) (func(), error), log *slog.Logger) (*agentBackups, error) {
 	if _, err := age.ParseX25519Recipient(cfg.Backups.Recipient); err != nil {
 		return nil, fmt.Errorf("backups.recipient: %w", err)
 	}
 	return &agentBackups{backup.NewScheduler(backup.SchedulerConfig{
-		State: st, Exclusive: exclusive, Leader: leader, Log: log,
+		State: st, Exclusive: exclusive, Leader: leader, Hold: hold, Log: log,
 		Every: cfg.Backups.Every.Duration, VerifyEvery: cfg.Backups.VerifyEvery.Duration,
 		IdentityFile: cfg.Backups.IdentityFile,
 		SetUp: func() (*backup.Backups, error) {
@@ -373,7 +373,7 @@ func (a *agentBackups) RunNow(ctx context.Context) ([]api.BackupResult, error) {
 	}
 	var answers []api.BackupResult
 	for _, r := range results {
-		answers = append(answers, api.BackupResult{Tenant: r.Tenant, Key: r.Key, Size: r.Size, Error: r.Error})
+		answers = append(answers, api.BackupResult{Tenant: r.Tenant, State: r.State, Key: r.Key, Size: r.Size, Error: r.Error})
 	}
 	return answers, nil
 }

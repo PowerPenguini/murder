@@ -95,7 +95,7 @@ func newFixture(t *testing.T) *fixture {
 	// Their copies hold the whole data, as n2 reports once it sent them.
 	for _, name := range []string{"a", "b"} {
 		record, _ := st.Get(name)
-		if err := st.ReplicaReady(name, record.Replica); err != nil {
+		if err := markReady(st, name, record.Replica); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -512,7 +512,7 @@ func TestABlockedFailoverStaysBlockedWhileItsTenantsAreStuck(t *testing.T) {
 	if c.Replica != "n2" {
 		t.Fatalf("c's replica: %q", c.Replica)
 	}
-	if err := f.store.ReplicaReady("c", "n2"); err != nil {
+	if err := markReady(f.store, "c", "n2"); err != nil {
 		t.Fatal(err)
 	}
 	f.fenceErr = errors.New("401 unauthorized")
@@ -583,4 +583,16 @@ func TestAFailoverActsOnlyInItsTerm(t *testing.T) {
 	if len(f.fenced) != 0 {
 		t.Fatalf("a failover of an earlier term powered %v off", f.fenced)
 	}
+}
+
+// markReady reports name's copy on replica whole, as its node would.
+func markReady(st interface {
+	Get(string) (store.Record, error)
+	ReplicaReady(string, string, string) error
+}, name, replica string) error {
+	record, err := st.Get(name)
+	if err != nil {
+		return err
+	}
+	return st.ReplicaReady(name, replica, record.Node)
 }

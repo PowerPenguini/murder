@@ -19,7 +19,9 @@ import (
 
 const tenantUsage = `Usage: murder tenant <command> [options]
 
-  create NAME -app APP [overrides]   add a tenant running an app
+  create NAME -app APP [-node NODE|auto] [overrides]
+                         add a tenant running an app, on the node running the
+                         fewest tenants (auto), or the one named
   set NAME [-app APP] [overrides]    change a tenant's app or overrides
   list                   list tenants, archived ones too, and their state
   show NAME              print a tenant as JSON

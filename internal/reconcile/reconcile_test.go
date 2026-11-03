@@ -1662,8 +1662,10 @@ func movedHere(t *testing.T, f *fixture, names ...string) {
 	if _, err := source.PutApp(store.App{Name: "web", Spec: app}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := source.PutNode(store.Node{Name: "test-node", Address: "10.0.0.1:7400"}, "test"); err != nil {
-		t.Fatal(err)
+	for i, node := range []string{"test-node", "other-node"} {
+		if err := source.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, name := range names {
 		if _, err := source.Create(store.NewTenant{Name: name, App: "web"}, "test"); err != nil {
@@ -1892,5 +1894,152 @@ func TestATenantIsNotStartedOnMissingData(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.volumes.Root, "beta", ".replica")); err == nil {
 		t.Fatal("the new tenant runs on the earlier tenant's copy")
+	}
+}
+
+// A caller waiting for the lock with a context waits in line: a pass that
+// comes after it does not go first, so passes one after another cannot
+// keep it out.
+func TestExclusiveContextWaitsInLine(t *testing.T) {
+	f := newFixture(t)
+	var mu sync.Mutex
+	var order []string
+	note := func(what string) { mu.Lock(); order = append(order, what); mu.Unlock() }
+	f.reconciler.pass.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	waited := make(chan error, 1)
+	go func() {
+		waited <- f.reconciler.ExclusiveContext(ctx, func() error { note("the caller"); return nil })
+	}()
+	time.Sleep(50 * time.Millisecond)
+	passed := make(chan struct{})
+	go func() {
+		defer close(passed)
+		f.reconciler.pass.Lock()
+		note("a later pass")
+		time.Sleep(100 * time.Millisecond)
+		f.reconciler.pass.Unlock()
+	}()
+	time.Sleep(50 * time.Millisecond)
+	f.reconciler.pass.Unlock()
+	if err := <-waited; err != nil {
+		t.Fatal(err)
+	}
+	<-passed
+	if order[0] != "the caller" {
+		t.Fatalf("a pass that came later went first: %v", order)
+	}
+}
+
+// A caller that gave up waiting runs nothing, and the lock it would have
+// had is given back.
+func TestExclusiveContextGivenUpGivesTheLockBack(t *testing.T) {
+	f := newFixture(t)
+	f.reconciler.pass.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := f.reconciler.ExclusiveContext(ctx, func() error { t.Error("ran after giving up"); return nil }); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("given up: %v", err)
+	}
+	f.reconciler.pass.Unlock()
+	locked := make(chan struct{})
+	go func() { f.reconciler.pass.Lock(); close(locked) }()
+	select {
+	case <-locked:
+		f.reconciler.pass.Unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("the lock was kept by a caller that gave up")
+	}
+}
+
+// A purge given up while it waits for a pass deletes nothing.
+func TestAPurgeGivenUpWhileWaitingDeletesNothing(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.archive(t, "acme")
+	f.reconciler.pass.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.reconciler.Purge(ctx, "acme", "test") }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	// The pass ends; a purge that kept waiting would now go on.
+	time.Sleep(20 * time.Millisecond)
+	f.reconciler.pass.Unlock()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("a purge given up: %v", err)
+	}
+	if exists, err := f.volumes.Exists(context.Background(), "acme"); err != nil || !exists {
+		t.Fatalf("data deleted by a purge given up: %v %v", exists, err)
+	}
+	if _, err := f.store.Get("acme"); err != nil {
+		t.Fatalf("the archived tenant was forgotten: %v", err)
+	}
+}
+
+// resealAll seals every secret again: the same values, new ciphertexts, as
+// a master key rotation leaves them.
+func (f *fixture) resealAll(t *testing.T) {
+	t.Helper()
+	count, err := f.store.ResealSecrets(func(tenant, name, sealed string) (string, bool, error) {
+		plain, err := f.key.Open(secrets.Context(tenant, name), sealed)
+		if err != nil {
+			return "", false, err
+		}
+		again, err := f.key.Seal(secrets.Context(tenant, name), plain)
+		return again, err == nil, err
+	}, "test")
+	if err != nil || count == 0 {
+		t.Fatalf("resealed %d, %v", count, err)
+	}
+}
+
+func TestSecretsSealedAgainReplaceNoContainer(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	id := f.runtime.only(t).ID
+	f.resealAll(t)
+	f.reconcile(t)
+	if f.runtime.count() != 1 || f.runtime.only(t).ID != id {
+		t.Fatal("sealing the secrets again replaced the container")
+	}
+	// A new value of a secret does (the fixture gives every secret the
+	// same one).
+	record, _ := f.store.Get("acme")
+	same, _ := f.reconciler.hashInputs(record, "/srv/acme", map[string]string{"SESSION_SECRET": secrets.Digest("acme/SESSION_SECRET", "the-secret")})
+	other, _ := f.reconciler.hashInputs(record, "/srv/acme", map[string]string{"SESSION_SECRET": secrets.Digest("acme/SESSION_SECRET", "another")})
+	if same == other {
+		t.Fatal("a new secret value keeps the container")
+	}
+}
+
+// A container of a release that hashed the sealed values is adopted, and
+// replaced once its secrets are sealed again.
+func TestContainersHashedWithSealedValuesAreAdopted(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	f.reconcile(t)
+	container := f.runtime.only(t)
+	sealedHash, err := f.reconciler.inputsHash(record, filepath.Join(f.volumes.Root, "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealedHash == container.Labels[runtime.LabelHash] {
+		t.Fatal("the hash of a tenant with secrets did not change")
+	}
+	container.Labels[runtime.LabelHash] = sealedHash
+	container.spec.Labels[runtime.LabelHash] = sealedHash
+	id := container.ID
+	f.reconcile(t)
+	if f.runtime.count() != 1 || f.runtime.only(t).ID != id {
+		t.Fatal("the container of the release before was replaced")
+	}
+	f.resealAll(t)
+	f.reconcile(t)
+	if f.runtime.only(t).ID == id {
+		t.Fatal("a container hashed with sealed values outlived them")
 	}
 }

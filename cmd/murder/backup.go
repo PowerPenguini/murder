@@ -160,7 +160,7 @@ func runRestore(args []string) error {
 			return fmt.Errorf("%w (the backup's secrets need the master key of node %s)", err, info.Node)
 		}
 		if _, err := key.Open(secrets.Context(info.Secret.Tenant, info.Secret.Name), info.Secret.Sealed); err != nil {
-			return fmt.Errorf("the master key in %s does not open the backup's secrets: put the master key of node %s there first", cfg.MasterKeyFile, info.Node)
+			return fmt.Errorf("the master key in %s does not open the backup's secrets: add the master key node %s had then to it, as a line of its own, first", cfg.MasterKeyFile, info.Node)
 		}
 	}
 	kept, err := store.Restore(from, cfg.Database)

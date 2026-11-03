@@ -67,7 +67,9 @@ func runPanel(args []string) error {
 	if err != nil {
 		return err
 	}
-	httpServer := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	// No whole-request bound, which an upgrade's upload would outlast:
+	// the panel's handler bounds each body itself.
+	httpServer := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: panel.IdleTimeout}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	// Asked to stop, the panel takes no more jobs, but serves on until the

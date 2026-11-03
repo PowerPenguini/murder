@@ -13,7 +13,8 @@
           <form method="post" action="/tenants" class="stack">
             <label class="field">Name <input type="text" name="name" placeholder="acme" aria-label="tenant name" required maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end" autocomplete="off" spellcheck="false"></label>
             <label class="field">App <select name="app" aria-label="app">{{range $d.Apps}}<option>{{.}}</option>{{end}}</select></label>
-            <span class="hint">Its address is name.{{"{"}}base domain{{"}"}}. It starts on {{.Cluster.Self}}; move it after if you like.</span>
+            {{if gt (len $d.Nodes) 1}}<label class="field">Node <select name="node" aria-label="node"><option value="auto" selected>the one running the fewest</option>{{range $d.Nodes}}{{if and .Answers (not .Failed)}}<option>{{.Name}}</option>{{end}}{{end}}</select></label>{{end}}
+            <span class="hint">Its address is name.{{"{"}}base domain{{"}"}}.</span>
             <div><button type="submit" class="primary">Create</button></div>
           </form>
         </div>

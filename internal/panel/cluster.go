@@ -32,6 +32,8 @@ type ClusterAgent interface {
 	RemoveNode(ctx context.Context, node string) error
 	FailOver(ctx context.Context, node string) (store.FailedOver, error)
 	RunBackups(ctx context.Context) ([]api.BackupResult, error)
+	// ThawIf takes changes again only if they are still frozen for reason.
+	ThawIf(ctx context.Context, reason string) error
 }
 
 // Job is work that outlasts a request, such as an upgrade: what it says,
@@ -75,10 +77,11 @@ const (
 	JobUpgrade JobKind = "upgrade"
 	JobDrain   JobKind = "drain"
 	JobBackups JobKind = "backups"
+	JobBalance JobKind = "balance"
 )
 
 // exclusive kinds change the cluster: one runs at a time.
-func (k JobKind) exclusive() bool { return k == JobUpgrade || k == JobDrain }
+func (k JobKind) exclusive() bool { return k == JobUpgrade || k == JobDrain || k == JobBalance }
 
 // Jobs are a panel's recent jobs, newest first. The socket's panel and
 // the tunnel's share them, so that one change of the cluster runs at a time
@@ -245,11 +248,15 @@ type clusterData struct {
 	Mixed   bool
 	Nodes   []nodeRow
 	Frozen  string
+	// Rotating says a master key rotation holds the freeze.
+	Rotating bool
 	// Busy is the job that changes the cluster now, if one does;
 	// Upgrading the upgrade among them, which takes changes again.
 	Busy, Upgrading *Job
 	Jobs            []*Job
 	Self            string
+	// Balance are the moves that would even the nodes' tenants.
+	Balance []store.Move
 }
 
 func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
@@ -261,7 +268,10 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	data := clusterData{Frozen: nodes.Frozen, Self: nodes.Self}
+	data := clusterData{Frozen: nodes.Frozen, Self: nodes.Self, Rotating: strings.HasPrefix(nodes.Frozen, store.RotationFreeze)}
+	if moves, err := agent.BalanceMoves(ctx); err == nil {
+		data.Balance = moves
+	}
 	data.Nodes = make([]nodeRow, len(nodes.Nodes))
 	var wg sync.WaitGroup
 	for i, node := range nodes.Nodes {
@@ -318,6 +328,10 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 	defer cancel()
 	switch r.FormValue("do") {
+	case "balance":
+		toJob(s.Jobs.Start(JobBalance, "balance the tenants", user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+			return clusterops.Balance(ctx, agent, false, out)
+		}))
 	case "drain":
 		to := r.FormValue("to")
 		if to == "" || to == node {
@@ -353,11 +367,18 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", "type thaw to take changes again")
 			return
 		}
+		// The freeze the page showed, and that one alone: one taken since,
+		// a rotation's say, stays (checked as the thaw is written).
+		frozen := r.FormValue("frozen")
+		if strings.HasPrefix(frozen, store.RotationFreeze) {
+			back("problem", "a master key rotation holds the freeze: it takes changes again once it ends (sudo murder key rotate goes on with one that stopped)")
+			return
+		}
 		if busy := s.Jobs.Busy(); busy != nil && busy.Kind == JobUpgrade {
 			back("problem", fmt.Sprintf("%q runs now: it takes changes again once it ends", busy.Title))
 			return
 		}
-		if err := agent.Thaw(ctx); err != nil {
+		if err := agent.ThawIf(ctx, frozen); err != nil {
 			back("problem", err.Error())
 			return
 		}
@@ -365,12 +386,17 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	case "backups":
 		toJob(s.Jobs.Start(JobBackups, "back up the tenants of "+s.nodeName(ctx, agent), user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			results, err := agent.RunBackups(ctx)
+			failed := 0
 			for _, result := range results {
 				if result.Error != "" {
-					fmt.Fprintf(out, "%s: failed: %s\n", result.Tenant, result.Error)
+					failed++
+					fmt.Fprintf(out, "%s: failed: %s\n", result.Label(), result.Error)
 				} else {
-					fmt.Fprintf(out, "%s: %s\n", result.Tenant, result.Key)
+					fmt.Fprintf(out, "%s: %s\n", result.Label(), result.Key)
 				}
+			}
+			if err == nil && failed > 0 {
+				err = fmt.Errorf("%d of %d backups failed", failed, len(results))
 			}
 			return err
 		}))
