@@ -67,9 +67,14 @@ On a server with Docker, nftables and a ZFS pool (setup says what is
 missing, and how to get it):
 
 ```bash
-go build -o murder ./cmd/murder
-sudo ./murder setup -domain example.com
+curl -fsSL https://github.com/PowerPenguini/murder/releases/latest/download/install.sh | sudo sh
+sudo murder setup -domain example.com
 ```
+
+`install.sh` puts the release's binary for the server's architecture at
+`/usr/local/bin/murder`, once it matches the release's SHA-256 sums. From
+source instead: `go build -o murder ./cmd/murder`, then `sudo ./murder
+setup …`.
 
 `setup` installs Murder and its services, writes a short
 `/etc/murder/agent.yaml`, makes the master key and the database, starts
@@ -81,8 +86,8 @@ More nodes join with an invitation, and take the master key, the config
 and its tokens from the cluster:
 
 ```bash
-sudo murder cluster invite                      # on a node: prints the command for the next one
-sudo ./murder setup -join 10.0.0.2:7400/…       # on the new server
+sudo murder cluster invite                      # on a node: prints the invitation
+sudo murder setup -join -                       # on the new server: paste it
 ```
 
 Then describe an app and run a tenant of it:

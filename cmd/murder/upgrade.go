@@ -33,6 +33,10 @@ func runVersion(args []string) error {
 	if *asJSON {
 		return json.NewEncoder(stdout).Encode(version)
 	}
+	if release != "" {
+		fmt.Fprintf(stdout, "murder %s (%s), schema version %d\n", release, short(version.Binary), version.Schema)
+		return nil
+	}
 	fmt.Fprintf(stdout, "murder %s, schema version %d\n", short(version.Binary), version.Schema)
 	return nil
 }

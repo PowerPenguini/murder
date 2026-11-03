@@ -8,6 +8,10 @@ import (
 	"os"
 )
 
+// release names the release this binary was built for, as its tag; empty
+// in a build from source. The release workflow sets it.
+var release string
+
 const usage = `Usage: murder <command> [arguments]
 
 Node commands:
