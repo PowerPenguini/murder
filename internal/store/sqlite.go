@@ -1226,7 +1226,10 @@ func (s *SQLite) Rotate(name, secret, actor string) (Record, error) {
 
 func (s *SQLite) ResealSecrets(reseal Resealer, actor string) (int, error) {
 	count := 0
-	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+	// Under a rotation's freeze. Always a change, even of no secret: a
+	// batch made before it, with a value sealed by the old key, is stale
+	// after it and made again.
+	_, err := s.writeIf(false, false, func(tx *recorder, current *snapshot, now time.Time) error {
 		count = 0
 		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
 			sealed := current.tenants[name].Sealed
@@ -1244,14 +1247,8 @@ func (s *SQLite) ResealSecrets(reseal Resealer, actor string) (int, error) {
 				count++
 			}
 		}
-		if count == 0 {
-			return errUnchanged
-		}
 		return event(tx, now, actor, "secrets.resealed", "", "", fmt.Sprintf("%d secrets sealed with the master key in use", count))
 	})
-	if errors.Is(err, errUnchanged) {
-		return 0, nil
-	}
 	return count, err
 }
 

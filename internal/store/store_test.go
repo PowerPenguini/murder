@@ -853,11 +853,15 @@ func TestSecretsAreSealedAgainInOneChange(t *testing.T) {
 	if b.Generation != 1 {
 		t.Fatalf("sealing again changed b's generation to %d", b.Generation)
 	}
+	// Again, nothing to seal; still a change, and one while frozen.
+	if err := st.Freeze("master key rotation from test", "root"); err != nil {
+		t.Fatal(err)
+	}
 	if count, err := st.ResealSecrets(reseal, "root"); err != nil || count != 0 {
 		t.Fatalf("again: %d, %v", count, err)
 	}
-	events, _ := st.Events(EventQuery{Limit: 1})
-	if events[0].Action != "secrets.resealed" {
+	events, _ := st.Events(EventQuery{Limit: 2})
+	if events[0].Action != "secrets.resealed" || events[0].Detail != "0 secrets sealed with the master key in use" {
 		t.Fatalf("events %+v", events)
 	}
 	failing := func(tenant, name, sealed string) (string, bool, error) { return "", false, errors.New("does not open") }

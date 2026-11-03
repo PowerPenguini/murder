@@ -33,6 +33,10 @@ const DefaultSettle = 10 * time.Second
 type Rotation struct {
 	// Nodes are every node of the cluster; this one alone outside one.
 	Nodes []string
+	// Members are the nodes as they are now, checked against Nodes before
+	// secrets are sealed again and old keys go: a node that joined
+	// meanwhile would be left with the old key alone. Nil checks nothing.
+	Members func() []string
 	// On is a node's ring.
 	On func(node string) Ring
 	// Raw is a key of this node's ring, to send to the other nodes.
@@ -84,7 +88,6 @@ func (r *Rotation) Run(ctx context.Context) (Result, error) {
 	}
 
 	// 1. Every node trusts the key.
-	added := false
 	for _, node := range r.Nodes {
 		if has(rings[node], target) {
 			continue
@@ -100,16 +103,16 @@ func (r *Rotation) Run(ctx context.Context) (Result, error) {
 			return result, fmt.Errorf("node %s: add key %s: %w", node, target, err)
 		}
 		report("node %s trusts key %s", node, target)
-		added = true
 	}
-	if added {
+
+	// 2. Every node uses it, once every edge had the time to trust it:
+	// waited for again by a rotation that goes on, as one that stopped
+	// may have stopped right after adding it.
+	if slices.ContainsFunc(r.Nodes, func(node string) bool { return rings[node][0].ID != target }) {
 		if err := r.settle(ctx); err != nil {
 			return result, err
 		}
 	}
-
-	// 2. Every node uses it.
-	used := false
 	for _, node := range r.Nodes {
 		if rings[node][0].ID == target {
 			continue
@@ -118,15 +121,12 @@ func (r *Rotation) Run(ctx context.Context) (Result, error) {
 			return result, fmt.Errorf("node %s: use key %s: %w", node, target, err)
 		}
 		report("node %s uses key %s", node, target)
-		used = true
-	}
-	if used {
-		if err := r.settle(ctx); err != nil {
-			return result, err
-		}
 	}
 
 	// 3. Every secret is sealed with it.
+	if err := r.sameMembers(); err != nil {
+		return result, err
+	}
 	count, err := r.Reseal(target)
 	if err != nil {
 		return result, fmt.Errorf("seal the secrets again: %w; the old keys stay", err)
@@ -134,7 +134,24 @@ func (r *Rotation) Run(ctx context.Context) (Result, error) {
 	result.Resealed = count
 	report("sealed %d secrets with key %s", count, target)
 
-	// 4. The other keys go.
+	// 4. The other keys go, once every edge had the time to present a
+	// certificate of the new authority.
+	if err := r.sameMembers(); err != nil {
+		return result, err
+	}
+	dropping := false
+	for _, node := range r.Nodes {
+		ring, err := r.On(node).Ring(ctx)
+		if err != nil {
+			return result, fmt.Errorf("node %s: %w", node, err)
+		}
+		dropping = dropping || len(ring) > 1
+	}
+	if dropping {
+		if err := r.settle(ctx); err != nil {
+			return result, err
+		}
+	}
 	for _, node := range r.Nodes {
 		ring, err := r.On(node).Ring(ctx)
 		if err != nil {
@@ -202,6 +219,17 @@ func (r *Rotation) target(rings map[string][]secrets.Entry) (string, []byte, err
 		return "", nil, err
 	}
 	return secrets.KeyID(raw), raw, nil
+}
+
+func (r *Rotation) sameMembers() error {
+	if r.Members == nil {
+		return nil
+	}
+	now := slices.Sorted(slices.Values(r.Members()))
+	if !slices.Equal(now, slices.Sorted(slices.Values(r.Nodes))) {
+		return fmt.Errorf("the cluster's nodes changed during the rotation (now %s): run it again", strings.Join(now, ", "))
+	}
+	return nil
 }
 
 func (r *Rotation) everyNodeHas(rings map[string][]secrets.Entry, id string) bool {

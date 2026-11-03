@@ -244,7 +244,20 @@ func runAgent(args []string) error {
 
 	apiHandler := apiserver.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves).WithUsage(recorder)
 	apiHandler.WithKeys(&keyRotator{ring: ring, store: st, member: started.Load, node: node, log: log.With("component", "keys")})
-	go key.Watch(ctx, keyCheckEvery, func() { _ = ring.changed() }, log)
+	go func() {
+		ticker := time.NewTicker(keyCheckEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if err := ring.reload(); err != nil {
+				log.Warn("read the master key again", "error", err)
+			}
+		}
+	}()
 	// Backups to a bucket, if set up: this node's tenants, and the
 	// cluster's state from its leader.
 	var backups *agentBackups

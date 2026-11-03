@@ -153,6 +153,18 @@ func TestARotationStoppedHalfWayGoesOn(t *testing.T) {
 	}
 }
 
+func TestANodeJoiningMeanwhileStopsTheRotation(t *testing.T) {
+	c := newCluster("n1", "n2")
+	r := c.rotation("n1", new(string))
+	r.Members = func() []string { return []string{"n1", "n2", "n3"} }
+	if _, err := r.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "nodes changed") {
+		t.Fatalf("%v", err)
+	}
+	if !slices.Contains(c.rings["n1"].keys, "old") || slices.Contains(c.calls, "n1 drop old") {
+		t.Fatal("old keys went")
+	}
+}
+
 func TestTwoRotationsAtOnceStop(t *testing.T) {
 	c := newCluster("n1", "n2")
 	a, _ := secrets.NewRaw()

@@ -27,42 +27,55 @@ type keyRing struct {
 	key    *secrets.Key
 	member func() *cluster.Cluster
 	log    *slog.Logger
+	// mu keeps changes, reads of the file and what follows them one at a
+	// time: a read from before a change never wins over the change.
+	mu sync.Mutex
 }
 
 func (k *keyRing) Ring() []secrets.Entry { return k.key.Ring() }
 
 func (k *keyRing) Add(raw []byte) error {
-	if err := secrets.AddNext(k.path, raw); err != nil {
-		return err
-	}
-	return k.reload()
+	return k.change(func() error { return secrets.AddNext(k.path, raw) })
 }
 
 func (k *keyRing) Use(id string) error {
-	if err := secrets.Use(k.path, id); err != nil {
-		return err
-	}
-	return k.reload()
+	return k.change(func() error { return secrets.Use(k.path, id) })
 }
 
 func (k *keyRing) Drop(id string) error {
-	if err := secrets.Drop(k.path, id); err != nil {
-		return err
-	}
-	return k.reload()
+	return k.change(func() error { return secrets.Drop(k.path, id) })
 }
 
+func (k *keyRing) change(edit func() error) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := edit(); err != nil {
+		return err
+	}
+	return k.reloadLocked()
+}
+
+// reload reads the file again, as the agent does every few seconds.
 func (k *keyRing) reload() error {
-	changed, err := k.key.Reload()
-	if err != nil || !changed {
-		return err
-	}
-	return k.changed()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.reloadLocked()
 }
 
-// changed has the cluster port present and trust what the ring makes.
-func (k *keyRing) changed() error {
-	k.log.Info("master key ring changed", "keys", k.key.Ring())
+func (k *keyRing) reloadLocked() error {
+	changed, err := k.key.Reload()
+	if err != nil {
+		return err
+	}
+	if changed {
+		k.log.Info("master key ring changed", "keys", k.key.Ring())
+	}
+	return k.rekey()
+}
+
+// rekey has the cluster port present and trust what the ring makes; the
+// same ring again changes nothing.
+func (k *keyRing) rekey() error {
 	if member := k.member(); member != nil {
 		if err := member.Rekey(k.key.DeriveAll(clusterSeed)); err != nil {
 			k.log.Error("follow the master key ring", "error", err)
@@ -80,6 +93,8 @@ type keyRotator struct {
 	node   string
 	log    *slog.Logger
 	mu     sync.Mutex
+	// settle overrides how long a step waits for the edges; tests only.
+	settle time.Duration
 }
 
 // localRing and remoteRing are a node's ring as rotations see it.
@@ -150,16 +165,34 @@ func (k *keyRotator) Rings(ctx context.Context) []api.NodeKeys {
 	return out
 }
 
+// rotationFreeze begins the reason of a rotation's freeze.
+const rotationFreeze = "master key rotation from node "
+
 func (k *keyRotator) Rotate(ctx context.Context, actor string) (rotation.Result, error) {
 	if !k.mu.TryLock() {
 		return rotation.Result{}, errors.New("a rotation runs on this node already")
 	}
 	defer k.mu.Unlock()
+	// The cluster takes no change meanwhile: no second rotation from
+	// another node, no node joining, no secret sealed with a key on its
+	// way out. A rotation that stopped on this node takes its own freeze
+	// over.
+	reason := rotationFreeze + k.node
+	if err := k.store.Freeze(reason, actor); err != nil {
+		return rotation.Result{}, fmt.Errorf("%w (a rotation from another node runs there to its end; `murder upgrade -thaw` ends a freeze no one ends)", err)
+	}
+	defer func() {
+		if err := k.store.Thaw(actor); err != nil {
+			k.log.Warn("take changes again after the rotation", "error", err)
+		}
+	}()
 	key := k.ring.key
 	r := &rotation.Rotation{
-		Nodes: k.nodes(),
-		On:    k.on,
-		Raw:   key.Raw,
+		Nodes:   k.nodes(),
+		Members: k.nodes,
+		Settle:  k.settle,
+		On:      k.on,
+		Raw:     key.Raw,
 		Reseal: func(target string) (int, error) {
 			if current := key.Current(); current != target {
 				return 0, fmt.Errorf("this node uses key %s, not %s", current, target)
