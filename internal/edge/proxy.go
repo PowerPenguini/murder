@@ -517,6 +517,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 	// The time to the response counts from here, a wait for a moving
 	// tenant included.
 	arrived := time.Now()
+	if refuseConnect(w, r) {
+		return
+	}
 	tenant, ok := p.Tenant(r.Host)
 	if !ok {
 		p.stats.Unrouted()
@@ -599,11 +602,27 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 	proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), hopKey{}, h)))
 }
 
+// refuseConnect answers a CONNECT 501 and reports true. The edge is no
+// forward proxy, and a tunnel through it to a tenant is nothing a tenant
+// serves: passed on, it would reach the tenant as an ordinary request
+// with no takeover. (Go's HTTP/2 server announces no extended CONNECT,
+// so WebSockets come as HTTP/1.1 upgrades.)
+func refuseConnect(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodConnect {
+		return false
+	}
+	http.Error(w, "CONNECT is not served here", http.StatusNotImplemented)
+	return true
+}
+
 // RedirectToHTTPS sends plain HTTP requests for tenant hosts to HTTPS once
 // ready reports that the HTTPS listener serves; until then it answers 503
 // instead of redirecting to a port that does not answer.
 func (p *Proxy) RedirectToHTTPS(ready func() bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refuseConnect(w, r) {
+			return
+		}
 		if _, ok := p.Tenant(r.Host); !ok {
 			http.Error(w, "unknown host", http.StatusNotFound)
 			return

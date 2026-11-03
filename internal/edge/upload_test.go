@@ -119,3 +119,97 @@ func TestATakenOverConnectionHasNoDeadline(t *testing.T) {
 		t.Fatal("nothing read after the switch")
 	}
 }
+
+// A handler that answers without reading the body makes the server read
+// the rest of it itself as the response goes out (HTTP/1.1); a body that
+// stopped must not hold the response, and the handler, there. (The new
+// tests close their servers after their connections: a handler held
+// would make a deferred Close wait for ever.)
+func TestAnAnswerDoesNotWaitForABodyNeverRead(t *testing.T) {
+	returned := make(chan struct{})
+	redirect := NewProxy("example.com", nil, quietLog()).RedirectToHTTPS(func() bool { return true })
+	server := httptest.NewServer(UploadDeadline(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(returned)
+		redirect.ServeHTTP(w, r)
+	}), 100*time.Millisecond))
+	t.Cleanup(server.Close)
+	conn := dial(t, server)
+	// The redirect repeats the path: long enough, it is written out
+	// before the handler returns.
+	path := "/" + strings.Repeat("a", 4096)
+	fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: acme.example.com\r\nContent-Length: 10\r\n\r\nx", path)
+	select {
+	case <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the handler still waits for a body it never read")
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusPermanentRedirect {
+		t.Fatalf("answer: %s", response.Status)
+	}
+}
+
+// A CONNECT is not exempt from the deadline: its body, if it has one, must
+// keep coming like any other.
+func TestAConnectBodyIsWatched(t *testing.T) {
+	read := make(chan error, 1)
+	server := httptest.NewServer(UploadDeadline(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := io.Copy(io.Discard, r.Body)
+		read <- err
+	}), 100*time.Millisecond))
+	t.Cleanup(server.Close)
+	conn := dial(t, server)
+	fmt.Fprint(conn, "CONNECT acme.example.com:443 HTTP/1.1\r\nHost: acme.example.com:443\r\nContent-Length: 10\r\n\r\nx")
+	select {
+	case err := <-read:
+		if err == nil {
+			t.Fatal("a body that stopped was read whole")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a CONNECT's body that stopped is still waited for")
+	}
+}
+
+// The edge tunnels nothing: a CONNECT for a tenant is refused at once, its
+// stalled body given up on, and the tenant never sees it.
+func TestTheEdgeRefusesConnect(t *testing.T) {
+	reached := make(chan struct{}, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached <- struct{}{}
+		_, _ = io.Copy(io.Discard, r.Body)
+	}))
+	defer backend.Close()
+	table := &LiveTable{}
+	table.Set(NewTable(map[string]Route{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}}))
+	proxy := NewProxy("example.com", table, quietLog())
+	for name, handler := range map[string]http.Handler{
+		"proxy":    proxy,
+		"relay":    proxy.Relay(),
+		"redirect": proxy.RedirectToHTTPS(func() bool { return true }),
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(UploadDeadline(handler, 100*time.Millisecond))
+			t.Cleanup(server.Close)
+			conn := dial(t, server)
+			fmt.Fprint(conn, "CONNECT acme.example.com:443 HTTP/1.1\r\nHost: acme.example.com:443\r\nContent-Length: 10\r\n\r\nx")
+			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != http.StatusNotImplemented {
+				t.Fatalf("CONNECT answered %s", response.Status)
+			}
+		})
+	}
+	select {
+	case <-reached:
+		t.Fatal("a CONNECT reached the tenant")
+	default:
+	}
+}
