@@ -133,11 +133,17 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err != nil {
 		return Status{}, err
 	}
+	// One made by a release before master key rotations carries the hash
+	// of its secrets' sealed values: current until they are sealed again.
+	sealedHash, err := r.inputsHash(record, dataPath)
+	if err != nil {
+		return Status{}, err
+	}
 	var current *runtime.Container
 	var outdated []runtime.Container
 	for i := range existing {
 		hash := existing[i].Labels[runtime.LabelHash]
-		if current == nil && (hash == desired.Labels[runtime.LabelHash] || hash == legacy) {
+		if current == nil && (hash == desired.Labels[runtime.LabelHash] || hash == sealedHash || hash == legacy) {
 			current = &existing[i]
 			continue
 		}

@@ -819,3 +819,49 @@ func TestRollReplacesOnlyLiveTenants(t *testing.T) {
 		t.Fatalf("roll an archived tenant: %v", err)
 	}
 }
+
+func TestSecretsAreSealedAgainInOneChange(t *testing.T) {
+	st, _ := openNew(t, options())
+	if _, err := st.PutApp(App{Name: "web", Spec: appSpec()}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a", "b"} {
+		if _, err := st.Create(NewTenant{Name: name, App: "web"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, _ := st.Get("a")
+	if len(a.Sealed) == 0 {
+		t.Fatal("the app has no secrets")
+	}
+	reseal := func(tenant, name, sealed string) (string, bool, error) {
+		if strings.HasPrefix(sealed, "again:") {
+			return sealed, false, nil
+		}
+		return "again:" + sealed, true, nil
+	}
+	count, err := st.ResealSecrets(reseal, "root")
+	if err != nil || count != 2*len(a.Sealed) {
+		t.Fatalf("resealed %d, %v", count, err)
+	}
+	b, _ := st.Get("b")
+	for name, sealed := range b.Sealed {
+		if !strings.HasPrefix(sealed, "again:") {
+			t.Fatalf("%s of b: %q", name, sealed)
+		}
+	}
+	if b.Generation != 1 {
+		t.Fatalf("sealing again changed b's generation to %d", b.Generation)
+	}
+	if count, err := st.ResealSecrets(reseal, "root"); err != nil || count != 0 {
+		t.Fatalf("again: %d, %v", count, err)
+	}
+	events, _ := st.Events(EventQuery{Limit: 1})
+	if events[0].Action != "secrets.resealed" {
+		t.Fatalf("events %+v", events)
+	}
+	failing := func(tenant, name, sealed string) (string, bool, error) { return "", false, errors.New("does not open") }
+	if _, err := st.ResealSecrets(failing, "root"); err == nil || !strings.Contains(err.Error(), "does not open") {
+		t.Fatalf("a value that does not open: %v", err)
+	}
+}

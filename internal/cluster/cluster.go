@@ -76,9 +76,9 @@ type Config struct {
 	Address string
 	// Dir holds the Raft log and snapshots.
 	Dir string
-	// Seed is derived from the master key; every node of a cluster has the
-	// same.
-	Seed  []byte
+	// Seeds are derived from the master key ring, the key in use first;
+	// every node of a cluster has the same. Rekey changes them.
+	Seeds [][]byte
 	Store *store.SQLite
 	Log   *slog.Logger
 	// Fatal is called when the node cannot apply an entry every other node
@@ -95,6 +95,8 @@ type Config struct {
 	Usage Usage
 	// Invites lets hosts join with an invitation; nil takes none.
 	Invites Invites
+	// Keys is this node's master key ring, for rotations; nil has none.
+	Keys Keys
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
@@ -122,7 +124,7 @@ type Cluster struct {
 // commit every change through the log. A new node waits, without a
 // leader, until it is bootstrapped or joins a cluster.
 func Start(config Config) (*Cluster, error) {
-	credentials, err := NewCredentials(config.Seed, config.Node, time.Now())
+	credentials, err := NewCredentials(config.Seeds, config.Node, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -187,6 +189,17 @@ func Start(config Config) (*Cluster, error) {
 // Invitation is an invitation to this node, for its secret.
 func (c *Cluster) Invitation(secret []byte) Invite {
 	return Invite{Address: c.config.Address, Secret: secret, CA: c.credentials.CAKey()}
+}
+
+// Rekey has the node present and trust what seeds, derived from the master
+// key ring as it is now, make. Connections made before stay; idle ones
+// close, so the next request makes a new one.
+func (c *Cluster) Rekey(seeds [][]byte) error {
+	if err := c.credentials.Update(seeds, time.Now()); err != nil {
+		return err
+	}
+	c.client.CloseIdleConnections()
+	return nil
 }
 
 // InviteSecret makes a new invitation secret.

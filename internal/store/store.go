@@ -247,6 +247,10 @@ type FailedOver struct {
 // Sealer makes a new value for one secret of a tenant and seals it.
 type Sealer func(tenant, name string, secret spec.Secret) (string, error)
 
+// Resealer seals a tenant's secret's value again; changed is false for a
+// value it leaves as it is.
+type Resealer func(tenant, name, sealed string) (resealed string, changed bool, err error)
+
 // Store is the desired state of a node. Reads come from memory and never
 // fail; every write is one transaction that also records who made it.
 //
@@ -304,6 +308,10 @@ type Store interface {
 	SetSuspended(name string, suspended bool, actor string) (Record, error)
 	// Rotate gives one secret of the tenant's spec a new value.
 	Rotate(name, secret, actor string) (Record, error)
+	// ResealSecrets seals every tenant's secrets again with reseal, in
+	// one change, and says how many changed. A value changed since it was
+	// read keeps its new one.
+	ResealSecrets(reseal Resealer, actor string) (int, error)
 	// Roll has a live tenant's container replaced as it is: what a new
 	// release of Murder changed in containers then applies to it.
 	Roll(name, actor string) (Record, error)

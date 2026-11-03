@@ -99,6 +99,10 @@ func runAgent(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The ring follows its file: a rotation run from any node, or an edit
+	// by hand, reaches everything that holds the key.
+	var started atomic.Pointer[cluster.Cluster]
+	ring := &keyRing{path: cfg.MasterKeyFile, key: key, member: started.Load, log: log.With("component", "keys")}
 	st, err := store.Open(cfg.Database, store.Options{NetworkPool: netip.MustParsePrefix(cfg.NetworkPool), Sealer: key.NewSealed})
 	if err != nil {
 		return err
@@ -156,7 +160,6 @@ func runAgent(args []string) error {
 	if cfg.Cluster != nil {
 		// Copies of other nodes' tenants, on ZFS only: requests for them may
 		// come as soon as the cluster listens, before it is returned here.
-		var started atomic.Pointer[cluster.Cluster]
 		catchUp := func() error {
 			if c := started.Load(); c != nil {
 				return c.CatchUp()
@@ -172,8 +175,8 @@ func runAgent(args []string) error {
 		}
 		member, err = cluster.Start(cluster.Config{
 			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
-			Seed: key.Derive(clusterSeed), Store: st, Log: log, Upgrade: upgrader, Moves: moves, Replicas: receiver,
-			Usage: peerUsage{recorder}, Invites: invites,
+			Seeds: key.DeriveAll(clusterSeed), Store: st, Log: log, Upgrade: upgrader, Moves: moves, Replicas: receiver,
+			Usage: peerUsage{recorder}, Invites: invites, Keys: ring,
 			Fatal: func(err error) {
 				select {
 				case fatal <- err:
@@ -240,6 +243,8 @@ func runAgent(args []string) error {
 	}
 
 	apiHandler := apiserver.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves).WithUsage(recorder)
+	apiHandler.WithKeys(&keyRotator{ring: ring, store: st, member: started.Load, node: node, log: log.With("component", "keys")})
+	go key.Watch(ctx, keyCheckEvery, func() { _ = ring.changed() }, log)
 	// Backups to a bucket, if set up: this node's tenants, and the
 	// cluster's state from its leader.
 	var backups *agentBackups
@@ -539,6 +544,9 @@ func recoverMoves(ctx context.Context, mover *move.Mover, log *slog.Logger) {
 // clusterSeed is what the cluster's certificate authority is derived from
 // the master key for.
 const clusterSeed = "cluster ca"
+
+// keyCheckEvery is how often the agent reads the master key file again.
+const keyCheckEvery = 5 * time.Second
 
 func newVolumes(cfg config.Volumes) (volume.Volumes, error) {
 	switch cfg.Driver {
