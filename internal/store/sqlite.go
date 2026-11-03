@@ -1075,8 +1075,14 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 		if node == "" {
 			node = current.node
 		}
-		if _, member := current.nodes[node]; node != current.node && !member {
+		// Outside a cluster, this node alone; in one, its members alone:
+		// this node too, which may be leaving it.
+		member, isMember := current.nodes[node]
+		if len(current.nodes) > 0 && !isMember || len(current.nodes) == 0 && node != current.node {
 			return fmt.Errorf("node %s: %w", node, ErrNotFound)
+		}
+		if member.Failed() {
+			return fmt.Errorf("%w: node %s failed and has not answered since", ErrConflict, node)
 		}
 		subnet, err := s.assign(current)
 		if err != nil {
@@ -1246,11 +1252,20 @@ func (s *SQLite) Observe(name, dataImage string) error {
 		return nil
 	}
 	_, err := s.write(false, func(tx *recorder, current *snapshot, _ time.Time) error {
-		if _, err := liveTenant(current, name); err != nil {
+		record, err := liveTenant(current, name)
+		if err != nil {
 			return err
+		}
+		// Again on every attempt: a retry after another observed the same
+		// image would put it in previous_image too.
+		if record.DataImage == dataImage {
+			return errUnchanged
 		}
 		return tx.Exec(`UPDATE tenants SET previous_image = CASE WHEN data_image = '' THEN previous_image ELSE data_image END, data_image = ? WHERE name = ?`, dataImage, name)
 	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
 	return err
 }
 

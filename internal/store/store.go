@@ -327,7 +327,8 @@ type Store interface {
 	PlaceReplicas(actor string) (int, error)
 	// ReplicaReady records that the copy of a tenant on replica holds its
 	// whole data; nothing changes unless replica is still its replica.
-	ReplicaReady(name, replica string) error
+	ReplicaReady(name, replica, owner string, generation int64) error
+	ReplicaStale(name, why, actor string) error
 	// SwitchReplica makes next, the tenant's ReplicaNext, its replica,
 	// ready, once next holds the whole data; nothing changes unless next
 	// is still its ReplicaNext. It reports whether it switched.

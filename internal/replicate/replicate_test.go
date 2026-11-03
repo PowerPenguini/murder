@@ -604,7 +604,7 @@ func TestACopyMovesToAnotherNode(t *testing.T) {
 	r.Pass(ctx)
 	f.change(t, func(st *store.SQLite) {
 		for _, name := range []string{"acme", "b", "c"} {
-			if err := st.ReplicaReady(name, "n2"); err != nil {
+			if err := markReady(st, name, "n2"); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -681,7 +681,7 @@ func TestAStuckCopyMoveIsGivenUp(t *testing.T) {
 	r.Pass(ctx)
 	f.change(t, func(st *store.SQLite) {
 		for _, name := range []string{"acme", "b", "c"} {
-			if err := st.ReplicaReady(name, "n2"); err != nil {
+			if err := markReady(st, name, "n2"); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -757,4 +757,16 @@ func TestAReplicaThatNeverGetsItsCopyIsReplaced(t *testing.T) {
 			t.Fatalf("n2 still refused: %+v", node)
 		}
 	}
+}
+
+// markReady reports name's copy on replica whole, as its node would.
+func markReady(st interface {
+	Get(string) (store.Record, error)
+	ReplicaReady(string, string, string, int64) error
+}, name, replica string) error {
+	record, err := st.Get(name)
+	if err != nil {
+		return err
+	}
+	return st.ReplicaReady(name, replica, record.Node, record.Generation)
 }

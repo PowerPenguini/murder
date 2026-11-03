@@ -200,7 +200,7 @@ func (r *Replicator) Pass(ctx context.Context) {
 			}
 			// Once the copy holds the whole data, it may take over.
 			if err == nil && !record.ReplicaReady {
-				err = r.Store.ReplicaReady(record.Spec.Name, record.Replica)
+				err = r.Store.ReplicaReady(record.Spec.Name, record.Replica, record.Node, record.Generation)
 			}
 			r.mu.Lock()
 			if r.failing == nil {

@@ -653,7 +653,7 @@ func TestStatusOfTenantsOfOtherNodes(t *testing.T) {
 	if tenant, err = f.client.Get(ctx, "on-n2"); err != nil || tenant.Replica == "" || tenant.ReplicaReady {
 		t.Fatalf("on-n2 with a replica = %+v, %v", tenant, err)
 	}
-	if err := f.store.ReplicaReady("on-n2", tenant.Replica); err != nil {
+	if err := markReady(f.store, "on-n2", tenant.Replica); err != nil {
 		t.Fatal(err)
 	}
 	if tenant, err = f.client.Get(ctx, "on-n2"); err != nil || !tenant.ReplicaReady {
@@ -873,4 +873,16 @@ func TestStoringAnAppOnlyAsRead(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "if must be") {
 		t.Fatalf("a bad if: %d %s", recorder.Code, recorder.Body)
 	}
+}
+
+// markReady reports name's copy on replica whole, as its node would.
+func markReady(st interface {
+	Get(string) (store.Record, error)
+	ReplicaReady(string, string, string, int64) error
+}, name, replica string) error {
+	record, err := st.Get(name)
+	if err != nil {
+		return err
+	}
+	return st.ReplicaReady(name, replica, record.Node, record.Generation)
 }

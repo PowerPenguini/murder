@@ -181,10 +181,18 @@ func (s *SQLite) GiveUpCopy(name, node, why string) (bool, error) {
 	return err == nil, err
 }
 
-func (s *SQLite) ReplicaReady(name, replica string) error {
+// ReplicaReady records that the copy of name on replica holds the whole
+// data, as owner sent it while the tenant was at generation. A report from
+// a node that no longer runs the tenant, of a tenant moving, or from before
+// a change of the tenant (its data replaced from a backup, say) proves
+// nothing of the copy now, and changes nothing: the next send reports again.
+func (s *SQLite) ReplicaReady(name, replica, owner string, generation int64) error {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
 		if !ok || record.Replica != replica || replica == "" || record.ReplicaReady {
+			return errUnchanged
+		}
+		if record.Node != owner || record.MoveTo != "" || record.Generation != generation {
 			return errUnchanged
 		}
 		if err := tx.Exec(`UPDATE tenants SET replica_ready = 1 WHERE name = ? AND replica = ?`, name, replica); err != nil {
@@ -195,6 +203,26 @@ func (s *SQLite) ReplicaReady(name, replica string) error {
 	if errors.Is(err, errUnchanged) {
 		return nil
 	}
+	return err
+}
+
+// ReplicaStale records that the copy of name no longer matches its data,
+// replaced from a backup say: no failover takes it until a send makes it
+// whole again, and a send begun before cannot report it whole.
+func (s *SQLite) ReplicaStale(name, why, actor string) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[name]
+		if !ok {
+			return fmt.Errorf("tenant %s: %w", name, ErrNotFound)
+		}
+		if err := tx.Exec(`UPDATE tenants SET replica_ready = 0, generation = generation + 1 WHERE name = ?`, name); err != nil {
+			return err
+		}
+		if record.Replica == "" {
+			return nil
+		}
+		return event(tx, now, actor, "tenant.replica", name, record.App, "the copy on "+record.Replica+" no longer matches: "+why)
+	})
 	return err
 }
 

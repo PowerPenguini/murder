@@ -40,6 +40,12 @@ type fakeState struct {
 	records   []store.Record
 	dir       string
 	snapshots []string
+	stale     []string
+}
+
+func (s *fakeState) ReplicaStale(name, why, _ string) error {
+	s.stale = append(s.stale, name+": "+why)
+	return nil
 }
 
 func (s *fakeState) Node() string         { return s.node }
@@ -239,12 +245,18 @@ func TestABackupReplacesOnlyAnArchivedTenantOfThisNode(t *testing.T) {
 	if err := st.Archive("acme", "test"); err != nil {
 		t.Fatal(err)
 	}
+	before, _ := st.Get("acme")
 	result, err := a.ReplaceTenant(ctx, "acme", "murder-copy-acme-restore-1")
 	if err != nil || result.Error != "" || result.Aside != "tank/murder/murder-replaced-acme" {
 		t.Fatalf("an archived tenant: %+v, %v", result, err)
 	}
 	if len(volumes.replaced) != 1 || exclusive != 3 {
 		t.Fatalf("replaced %v, under the reconciler's lock %d times", volumes.replaced, exclusive)
+	}
+	// Its copy on another node no longer matches: no failover takes it,
+	// nor a send begun before reports it whole (its generation moved on).
+	if replaced, _ := st.Get("acme"); replaced.ReplicaReady || replaced.Generation <= before.Generation {
+		t.Fatalf("after the replacement: ready %v, generation %d (was %d)", replaced.ReplicaReady, replaced.Generation, before.Generation)
 	}
 	// A run under way holds the replacement off; a caller that gives up
 	// stops waiting.

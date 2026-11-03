@@ -19,7 +19,7 @@ type State interface {
 	// many it changed.
 	PlaceReplicas(actor string) (int, error)
 	// ReplicaReady records that the copy on replica holds the whole data.
-	ReplicaReady(name, replica string) error
+	ReplicaReady(name, replica, owner string, generation int64) error
 	// SwitchReplica makes next, the tenant's ReplicaNext, its replica once
 	// next holds the whole data; it reports whether it switched.
 	SwitchReplica(name, next string) (bool, error)

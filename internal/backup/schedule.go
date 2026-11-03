@@ -24,6 +24,8 @@ type State interface {
 	Get(name string) (store.Record, error)
 	// SnapshotFile copies the state to a file of its own, for a backup.
 	SnapshotFile() (string, error)
+	// ReplicaStale records that a tenant's copy no longer matches its data.
+	ReplicaStale(name, why, actor string) error
 }
 
 // Result is how backing up one tenant went.
@@ -193,6 +195,11 @@ func (a *Scheduler) ReplaceTenant(ctx context.Context, tenant, copy string) (Rep
 			return fmt.Errorf("tenant %s: %w: archive it before its data is replaced", tenant, store.ErrNotArchived)
 		case record.Node != a.state.Node() || record.MoveTo != "":
 			return fmt.Errorf("tenant %s: %w", tenant, store.ErrElsewhere)
+		}
+		// The copy on another node holds the data being replaced: no
+		// failover may take it, nor a send begun before report it whole.
+		if err := a.state.ReplicaStale(tenant, "its data is replaced with backup "+copy, "murder"); err != nil {
+			return err
 		}
 		// Begun, the replacement ends, whether the client waits or not.
 		aside, err := a.backups.ReplaceCopy(context.WithoutCancel(ctx), tenant, copy)

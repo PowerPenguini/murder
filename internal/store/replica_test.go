@@ -113,7 +113,7 @@ func TestAFailoverGivesTenantsToTheirReplicas(t *testing.T) {
 	// The copies of a and b hold the whole data; lone's never got there.
 	for _, name := range []string{"a", "b", "c"} {
 		record, _ := st.Get(name)
-		if err := st.ReplicaReady(name, record.Replica); err != nil {
+		if err := markReady(st, name, record.Replica); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -246,7 +246,7 @@ func TestMovesClearACopysReadiness(t *testing.T) {
 	ready := func() Record {
 		t.Helper()
 		record, _ := st.Get("a")
-		if err := st.ReplicaReady("a", record.Replica); err != nil {
+		if err := markReady(st, "a", record.Replica); err != nil {
 			t.Fatal(err)
 		}
 		record, _ = st.Get("a")
@@ -283,7 +283,7 @@ func ready(t *testing.T, st *SQLite) {
 	t.Helper()
 	for _, record := range st.List() {
 		if record.Replica != "" && !record.ReplicaReady {
-			if err := st.ReplicaReady(record.Spec.Name, record.Replica); err != nil {
+			if err := markReady(st, record.Spec.Name, record.Replica); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -574,4 +574,16 @@ func TestADeviceIsRemovedDuringAFreeze(t *testing.T) {
 	if err := st.RemoveDevice("phone", "alice"); err != nil || len(st.Devices()) != 0 {
 		t.Fatalf("removed during a freeze: %v, %+v", err, st.Devices())
 	}
+}
+
+// markReady reports name's copy on replica whole, as its node would.
+func markReady(st interface {
+	Get(string) (Record, error)
+	ReplicaReady(string, string, string, int64) error
+}, name, replica string) error {
+	record, err := st.Get(name)
+	if err != nil {
+		return err
+	}
+	return st.ReplicaReady(name, replica, record.Node, record.Generation)
 }
