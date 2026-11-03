@@ -28,8 +28,8 @@ type Cluster interface {
 	Ping(ctx context.Context, node string) error
 	// CatchUp applies here what the cluster has applied.
 	CatchUp() error
-	// DataExistsOn reports whether node holds data of tenant.
-	DataExistsOn(ctx context.Context, node, tenant string) (bool, error)
+	// CreateOn has node create tenant to run there.
+	CreateOn(ctx context.Context, node string, tenant store.NewTenant, actor string) (store.Record, error)
 }
 
 // Invites makes invitations for hosts to join the cluster as nodes.

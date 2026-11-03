@@ -44,9 +44,9 @@ Every node runs tenants: each tenant runs on one node, which keeps its
 data, and `tenant list` shows which. `murder tenant create` puts a new
 tenant on the node running the fewest tenants (live, not suspended; this
 node among equals; never a failed one), or on the one `-node NAME` names.
-Before it does, the node it goes to says whether it holds data of an
-earlier tenant of that name (a copy, or what a failure left), and the
-tenant is refused there if so. Every node's edge serves
+The node it goes to creates it, refusing it if it holds data of an
+earlier tenant of that name (a copy, or what a failure left). Creates at
+once through one node are placed one after the other, so they spread. Every node's edge serves
 every tenant: a request for a tenant of another node goes on, over TLS on
 the private network, to that node's edge (`edge.relayPort`, 7402, the same
 on every node), so DNS may point at any node. If the tenant moved while the

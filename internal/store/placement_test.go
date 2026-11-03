@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -60,5 +61,23 @@ func TestBalancingMovesTenantsOntoTheirCopiesFirst(t *testing.T) {
 	records[5].MoveTo = "c"
 	if moves := BalanceMoves(nodes, records); moves != nil {
 		t.Fatalf("while one moves: %+v", moves)
+	}
+}
+
+func TestNoTenantIsCreatedOnAFailedNode(t *testing.T) {
+	st, _ := openNew(t, options())
+	if _, err := st.PutApp(App{Name: "web", Spec: appSpec()}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range []string{st.Node(), "n2"} {
+		if err := st.PutNode(Node{Name: node, Address: node + ":7400"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.MarkFailed("n2", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(NewTenant{Name: "a", App: "web", Node: "n2"}, "test"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("created on a failed node: %v", err)
 	}
 }

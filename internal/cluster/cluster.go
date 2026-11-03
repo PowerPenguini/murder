@@ -570,9 +570,9 @@ type Moves interface {
 	Receive(ctx context.Context, tenant string, incremental bool, data io.Reader) error
 	Discard(ctx context.Context, tenant string) error
 	Status(tenant string) (any, bool)
-	// DataExists reports whether this node holds data of tenant: its own,
-	// a copy, or what a failure left.
-	DataExists(ctx context.Context, tenant string) (bool, error)
+	// Create creates tenant to run on this node, once no data an earlier
+	// tenant of its name left is here.
+	Create(ctx context.Context, tenant store.NewTenant, actor string) (store.Record, error)
 	Move(ctx context.Context, tenant, to, actor string) error
 }
 
@@ -609,13 +609,18 @@ func (c *Cluster) DiscardOn(ctx context.Context, node, tenant string) error {
 	return c.stream(ctx, node, http.MethodDelete, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/data", nil, nil)
 }
 
-// DataExistsOn reports whether node holds data of tenant.
-func (c *Cluster) DataExistsOn(ctx context.Context, node, tenant string) (bool, error) {
-	var answer struct {
-		Exists bool `json:"exists"`
-	}
-	err := c.stream(ctx, node, http.MethodGet, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/data", nil, &answer)
-	return answer.Exists, err
+// createRequest asks a node to create a tenant to run there.
+type createRequest struct {
+	Tenant store.NewTenant `json:"tenant"`
+	Actor  string          `json:"actor"`
+}
+
+// CreateOn has node create tenant to run there.
+func (c *Cluster) CreateOn(ctx context.Context, node string, tenant store.NewTenant, actor string) (store.Record, error) {
+	var record store.Record
+	body := marshal(createRequest{Tenant: tenant, Actor: actor})
+	err := c.stream(ctx, node, http.MethodPost, "/cluster/v1/tenants/"+url.PathEscape(tenant.Name), bytes.NewReader(body), &record)
+	return record, err
 }
 
 // StatusOn decodes a tenant's status on node into out.

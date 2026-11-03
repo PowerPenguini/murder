@@ -12,6 +12,7 @@ import (
 
 	"github.com/hashicorp/raft"
 
+	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -31,7 +32,7 @@ func (c *Cluster) handler() http.Handler {
 	members("GET /cluster/v1/node", c.handleNodeInfo)
 	members("PUT /cluster/v1/tenants/{name}/data", c.handleReceive)
 	members("DELETE /cluster/v1/tenants/{name}/data", c.handleDiscard)
-	members("GET /cluster/v1/tenants/{name}/data", c.handleDataExists)
+	members("POST /cluster/v1/tenants/{name}", c.handleCreate)
 	members("GET /cluster/v1/tenants/{name}/status", c.handleTenantStatus)
 	members("POST /cluster/v1/tenants/{name}/move", c.handleMove)
 	members("PUT /cluster/v1/node/binary", c.handleInstall)
@@ -462,18 +463,31 @@ func (c *Cluster) handleDiscard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct{}{})
 }
 
-func (c *Cluster) handleDataExists(w http.ResponseWriter, r *http.Request) {
+func (c *Cluster) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if !c.moves(w) {
 		return
 	}
-	exists, err := c.config.Moves.DataExists(r.Context(), r.PathValue("name"))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	var request createRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&request); err != nil || request.Tenant.Name != r.PathValue("name") {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("a tenant to create named %s", r.PathValue("name")))
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
-		Exists bool `json:"exists"`
-	}{exists})
+	record, err := c.config.Moves.Create(r.Context(), request.Tenant, request.Actor)
+	if err != nil {
+		status := http.StatusInternalServerError
+		var invalid *spec.ValidationError
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, store.ErrExists), errors.Is(err, store.ErrArchived), errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrFrozen):
+			status = http.StatusConflict
+		case errors.As(err, &invalid), errors.Is(err, store.ErrInvalid):
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, record)
 }
 
 func (c *Cluster) handleTenantStatus(w http.ResponseWriter, r *http.Request) {

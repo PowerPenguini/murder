@@ -1075,8 +1075,12 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 		if node == "" {
 			node = current.node
 		}
-		if _, member := current.nodes[node]; node != current.node && !member {
+		member, isMember := current.nodes[node]
+		if node != current.node && !isMember {
 			return fmt.Errorf("node %s: %w", node, ErrNotFound)
+		}
+		if member.Failed() {
+			return fmt.Errorf("%w: node %s failed and has not answered since", ErrConflict, node)
 		}
 		subnet, err := s.assign(current)
 		if err != nil {

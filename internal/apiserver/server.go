@@ -30,9 +30,11 @@ import (
 type Server struct {
 	store      store.Store
 	reconciler *reconcile.Reconciler
-	runtime    runtime.Runtime
-	key        *secrets.Key
-	log        *slog.Logger
+	// placing keeps automatic placements one at a time.
+	placing sync.Mutex
+	runtime runtime.Runtime
+	key     *secrets.Key
+	log     *slog.Logger
 	// cluster is this node's part of a cluster; nil outside one.
 	cluster Cluster
 	// stopping is closed when the agent stops, so requests that wait, such
@@ -442,58 +444,63 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := detached(r)
 	defer cancel()
+	// Placed one at a time, so creates at once spread over the nodes
+	// instead of all counting the same tenants.
+	if request.Node == store.Auto {
+		s.placing.Lock()
+		defer s.placing.Unlock()
+	}
 	node, err := s.placeNew(request.Node)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	// Data on another node is that node's to say: it starts the tenant on
-	// whatever it finds.
-	if node != s.store.Node() {
-		if s.cluster == nil {
-			writeError(w, errNoCluster)
-			return
-		}
-		exists, err := s.cluster.DataExistsOn(ctx, node, request.Name)
-		if err != nil {
-			writeError(w, statusError{http.StatusBadGateway, fmt.Errorf("node %s: %w", node, err)})
-			return
-		}
-		if exists {
-			writeError(w, statusError{http.StatusConflict, fmt.Errorf("data of an earlier tenant %s is on node %s but not in the archive; purge it there first, or create the tenant on another node", request.Name, node)})
-			return
-		}
-	}
+	tenant := store.NewTenant{Name: request.Name, App: request.App, Overrides: overrides, Node: node}
 	var record store.Record
-	// Under the reconciler's lock, so a concurrent purge cannot interleave
-	// with the check for leftover data.
-	err = s.reconciler.Exclusive(func() error {
+	if node == s.store.Node() {
 		if err := r.Context().Err(); err != nil {
-			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err))
+			writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was created: %w", err)))
+			return
 		}
-		if existing, err := s.store.Get(request.Name); err == nil && existing.Archived() {
-			return store.ErrArchived
-		} else if err == nil {
-			return store.ErrExists
-		}
-		exists := false
-		if node == s.store.Node() {
-			if exists, err = s.reconciler.DataExists(ctx, request.Name); err != nil {
-				return err
-			}
-		}
-		if exists {
-			return statusError{http.StatusConflict, fmt.Errorf("data of an earlier tenant %s is on this node but not in the archive; purge it first", request.Name)}
-		}
-		record, err = s.store.Create(store.NewTenant{Name: request.Name, App: request.App, Overrides: overrides, Node: node}, actor(r))
-		return err
-	})
+		record, err = CreateHere(ctx, s.store, s.reconciler, tenant, actor(r))
+	} else if s.cluster == nil {
+		err = errNoCluster
+	} else {
+		// The node it runs on creates it: the data there is that node's
+		// to check, under its own lock.
+		record, err = s.cluster.CreateOn(ctx, node, tenant, actor(r))
+	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	s.log.Info("tenant created", "tenant", request.Name, "app", request.App, "image", record.Spec.Image)
 	writeJSON(w, http.StatusCreated, api.Applied{Tenant: s.view(record), Changed: true, Note: note})
+}
+
+// CreateHere creates tenant on this node, under the reconciler's lock, so
+// a purge cannot interleave with the check for data an earlier tenant of
+// its name left here, which the new one would start on.
+func CreateHere(ctx context.Context, st store.Store, reconciler *reconcile.Reconciler, tenant store.NewTenant, actor string) (store.Record, error) {
+	var record store.Record
+	err := reconciler.Exclusive(func() error {
+		if existing, err := st.Get(tenant.Name); err == nil && existing.Archived() {
+			return store.ErrArchived
+		} else if err == nil {
+			return store.ErrExists
+		}
+		exists, err := reconciler.DataExists(ctx, tenant.Name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return fmt.Errorf("%w: data of an earlier tenant %s is on node %s but not in the archive; purge it there first, or create the tenant on another node", store.ErrConflict, tenant.Name, st.Node())
+		}
+		tenant.Node = st.Node()
+		record, err = st.Create(tenant, actor)
+		return err
+	})
+	return record, err
 }
 
 // placeNew is the node a new tenant runs on, as asked: a node's name,

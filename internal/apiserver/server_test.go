@@ -875,14 +875,19 @@ func TestStoringAnAppOnlyAsRead(t *testing.T) {
 	}
 }
 
-// dataCluster says which nodes hold data of which tenants.
-type dataCluster struct {
+// createCluster creates tenants on other nodes as they would, refusing
+// those whose name has data left there.
+type createCluster struct {
 	Cluster
-	data map[string]bool
+	store store.Store
+	data  map[string]bool
 }
 
-func (c dataCluster) DataExistsOn(_ context.Context, node, tenant string) (bool, error) {
-	return c.data[node+"/"+tenant], nil
+func (c createCluster) CreateOn(_ context.Context, node string, tenant store.NewTenant, actor string) (store.Record, error) {
+	if c.data[node+"/"+tenant.Name] {
+		return store.Record{}, &cluster.PeerError{Status: http.StatusConflict, Message: "data of an earlier tenant " + tenant.Name + " is on node " + node + " but not in the archive"}
+	}
+	return c.store.Create(tenant, actor)
 }
 
 func TestNewTenantsGoWhereTheyAreAskedTo(t *testing.T) {
@@ -897,7 +902,7 @@ func TestNewTenantsGoWhereTheyAreAskedTo(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	f.server.WithCluster(dataCluster{data: map[string]bool{"n3/stale": true}})
+	f.server.WithCluster(createCluster{store: f.store, data: map[string]bool{"n3/stale": true}})
 	create := func(name, node string) (api.Applied, error) {
 		return f.client.Create(ctx, api.TenantRequest{Name: name, App: "web", Node: node})
 	}
@@ -924,5 +929,37 @@ func TestNewTenantsGoWhereTheyAreAskedTo(t *testing.T) {
 	moves, err := f.client.BalanceMoves(ctx)
 	if err != nil || len(moves) != 0 {
 		t.Fatalf("moves %+v, %v", moves, err)
+	}
+}
+
+// Creates at once through one node spread over the nodes.
+func TestNewTenantsAtOnceSpread(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if _, err := f.client.PutApp(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	self := f.store.Node()
+	for i, node := range []string{self, "n2", "n3"} {
+		if err := f.store.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.server.WithCluster(createCluster{store: f.store})
+	var wg sync.WaitGroup
+	for i := range 9 {
+		wg.Go(func() {
+			if _, err := f.client.Create(ctx, api.TenantRequest{Name: fmt.Sprintf("t%d", i), App: "web", Node: store.Auto}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	counts := map[string]int{}
+	for _, record := range f.store.List() {
+		counts[record.Node]++
+	}
+	if counts[self] != 3 || counts["n2"] != 3 || counts["n3"] != 3 {
+		t.Fatalf("placed %v", counts)
 	}
 }
