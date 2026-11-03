@@ -76,9 +76,9 @@ type Config struct {
 	Address string
 	// Dir holds the Raft log and snapshots.
 	Dir string
-	// Seed is derived from the master key; every node of a cluster has the
-	// same.
-	Seed  []byte
+	// Seeds are derived from the master key ring, the key in use first;
+	// every node of a cluster has the same. Rekey changes them.
+	Seeds [][]byte
 	Store *store.SQLite
 	Log   *slog.Logger
 	// Fatal is called when the node cannot apply an entry every other node
@@ -95,6 +95,8 @@ type Config struct {
 	Usage Usage
 	// Invites lets hosts join with an invitation; nil takes none.
 	Invites Invites
+	// Keys is this node's master key ring, for rotations; nil has none.
+	Keys Keys
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
@@ -122,7 +124,7 @@ type Cluster struct {
 // commit every change through the log. A new node waits, without a
 // leader, until it is bootstrapped or joins a cluster.
 func Start(config Config) (*Cluster, error) {
-	credentials, err := NewCredentials(config.Seed, config.Node, time.Now())
+	credentials, err := NewCredentials(config.Seeds, config.Node, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -187,6 +189,17 @@ func Start(config Config) (*Cluster, error) {
 // Invitation is an invitation to this node, for its secret.
 func (c *Cluster) Invitation(secret []byte) Invite {
 	return Invite{Address: c.config.Address, Secret: secret, CA: c.credentials.CAKey()}
+}
+
+// Rekey has the node present and trust what seeds, derived from the master
+// key ring as it is now, make. Connections made before stay; idle ones
+// close, so the next request makes a new one.
+func (c *Cluster) Rekey(seeds [][]byte) error {
+	if err := c.credentials.Update(seeds, time.Now()); err != nil {
+		return err
+	}
+	c.client.CloseIdleConnections()
+	return nil
 }
 
 // InviteSecret makes a new invitation secret.
@@ -570,6 +583,9 @@ type Moves interface {
 	Receive(ctx context.Context, tenant string, incremental bool, data io.Reader) error
 	Discard(ctx context.Context, tenant string) error
 	Status(tenant string) (any, bool)
+	// Create creates tenant to run on this node, once no data an earlier
+	// tenant of its name left is here.
+	Create(ctx context.Context, tenant store.NewTenant, actor string) (store.Record, error)
 	Move(ctx context.Context, tenant, to, actor string) error
 }
 
@@ -604,6 +620,20 @@ func (c *Cluster) ReceiveOn(ctx context.Context, node, tenant string, incrementa
 // DiscardOn drops what node received for a move that failed.
 func (c *Cluster) DiscardOn(ctx context.Context, node, tenant string) error {
 	return c.stream(ctx, node, http.MethodDelete, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/data", nil, nil)
+}
+
+// createRequest asks a node to create a tenant to run there.
+type createRequest struct {
+	Tenant store.NewTenant `json:"tenant"`
+	Actor  string          `json:"actor"`
+}
+
+// CreateOn has node create tenant to run there.
+func (c *Cluster) CreateOn(ctx context.Context, node string, tenant store.NewTenant, actor string) (store.Record, error) {
+	var record store.Record
+	body := marshal(createRequest{Tenant: tenant, Actor: actor})
+	err := c.stream(ctx, node, http.MethodPost, "/cluster/v1/tenants/"+url.PathEscape(tenant.Name), bytes.NewReader(body), &record)
+	return record, err
 }
 
 // StatusOn decodes a tenant's status on node into out.

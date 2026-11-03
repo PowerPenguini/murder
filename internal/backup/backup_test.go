@@ -108,10 +108,14 @@ type dirVolumes struct {
 	now         func() time.Time
 	replaced    map[string]string
 	failReplace error
+	// writes counts each tenant's writes, taken the count at each
+	// snapshot, for Written.
+	writes map[string]int
+	taken  map[string]int
 }
 
 func newDirVolumes(t *testing.T, now func() time.Time) *dirVolumes {
-	return &dirVolumes{root: t.TempDir(), now: now, replaced: map[string]string{}}
+	return &dirVolumes{root: t.TempDir(), now: now, replaced: map[string]string{}, writes: map[string]int{}, taken: map[string]int{}}
 }
 
 func dataset(tenant string) string { return "tank/tenants/" + tenant }
@@ -127,6 +131,7 @@ func (v *dirVolumes) write(t *testing.T, tenant, name, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	v.writes[tenant]++
 }
 
 func (v *dirVolumes) snapshotPath(snapshot string) string {
@@ -156,6 +161,7 @@ func (v *dirVolumes) Snapshot(_ context.Context, tenant, reason string) (string,
 	if err := os.MkdirAll(v.data(tenant), 0o755); err != nil {
 		return "", err
 	}
+	v.taken[name] = v.writes[tenant]
 	return name, copyTree(v.data(tenant), v.snapshotPath(name))
 }
 
@@ -527,6 +533,61 @@ func TestVerifyFindsWhatDiffers(t *testing.T) {
 			f.volumes.write(t, "acme", "receipts/a.pdf", "%PDF")
 			backup := f.backUp(t, "acme")
 			change(f.volumes.snapshotPath(dataset("acme") + "@murder-backup-" + backup.At.Format(stamp)))
+			if _, err := f.backups.Verify(context.Background(), "acme", dataset("acme"), f.identity); err == nil {
+				t.Fatal("verified a backup that is not its snapshot")
+			}
+		})
+	}
+}
+
+// Verify reads a backup by the rules a restore unpacks it by: one holding
+// a path twice, which a restore refuses, does not verify, though every
+// file of it matches its snapshot.
+func TestVerifyRefusesWhatARestoreRefuses(t *testing.T) {
+	f := newFixture(t, Test)
+	f.volumes.write(t, "acme", "db", "good")
+	made := f.backUp(t, "acme")
+	// Encryption to a public key authenticates bytes, not what they say:
+	// anyone with the recipient may write such a backup.
+	_, err := f.backups.upload(context.Background(), made.Key, 0, func(w io.Writer) error {
+		tw := tar.NewWriter(w)
+		for range 2 {
+			if err := tw.WriteHeader(&tar.Header{Name: "db", Mode: 0o600, Size: 4, Typeflag: tar.TypeReg}); err != nil {
+				return err
+			}
+			if _, err := tw.Write([]byte("good")); err != nil {
+				return err
+			}
+		}
+		return tw.Close()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified, err := f.backups.Verify(context.Background(), "acme", dataset("acme"), f.identity); err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Fatalf("verified %+v, %v", verified, err)
+	}
+	if _, _, err := f.backups.Fill(context.Background(), "acme", made.At, f.identity); err == nil {
+		t.Fatal("restored a path twice")
+	}
+}
+
+// Verify compares what a restore puts back, not only files' content: a
+// mode, a symlink or a directory that differs from the snapshot fails it.
+func TestVerifyComparesWhatARestorePutsBack(t *testing.T) {
+	for name, change := range map[string]func(dir string) error{
+		"mode":      func(dir string) error { return os.Chmod(filepath.Join(dir, "data.db"), 0o644) },
+		"directory": func(dir string) error { return os.Mkdir(filepath.Join(dir, "receipts", "more"), 0o700) },
+		"symlink":   func(dir string) error { return os.Symlink("data.db", filepath.Join(dir, "current")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, Test)
+			f.volumes.write(t, "acme", "data.db", "x")
+			f.volumes.write(t, "acme", "receipts/a.pdf", "%PDF")
+			backup := f.backUp(t, "acme")
+			if err := change(f.volumes.snapshotPath(dataset("acme") + "@murder-backup-" + backup.At.Format(stamp))); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := f.backups.Verify(context.Background(), "acme", dataset("acme"), f.identity); err == nil {
 				t.Fatal("verified a backup that is not its snapshot")
 			}

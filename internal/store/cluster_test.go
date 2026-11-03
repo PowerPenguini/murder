@@ -470,6 +470,11 @@ func TestAMoveGivesTheTenantToItsTarget(t *testing.T) {
 	if _, err := st.StartMove("acme", "nbg-1", "alice"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a move to an unknown node: %v", err)
 	}
+	// A cluster has this node among its members, as bootstrapping or
+	// joining makes it.
+	if err := st.PutNode(Node{Name: "node-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.PutNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400"}, "alice"); err != nil {
 		t.Fatal(err)
 	}

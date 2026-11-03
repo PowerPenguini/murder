@@ -230,3 +230,116 @@ func TestDirLeavesOutSocketsAndPipes(t *testing.T) {
 		}
 	}
 }
+
+// archiveOf is a tar stream of the entries given, each file holding "x".
+func archiveOf(headers ...*tar.Header) *bytes.Buffer {
+	var stream bytes.Buffer
+	archive := tar.NewWriter(&stream)
+	for _, header := range headers {
+		if header.Typeflag == tar.TypeReg {
+			header.Size = 1
+		}
+		_ = archive.WriteHeader(header)
+		if header.Typeflag == tar.TypeReg {
+			_, _ = archive.Write([]byte("x"))
+		}
+	}
+	_ = archive.Close()
+	return &stream
+}
+
+// ScanTar reads a stream by the rules ReadTar unpacks it by: what one
+// refuses, the other does, so a backup read through is one that restores.
+func TestScanTarRefusesWhatReadTarRefuses(t *testing.T) {
+	for name, headers := range map[string][]*tar.Header{
+		"a file twice": {
+			{Name: "db", Typeflag: tar.TypeReg, Mode: 0o600},
+			{Name: "db", Typeflag: tar.TypeReg, Mode: 0o600},
+		},
+		"a symlink and a file of one name": {
+			{Name: "db", Typeflag: tar.TypeSymlink, Linkname: "elsewhere"},
+			{Name: "db", Typeflag: tar.TypeReg, Mode: 0o600},
+		},
+		"a file below a symlink": {
+			{Name: "a", Typeflag: tar.TypeSymlink, Linkname: "."},
+			{Name: "a/x", Typeflag: tar.TypeReg, Mode: 0o600},
+		},
+		"a file in no directory": {
+			{Name: "missing/x", Typeflag: tar.TypeReg, Mode: 0o600},
+		},
+		"a file where a directory was made": {
+			{Name: "a/b", Typeflag: tar.TypeDir, Mode: 0o700},
+			{Name: "a", Typeflag: tar.TypeReg, Mode: 0o600},
+		},
+		"an entry outside": {
+			{Name: "../escape", Typeflag: tar.TypeReg, Mode: 0o600},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ScanTar(context.Background(), archiveOf(headers...)); err == nil {
+				t.Fatal("read through")
+			}
+			if err := ReadTar(context.Background(), t.TempDir(), archiveOf(headers...)); err == nil {
+				t.Fatal("unpacked")
+			}
+		})
+	}
+	// A hard link is left out of a restore: no backup holds one.
+	link := []*tar.Header{{Name: "db", Typeflag: tar.TypeReg, Mode: 0o600}, {Name: "copy", Typeflag: tar.TypeLink, Linkname: "db"}}
+	if _, err := ScanTar(context.Background(), archiveOf(link...)); err == nil {
+		t.Fatal("a hard link read through")
+	}
+	if err := ReadTar(context.Background(), t.TempDir(), archiveOf(link...)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// CompareTar finds a tree the same as the stream WriteTar made of it, and
+// finds what ReadTar would put back otherwise: a mode, a symlink's target,
+// an entry more.
+func TestCompareTarFindsWhatARestoreWouldChange(t *testing.T) {
+	ctx := context.Background()
+	for name, change := range map[string]func(dir string) error{
+		"same": func(string) error { return nil },
+		"mode": func(dir string) error { return os.Chmod(filepath.Join(dir, "db"), 0o644) },
+		"link": func(dir string) error {
+			if err := os.Remove(filepath.Join(dir, "current")); err != nil {
+				return err
+			}
+			return os.Symlink("other", filepath.Join(dir, "current"))
+		},
+		"directory": func(dir string) error { return os.Mkdir(filepath.Join(dir, "more"), 0o700) },
+		"time": func(dir string) error {
+			at := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+			return os.Chtimes(filepath.Join(dir, "db"), at, at)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "receipts"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "db"), []byte("database"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("db", filepath.Join(dir, "current")); err != nil {
+				t.Fatal(err)
+			}
+			var stream bytes.Buffer
+			if err := WriteTar(ctx, dir, &stream); err != nil {
+				t.Fatal(err)
+			}
+			entries, err := ScanTar(ctx, &stream)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := change(dir); err != nil {
+				t.Fatal(err)
+			}
+			err = CompareTar(ctx, dir, entries)
+			if (err == nil) != (name == "same") {
+				t.Fatalf("compared: %v", err)
+			}
+		})
+	}
+}

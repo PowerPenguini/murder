@@ -103,17 +103,25 @@ func (a *demoActor) change(name, action, detail string, change func(*api.Tenant)
 	return t, nil
 }
 
-func (a *demoActor) Create(_ context.Context, request api.TenantRequest) (api.Applied, error) {
+func (a *demoActor) Create(ctx context.Context, request api.TenantRequest) (api.Applied, error) {
+	node := request.Node
+	switch node {
+	case "":
+		node = "fsn-1"
+	case store.Auto:
+		nodes, records := a.demoPlacement(ctx)
+		node = store.LeastLoaded(nodes, records, "fsn-1")
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, ok := a.tenants[request.Name]; ok {
 		return api.Applied{}, &api.Error{Status: 409, Message: "tenant " + request.Name + " exists already"}
 	}
-	t := api.Tenant{App: request.App, Node: "fsn-1", Host: request.Name + ".example.com", URL: "https://" + request.Name + ".example.com", Generation: 1, CreatedAt: time.Now(),
+	t := api.Tenant{App: request.App, Node: node, Host: request.Name + ".example.com", URL: "https://" + request.Name + ".example.com", Generation: 1, CreatedAt: time.Now(),
 		Status: &reconcile.Status{Phase: "starting", CheckedAt: time.Now()}}
 	t.Spec.Name, t.Spec.Image, t.Spec.User = request.Name, "sha256:c23c323553d0a47eedff01b1cfb4a83a8f9b1b03f7f75a454c9ebf1391201156", "1000:1000"
 	a.tenants[request.Name] = t
-	a.record("tenant.created", request.Name, "on node fsn-1")
+	a.record("tenant.created", request.Name, "on node "+node)
 	return api.Applied{Tenant: t, Changed: true}, nil
 }
 

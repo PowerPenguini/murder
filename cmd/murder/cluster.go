@@ -25,6 +25,9 @@ const clusterUsage = `Usage: murder cluster <command> [arguments]
   drain <node> -to <target>
                       move every tenant of node, with its data, to target,
                       one after the other
+  balance [-dry-run]  move tenants, one after the other, from the nodes
+                      running the most to those running the fewest, until
+                      none runs two more than another
   replace <old> <new> move every tenant of old to new, then take old out of
                       the cluster: a server swapped for a bigger or smaller
                       one, which joined first; switch it off afterwards
@@ -50,6 +53,7 @@ func runCluster(args []string) error {
 	to := flags.String("to", "", "with drain: the node to move the tenants to")
 	poweredOff := flags.Bool("powered-off", false, "with failover: the node is powered off, checked by you")
 	valid := flags.Duration("valid", time.Hour, "with invite: how long the invitation is valid (up to 24h)")
+	dryRun := flags.Bool("dry-run", false, "with balance: only print the moves")
 	rest, err := parseInterspersed(flags, args[1:])
 	if err != nil {
 		return err
@@ -73,6 +77,8 @@ func runCluster(args []string) error {
 		status, err = client.Bootstrap(ctx)
 	case command == "join" && len(rest) == 1:
 		status, err = client.Join(ctx, rest[0])
+	case command == "balance" && len(rest) == 0:
+		return clusterops.Balance(context.Background(), client, *dryRun, stdout)
 	case command == "drain" && len(rest) == 1 && *to != "":
 		return drain(client, rest[0], *to)
 	case command == "replace" && len(rest) == 2:
