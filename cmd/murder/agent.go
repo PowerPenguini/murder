@@ -57,6 +57,13 @@ func runInit(args []string) error {
 		return err
 	}
 	if _, err := os.Stat(cfg.MasterKeyFile); errors.Is(err, os.ErrNotExist) {
+		// The database's secrets are sealed with the key it was made
+		// with: a new one would open none of them.
+		if _, err := os.Stat(cfg.Database); err == nil {
+			return fmt.Errorf("database %s exists but master key %s does not: its secrets are sealed with the original key, which a new one cannot open; restore the original key (from the copy kept offline) and run init again", cfg.Database, cfg.MasterKeyFile)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		if err := secrets.CreateKey(cfg.MasterKeyFile); err != nil {
 			return err
 		}

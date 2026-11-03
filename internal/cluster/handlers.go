@@ -16,6 +16,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/upgrade"
 )
 
 // handler serves other nodes. They are all trusted alike: any of them holds
@@ -441,8 +442,18 @@ func (c *Cluster) handleInstall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, errors.New("this node does not take upgrades"))
 		return
 	}
-	if err := c.config.Upgrade.Install(r.Context(), http.MaxBytesReader(w, r.Body, maxBinary), r.Header.Get(shaHeader)); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, err)
+	if err := c.config.Upgrade.Install(r.Context(), http.MaxBytesReader(w, r.Body, maxBinary), r.Header.Get(shaHeader), r.Header.Get(freezeHeader)); err != nil {
+		// A node that took no binary, as the upgrade no longer holds the
+		// freeze (412) or another install restarts it (409), is no
+		// refusal.
+		status := http.StatusUnprocessableEntity
+		switch {
+		case errors.Is(err, upgrade.ErrNotOwner):
+			status = http.StatusPreconditionFailed
+		case errors.Is(err, upgrade.ErrRestarting):
+			status = http.StatusConflict
+		}
+		writeError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})

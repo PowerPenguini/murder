@@ -368,8 +368,13 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The freeze the page showed, and that one alone: one taken since,
-		// a rotation's say, stays (checked as the thaw is written).
+		// a rotation's or another upgrade's, stays (checked as the thaw is
+		// written).
 		frozen := r.FormValue("frozen")
+		if frozen == "" {
+			back("problem", "the form does not say which freeze to end: look at the page again")
+			return
+		}
 		if strings.HasPrefix(frozen, store.RotationFreeze) {
 			back("problem", "a master key rotation holds the freeze: it takes changes again once it ends (sudo murder key rotate goes on with one that stopped)")
 			return
@@ -431,6 +436,25 @@ func (s *Server) upgradeAction(w http.ResponseWriter, r *http.Request) {
 		back(fmt.Sprintf("%q runs now, begun by %s: one change of the cluster at a time", busy.Title, busy.By))
 		return
 	}
+	agent := s.Cluster(user)
+	// Jobs are this panel's own: an upgrade begun from another node's
+	// panel, or a command line, shows only as its freeze. The panel
+	// begins one only with changes taken, and never resumes or takes over
+	// another; "murder upgrade" on a node does.
+	ask, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	nodes, err := agent.Nodes(ask)
+	cancel()
+	switch {
+	case err != nil:
+		back(err.Error())
+		return
+	case strings.HasPrefix(nodes.Frozen, store.UpgradeFreeze):
+		back("changes are frozen for an upgrade (" + nodes.Frozen + "), which may still run from another node: the panel begins no upgrade until it ends; to finish one that stopped, run murder upgrade again on the node it began on")
+		return
+	case nodes.Frozen != "":
+		back("changes are frozen (" + nodes.Frozen + "): the panel begins no upgrade until they are taken again")
+		return
+	}
 	path, err := s.receiveBinary(r)
 	if err != nil {
 		back(err.Error())
@@ -444,7 +468,6 @@ func (s *Server) upgradeAction(w http.ResponseWriter, r *http.Request) {
 		back("the file did not tell its murder version, so it is not used: " + err.Error())
 		return
 	}
-	agent := s.Cluster(user)
 	job, err := s.Jobs.Start(JobUpgrade, "upgrade the cluster", user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 		defer os.Remove(path)
 		return clusterops.Upgrade(ctx, agent, path, 5*time.Minute, out)

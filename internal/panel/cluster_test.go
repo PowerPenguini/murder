@@ -3,7 +3,6 @@ package panel
 import (
 	"bytes"
 	"context"
-	"github.com/PowerPenguini/murder/internal/store"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // A panel acting on the demo cluster's nodes, as a browser on its pages.
@@ -127,12 +128,12 @@ func TestActingOnTheCluster(t *testing.T) {
 	if _, page = get(t, server.URL+"/cluster"); !strings.Contains(page, "an upgrade stopped") {
 		t.Fatalf("the cluster page does not say changes are frozen:\n%s", page)
 	}
-	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"yes"}}, server.URL)
+	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"yes"}, "frozen": {"an upgrade stopped"}}, server.URL)
 	if nodes, _ := cluster.Nodes(ctx); nodes.Frozen == "" || !strings.Contains(body, "type thaw to take changes again") {
 		t.Fatalf("thawed without thaw typed:\n%s", body)
 	}
-	if !strings.Contains(page, `name="frozen" value="an upgrade stopped"`) {
-		t.Fatalf("the thaw form does not say which freeze it ends:\n%s", page)
+	if !strings.Contains(page, `name="frozen" value="an upgrade stopped"`) || !strings.Contains(page, "Never use it while an upgrade runs from another node") {
+		t.Fatalf("the thaw form does not name the freeze, or say when not to use it:\n%s", page)
 	}
 	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}, "frozen": {"an upgrade stopped"}}, server.URL)
 	if nodes, _ := cluster.Nodes(ctx); nodes.Frozen != "" || !strings.Contains(body, "changes are taken again") {
@@ -233,6 +234,55 @@ func TestAJobOnlyItsPanelKnows(t *testing.T) {
 	}
 }
 
+// Jobs are kept by the panel that began them: another node's panel sees an
+// upgrade only by its freeze. It begins no upgrade under one, says the thaw
+// is not for an upgrade that runs elsewhere, and thaws only the freeze its
+// page showed, never one another upgrade took since.
+func TestAnotherPanelLeavesARunningUpgradeAlone(t *testing.T) {
+	cluster, first, _, _ := newClusterPanel(t)
+	second, err := New(cluster, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Actions, second.Cluster = cluster.As, cluster.AsCluster
+	second.UploadDir = t.TempDir()
+	server := httptest.NewServer(second.Handler())
+	t.Cleanup(server.Close)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	ctx := context.Background()
+	running := store.UpgradeFreeze + "abc from node fsn-1, operation 01"
+	if err := cluster.AsCluster("test").Freeze(ctx, running); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer func() { close(release); first.Jobs.Wait() }()
+	if _, err := first.Jobs.Start(JobUpgrade, "upgrade the cluster", "jan (panel)", first.now, first.log, func(context.Context, io.Writer) error {
+		<-release
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := uploadBinary(t, client, server, os.Args[0], "upgrade")
+	if page, _ := io.ReadAll(response.Body); !strings.Contains(string(page), "changes are frozen for an upgrade") || second.Jobs.Busy() != nil {
+		t.Fatalf("a second upgrade began from another panel:\n%s", page)
+	}
+	if _, page := get(t, server.URL+"/cluster"); !strings.Contains(page, "Never use it while an upgrade runs from another node") {
+		t.Fatalf("the thaw does not say it is not for an upgrade that runs elsewhere:\n%s", page)
+	}
+	// The upgrade was taken over after the page was shown: the thaw of
+	// what it showed leaves the new freeze.
+	took := store.UpgradeFreeze + "abc from node fsn-1, operation 02"
+	if err := cluster.AsCluster("test").TakeOverFreeze(ctx, running, took); err != nil {
+		t.Fatal(err)
+	}
+	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}, "frozen": {running}}, server.URL)
+	if nodes, _ := cluster.Nodes(ctx); nodes.Frozen != took || strings.Contains(body, "changes are taken again") {
+		t.Fatalf("thawed a freeze the page did not show (now %q):\n%s", nodes.Frozen, body)
+	}
+}
+
 // A new release's static files are fetched anew: their addresses change.
 func TestStaticFilesAreVersioned(t *testing.T) {
 	_, _, server, _ := newClusterPanel(t)
@@ -266,7 +316,7 @@ func TestOneChangeOfTheClusterAtATime(t *testing.T) {
 	if !strings.Contains(body, "one change of the cluster at a time") {
 		t.Fatalf("a drain began during an upgrade:\n%s", body)
 	}
-	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}}, server.URL)
+	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}, "frozen": {"an upgrade runs"}}, server.URL)
 	if nodes, _ := cluster.Nodes(context.Background()); nodes.Frozen == "" || !strings.Contains(body, "takes changes again once it ends") {
 		t.Fatalf("thawed during an upgrade:\n%s", body)
 	}
@@ -342,5 +392,15 @@ func TestARotationsFreezeIsNotThawedFromThePanel(t *testing.T) {
 	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}, "frozen": {"an upgrade stopped"}}, server.URL)
 	if nodes, _ := cluster.Nodes(context.Background()); nodes.Frozen == "" || !strings.Contains(body, "frozen for another reason now") {
 		t.Fatalf("a stale form thawed a rotation:\n%s", body)
+	}
+	// A form that names no freeze ends none.
+	_, body = submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}}, server.URL)
+	if nodes, _ := cluster.Nodes(context.Background()); nodes.Frozen == "" || !strings.Contains(body, "does not say which freeze to end") {
+		t.Fatalf("a form naming no freeze thawed a rotation:\n%s", body)
+	}
+	// Nor does the panel begin an upgrade under a rotation's freeze.
+	response := uploadBinary(t, client, server, os.Args[0], "upgrade")
+	if page, _ := io.ReadAll(response.Body); !strings.Contains(string(page), "the panel begins no upgrade until they are taken again") {
+		t.Fatalf("an upgrade began during a rotation:\n%s", page)
 	}
 }

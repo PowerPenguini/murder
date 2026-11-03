@@ -181,11 +181,15 @@ Each stage is one PR, reviewed and tested before the next.
 5. **Cluster actions:** the Cluster page shows each node's release and
    schema, drains a node to another, removes one (its name typed), fails
    over one that does not answer (its name typed: only once it is off),
-   takes changes again after a stopped upgrade ("thaw" typed), backs up
-   this node's tenants, and upgrades the cluster with an uploaded binary
-   ("upgrade" typed; the panel checks that it says a murder version, then
-   installs it node by node, this one last, as `murder upgrade` does: the
-   same code, in `internal/clusterops`). Upgrades, drains and backups are
+   takes changes again after a stopped upgrade ("thaw" typed; it ends only
+   the freeze the page showed, and is never for an upgrade that runs from
+   another node's panel or command line, which this panel does not see),
+   backs up this node's tenants, and upgrades the cluster with an uploaded
+   binary ("upgrade" typed; the panel checks that it says a murder version,
+   then installs it node by node, this one last, as `murder upgrade` does:
+   the same code, in `internal/clusterops`). The panel begins an upgrade
+   only while changes are taken: it never resumes or takes over one that
+   stopped; `murder upgrade` on a node does. Upgrades, drains and backups are
    jobs: their page follows what they say. One change of the cluster (an
    upgrade or a drain) runs at a time, from either of a node's panels; a
    thaw waits for it too. The binary is uploaded beside the database, not
@@ -193,7 +197,8 @@ Each stage is one PR, reviewed and tested before the next.
    replaced by an upgrade restarts only once its jobs ended, taking none
    meanwhile; a panel asked to stop serves on until its upgrade or drain
    ended (up to an hour, as its unit says: an upgrade killed halfway
-   leaves changes frozen until it is run again, and resumes). Uploads a
+   leaves changes frozen until `murder upgrade` with the same binary on
+   that node resumes it). Uploads a
    stopped panel left are removed when it starts. Restoring a backup stays on a node (`murder backups
    restore`). Static files carry a hash of their content in their
    address, so a new release never runs an old page's script.

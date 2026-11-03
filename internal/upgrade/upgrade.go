@@ -99,7 +99,21 @@ type Node struct {
 	// stopRevert ends the watch for a late edge of an earlier install.
 	revertMu   sync.Mutex
 	stopRevert context.CancelFunc
+	// installMu holds one install at a time, from its first check to its
+	// restart: two at once would each keep the other's binary as the one
+	// to roll back to. restarting is the binary an install put in place,
+	// which the agent restarts into; no other is taken until then.
+	installMu  sync.Mutex
+	restarting string
 }
+
+// ErrRestarting refuses an install while the agent restarts into the
+// binary an earlier one put in place.
+var ErrRestarting = errors.New("the agent restarts into the binary installed just before")
+
+// ErrNotOwner refuses an install for an upgrade whose freeze is gone: a
+// person thawed, or another upgrade took the freeze over.
+var ErrNotOwner = errors.New("the upgrade no longer holds the freeze")
 
 // ErrDowngrade refuses a binary of an older schema: the database, once the
 // new release has run, would not open with it.
@@ -110,6 +124,29 @@ var ErrDowngrade = errors.New("the binary has an older schema version")
 // edge running, there is nothing to hand over. If the edge does not take
 // the new binary, the old one is put back and nothing else changes.
 func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
+	return n.InstallHolding(ctx, r, sha, nil)
+}
+
+// InstallHolding installs as Install does, while holds, if set, says the
+// upgrade that sends the binary still holds the freeze. The sender may lose
+// it while the binary arrives, or while the edge hands over: holds is asked
+// again, under the install lock, once the binary has arrived and been
+// checked, before anything is replaced, and again before the agent
+// restarts. If it fails before the restart, the old binary goes back, and
+// the edge to it, and nothing else changes.
+func (n *Node) InstallHolding(ctx context.Context, r io.Reader, sha string, holds func() error) error {
+	if holds == nil {
+		holds = func() error { return nil }
+	}
+	n.installMu.Lock()
+	defer n.installMu.Unlock()
+	switch n.restarting {
+	case "":
+	case sha:
+		return nil // installed already: the agent restarts into it
+	default:
+		return fmt.Errorf("%w (%s): wait until it runs it", ErrRestarting, short(n.restarting))
+	}
 	// An earlier install's watch for a late edge would hand this one's
 	// edge back.
 	n.revertMu.Lock()
@@ -148,6 +185,10 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 	}
 	if version.Schema < n.Current.Schema {
 		return fmt.Errorf("%w: %d, this node runs %d", ErrDowngrade, version.Schema, n.Current.Schema)
+	}
+	// The binary has arrived and runs: is it still the sender's to install?
+	if err := holds(); err != nil {
+		return err
 	}
 	// The database as it is, for a rollback after the new release changed
 	// it. Changes are frozen during an upgrade: nothing is lost going back.
@@ -188,8 +229,36 @@ func (n *Node) Install(ctx context.Context, r io.Reader, sha string) error {
 		}
 		return err
 	}
+	// The handover takes a while: the freeze may have gone meanwhile.
+	if err := holds(); err != nil {
+		return errors.Join(err, n.putBack(ctx, previous, sha))
+	}
 	n.Log.Info("installed a new murder binary; the agent restarts into it", "binary", sha, "schema", version.Schema)
+	n.restarting = sha
 	n.Restart()
+	return nil
+}
+
+// putBack undoes an install whose edge handed over, before the agent
+// restarts: the old binary goes back in place, and the edge, if one runs,
+// hands over to it. An edge that does not at once is watched, and asked
+// again, as after a handover that failed.
+func (n *Node) putBack(ctx context.Context, previous, sha string) error {
+	if err := os.Rename(previous, n.Executable); err != nil {
+		return fmt.Errorf("put the old binary back: %w", err)
+	}
+	_ = os.Remove(recordPath(n.Executable))
+	// The sender may be gone: the edge goes back all the same.
+	if err := n.handOverEdge(context.WithoutCancel(ctx)); err != nil {
+		revert, stop := context.WithCancel(context.Background())
+		n.revertMu.Lock()
+		n.stopRevert = stop
+		n.revertMu.Unlock()
+		// Any edge still running the new binary is handed back.
+		go n.revertLateEdge(revert, 0, sha)
+		return fmt.Errorf("hand the edge back to the old binary: %w", err)
+	}
+	n.Log.Warn("put the old binary back: the upgrade lost the freeze while the edge handed over", "binary", sha)
 	return nil
 }
 
@@ -335,13 +404,18 @@ type Record struct {
 func recordPath(executable string) string { return executable + ".upgrade" }
 
 // RollbackTarget is the binary a rollback run as executable puts the old
-// one back for: the old binary, kept as murder.prev, rolls back the one in
-// place, so a node whose new binary does not even run can still be rolled
-// back.
+// one back for. The new binary, in place, rolls itself back. The old one,
+// kept as murder.prev, rolls back the one in place, so a node whose new
+// binary does not even run can still be rolled back. A copy of the new
+// binary, kept as murder.failed once the old one is back, finishes a
+// rollback that stopped after that: the old binary in place may be of a
+// release that cannot.
 func RollbackTarget(executable string) string {
-	if installed, ok := strings.CutSuffix(executable, ".prev"); ok {
-		if _, err := os.Stat(recordPath(installed)); err == nil {
-			return installed
+	for _, suffix := range []string{".prev", ".failed"} {
+		if installed, ok := strings.CutSuffix(executable, suffix); ok {
+			if _, err := os.Stat(recordPath(installed)); err == nil {
+				return installed
+			}
 		}
 	}
 	return executable
@@ -375,10 +449,12 @@ func LastInstall(executable string) (Record, error) {
 // ErrNothingToRollBack reports a node with no install to undo.
 var ErrNothingToRollBack = errors.New("no upgrade of this node to roll back")
 
-// Rollback puts back the binary the last install replaced, if the binary
-// in place is the one it installed. It returns the record, whose From
-// schema says which database the old binary opens.
-func Rollback(executable string) (Record, error) {
+// CheckRollback returns the record of the last install over executable
+// if a rollback can put its binary back, changing nothing: the binary in
+// place is the one it installed and murder.prev the one it replaced, or
+// the old binary is back already. The record's From schema says which
+// database the old binary opens.
+func CheckRollback(executable string) (Record, error) {
 	record, err := LastInstall(executable)
 	if err != nil {
 		return Record{}, err
@@ -386,6 +462,9 @@ func Rollback(executable string) (Record, error) {
 	inPlace, err := Hash(executable)
 	if err != nil {
 		return Record{}, err
+	}
+	if inPlace == record.From.Binary {
+		return record, nil // put back already
 	}
 	previous, err := Hash(executable + ".prev")
 	if err != nil {
@@ -395,13 +474,43 @@ func Rollback(executable string) (Record, error) {
 		return Record{}, fmt.Errorf("%w: %s holds %s and its .prev %s, not what the last install left (%s replacing %s)",
 			ErrNothingToRollBack, executable, short(inPlace), short(previous), short(record.To.Binary), short(record.From.Binary))
 	}
-	if err := os.Rename(executable, executable+".failed"); err != nil {
+	return record, nil
+}
+
+// Rollback puts back the binary the last install replaced, if CheckRollback
+// allows it, and returns the record. The new binary is copied to
+// murder.failed first and the old one then renamed over it, so a binary is
+// always in place and the new one, whose code finishes a rollback, is
+// kept. It keeps the record: a rollback that also puts the database back
+// is over only once both are, and then FinishRollback removes it. A
+// rollback that stopped after putting the binary back finds it in place,
+// and returns the record again.
+func Rollback(executable string) (Record, error) {
+	record, err := CheckRollback(executable)
+	if err != nil {
 		return Record{}, err
+	}
+	if inPlace, err := Hash(executable); err != nil {
+		return Record{}, err
+	} else if inPlace == record.From.Binary {
+		return record, nil
+	}
+	if err := copyFile(executable, executable+".failed"); err != nil {
+		return Record{}, fmt.Errorf("keep the new binary: %w", err)
 	}
 	if err := os.Rename(executable+".prev", executable); err != nil {
 		return Record{}, err
 	}
-	return record, os.Remove(recordPath(executable))
+	return record, nil
+}
+
+// FinishRollback says a rollback is over: binary and database are back.
+func FinishRollback(executable string) error {
+	err := os.Remove(recordPath(executable))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func short(sha string) string {

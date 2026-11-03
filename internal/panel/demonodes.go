@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
 	"time"
 
@@ -92,7 +93,7 @@ func (a *demoActor) NodeInfo(ctx context.Context, node string) (upgrade.Info, er
 	return upgrade.Info{}, &api.Error{Status: 502, Message: "node " + node + " does not answer"}
 }
 
-func (a *demoActor) Install(_ context.Context, node string, binary io.Reader, sha string) error {
+func (a *demoActor) Install(_ context.Context, node string, binary io.Reader, sha, _ string) error {
 	if _, err := io.Copy(io.Discard, binary); err != nil {
 		return err
 	}
@@ -107,9 +108,13 @@ func (a *demoActor) Install(_ context.Context, node string, binary io.Reader, sh
 	return nil
 }
 
+// Freeze refuses as the store does: a freeze for another reason stays.
 func (a *demoActor) Freeze(_ context.Context, reason string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.nodes.frozen != "" && a.nodes.frozen != reason {
+		return &api.Error{Status: http.StatusConflict, Message: "changes are frozen: " + a.nodes.frozen}
+	}
 	a.nodes.frozen = reason
 	return nil
 }
@@ -118,16 +123,31 @@ func (a *demoActor) ThawIf(_ context.Context, reason string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.nodes.frozen != "" && a.nodes.frozen != reason {
-		return &api.Error{Status: 409, Message: "changes are frozen for another reason now: " + a.nodes.frozen}
+		return &api.Error{Status: http.StatusConflict, Message: "changes are frozen for another reason now: " + a.nodes.frozen}
 	}
 	a.nodes.frozen = ""
 	return nil
 }
 
-func (a *demoActor) Thaw(context.Context) error {
+func (a *demoActor) TakeOverFreeze(_ context.Context, from, reason string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.nodes.frozen = ""
+	if a.nodes.frozen == from {
+		a.nodes.frozen = reason
+	}
+	return nil
+}
+
+func (a *demoActor) ThawOwn(_ context.Context, reason string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch a.nodes.frozen {
+	case "":
+	case reason:
+		a.nodes.frozen = ""
+	default:
+		return &api.Error{Status: http.StatusConflict, Message: "changes are frozen: " + a.nodes.frozen + ", not " + reason}
+	}
 	return nil
 }
 

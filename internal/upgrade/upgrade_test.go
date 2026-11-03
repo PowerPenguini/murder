@@ -156,9 +156,74 @@ func TestRollbackUndoesTheLastInstallOnly(t *testing.T) {
 	if !bytes.Equal(inPlace, fakeBinary(5, "old")) || !bytes.Equal(failed, binary) || record.From.Schema != 5 || record.To.Schema != 6 {
 		t.Fatalf("after rollback: %q in place, %q failed, record %+v", inPlace, failed, record)
 	}
-	// Done once: a second rollback has nothing to undo.
+	// Until it is finished, a rollback that stopped after the binary
+	// finds it back, and goes on with the database.
+	again, err := Rollback(f.node.Executable)
+	if err != nil || again != record {
+		t.Fatalf("a rollback again before it finished: %+v, %v", again, err)
+	}
+	if inPlace, _ := os.ReadFile(f.node.Executable); !bytes.Equal(inPlace, fakeBinary(5, "old")) {
+		t.Fatalf("a rollback again changed the binary: %q in place", inPlace)
+	}
+	if err := FinishRollback(f.node.Executable); err != nil {
+		t.Fatal(err)
+	}
+	// Done once: a rollback after it has nothing to undo.
 	if _, err := Rollback(f.node.Executable); !errors.Is(err, ErrNothingToRollBack) {
 		t.Fatalf("a second rollback: %v", err)
+	}
+}
+
+// Installs on one node go one at a time, from the first check to the
+// restart, and none follows one that installed until the agent restarted:
+// two at once would each keep the other's binary as the old one, and leave
+// nothing to roll back to.
+func TestInstallsGoOneAtATime(t *testing.T) {
+	f := newFixture(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	snapshots := 0
+	snapshot := f.node.Snapshot
+	f.node.Snapshot = func() (string, error) {
+		if snapshots++; snapshots == 1 {
+			close(entered)
+			<-release
+		}
+		return snapshot()
+	}
+	first, second := fakeBinary(6, "first"), fakeBinary(6, "second")
+	firstDone, secondDone := make(chan error, 1), make(chan error, 1)
+	go func() { firstDone <- f.node.Install(context.Background(), bytes.NewReader(first), sha(first)) }()
+	<-entered
+	go func() { secondDone <- f.node.Install(context.Background(), bytes.NewReader(second), sha(second)) }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("a second install went on beside the first: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; !errors.Is(err, ErrRestarting) {
+		t.Fatalf("an install while the agent restarts into another: %v", err)
+	}
+	// The same binary again, as an upgrade that resumes sends it, is no
+	// refusal: it is installed already.
+	if err := f.node.Install(context.Background(), bytes.NewReader(first), sha(first)); err != nil {
+		t.Fatalf("the installed binary again: %v", err)
+	}
+	if snapshots != 1 || f.restarted != 1 {
+		t.Fatalf("%d snapshots, %d restarts", snapshots, f.restarted)
+	}
+	if previous, _ := os.ReadFile(f.node.Executable + ".prev"); !bytes.Equal(previous, fakeBinary(5, "old")) {
+		t.Fatalf("murder.prev holds %q, not the binary that ran", previous)
+	}
+	record, err := Rollback(f.node.Executable)
+	if err != nil || record.From != f.node.Current {
+		t.Fatalf("rollback: %+v, %v", record, err)
+	}
+	if inPlace, _ := os.ReadFile(f.node.Executable); !bytes.Equal(inPlace, fakeBinary(5, "old")) {
+		t.Fatalf("after rollback: %q in place", inPlace)
 	}
 }
 
@@ -186,6 +251,25 @@ func TestTheOldBinaryRollsBackTheNewOne(t *testing.T) {
 	}
 	if inPlace, _ := os.ReadFile(f.node.Executable); !bytes.Equal(inPlace, fakeBinary(5, "old")) {
 		t.Fatalf("after rollback from murder.prev: %q in place", inPlace)
+	}
+	// The old binary in place may be one (v0.1.0) whose rollback cannot
+	// finish this one: the new binary, kept as murder.failed, does, while
+	// the record is there.
+	failed := f.node.Executable + ".failed"
+	if kept, _ := os.ReadFile(failed); !bytes.Equal(kept, binary) {
+		t.Fatalf("murder.failed holds %q, not the new binary", kept)
+	}
+	if got := RollbackTarget(failed); got != f.node.Executable {
+		t.Fatalf("murder.failed rolls back %s, want %s", got, f.node.Executable)
+	}
+	if _, err := Rollback(RollbackTarget(failed)); err != nil {
+		t.Fatalf("finishing from murder.failed: %v", err)
+	}
+	if err := FinishRollback(f.node.Executable); err != nil {
+		t.Fatal(err)
+	}
+	if got := RollbackTarget(failed); got != failed {
+		t.Fatalf("once finished, murder.failed rolls back %s", got)
 	}
 }
 
@@ -332,5 +416,69 @@ func TestALateEdgeIsHandedBack(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("an edge was signalled that should not be")
+	}
+}
+
+// An upgrade may lose the freeze while its binary arrives: asked once the
+// binary is in and checked, before anything is replaced, it installs
+// nothing.
+func TestAnInstallWhoseSenderLostTheFreezeReplacesNothing(t *testing.T) {
+	f := newFixture(t)
+	snapshots := 0
+	f.node.Snapshot = func() (string, error) { snapshots++; return "", errors.New("not wanted") }
+	binary := fakeBinary(6, "new")
+	asked := 0
+	err := f.node.InstallHolding(context.Background(), bytes.NewReader(binary), sha(binary), func() error { asked++; return ErrNotOwner })
+	if !errors.Is(err, ErrNotOwner) || asked != 1 {
+		t.Fatalf("install after the freeze went: %v (asked %d times)", err, asked)
+	}
+	if installed, _ := os.ReadFile(f.node.Executable); !bytes.Equal(installed, fakeBinary(5, "old")) || f.restarted != 0 || snapshots != 0 {
+		t.Fatalf("installed %q, restarted %d, %d snapshots", installed, f.restarted, snapshots)
+	}
+	for _, path := range []string{f.node.Executable + ".prev", recordPath(f.node.Executable)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s was written", path)
+		}
+	}
+}
+
+// The freeze may go while the edge hands over: then the agent does not
+// restart, the old binary goes back, and the edge hands over to it; an
+// install after that is not refused as one the agent restarts into.
+func TestAnInstallWhoseSenderLostTheFreezeDuringTheHandoverPutsTheOldBinaryBack(t *testing.T) {
+	f := newFixture(t)
+	count := filepath.Join(f.dir, "handovers")
+	// An edge that, on SIGHUP, starts another one, which writes its PID.
+	startEdge(t, f, "#!/bin/sh\ntrap 'echo hup >> "+count+"; \"$0\" edge & exit' HUP\necho $$ > "+f.node.EdgePIDFile+"\nwhile true; do sleep 0.05; done\n")
+	t.Cleanup(func() {
+		if pid, err := readPID(f.node.EdgePIDFile); err == nil && isEdge(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	f.node.edgeWait = 5 * time.Second
+	binary := fakeBinary(6, "new")
+	asked := 0
+	holds := func() error {
+		asked++
+		if asked > 1 {
+			return ErrNotOwner
+		}
+		return nil
+	}
+	err := f.node.InstallHolding(context.Background(), bytes.NewReader(binary), sha(binary), holds)
+	if !errors.Is(err, ErrNotOwner) || asked != 2 {
+		t.Fatalf("install whose freeze went during the handover: %v (asked %d times)", err, asked)
+	}
+	if installed, _ := os.ReadFile(f.node.Executable); !bytes.Equal(installed, fakeBinary(5, "old")) || f.restarted != 0 {
+		t.Fatalf("after: %q in place, restarted %d", installed, f.restarted)
+	}
+	if _, err := LastInstall(f.node.Executable); !errors.Is(err, ErrNothingToRollBack) {
+		t.Fatalf("the record stays: %v", err)
+	}
+	if data, _ := os.ReadFile(count); strings.Count(string(data), "hup") != 2 {
+		t.Fatalf("the edge handed over %d times, not there and back", strings.Count(string(data), "hup"))
+	}
+	if err := f.node.InstallHolding(context.Background(), bytes.NewReader(binary), sha(binary), nil); err != nil || f.restarted != 1 {
+		t.Fatalf("install again: %v, restarted %d", err, f.restarted)
 	}
 }

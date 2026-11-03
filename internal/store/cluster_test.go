@@ -637,27 +637,43 @@ func TestNothingPullsATenantFromUnderItsMove(t *testing.T) {
 	}
 }
 
-// An upgrade that stopped is taken over by one with a fixed binary; a
-// freeze for anything else is not.
-func TestAFixedUpgradeTakesOverTheFreeze(t *testing.T) {
+// An upgrade takes over another upgrade's freeze only by naming it: two
+// upgrades never both think they hold it. A freeze for anything else is
+// never taken over.
+func TestAnUpgradeTakesOverAFreezeOnlyByNamingIt(t *testing.T) {
 	st, _ := openNew(t, options())
 	if err := st.Freeze(UpgradeFreeze+"aaa", "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Freeze(UpgradeFreeze+"bbb", "alice"); err != nil || st.Frozen() != UpgradeFreeze+"bbb" {
-		t.Fatalf("a fixed upgrade: %v, frozen %q", err, st.Frozen())
+	if err := st.Freeze(UpgradeFreeze+"bbb", "alice"); !errors.Is(err, ErrFrozen) || st.Frozen() != UpgradeFreeze+"aaa" {
+		t.Fatalf("an upgrade over another's freeze: %v, frozen %q", err, st.Frozen())
+	}
+	if err := st.TakeOverFreeze(UpgradeFreeze+"zzz", UpgradeFreeze+"bbb", "alice"); !errors.Is(err, ErrFrozen) || st.Frozen() != UpgradeFreeze+"aaa" {
+		t.Fatalf("a takeover of a freeze that is not there: %v, frozen %q", err, st.Frozen())
+	}
+	if err := st.TakeOverFreeze(UpgradeFreeze+"aaa", UpgradeFreeze+"bbb", "alice"); err != nil || st.Frozen() != UpgradeFreeze+"bbb" {
+		t.Fatalf("a takeover: %v, frozen %q", err, st.Frozen())
+	}
+	if err := st.ThawOwn(UpgradeFreeze+"aaa", "alice"); err != nil || st.Frozen() != UpgradeFreeze+"bbb" {
+		t.Fatalf("the upgrade taken over thawed: %v, frozen %q", err, st.Frozen())
 	}
 	if err := st.Freeze("maintenance", "alice"); !errors.Is(err, ErrFrozen) {
 		t.Fatalf("another freeze over an upgrade's: %v", err)
 	}
-	if err := st.Thaw("alice"); err != nil {
-		t.Fatal(err)
+	if err := st.ThawOwn(UpgradeFreeze+"bbb", "alice"); err != nil || st.Frozen() != "" {
+		t.Fatalf("thaw its own: %v, frozen %q", err, st.Frozen())
+	}
+	if err := st.TakeOverFreeze(UpgradeFreeze+"bbb", UpgradeFreeze+"ccc", "alice"); !errors.Is(err, ErrConflict) || st.Frozen() != "" {
+		t.Fatalf("a takeover once thawed: %v, frozen %q", err, st.Frozen())
 	}
 	if err := st.Freeze("maintenance", "alice"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Freeze(UpgradeFreeze+"ccc", "alice"); !errors.Is(err, ErrFrozen) {
 		t.Fatalf("an upgrade over another freeze: %v", err)
+	}
+	if err := st.TakeOverFreeze("maintenance", UpgradeFreeze+"ccc", "alice"); err == nil || st.Frozen() != "maintenance" {
+		t.Fatalf("an upgrade took over another freeze: %v, frozen %q", err, st.Frozen())
 	}
 	frozen, err := DatabaseFrozen(st.path)
 	if err != nil || frozen != "maintenance" {

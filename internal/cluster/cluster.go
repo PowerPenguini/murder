@@ -805,7 +805,7 @@ func (c *Cluster) request(ctx context.Context, node, method, path string, body i
 // Upgrader is the node's part in an upgrade.
 type Upgrader interface {
 	Info() upgrade.Info
-	Install(ctx context.Context, binary io.Reader, sha string) error
+	Install(ctx context.Context, binary io.Reader, sha, freeze string) error
 }
 
 // NodeInfo asks a node of the cluster how it is, for an upgrade.
@@ -819,8 +819,9 @@ func (c *Cluster) NodeInfo(ctx context.Context, node string) (upgrade.Info, erro
 	return info, err
 }
 
-// Install sends a node of the cluster a binary to install.
-func (c *Cluster) Install(ctx context.Context, node string, binary io.Reader, sha string) error {
+// Install sends a node of the cluster a binary to install, if changes are
+// still frozen for freeze there.
+func (c *Cluster) Install(ctx context.Context, node string, binary io.Reader, sha, freeze string) error {
 	address, err := c.addressOf(node)
 	if err != nil {
 		return err
@@ -830,6 +831,9 @@ func (c *Cluster) Install(ctx context.Context, node string, binary io.Reader, sh
 		return err
 	}
 	request.Header.Set(shaHeader, sha)
+	if freeze != "" {
+		request.Header.Set(freezeHeader, freeze)
+	}
 	response, err := c.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("node %s: %w", node, err)
@@ -841,8 +845,12 @@ func (c *Cluster) Install(ctx context.Context, node string, binary io.Reader, sh
 	return nil
 }
 
-// shaHeader carries the SHA-256 a binary must have.
-const shaHeader = "X-Murder-Sha256"
+// shaHeader carries the SHA-256 a binary must have, freezeHeader the
+// freeze of the upgrade that sends it.
+const (
+	shaHeader    = "X-Murder-Sha256"
+	freezeHeader = "X-Murder-Freeze"
+)
 
 // addressOf is where the cluster reaches node.
 func (c *Cluster) addressOf(node string) (string, error) {

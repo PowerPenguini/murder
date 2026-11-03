@@ -65,17 +65,49 @@ type agentUpgrader struct {
 
 // Install takes a binary only under an upgrade's freeze, as this node has
 // it once caught up: a rollback here then finds the freeze it undoes, and
-// no binary is installed while changes are taken.
-func (a *agentUpgrader) Install(ctx context.Context, binary io.Reader, sha string) error {
-	if a.catchUp != nil {
-		if err := a.catchUp(); err != nil {
-			return err
-		}
+// no binary is installed while changes are taken. Given the freeze of the
+// upgrade that sends it, only under that one: an upgrade whose freeze
+// another took over, or a person thawed, installs nothing more. Upgrades
+// of releases before say no freeze: theirs is the freeze found first. The
+// freeze is checked again, caught up, once the binary has arrived, before
+// it replaces the one in place, and before the agent restarts: one taken
+// over or thawed meanwhile installs nothing.
+func (a *agentUpgrader) Install(ctx context.Context, binary io.Reader, sha, freeze string) error {
+	frozen, err := a.frozen()
+	if err != nil {
+		return err
 	}
-	if frozen := a.store.Frozen(); !strings.HasPrefix(frozen, store.UpgradeFreeze) {
+	switch {
+	case freeze != "" && frozen == "":
+		return fmt.Errorf("%w: changes were taken again here", upgrade.ErrNotOwner)
+	case freeze != "" && frozen != freeze:
+		return fmt.Errorf("%w: changes are frozen here for %q", upgrade.ErrNotOwner, frozen)
+	case !strings.HasPrefix(frozen, store.UpgradeFreeze):
 		return fmt.Errorf("changes are not frozen for an upgrade here (%q): murder upgrade freezes them first", frozen)
 	}
-	return a.Node.Install(ctx, binary, sha)
+	holds := func() error {
+		now, err := a.frozen()
+		switch {
+		case err != nil:
+			return err
+		case now == "":
+			return fmt.Errorf("%w: changes were taken again here while the binary arrived; nothing was installed", upgrade.ErrNotOwner)
+		case now != frozen:
+			return fmt.Errorf("%w: changes are frozen here for %q since the binary was sent; nothing was installed", upgrade.ErrNotOwner, now)
+		}
+		return nil
+	}
+	return a.Node.InstallHolding(ctx, binary, sha, holds)
+}
+
+// frozen is the freeze here once caught up with the cluster.
+func (a *agentUpgrader) frozen() (string, error) {
+	if a.catchUp != nil {
+		if err := a.catchUp(); err != nil {
+			return "", err
+		}
+	}
+	return a.store.Frozen(), nil
 }
 
 func (a *agentUpgrader) Info() upgrade.Info {
@@ -83,7 +115,7 @@ func (a *agentUpgrader) Info() upgrade.Info {
 	return upgrade.Info{Node: a.store.Node(), Version: a.Current, Started: a.started, Applied: a.store.Applied(), LastPass: at}
 }
 
-const upgradeUsage = `Usage: murder upgrade [-wait 5m] <binary>
+const upgradeUsage = `Usage: murder upgrade [-wait 5m] [-take-over] <binary>
        murder upgrade -thaw
        murder upgrade rollback [-config file] [-binary path]
 
@@ -98,9 +130,14 @@ next node follows once it is back and has caught up.
 If a node does not come back, the upgrade stops there and changes stay
 frozen: on that node, with its agent stopped, "murder upgrade rollback"
 puts the old binary (and, if the new release changed it, the old database)
-back; run it as /usr/local/bin/murder.prev, the old binary, if the new one
-does not run. Running the same upgrade again resumes it; "murder upgrade -thaw"
-takes changes again, which is safe only once every node runs one release.
+back. Run it as the new binary in place: it puts the database back first,
+and if stopped, run again, it finishes. Only if the new binary does not run
+at all, run it as /usr/local/bin/murder.prev, the old binary; one of
+v0.1.0 does not resume. Running the same upgrade again on the same node resumes it.
+An upgrade never takes over the freeze of another, which may still run
+elsewhere, unless told -take-over. "murder upgrade -thaw" takes changes
+again; it is for an upgrade that stopped, safe only once every node runs
+one release, and never to be used while an upgrade runs on another node.
 `
 
 func runUpgrade(args []string) error {
@@ -111,7 +148,8 @@ func runUpgrade(args []string) error {
 	flags.Usage = func() { fmt.Fprint(flags.Output(), upgradeUsage); flags.PrintDefaults() }
 	socket := socketPath(flags)
 	wait := flags.Duration("wait", 5*time.Minute, "how long each node may take to come back")
-	thaw := flags.Bool("thaw", false, "only take changes again after an upgrade that stopped")
+	thaw := flags.Bool("thaw", false, "only take changes again after an upgrade that stopped (never while one runs on another node)")
+	takeOver := flags.Bool("take-over", false, "take over the freeze of another upgrade, which stopped and runs nowhere")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
 		return err
@@ -133,7 +171,7 @@ func runUpgrade(args []string) error {
 		flags.Usage()
 		return flag.ErrHelp
 	}
-	return upgradeCluster(ctx, client, positional[0], *wait)
+	return upgradeCluster(ctx, client, positional[0], *wait, *takeOver)
 }
 
 func short(sha string) string {
@@ -143,9 +181,15 @@ func short(sha string) string {
 	return sha
 }
 
+// restoreDatabase puts a database copy in place; a test makes it fail.
+var restoreDatabase = store.Restore
+
 // runRollback puts the binary an upgrade replaced back on this node, and
 // the database as it was before, if the new release changed its schema. It
-// undoes the last install only, and only while the agent is stopped.
+// undoes the last install only, and only while the agent is stopped. The
+// database goes back first, while the new binary, whose code resumes a
+// rollback, is still in place: the old one may be of a release that cannot
+// (v0.1.0 drops the record as it puts its binary back).
 func runRollback(args []string) error {
 	flags := flag.NewFlagSet("upgrade rollback", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfig, "agent configuration file")
@@ -170,38 +214,58 @@ func runRollback(args []string) error {
 	} else if running {
 		return errors.New("the agent runs: stop it first (systemctl stop murder-agent)")
 	}
-	// Once an upgrade is over, its rollback would put back a database as
-	// it was then, losing every change since.
-	if _, err := upgrade.LastInstall(executable); err != nil {
+	// Nothing changes unless the binary can go back too.
+	record, err := upgrade.CheckRollback(executable)
+	if err != nil {
 		return err
 	}
+	// Once an upgrade is over, its rollback would put back a database as
+	// it was then, losing every change since.
 	if frozen, err := store.DatabaseFrozen(cfg.Database); err != nil {
 		return err
 	} else if !strings.HasPrefix(frozen, store.UpgradeFreeze) && !*force {
 		return errors.New("no upgrade is under way (changes were taken again since): rolling the last one back now would put back the binary, and the database if its schema changed, as they were before it, losing what changed since; -force does it anyway")
 	}
-	record, err := upgrade.Rollback(executable)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "put murder %s back (the new binary is %s.failed)\n", short(record.From.Binary), executable)
-	// The old binary may not open the database as the new release left it.
+	// The old binary may not open the database as the new release left
+	// it: then the copy from before the upgrade goes back too, and is
+	// checked before anything changes.
 	schema, err := store.DatabaseSchema(cfg.Database)
 	if err != nil {
 		return err
 	}
+	before := cfg.Database + ".before-upgrade"
 	if schema > record.From.Schema {
-		kept, err := store.Restore(cfg.Database+".before-upgrade", cfg.Database)
+		if _, err := store.CheckBackup(before); err != nil {
+			return fmt.Errorf("nothing was rolled back: the new release changed the database (schema %d, the old binary opens %d), and its copy from before the upgrade cannot be put back: %w", schema, record.From.Schema, err)
+		}
+		if copied, err := store.DatabaseSchema(before); err != nil {
+			return err
+		} else if copied > record.From.Schema {
+			return fmt.Errorf("nothing was rolled back: %s is of schema %d, which the old binary (schema %d) does not open", before, copied, record.From.Schema)
+		}
+		kept, err := restoreDatabase(before, cfg.Database)
 		if err != nil {
-			return fmt.Errorf("put the database back: %w", err)
+			return fmt.Errorf("put the database back: %w\nnothing else changed: the new binary is still in place; once this is fixed, run \"%s upgrade rollback\" again", err, executable)
 		}
 		fmt.Fprintf(stdout, "put the database from before the upgrade back; the one the new release changed is %s\n", kept)
+	}
+	// The record stays until the binary is back too: a rollback that
+	// stops before is run again, and finishes.
+	if record, err = upgrade.Rollback(executable); err != nil {
+		return fmt.Errorf("put the old binary back: %w\nthe new binary is still in place; once this is fixed, run \"%s upgrade rollback\" again", err, executable)
+	}
+	fmt.Fprintf(stdout, "put murder %s back (the new binary is kept as %s.failed)\n", short(record.From.Binary), executable)
+	if err := upgrade.FinishRollback(executable); err != nil {
+		return fmt.Errorf("%w\nthe old binary and its database are back; run \"%s.failed upgrade rollback\" (the new binary's code) to finish", err, executable)
 	}
 	fmt.Fprintln(stdout, "now: systemctl start murder-agent; systemctl reload murder-edge")
 	return nil
 }
 
 // upgradeCluster upgrades every node, telling stdout.
-func upgradeCluster(ctx context.Context, client *api.Client, binary string, wait time.Duration) error {
+func upgradeCluster(ctx context.Context, client *api.Client, binary string, wait time.Duration, takeOver bool) error {
+	if takeOver {
+		return clusterops.TakeOver(ctx, client, binary, wait, stdout)
+	}
 	return clusterops.Upgrade(ctx, client, binary, wait, stdout)
 }

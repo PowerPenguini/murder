@@ -63,25 +63,51 @@ sudo murder upgrade ./murder          # every node of the cluster, one after the
 ```
 
 It freezes changes (the panel and CLI only read meanwhile, so nodes of two
-releases exchange none), then, node by node: the node checks the binary
-(its hash, that it runs, no older schema), keeps the binary it runs as
+releases exchange none) under a freeze of its own, which names the binary,
+the node that runs the upgrade and an operation id; it then reads again
+what every node runs. Then, node by node: the node checks that the upgrade
+still holds the freeze and the binary (its hash, that it runs, no older
+schema), takes one install at a time, keeps the binary it runs as
 `murder.prev` and a copy of its database, hands its edge over to the new
 binary and restarts its agent into it (`murder-agent.service` restarts it:
 keep `Restart=always`); the next node follows once this one runs the new
-binary, has caught up with the cluster and reconciled. Then changes are
-taken again. A node that refuses the binary keeps its old one, edge
-included; if it was the first, changes are taken again at once. A node that
+binary, has caught up with the cluster and reconciled; a node that runs
+the binary already is not sent it again, but is waited for alike. Then the
+upgrade takes changes again, if the freeze is still its own. A node that
+refuses the binary keeps its old one, edge included; if it was the first,
+and the nodes ran one release, changes are taken again at once. A node that
 does not come back stops the upgrade with changes still frozen: on that
-node, with its agent stopped, `murder.prev upgrade rollback` (the old
-binary, beside the new one, so it works even if the new one does not run)
-puts the old binary back (and the database from before the upgrade, if the
-new release changed its schema); it undoes that node's last install, nothing older, and only
-while an upgrade is under way (`-force` otherwise: the database would go back
-to before it). Running the same upgrade again resumes it where it stopped,
-and an upgrade with a fixed binary takes over; `murder upgrade -thaw` takes
-changes again, safe only once every node runs one release. Before freezing
-anything, the upgrade checks that every node answers. Only root
-upgrades, and each install is in the audit log (`node.upgraded`). By hand,
+node, with its agent stopped, `murder upgrade rollback` (the new binary, in
+place) puts the old binary back (and the database from before the upgrade,
+if the new release changed its schema); it undoes that node's last install,
+nothing older, and only while an upgrade is under way (`-force` otherwise:
+the database would go back to before it). It checks first that both can go
+back, and changes nothing if not. It puts the database back first, while
+the new binary is still in place: a rollback that stops there is run again
+the same way, and finishes. It then keeps the new binary as `murder.failed`
+and puts the old one in place; should it stop after that, run
+`murder.failed upgrade rollback` to finish. Run the rollback from the new
+binary, or from `murder.failed`, not from the old one: the old binary of
+v0.1.0 puts its binary back first and forgets the upgrade, so a rollback it
+began does not resume. Only if the new binary does not run at all, run
+`murder.prev upgrade rollback` (the old binary, beside it); from v0.1.0, if
+it then fails to put the database back, put the copy back by hand:
+`sudo murder restore /var/lib/murder/murder.db.before-upgrade`. Running
+the same upgrade again, on the node it ran from, resumes it where it stopped. An upgrade never takes over the
+freeze of another, which may still run on another node: once sure that one
+stopped and runs nowhere, `murder upgrade -take-over ./murder` takes it
+over, say with a fixed binary. An upgrade whose freeze was taken over, or
+thawed, installs nothing more: the node checks the freeze again, caught up
+with the cluster, once the binary has arrived and before it replaces the
+one in place, and again once its edge has handed over; if it went
+meanwhile, the node keeps (or puts back) its old binary, edge included,
+and does not restart. `murder upgrade -thaw` (or the panel's "take
+changes again") ends any freeze: it is for an upgrade that stopped, safe
+only once every node runs one release, and must never be used while an
+upgrade runs on another node. The panel begins no upgrade while changes are
+frozen. Before freezing anything, the upgrade checks that every node
+answers. Only root upgrades, and each install is in the audit log
+(`node.upgraded`). By hand,
 on one node, the same is:
 
 ```bash
@@ -122,6 +148,9 @@ directory underneath and replaces it.
 The agent refuses to start without its database. A new node gets one from
 `murder init`; on an existing node a missing file means a broken mount or a
 lost disk, and starting from an empty database would remove every tenant.
+Likewise `murder init` makes no master key for a database that exists: its
+secrets are sealed with the original key, which no new one opens; restore
+that key from its copy offline.
 
 ## Back up and restore
 
