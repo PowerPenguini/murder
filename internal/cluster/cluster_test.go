@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 
 	"github.com/PowerPenguini/murder/internal/secrets"
@@ -54,6 +56,8 @@ type node struct {
 	tune func(*raft.Config)
 	// replicas keeps copies of other nodes' tenants; none if nil.
 	replicas Replicas
+	// stable wraps where Raft keeps its term; nil leaves it.
+	stable func(raft.StableStore) raft.StableStore
 }
 
 func newNode(t *testing.T, name string) *node {
@@ -63,7 +67,14 @@ func newNode(t *testing.T, name string) *node {
 
 func newTunedNode(t *testing.T, name string, tune func(*raft.Config)) *node {
 	t.Helper()
-	n := &node{t: t, name: name, dir: t.TempDir(), address: "127.0.0.1:0", fatal: make(chan error, 1), tune: tune}
+	return newNodeWith(t, name, func(n *node) { n.tune = tune })
+}
+
+// newNodeWith starts a node that set has changed first.
+func newNodeWith(t *testing.T, name string, set func(*node)) *node {
+	t.Helper()
+	n := &node{t: t, name: name, dir: t.TempDir(), address: "127.0.0.1:0", fatal: make(chan error, 1)}
+	set(n)
 	n.key = keyFile(t, filepath.Join(n.dir, "master.key"), 7)
 	if err := store.Init(filepath.Join(n.dir, "murder.db"), name); err != nil {
 		t.Fatal(err)
@@ -82,8 +93,9 @@ func (n *node) start() {
 	c, err := Start(Config{
 		Node: n.name, Address: n.address, Dir: filepath.Join(n.dir, "raft"),
 		Seeds: n.key.DeriveAll("cluster ca"), Store: st, Replicas: n.replicas, Keys: nodeKeys{n},
-		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Fatal: func(err error) { n.fatal <- err },
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Fatal:  func(err error) { n.fatal <- err },
+		stable: n.stable,
 		raft: func(config *raft.Config) {
 			// Raft's own defaults: a loaded test host with the race
 			// detector misses shorter heartbeats and elects for nothing.
@@ -105,12 +117,29 @@ func (n *node) start() {
 	n.address = c.address
 }
 
+// stopTimeout bounds stopping a node: Raft's Shutdown waits for every one
+// of its goroutines, and one that never ends would hold the test until the
+// whole run times out.
+const stopTimeout = time.Minute
+
 func (n *node) stop() {
 	if n.cluster == nil {
 		return
 	}
-	_ = n.cluster.Close()
-	_ = n.store.Close()
+	closed := make(chan struct{})
+	go func(c *Cluster) {
+		_ = c.Close()
+		close(closed)
+	}(n.cluster)
+	select {
+	case <-closed:
+		_ = n.store.Close()
+	case <-time.After(stopTimeout):
+		// The store stays open: Raft may still apply to it.
+		stacks := make([]byte, 4<<20)
+		stacks = stacks[:runtime.Stack(stacks, true)]
+		n.t.Errorf("%s did not stop within %s; goroutines:\n%s", n.name, stopTimeout, stacks)
+	}
 	n.cluster, n.store = nil, nil
 }
 
@@ -124,10 +153,14 @@ func appSpec() spec.Tenant {
 	return spec.Tenant{Image: testImage, HealthPath: "/health", User: "1000:1000", Secrets: spec.Secrets{"SESSION": {}}}
 }
 
+// eventuallyFor bounds a wait for the cluster to get somewhere: long, for
+// a loaded host with the race detector.
+const eventuallyFor = 60 * time.Second
+
 // eventually waits for check to pass.
 func eventually(t *testing.T, what string, check func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(eventuallyFor)
 	for !check() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting until %s", what)
@@ -169,11 +202,28 @@ func threeTunedNodes(t *testing.T, tune func(*raft.Config)) []*node {
 	return nodes
 }
 
+// raftStats is what Raft says of n, for a failure to show.
+func raftStats(n *node) map[string]string {
+	stats := n.cluster.raft.Stats()
+	keep := map[string]string{}
+	for _, key := range []string{"state", "term", "last_log_index", "commit_index", "applied_index", "last_snapshot_index", "last_contact"} {
+		keep[key] = stats[key]
+	}
+	return keep
+}
+
 func sameState(t *testing.T, nodes []*node) {
 	t.Helper()
 	first := nodes[0].store
 	for _, n := range nodes[1:] {
-		eventually(t, n.name+" caught up", func() bool { return n.store.Applied() == first.Applied() })
+		deadline := time.Now().Add(eventuallyFor)
+		for n.store.Applied() != first.Applied() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting until %s caught up: it applied %d, %s %d\n%s: %v\n%s: %v", n.name, n.store.Applied(), nodes[0].name, first.Applied(),
+					n.name, raftStats(n), nodes[0].name, raftStats(nodes[0]))
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 		if !reflect.DeepEqual(n.store.List(), first.List()) || !reflect.DeepEqual(n.store.Apps(), first.Apps()) || !reflect.DeepEqual(n.store.Nodes(), first.Nodes()) {
 			t.Fatalf("%s differs from %s:\n%+v\n%+v", n.name, nodes[0].name, n.store.List(), first.List())
 		}
@@ -312,9 +362,12 @@ func TestANodeFarBehindCatchesUpFromASnapshot(t *testing.T) {
 	}
 	behind.start()
 	sameState(t, nodes)
-	if installed, _ := strconv.ParseUint(behind.cluster.raft.Stats()["last_snapshot_index"], 10, 64); installed <= appliedAtStop {
-		t.Fatalf("%s caught up without a snapshot newer than what it had (%d <= %d)", behind.name, installed, appliedAtStop)
-	}
+	// Raft restores the snapshot into the store first and records it only
+	// afterwards: the state can match before the record does.
+	eventually(t, behind.name+" caught up from a snapshot newer than what it had", func() bool {
+		installed, _ := strconv.ParseUint(behind.cluster.raft.Stats()["last_snapshot_index"], 10, 64)
+		return installed > appliedAtStop
+	})
 	if len(behind.store.List()) != 20 {
 		t.Fatalf("%s has %d tenants", behind.name, len(behind.store.List()))
 	}
@@ -866,6 +919,38 @@ func TestAVerifyLeaderRaftDoesNotTakeIsGivenUp(t *testing.T) {
 	}
 }
 
+// handOver has to lead, asking whichever of nodes leads to hand over. A
+// transfer that does not finish within Raft's election timeout, as on a
+// loaded host, is asked for again.
+func handOver(t *testing.T, nodes []*node, to *node) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for !to.cluster.Leader() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never took over the leadership", to.name)
+		}
+		for _, n := range nodes {
+			if n != to && n.cluster.Leader() {
+				_ = n.cluster.raft.LeadershipTransferToServer(raft.ServerID(to.name), raft.ServerAddress(to.address)).Error()
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// awaitJoin waits for a join a test resumed; Join gives up within its
+// context's minute, so a join that outlasts that is a failure, not a wait.
+func awaitJoin(t *testing.T, joined <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-joined:
+		return err
+	case <-time.After(90 * time.Second):
+		t.Fatal("the resumed join never returned")
+		return nil
+	}
+}
+
 // A join keeps to the term it started in: a leader that lost its
 // leadership and won it back, while the leader between removed the node,
 // does not make a voter the state does not know. The host asks again and
@@ -912,13 +997,10 @@ func TestAJoinAcrossTwoLeadershipChangesMakesNoUnknownVoter(t *testing.T) {
 			go func() { joined <- x.cluster.Join(ctx(t), old.address, "alice") }()
 			select {
 			case <-paused:
-			case <-time.After(20 * time.Second):
+			case <-time.After(60 * time.Second):
 				t.Fatal("the join never got to stage " + stage)
 			}
-			if err := old.cluster.raft.LeadershipTransferToServer(raft.ServerID(next.name), raft.ServerAddress(next.address)).Error(); err != nil {
-				t.Fatal(err)
-			}
-			eventually(t, next.name+" leads", next.cluster.Leader)
+			handOver(t, nodes, next)
 			if err := next.cluster.Remove(ctx(t), "x-1", "bob"); err != nil {
 				t.Fatalf("remove x-1: %v", err)
 			}
@@ -926,12 +1008,9 @@ func TestAJoinAcrossTwoLeadershipChangesMakesNoUnknownVoter(t *testing.T) {
 				_, known := nodeNamed(old.store.Nodes(), "x-1")
 				return !known
 			})
-			if err := next.cluster.raft.LeadershipTransferToServer(raft.ServerID(old.name), raft.ServerAddress(old.address)).Error(); err != nil {
-				t.Fatal(err)
-			}
-			eventually(t, old.name+" leads again", old.cluster.Leader)
+			handOver(t, nodes, old)
 			close(release)
-			if err := <-joined; err != nil {
+			if err := awaitJoin(t, joined); err != nil {
 				t.Fatalf("the join, resumed: %v", err)
 			}
 			if reached.Load() < 2 {
@@ -990,18 +1069,15 @@ func TestAJoinAcrossALeadershipChangeKeepsOneAddress(t *testing.T) {
 	go func() { joined <- first.cluster.Join(ctx(t), old.address, "mallory") }()
 	select {
 	case <-paused:
-	case <-time.After(20 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("the first join never got to its write")
 	}
-	if err := old.cluster.raft.LeadershipTransferToServer(raft.ServerID(next.name), raft.ServerAddress(next.address)).Error(); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, next.name+" leads", next.cluster.Leader)
+	handOver(t, nodes, next)
 	if err := second.cluster.Join(ctx(t), next.address, "alice"); err != nil {
 		t.Fatalf("the second join: %v", err)
 	}
 	close(release)
-	if err := <-joined; err == nil || !strings.Contains(err.Error(), "already a member at "+second.address) {
+	if err := awaitJoin(t, joined); err == nil || !strings.Contains(err.Error(), "already a member at "+second.address) {
 		t.Fatalf("the first join, resumed: %v", err)
 	}
 	for _, n := range nodes {
@@ -1054,13 +1130,10 @@ func TestAStaleJoinLeavesAReplacementInPlace(t *testing.T) {
 	go func() { joined <- stale.cluster.Join(ctx(t), old.address, "alice") }()
 	select {
 	case <-paused:
-	case <-time.After(20 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("the join never got to adding the voter")
 	}
-	if err := old.cluster.raft.LeadershipTransferToServer(raft.ServerID(next.name), raft.ServerAddress(next.address)).Error(); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, next.name+" leads", next.cluster.Leader)
+	handOver(t, nodes, next)
 	if err := next.cluster.Remove(ctx(t), "x-1", "bob"); err != nil {
 		t.Fatalf("remove x-1: %v", err)
 	}
@@ -1073,20 +1146,200 @@ func TestAStaleJoinLeavesAReplacementInPlace(t *testing.T) {
 		node, known := nodeNamed(old.store.Nodes(), "x-1")
 		return known && node.Address == replacement.address
 	})
-	if err := next.cluster.raft.LeadershipTransferToServer(raft.ServerID(old.name), raft.ServerAddress(old.address)).Error(); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, old.name+" leads again", old.cluster.Leader)
+	handOver(t, nodes, old)
 	close(release)
-	select {
-	case <-joined:
-	case <-time.After(60 * time.Second):
-	}
+	_ = awaitJoin(t, joined)
 	for _, n := range nodes {
 		eventually(t, n.name+" names the replacement in the state and the voters", func() bool {
 			node, member := nodeNamed(n.store.Nodes(), "x-1")
 			voter, isVoter := n.cluster.voterAddress("x-1")
 			return member && isVoter && node.Address == replacement.address && voter == replacement.address
 		})
+	}
+	// Nor was the replacement's voter moved to the stale host meanwhile,
+	// to be moved back: Raft refused the stale join's change.
+	for _, configuration := range configurations(t, old) {
+		if address, voter := serverAddress(configuration, "x-1"); voter && address == stale.address {
+			t.Fatalf("the voters named x-1 at the stale host's address: %+v", configuration.Servers)
+		}
+	}
+}
+
+// configurations are the configurations of the voters in n's log.
+func configurations(t *testing.T, n *node) []raft.Configuration {
+	t.Helper()
+	first, err := n.cluster.logs.FirstIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	last, err := n.cluster.logs.LastIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []raft.Configuration
+	for index := first; index <= last && index > 0; index++ {
+		var entry raft.Log
+		if err := n.cluster.logs.GetLog(index, &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Type == raft.LogConfiguration {
+			found = append(found, raft.DecodeConfiguration(entry.Data))
+		}
+	}
+	return found
+}
+
+// tcpStream is a plain TCP stream layer for Raft's transport.
+type tcpStream struct{ net.Listener }
+
+func (s tcpStream) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
+	return net.DialTimeout("tcp", string(address), timeout)
+}
+
+// Replication sends a follower one request at a time: Raft's pipeline can
+// wedge the leader's replication to a follower, and its Shutdown, for good
+// once the follower answers with a newer term, as after a leadership
+// transfer. Under load the join tests, which transfer leadership, hung
+// there.
+func TestReplicationIsNotPipelined(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := raft.NewNetworkTransportWithConfig(transportConfig(tcpStream{inner}, hclog.NewNullLogger()))
+	defer transport.Close()
+	if pipeline, err := transport.AppendEntriesPipeline("nbg-1", raft.ServerAddress(inner.Addr().String())); !errors.Is(err, raft.ErrPipelineReplicationNotSupported) {
+		if pipeline != nil {
+			_ = pipeline.Close()
+		}
+		t.Fatalf("a pipeline to a follower: %v", err)
+	}
+}
+
+// Closing a node waits for a heartbeat Raft is handling, and refuses later
+// ones: Raft handles them outside what its Shutdown waits for, and one that
+// saved the term to a closed log made Raft panic.
+func TestNoHeartbeatOutlastsClose(t *testing.T) {
+	transport := &gatedTransport{}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	heartbeat := transport.gate(func(rpc raft.RPC) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		rpc.Respond(&raft.AppendEntriesResponse{}, nil)
+	})
+	rpc := func() (raft.RPC, chan raft.RPCResponse) {
+		answer := make(chan raft.RPCResponse, 1)
+		return raft.RPC{Command: &raft.AppendEntriesRequest{}, RespChan: answer}, answer
+	}
+	first, _ := rpc()
+	go heartbeat(first)
+	<-entered
+	stopped := make(chan struct{})
+	go func() {
+		transport.stopHeartbeats()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("heartbeats stopped while one was being handled")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("heartbeats did not stop once the one being handled was done")
+	}
+	later, answer := rpc()
+	heartbeat(later)
+	if response := <-answer; !errors.Is(response.Error, raft.ErrRaftShutdown) {
+		t.Fatalf("a heartbeat after close: %+v", response)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("Raft handled %d heartbeats, want 1", n)
+	}
+}
+
+// dialer is a stream layer that only dials, as the node it belongs to: a
+// transport over it sends requests and takes none.
+type dialer struct {
+	*stream
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (d *dialer) Accept() (net.Conn, error) {
+	<-d.closed
+	return nil, net.ErrClosed
+}
+
+func (d *dialer) Close() error {
+	d.once.Do(func() { close(d.closed) })
+	return nil
+}
+
+// slowTerms saves terms slowly, counting the saves under way.
+type slowTerms struct {
+	raft.StableStore
+	saving *atomic.Int32
+}
+
+func (s slowTerms) SetUint64(key []byte, value uint64) error {
+	s.saving.Add(1)
+	defer s.saving.Add(-1)
+	time.Sleep(100 * time.Millisecond)
+	return s.StableStore.SetUint64(key, value)
+}
+
+// A node closed while heartbeats pour in does not crash: Raft saved the
+// term of a heartbeat it was handling to a log Close had closed, and
+// panicked.
+func TestHeartbeatsDuringCloseDoNotCrash(t *testing.T) {
+	for range 3 {
+		// Saving a term takes a while, as on a loaded host: Close comes
+		// while a heartbeat is saving one.
+		var saving atomic.Int32
+		n := newNodeWith(t, "fsn-1", func(n *node) {
+			n.stable = func(inner raft.StableStore) raft.StableStore {
+				return slowTerms{StableStore: inner, saving: &saving}
+			}
+		})
+		if err := n.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+			t.Fatal(err)
+		}
+		// Heartbeats as from a leader of ever newer terms: each one has
+		// the node save its term.
+		client := raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
+			Stream:  &dialer{stream: &stream{l: n.cluster.listener, protocol: protocolRaft}, closed: make(chan struct{})},
+			MaxPool: 8, Timeout: time.Second, Logger: hclog.NewNullLogger(),
+		})
+		var term atomic.Uint64
+		term.Store(1000)
+		stop := make(chan struct{})
+		var senders sync.WaitGroup
+		for range 8 {
+			senders.Go(func() {
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					request := &raft.AppendEntriesRequest{
+						RPCHeader: raft.RPCHeader{ProtocolVersion: raft.ProtocolVersionMax, ID: []byte("nbg-1"), Addr: []byte("127.0.0.1:1")},
+						Term:      term.Add(1),
+					}
+					_ = client.AppendEntries("fsn-1", raft.ServerAddress(n.address), request, &raft.AppendEntriesResponse{})
+				}
+			})
+		}
+		eventually(t, "a heartbeat is saving its term", func() bool { return saving.Load() > 0 })
+		n.stop()
+		close(stop)
+		senders.Wait()
+		_ = client.Close()
 	}
 }

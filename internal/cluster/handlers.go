@@ -215,7 +215,51 @@ func (c *Cluster) voterAddress(name string) (string, bool) {
 	if future.Error() != nil {
 		return "", false
 	}
-	for _, server := range future.Configuration().Servers {
+	return serverAddress(future.Configuration(), name)
+}
+
+// configuration is the latest configuration of the voters, and the index
+// of the log entry that made it.
+func (c *Cluster) configuration() (raft.Configuration, uint64, error) {
+	future := c.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		return raft.Configuration{}, 0, err
+	}
+	// Raft's GetConfiguration leaves the index out (as of v1.8.0): it is
+	// that of the last configuration in the log, or of the one in the
+	// newest snapshot once the log no longer holds it.
+	last, err := c.logs.LastIndex()
+	if err != nil {
+		return raft.Configuration{}, 0, err
+	}
+	first, err := c.logs.FirstIndex()
+	if err != nil {
+		return raft.Configuration{}, 0, err
+	}
+	for index := last; index >= first && index > 0; index-- {
+		var entry raft.Log
+		if err := c.logs.GetLog(index, &entry); errors.Is(err, raft.ErrLogNotFound) {
+			break // compacted meanwhile
+		} else if err != nil {
+			return raft.Configuration{}, 0, err
+		}
+		if entry.Type == raft.LogConfiguration {
+			return future.Configuration(), index, nil
+		}
+	}
+	snapshots, err := c.snapshots.List()
+	if err != nil {
+		return raft.Configuration{}, 0, err
+	}
+	if len(snapshots) == 0 {
+		return raft.Configuration{}, 0, errors.New("neither the log nor a snapshot holds a configuration")
+	}
+	return future.Configuration(), snapshots[0].ConfigurationIndex, nil
+}
+
+// serverAddress is where configuration has node name.
+func serverAddress(configuration raft.Configuration, name string) (string, bool) {
+	for _, server := range configuration.Servers {
 		if server.ID == raft.ServerID(name) {
 			return string(server.Address), true
 		}
@@ -324,14 +368,28 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		c.moved(w)
 		return
 	}
-	if address, voter := c.voterAddress(name); voter && address != request.Address {
+	configuration, index, err := c.configuration()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	if address, voter := serverAddress(configuration, name); voter && address != request.Address {
 		writeError(w, http.StatusConflict, fmt.Errorf("node %s is already a voter at %s; remove it first, or give the new node another name", name, address))
 		return
 	}
 	c.joinStage(joinAdd, name)
-	if err := waitFuture(c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), 0, commitTimeout), commitTimeout+futureGrace); err != nil {
+	// Raft adds the voter only to the configuration the checks saw: one
+	// that changed meanwhile, as under a leader between, is not taken
+	// over, nor a node of the same name moved to this host's address.
+	if err := waitFuture(c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), index, commitTimeout), commitTimeout+futureGrace); err != nil {
 		if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
 			// The node may be a voter now, or not: asking again is safe.
+			c.moved(w)
+			return
+		}
+		if _, latest, latestErr := c.configuration(); latestErr == nil && latest != index {
+			// The voters changed since the checks: asking again checks
+			// them afresh.
 			c.moved(w)
 			return
 		}
