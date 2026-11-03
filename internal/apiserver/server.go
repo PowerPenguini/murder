@@ -107,7 +107,9 @@ func (s *Server) Handler() http.Handler {
 	s.panelRoutes(mux)
 	s.panelAuthRoutes(mux)
 	mux.HandleFunc("POST /v1/reconcile", s.reconcileNow)
-	mux.HandleFunc("GET /v1/backup", s.backup)
+	// The whole database: panel secrets and sign-in state too, which only
+	// root reads.
+	mux.HandleFunc("GET /v1/backup", rootOnly(s.backup))
 	mux.HandleFunc("POST /v1/backups/run", rootOnly(s.runBackups))
 	mux.HandleFunc("POST /v1/backups/replace", rootOnly(s.replaceTenant))
 	return mux
@@ -541,7 +543,12 @@ func (s *Server) archive(w http.ResponseWriter, r *http.Request) {
 func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var record store.Record
-	err := s.reconciler.Exclusive(func() error {
+	// A client that gave up while waiting for a reconcile pass restores
+	// nothing.
+	err := s.reconciler.ExclusiveContext(r.Context(), func() error {
+		if err := r.Context().Err(); err != nil {
+			return clientGone(fmt.Errorf("the client gave up while waiting; nothing was restored: %w", err))
+		}
 		var err error
 		record, err = s.store.Restore(name, actor(r))
 		return err
@@ -846,11 +853,16 @@ func writeError(w http.ResponseWriter, err error) {
 	writeJSON(w, status, api.ErrorBody{Error: err.Error()})
 }
 
+// readJSON reads one JSON value of at most 1 MiB, and nothing after it.
 func readJSON(w http.ResponseWriter, r *http.Request, out any) bool {
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
 		writeError(w, badRequest(fmt.Errorf("request body: %w", err)))
+		return false
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		writeError(w, badRequest(errors.New("request body: more than one JSON value")))
 		return false
 	}
 	return true

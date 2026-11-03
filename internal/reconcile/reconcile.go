@@ -504,6 +504,23 @@ func (r *Reconciler) Exclusive(fn func() error) error {
 	return fn()
 }
 
+// ExclusiveContext is Exclusive, giving up while waiting for the lock once
+// ctx ends.
+func (r *Reconciler) ExclusiveContext(ctx context.Context, fn func() error) error {
+	for !r.pass.TryLock() {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	defer r.pass.Unlock()
+	if r.life.Err() != nil {
+		return ErrStopping
+	}
+	return fn()
+}
+
 // ErrStopping refuses work queued behind a pass while the agent stops, so
 // the agent's stop does not wait for it.
 var ErrStopping = errors.New("the agent is stopping; try again once it is back")

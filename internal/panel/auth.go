@@ -30,7 +30,9 @@ type AuthAgent interface {
 	PanelUserByHandle(ctx context.Context, handle string) (store.PanelUser, error)
 	Enrollment(ctx context.Context, hash string) (store.Enrollment, error)
 	AddPasskey(ctx context.Context, request api.PasskeyRequest) error
-	UsePasskey(ctx context.Context, id, data string) error
+	// UsePasskey records a sign-in, refused if the passkey was used since
+	// its credential read previous (empty: whatever it is).
+	UsePasskey(ctx context.Context, id, previous, data string) error
 	SetRecoveryCodes(ctx context.Context, name string, hashes []string) error
 	StartPanelSession(ctx context.Context, request api.SessionRequest) error
 	PanelSession(ctx context.Context, hash string, fresh bool) (store.PanelSession, error)
@@ -306,12 +308,26 @@ func (a *Auth) loginFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := base64.RawURLEncoding.EncodeToString(credential.ID)
-	if err := a.startSession(r.Context(), w, signedIn.Name, id, c.Session.Challenge); err != nil {
+	// Its counter is recorded first, only over the credential this
+	// sign-in checked: two sign-ins at once cannot take its counter back.
+	previous := ""
+	for _, key := range signedIn.Passkeys {
+		if key.ID == id {
+			previous = key.Data
+		}
+	}
+	if previous == "" {
+		a.fail(w, errors.New("this passkey does not sign anyone in"), http.StatusUnauthorized)
+		return
+	}
+	if err := a.agent.UsePasskey(r.Context(), id, previous, string(data)); err != nil {
+		a.log.Warn("a sign-in was refused: its passkey was used meanwhile", "user", signedIn.Name, "error", err)
 		a.fail(w, errors.New("this sign-in was not taken: begin again"), http.StatusUnauthorized)
 		return
 	}
-	if err := a.agent.UsePasskey(r.Context(), id, string(data)); err != nil {
-		a.log.Warn("record a passkey's use", "error", err)
+	if err := a.startSession(r.Context(), w, signedIn.Name, id, c.Session.Challenge); err != nil {
+		a.fail(w, errors.New("this sign-in was not taken: begin again"), http.StatusUnauthorized)
+		return
 	}
 	writeJSON(w, map[string]string{"user": signedIn.Name})
 }
@@ -420,7 +436,7 @@ func (a *Auth) enrollFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// It signed its person in already.
-	if err := a.agent.UsePasskey(r.Context(), key.ID, key.Data); err != nil {
+	if err := a.agent.UsePasskey(r.Context(), key.ID, "", key.Data); err != nil {
 		a.log.Warn("record a passkey's use", "error", err)
 	}
 	writeJSON(w, answer)

@@ -238,8 +238,13 @@ func (s *SQLite) InvitePanelUser(name, hash string, expires time.Time, actor str
 		}
 		// Invitations of the past expire as new ones are made; a person's
 		// newest invitation is their only one.
-		if err := tx.Exec(`DELETE FROM panel_enrollments WHERE kind = 'invite' AND (expires_at < ? OR user = ?)`, formatTime(now), name); err != nil {
-			return err
+		for _, old := range slices.Sorted(maps.Keys(current.panel.enrollments)) {
+			e := current.panel.enrollments[old]
+			if e.Kind == "invite" && (e.ExpiresAt.Before(now) || e.User == name) {
+				if err := tx.Exec(`DELETE FROM panel_enrollments WHERE hash = ?`, old); err != nil {
+					return err
+				}
+			}
 		}
 		if err := tx.Exec(`INSERT INTO panel_enrollments (hash, user, kind, expires_at, created_at, created_by) VALUES (?, ?, 'invite', ?, ?, ?)`,
 			hash, name, formatTime(expires), formatTime(now), actor); err != nil {
@@ -322,10 +327,25 @@ func (s *SQLite) SetRecoveryCodes(name string, hashes []string, actor string) er
 
 // UsePasskey records a sign-in with a passkey: its credential as it is
 // now (its counter), and when.
+// sessionsKeptEnded is how long an ended session stays: longer than a
+// sign-in ceremony lasts, so its challenge cannot be used again.
+const sessionsKeptEnded = 15 * time.Minute
+
 func (s *SQLite) UsePasskey(id, data string) error {
+	return s.UsePasskeyIf(id, "", data)
+}
+
+// UsePasskeyIf is UsePasskey only while the passkey's credential is still
+// previous, as the sign-in checked it: one that another sign-in recorded
+// meanwhile, with a counter as far or further, is not written back over.
+func (s *SQLite) UsePasskeyIf(id, previous, data string) error {
 	_, err := s.writeAs(panelSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
-		if _, ok := current.panel.passkeys[id]; !ok {
+		key, ok := current.panel.passkeys[id]
+		if !ok {
 			return fmt.Errorf("passkey: %w", ErrNotFound)
+		}
+		if previous != "" && key.Data != previous {
+			return fmt.Errorf("%w: the passkey was used meanwhile", ErrConflict)
 		}
 		return tx.Exec(`UPDATE panel_passkeys SET data = ?, used_at = ? WHERE id = ?`, data, formatTime(now), id)
 	})
@@ -389,8 +409,14 @@ func (s *SQLite) StartPanelSession(session PanelSession) error {
 				return fmt.Errorf("%w: this sign-in was used already", ErrConflict)
 			}
 		}
-		if err := tx.Exec(`DELETE FROM panel_sessions WHERE expires_at < ?`, formatTime(now)); err != nil {
-			return err
+		// Sessions ended a while ago go; ended ones stay as long as their
+		// sign-in's challenge could be replayed, as a mark it was used.
+		for _, hash := range slices.Sorted(maps.Keys(current.panel.sessions)) {
+			if current.panel.sessions[hash].ExpiresAt.Before(now.Add(-sessionsKeptEnded)) {
+				if err := tx.Exec(`DELETE FROM panel_sessions WHERE hash = ?`, hash); err != nil {
+					return err
+				}
+			}
 		}
 		if err := tx.Exec(`INSERT INTO panel_sessions (hash, user, passkey, challenge, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			session.Hash, name, session.Passkey, session.Challenge, formatTime(now), formatTime(session.ExpiresAt)); err != nil {
@@ -415,10 +441,11 @@ func (s *SQLite) PanelSession(hash string) (PanelSession, error) {
 func (s *SQLite) EndPanelSession(hash string) error {
 	_, err := s.writeAs(panelSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
 		session, ok := current.panel.sessions[hash]
-		if !ok {
+		if !ok || !session.ExpiresAt.After(now) {
 			return errUnchanged
 		}
-		if err := tx.Exec(`DELETE FROM panel_sessions WHERE hash = ?`, hash); err != nil {
+		// Ended, not deleted: its challenge stays a mark that it was used.
+		if err := tx.Exec(`UPDATE panel_sessions SET expires_at = ? WHERE hash = ?`, formatTime(now), hash); err != nil {
 			return err
 		}
 		return event(tx, now, session.User+" (panel)", "panel.signed-out", "", "", "")

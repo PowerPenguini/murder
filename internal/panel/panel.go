@@ -144,7 +144,37 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /auth/logout", s.Auth.logout)
 	}
 	mux.Handle("/", s.signedIn(pages))
-	return s.ownNames(secure(s.sameOrigin(mux)))
+	return s.ownNames(secure(s.sameOrigin(bounded(mux))))
+}
+
+// Bounds of what a request sends: a sign-in's credential is small, a form
+// (an app's spec) larger; an upgrade's binary has its own bound. Each must
+// arrive within its time, so a slow sender holds nothing for long.
+const (
+	authBody       = 64 << 10
+	formBody       = 2 << 20
+	bodyTime       = 30 * time.Second
+	uploadBodyTime = 15 * time.Minute
+)
+
+// bounded holds every request's body to its bound and time, before anyone,
+// signed in or not, reads it.
+func bounded(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit, within := int64(formBody), bodyTime
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/auth/"):
+			limit = authBody
+		case r.URL.Path == "/cluster/upgrade":
+			limit, within = -1, uploadBodyTime
+		}
+		if limit > 0 {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		// Servers that cannot set deadlines (tests' recorders) go without.
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(within))
+		next.ServeHTTP(w, r)
+	})
 }
 
 // gate serves a page of signing in, which needs no session.

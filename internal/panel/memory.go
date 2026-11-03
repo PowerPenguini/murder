@@ -105,12 +105,15 @@ func (m *MemoryAuth) AddPasskey(_ context.Context, request api.PasskeyRequest) e
 	return nil
 }
 
-func (m *MemoryAuth) UsePasskey(_ context.Context, id, data string) error {
+func (m *MemoryAuth) UsePasskey(_ context.Context, id, previous, data string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key, ok := m.passkeys[id]
 	if !ok {
 		return store.ErrNotFound
+	}
+	if previous != "" && key.Data != previous {
+		return store.ErrConflict
 	}
 	key.Data, key.UsedAt = data, time.Now()
 	m.passkeys[id] = key
