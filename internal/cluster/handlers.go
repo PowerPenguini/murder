@@ -214,12 +214,31 @@ func (c *Cluster) voterAddress(name string) (string, bool) {
 	return "", false
 }
 
+// The stages of a join a test can pause it at.
+const (
+	joinWrite = "write" // before the node is written to the state
+	joinVote  = "vote"  // after that, before the checks for the voters
+	joinAdd   = "add"   // after the checks, before the node is a voter
+)
+
+// joinStage runs the test hook, if any, at stage of a join.
+func (c *Cluster) joinStage(stage, name string) {
+	if hook := c.joinHook.Load(); hook != nil {
+		(*hook)(stage, name)
+	}
+}
+
 // handleJoin adds a node: first to the state, so its role is known before
 // it votes, then to the voters.
 func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	if c.notLeader(w) {
 		return
 	}
+	// The join keeps to the term it started in. A leader that lost its
+	// leadership and won it back may find the node removed meanwhile, by
+	// the leader between: adding it to the voters then would make a voter
+	// the state does not know.
+	term := c.raft.CurrentTerm()
 	name, err := peerName(r.TLS)
 	if err != nil {
 		writeError(w, http.StatusForbidden, err)
@@ -257,9 +276,7 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = "node " + name
 	}
-	if hook := c.beforeJoinWrite.Load(); hook != nil {
-		(*hook)(name)
-	}
+	c.joinStage(joinWrite, name)
 	// The mutex keeps joins apart on this node only: a leader that lost
 	// its leadership meanwhile still gets here, and its write goes to the
 	// next leader. The write refuses a node that one added at another
@@ -275,11 +292,13 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	c.joinStage(joinVote, name)
 	// The state names the node at its address now. Only a leader that
-	// still leads adds it to the voters, and only if they do not name it
-	// elsewhere: no other join changes them meanwhile, as another leader's
-	// would end its leadership, and this one's are held off by the mutex.
-	if err := waitFuture(c.raft.VerifyLeader(), commitTimeout+futureGrace); err != nil {
+	// still leads, in the same term, adds it to the voters, and only if the
+	// state still names it there and the voters do not name it elsewhere:
+	// in one term no other join or removal changes them, as no other node
+	// leads, and this one's are held off by the mutex.
+	if err := verifyLeader(c.joinVerify, c.raft.VerifyLeader, commitTimeout+futureGrace); err != nil {
 		if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
 			c.moved(w)
 			return
@@ -287,10 +306,20 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
+	if c.raft.CurrentTerm() != term {
+		// Asking again writes the node afresh.
+		c.moved(w)
+		return
+	}
+	if node, known := nodeNamed(c.config.Store.Nodes(), name); !known || node.Address != request.Address {
+		c.moved(w)
+		return
+	}
 	if address, voter := c.voterAddress(name); voter && address != request.Address {
 		writeError(w, http.StatusConflict, fmt.Errorf("node %s is already a voter at %s; remove it first, or give the new node another name", name, address))
 		return
 	}
+	c.joinStage(joinAdd, name)
 	if err := waitFuture(c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), 0, commitTimeout), commitTimeout+futureGrace); err != nil {
 		if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
 			// The node may be a voter now, or not: asking again is safe.
@@ -298,6 +327,22 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("add %s to the voters: %w", name, err))
+		return
+	}
+	// Terms only grow: the same term now means the voter was added in it.
+	// Otherwise leadership was lost and won back between the checks and
+	// the change, and the node may have been removed meanwhile. A voter
+	// the state does not name is taken out again; either way the host is
+	// told to ask again, which writes the node and adds it afresh.
+	if c.raft.CurrentTerm() != term {
+		if err := c.catchUp(); err == nil {
+			if node, known := nodeNamed(c.config.Store.Nodes(), name); known && node.Address == request.Address {
+				writeJSON(w, http.StatusOK, struct{}{})
+				return
+			}
+		}
+		_ = waitFuture(c.raft.RemoveServer(raft.ServerID(name), 0, commitTimeout), commitTimeout+futureGrace)
+		c.moved(w)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
@@ -340,7 +385,7 @@ func (c *Cluster) handleRemove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if voter {
-		if err := c.raft.RemoveServer(raft.ServerID(name), 0, commitTimeout).Error(); err != nil {
+		if err := waitFuture(c.raft.RemoveServer(raft.ServerID(name), 0, commitTimeout), commitTimeout+futureGrace); err != nil {
 			if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
 				// Asking the next leader again is safe.
 				c.moved(w)
