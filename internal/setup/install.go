@@ -3,6 +3,8 @@ package setup
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
@@ -92,6 +94,8 @@ type Install struct {
 	ZFSPool string
 	// Panel starts the panel too.
 	Panel bool
+	// LiveRestore turns on Docker's live-restore.
+	LiveRestore bool
 }
 
 // Install is what setup installs for the settings.
@@ -108,6 +112,37 @@ func (s Settings) Install() Install {
 		in.Secrets[file] = []byte(s.DNSToken + "\n")
 	}
 	return in
+}
+
+// liveRestore sets "live-restore" in Docker's config, keeping the rest,
+// and has Docker read it again: a reload, which restarts no container.
+func liveRestore(ctx context.Context, host Host) error {
+	settings := map[string]any{}
+	if data, err := host.ReadFile(DaemonConfig); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("%s is not JSON setup can change (%v): add \"live-restore\": true to it by hand, then `systemctl reload docker`", DaemonConfig, err)
+		}
+		if err := host.WriteFile(DaemonConfig+".before-murder", data, 0o644); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	settings["live-restore"] = true
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := host.MkdirAll(path.Dir(DaemonConfig), 0o755); err != nil {
+		return err
+	}
+	if err := host.WriteFile(DaemonConfig, append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	if _, err := host.Run(ctx, "systemctl", "reload", "docker"); err != nil {
+		return fmt.Errorf("have Docker read %s again: %w", DaemonConfig, err)
+	}
+	return nil
 }
 
 // Units are the services setup enables and starts, in order.
@@ -176,6 +211,11 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 		_, err = host.Run(ctx, "systemctl", "daemon-reload")
 		return err
 	})
+	if in.LiveRestore {
+		add("have Docker keep containers running while it restarts (live-restore)", func(ctx context.Context) error {
+			return liveRestore(ctx, host)
+		})
+	}
 	if in.ZFSPool != "" {
 		parent := in.ZFSPool + "/murder/tenants"
 		add("create the ZFS dataset "+parent, func(ctx context.Context) error {

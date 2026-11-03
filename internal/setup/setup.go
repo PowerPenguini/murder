@@ -68,7 +68,13 @@ type Facts struct {
 	HasKey, HasDatabase bool
 	// Busy are the edge's ports something else listens on.
 	Busy []string
+	// LiveRestore reports whether Docker keeps containers running while
+	// it restarts; Swarm whether it is in swarm mode, which forbids that.
+	LiveRestore, Swarm bool
 }
+
+// DaemonConfig is Docker's own config file.
+const DaemonConfig = "/etc/docker/daemon.json"
 
 // Default places of the master key and the database.
 const (
@@ -83,6 +89,11 @@ func Inspect(ctx context.Context, host Host) Facts {
 	facts.Systemd = err == nil
 	if out, err := host.Run(ctx, "docker", "version", "--format", "{{.Server.APIVersion}}"); err == nil {
 		facts.Docker = strings.TrimSpace(out)
+		if out, err := host.Run(ctx, "docker", "info", "--format", "{{.LiveRestoreEnabled}} {{.Swarm.LocalNodeState}}"); err == nil {
+			fields := strings.Fields(out)
+			facts.LiveRestore = len(fields) > 0 && fields[0] == "true"
+			facts.Swarm = len(fields) > 1 && fields[1] != "inactive" && fields[1] != ""
+		}
 	}
 	_, err = host.Run(ctx, "nft", "--version")
 	facts.Nftables = err == nil
@@ -143,11 +154,18 @@ func (f Facts) Problems() []string {
 	return problems
 }
 
+// WantsLiveRestore reports whether setup should turn Docker's
+// live-restore on: it is off, and swarm mode does not forbid it.
+func (f Facts) WantsLiveRestore() bool { return f.Docker != "" && !f.LiveRestore && !f.Swarm }
+
 // Warnings are what Murder runs without, but lesser.
 func (f Facts) Warnings() []string {
 	var warnings []string
 	if !f.CgroupV2 {
 		warnings = append(warnings, "the host does not use cgroup v2: tenants run, but what they use is not measured")
+	}
+	if f.Docker != "" && !f.LiveRestore && f.Swarm {
+		warnings = append(warnings, "Docker is in swarm mode, which cannot keep containers running while Docker restarts: restarting Docker stops every tenant until the agent starts them again")
 	}
 	return warnings
 }

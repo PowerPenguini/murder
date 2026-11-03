@@ -118,7 +118,9 @@ func runSetup(args []string) error {
 		return err
 	}
 	describe(settings)
-	steps, err := setup.Steps(host, settings.Install(), opts.Force, func() error { return runInit([]string{"-config", setup.ConfigFile}) })
+	in := settings.Install()
+	in.LiveRestore = facts.WantsLiveRestore()
+	steps, err := setup.Steps(host, in, opts.Force, func() error { return runInit([]string{"-config", setup.ConfigFile}) })
 	if err != nil {
 		return err
 	}
@@ -230,6 +232,7 @@ func joinCluster(ctx context.Context, host setup.System, facts setup.Facts, opts
 	if err != nil {
 		return err
 	}
+	in.LiveRestore = facts.WantsLiveRestore()
 	steps, err := setup.Steps(host, in, opts.Force, func() error { return runInit([]string{"-config", setup.ConfigFile}) })
 	if err != nil {
 		return err

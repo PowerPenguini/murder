@@ -118,6 +118,15 @@ func runAgent(args []string) error {
 		logins = append(logins, runtime.RegistryLogin{Host: registry.Host, Username: registry.Username, TokenFile: registry.TokenFile})
 	}
 	docker := runtime.NewDocker(runtime.DockerOptions{Socket: cfg.DockerSocket, Node: node, Registries: logins, RegistryAuthFile: cfg.RegistryAuthFile})
+	// Without live-restore, restarting Docker, as an upgrade of it does,
+	// stops every tenant until this agent starts them again.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if enabled, err := docker.LiveRestore(ctx); err == nil && !enabled {
+			log.Warn("Docker's live-restore is off: restarting Docker stops every tenant; add \"live-restore\": true to /etc/docker/daemon.json and `systemctl reload docker` (murder setup does)")
+		}
+	}()
 	volumes, err := newVolumes(cfg.Volumes)
 	if err != nil {
 		return err

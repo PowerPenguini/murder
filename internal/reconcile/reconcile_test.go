@@ -313,6 +313,10 @@ func (f *fakeRuntime) takeEvents() []string {
 // fakeVolumes records snapshots and keeps directories below a temp root.
 type fakeVolumes struct {
 	volume.Dir
+	// runtime, if set, logs snapshots among the container events.
+	runtime      *fakeRuntime
+	destroyed    []string
+	failFinal    bool
 	snapshots    []string
 	removed      []string
 	failSnapshot error
@@ -347,8 +351,22 @@ func (f *fakeVolumes) Snapshot(_ context.Context, tenant, reason string) (string
 	if f.failSnapshot != nil {
 		return "", f.failSnapshot
 	}
-	f.snapshots = append(f.snapshots, tenant+"@"+reason)
-	return tenant + "@" + reason, nil
+	if f.failFinal && len(f.snapshots) > 0 {
+		return "", errors.New("the pool is full")
+	}
+	name := fmt.Sprintf("%s@murder-%s-%d", tenant, reason, len(f.snapshots)+1)
+	f.snapshots = append(f.snapshots, name)
+	if f.runtime != nil {
+		f.runtime.mu.Lock()
+		f.runtime.record("snapshot " + name)
+		f.runtime.mu.Unlock()
+	}
+	return name, nil
+}
+
+func (f *fakeVolumes) DestroySnapshot(_ context.Context, tenant, snapshot string) error {
+	f.destroyed = append(f.destroyed, tenant+"@"+snapshot)
+	return nil
 }
 
 func (f *fakeVolumes) Prune(_ context.Context, tenant, reason string, keep int) error {
@@ -420,7 +438,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	rt := newFakeRuntime()
-	volumes := &fakeVolumes{Dir: volume.Dir{Root: filepath.Join(t.TempDir(), "tenants")}}
+	volumes := &fakeVolumes{Dir: volume.Dir{Root: filepath.Join(t.TempDir(), "tenants")}, runtime: rt}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reconciler := New(st, rt, volumes, key, Config{BaseDomain: "example.test", DefaultLimits: spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128, DiskGB: 7}}, log)
 	// Every tenant's health is checked at the test server.
@@ -545,8 +563,13 @@ func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 	if replacement.ID == old || replacement.spec.Image != imageB || !replacement.Running {
 		t.Fatalf("container after image change = %+v", replacement)
 	}
-	if !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) || !slices.Equal(f.runtime.pulled, []string{imageB}) {
+	// One snapshot while the old container ran, the one to go back to once
+	// it stopped, with every write it made; the first goes.
+	if !slices.Equal(f.volumes.snapshots, []string{"acme@murder-image-change-1", "acme@murder-image-change-2"}) || !slices.Equal(f.runtime.pulled, []string{imageB}) {
 		t.Fatalf("snapshots = %v, pulled = %v", f.volumes.snapshots, f.runtime.pulled)
+	}
+	if !slices.Equal(f.volumes.destroyed, []string{"acme@murder-image-change-1"}) {
+		t.Fatalf("destroyed = %v", f.volumes.destroyed)
 	}
 	if !slices.Equal(f.volumes.pruned, []string{"acme@image-change keep 5"}) {
 		t.Fatalf("pruned = %v", f.volumes.pruned)
@@ -556,7 +579,7 @@ func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 		t.Fatalf("removed images = %v", f.runtime.removedImages)
 	}
 	events := strings.Join(f.runtime.takeEvents(), ",")
-	if events != fmt.Sprintf("stop %s,remove %s,create %s,start %s", old, old, replacement.ID, replacement.ID) {
+	if events != fmt.Sprintf("snapshot acme@murder-image-change-1,stop %s,remove %s,snapshot acme@murder-image-change-2,create %s,start %s", old, old, replacement.ID, replacement.ID) {
 		t.Fatalf("events = %v", events)
 	}
 	if got, _ := f.store.Get("acme"); got.DataImage != imageB {
@@ -565,7 +588,7 @@ func TestImageChangeStopsSnapshotsAndReplaces(t *testing.T) {
 	// An env change replaces the container without a snapshot.
 	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Env["EXTRA"] = "1" })
 	f.reconcile(t)
-	if len(f.volumes.snapshots) != 1 {
+	if len(f.volumes.snapshots) != 2 {
 		t.Fatalf("an env change took a snapshot: %v", f.volumes.snapshots)
 	}
 }
@@ -876,6 +899,26 @@ func TestHealthChecksRunSideBySide(t *testing.T) {
 
 // A failing snapshot blocks the change without ever stopping the old
 // container, however many passes it takes.
+// A final snapshot that fails leaves the one taken while the old container
+// ran, and the change goes on: the tenant is down already.
+func TestAFailedFinalSnapshotKeepsTheFirst(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.volumes.failFinal = true
+	f.reconcile(t)
+	if replacement := f.runtime.only(t); replacement.spec.Image != imageB || !replacement.Running {
+		t.Fatalf("container = %+v", replacement)
+	}
+	if !slices.Equal(f.volumes.snapshots, []string{"acme@murder-image-change-1"}) || len(f.volumes.destroyed) != 0 {
+		t.Fatalf("snapshots %v, destroyed %v", f.volumes.snapshots, f.volumes.destroyed)
+	}
+	if !slices.Equal(f.volumes.pruned, []string{"acme@image-change keep 5"}) {
+		t.Fatalf("pruned = %v", f.volumes.pruned)
+	}
+}
+
 func TestFailedSnapshotBlocksTheChangeWithoutAnOutage(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")
@@ -901,7 +944,7 @@ func TestFailedSnapshotBlocksTheChangeWithoutAnOutage(t *testing.T) {
 	}
 	f.volumes.failSnapshot = nil
 	f.reconcile(t)
-	if f.runtime.only(t).spec.Image != imageB || len(f.volumes.snapshots) != 1 {
+	if f.runtime.only(t).spec.Image != imageB || len(f.volumes.snapshots) != 2 {
 		t.Fatal("the change did not go ahead once the snapshot worked")
 	}
 }
@@ -922,7 +965,8 @@ func TestImageChangedWhileSuspendedIsSnapshottedOnResume(t *testing.T) {
 	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
 	f.suspend(t, "acme", false)
 	f.reconcile(t)
-	if f.runtime.only(t).spec.Image != imageB || !slices.Equal(f.volumes.snapshots, []string{"acme@image-change"}) {
+	// Nothing ran since: the one snapshot holds every write.
+	if f.runtime.only(t).spec.Image != imageB || !slices.Equal(f.volumes.snapshots, []string{"acme@murder-image-change-1"}) || len(f.volumes.destroyed) != 0 {
 		t.Fatalf("resume with a new image: snapshots = %v", f.volumes.snapshots)
 	}
 }
