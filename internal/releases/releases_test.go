@@ -142,3 +142,30 @@ func TestRunChecksUntilItsContextEnds(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestDockerHubIsAskedAtMostHourly(t *testing.T) {
+	st := &fakeStore{apps: []store.App{app("db", "postgres:17", v1), app("web", "ghcr.io/example/web:stable", v1), app("gone", "example/gone:1", v1)}}
+	registry := &fakeRegistry{images: map[string]string{"postgres:17": v2, "ghcr.io/example/web:stable": v2}}
+	now := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	w := &Watcher{Store: st, Registry: registry, Every: 5 * time.Minute, Now: func() time.Time { return now }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	w.Check(context.Background())
+	now = now.Add(5 * time.Minute)
+	w.Check(context.Background())
+	if got := strings.Join(registry.asked, ","); got != "postgres:17,ghcr.io/example/web:stable,example/gone:1,ghcr.io/example/web:stable" {
+		t.Fatalf("asked %s", got)
+	}
+	// A Hub tag that failed is still reported failing between questions.
+	if w.Failing()["gone"] != "denied" {
+		t.Fatalf("failing %v", w.Failing())
+	}
+	now = now.Add(time.Hour)
+	w.Check(context.Background())
+	if n := strings.Count(strings.Join(registry.asked, ","), "postgres:17"); n != 2 {
+		t.Fatalf("postgres asked %d times in an hour and five minutes", n)
+	}
+	for tag, hub := range map[string]bool{"postgres": true, "library/postgres:17": true, "docker.io/library/postgres:17": true, "index.docker.io/x/y:1": true, "ghcr.io/x/y:1": false, "localhost:5000/x:1": false, "registry.example.com/x:1": false} {
+		if OnDockerHub(tag) != hub {
+			t.Errorf("OnDockerHub(%s) = %v", tag, !hub)
+		}
+	}
+}

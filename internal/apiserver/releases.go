@@ -59,6 +59,10 @@ func (s *Server) updateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(errors.New("an update needs an app that exists")))
 		return
 	}
+	if err := s.catchUp(); err != nil {
+		writeError(w, err)
+		return
+	}
 	app, err := s.store.App(name)
 	if err != nil {
 		writeError(w, err)
@@ -100,6 +104,10 @@ func (s *Server) restoreRevision(w http.ResponseWriter, r *http.Request) {
 	}
 	if cond.Absent {
 		writeError(w, badRequest(errors.New("a revision restores an app that exists")))
+		return
+	}
+	if err := s.catchUp(); err != nil {
+		writeError(w, err)
 		return
 	}
 	change, err := s.store.RestoreRevision(r.PathValue("name"), revision, cond, actor(r))

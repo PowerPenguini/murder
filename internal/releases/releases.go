@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,11 @@ const Actor = "murder"
 
 // askTimeout bounds one question to a registry.
 const askTimeout = 30 * time.Second
+
+// hubEvery is how often a tag on Docker Hub is asked about at most: Hub
+// counts every question as a pull against its rate limits, which the
+// node's own pulls share.
+const hubEvery = time.Hour
 
 // firstCheck is how long after the agent starts the first check waits, so
 // a restart does not ask every registry at once with everything else.
@@ -47,6 +53,11 @@ type Watcher struct {
 	Leader func() bool
 	Every  time.Duration
 	Log    *slog.Logger
+	// Now tells the time; time.Now if nil.
+	Now func() time.Time
+
+	// hubAsked is when each Docker Hub tag was last asked about.
+	hubAsked map[string]time.Time
 
 	mu sync.Mutex
 	// failing maps each app whose registry could not be asked at the last
@@ -79,6 +90,13 @@ func (w *Watcher) Check(ctx context.Context) {
 		image string
 		err   error
 	}
+	now := time.Now
+	if w.Now != nil {
+		now = w.Now
+	}
+	if w.hubAsked == nil {
+		w.hubAsked = map[string]time.Time{}
+	}
 	answers := map[string]answer{}
 	failing := map[string]string{}
 	for _, app := range w.Store.Apps() {
@@ -86,6 +104,16 @@ func (w *Watcher) Check(ctx context.Context) {
 			continue
 		}
 		got, asked := answers[app.Tag]
+		if !asked && OnDockerHub(app.Tag) {
+			if last, ok := w.hubAsked[app.Tag]; ok && now().Sub(last) < hubEvery {
+				// What failed last time is still what is known.
+				if why := w.failingFor(app.Name); why != "" {
+					failing[app.Name] = why
+				}
+				continue
+			}
+			w.hubAsked[app.Tag] = now()
+		}
 		if !asked {
 			ask, cancel := context.WithTimeout(ctx, askTimeout)
 			got.image, got.err = w.Registry.Latest(ask, app.Tag)
@@ -113,6 +141,16 @@ func (w *Watcher) Check(ctx context.Context) {
 		}
 	}
 	w.setFailing(failing)
+}
+
+// OnDockerHub reports whether tag names an image on Docker Hub: one
+// without a registry host, or with Hub's own.
+func OnDockerHub(tag string) bool {
+	first, _, ok := strings.Cut(tag, "/")
+	if !ok || !(strings.ContainsAny(first, ".:") || first == "localhost") {
+		return true
+	}
+	return first == "docker.io" || first == "index.docker.io" || first == "registry-1.docker.io"
 }
 
 func (w *Watcher) failingFor(app string) string {

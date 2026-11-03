@@ -94,3 +94,43 @@ func TestAnAppGivenPinnedHasNoTagToAskAbout(t *testing.T) {
 		t.Fatalf("tagged again %+v, %v", tagged, err)
 	}
 }
+
+func TestAnUpdateTakesOnlyTheRegistrysAnswer(t *testing.T) {
+	f := withApp(t)
+	ctx := context.Background()
+	const tag = "ghcr.io/example/app:1.4"
+	before, _ := f.client.App(ctx, "web")
+	// The registry does not answer: an update changes nothing, rather than
+	// falling back to whatever this node has.
+	f.runtime.setLatest(tag, "")
+	_, err := f.client.UpdateApp(ctx, "web", time.Time{})
+	checkStatus(t, "an update while the registry does not answer", err, 502)
+	if after, _ := f.client.App(ctx, "web"); after.Spec.Image != before.Spec.Image || after.Revision != before.Revision {
+		t.Fatalf("a refused update changed the app: %+v", after)
+	}
+	// An image found earlier is forgotten once a newer one is taken.
+	d2 := "ghcr.io/example/app@sha256:" + strings.Repeat("2", 64)
+	d3 := "ghcr.io/example/app@sha256:" + strings.Repeat("3", 64)
+	f.runtime.setLatest(tag, d2)
+	if _, err := f.client.CheckApp(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	f.runtime.setLatest(tag, d3)
+	updated, err := f.client.UpdateApp(ctx, "web", time.Time{})
+	if err != nil || updated.App.Spec.Image != d3 || updated.App.Latest != "" {
+		t.Fatalf("update %+v, %v", updated.App, err)
+	}
+	// Applying the same tag again asks the registry, and says what it holds.
+	d4 := "ghcr.io/example/app@sha256:" + strings.Repeat("4", 64)
+	f.runtime.setLatest(tag, d4)
+	same, err := f.client.PutApp(ctx, "web", appSpec())
+	if err != nil || same.Changed || same.App.Spec.Image != d3 || same.App.Latest != d4 || !strings.Contains(same.Note, "murder app update web") {
+		t.Fatalf("the same tag again %+v, %v", same, err)
+	}
+	if _, err := f.client.PutAppNewest(ctx, "web", appSpec()); err != nil {
+		t.Fatal(err)
+	}
+	if app, _ := f.client.App(ctx, "web"); app.Spec.Image != d4 || app.Latest != "" {
+		t.Fatalf("after apply -update %+v", app)
+	}
+}

@@ -143,7 +143,7 @@ func (c *Client) PutAppIf(ctx context.Context, name string, app spec.Tenant, con
 // app was given that tag before: PutApp keeps the image the app has.
 func (c *Client) PutAppNewest(ctx context.Context, name string, app spec.Tenant) (AppApplied, error) {
 	var applied AppApplied
-	return applied, c.do(ctx, http.MethodPut, appPath(name)+"?update=1", app, &applied)
+	return applied, c.do(ctx, http.MethodPut, appPath(name)+"?update=true", app, &applied)
 }
 
 // CheckApp asks the app's registry now which image its tag names.

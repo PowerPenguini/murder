@@ -178,7 +178,15 @@ func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &app) {
 		return
 	}
-	s.storeApp(w, r, name, app, cond, r.URL.Query().Get("update") != "")
+	update := false
+	if value := r.URL.Query().Get("update"); value != "" {
+		var err error
+		if update, err = strconv.ParseBool(value); err != nil {
+			writeError(w, badRequest(errors.New("update must be true or false")))
+			return
+		}
+	}
+	s.storeApp(w, r, name, app, cond, update)
 }
 
 // appCondition reads the condition a change of an app is made on.
@@ -197,35 +205,39 @@ func appCondition(r *http.Request) (store.AppIf, error) {
 	return cond, nil
 }
 
-// storeApp pins app's image and stores it; with update, a tag is pinned to
-// its newest image even if the app has it already.
+// storeApp pins app's image and stores it. A tag the app already has keeps
+// the image it is pinned to, unless update asks for the tag's newest one;
+// update takes nothing but the registry's answer.
 func (s *Server) storeApp(w http.ResponseWriter, r *http.Request, name string, app spec.Tenant, cond store.AppIf, update bool) {
 	if err := s.store.CheckApp(store.App{Name: name, Spec: app}); err != nil {
 		writeError(w, err)
 		return
 	}
+	// The app as the cluster has it, not as a node behind it last heard.
+	if err := s.catchUp(); err != nil {
+		writeError(w, err)
+		return
+	}
 	tag, note := "", ""
+	kept, fresh := false, false
 	if !spec.Pinned(app.Image) {
 		tag = app.Image
 		stored, err := s.store.App(name)
-		if kept := err == nil && stored.Tag == tag && !update; kept {
+		if kept = err == nil && stored.Tag == tag && !update; kept {
 			app.Image = stored.Spec.Image
 			// What the pin was kept on must not change meanwhile.
 			if cond == (store.AppIf{}) {
 				cond.UpdatedAt = stored.UpdatedAt
 			}
-			if stored.Latest != "" {
-				note = fmt.Sprintf("a newer image of %s is in its registry; \"murder app update %s\" takes it", tag, name)
-			}
 		} else {
-			pinned, pinNote, err := s.resolve(r.Context(), app.Image)
+			pinned, pinNote, err := s.pinTag(r.Context(), tag, update)
 			if err != nil {
 				writeError(w, err)
 				return
 			}
 			app.Image, note = pinned, pinNote
 			// A local image cannot be asked about.
-			if !spec.RegistryPinned(pinned) {
+			if fresh = spec.RegistryPinned(pinned); !fresh {
 				tag = ""
 			}
 		}
@@ -239,7 +251,58 @@ func (s *Server) storeApp(w http.ResponseWriter, r *http.Request, name string, a
 		writeError(w, err)
 		return
 	}
+	// The registry is asked now: what it holds is newer than any earlier
+	// answer, whether the image was just pinned from it or kept.
+	if kept {
+		ask, cancel := context.WithTimeout(r.Context(), askTimeout)
+		latest, err := s.runtime.Latest(ask, tag)
+		cancel()
+		if err == nil {
+			_, err = s.store.SetLatest(name, tag, latest, actor(r))
+		}
+		if err != nil {
+			s.log.Info("ask the registry about a kept tag", "app", name, "tag", tag, "error", err)
+		}
+	} else if fresh && change.App.Latest != "" {
+		if _, err := s.store.SetLatest(name, tag, app.Image, actor(r)); err != nil {
+			s.log.Warn("forget an older image found", "app", name, "error", err)
+		}
+	}
+	if current, err := s.store.App(name); err == nil {
+		change.App = current
+	}
+	if kept && change.App.Latest != "" {
+		note = fmt.Sprintf("kept the image %s is pinned to; a newer one is in its registry: \"murder app update %s\" takes it", tag, name)
+	}
 	s.writeAppChange(w, change, note)
+}
+
+// askTimeout bounds asking a registry about a tag while a client waits.
+const askTimeout = 15 * time.Second
+
+// catchUp applies here what the cluster has applied; nothing outside one.
+func (s *Server) catchUp() error {
+	if s.cluster == nil || s.store.Cluster() == "" {
+		return nil
+	}
+	return s.cluster.CatchUp()
+}
+
+// pinTag pins tag to the image its registry names now, pulled here. If the
+// registry cannot be asked, strict refuses; otherwise the tag is resolved
+// as before, a local image being taken when the registry has none.
+func (s *Server) pinTag(ctx context.Context, tag string, strict bool) (string, string, error) {
+	latest, err := s.runtime.Latest(ctx, tag)
+	if err == nil {
+		if err := s.runtime.PullImage(ctx, latest); err != nil {
+			return "", "", statusError{http.StatusUnprocessableEntity, fmt.Errorf("pull %s, the image of %s: %w", latest, tag, err)}
+		}
+		return latest, "", nil
+	}
+	if strict {
+		return "", "", statusError{http.StatusBadGateway, fmt.Errorf("the newest image of %s is unknown; nothing was changed: %w", tag, err)}
+	}
+	return s.resolve(ctx, tag)
 }
 
 // writeAppChange answers with a stored app and the tenants it rolls out to.

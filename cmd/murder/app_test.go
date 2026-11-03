@@ -164,7 +164,7 @@ func TestAppApplyWithUpdateAsksForTheNewestImage(t *testing.T) {
 	if err := runApp([]string{"apply", file, "-socket", socket}); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(calls(), ","); got != "PUT /v1/apps/web?update=1,PUT /v1/apps/web" {
+	if got := strings.Join(calls(), ","); got != "PUT /v1/apps/web?update=true,PUT /v1/apps/web" {
 		t.Fatalf("calls %s", got)
 	}
 }
