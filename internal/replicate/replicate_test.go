@@ -604,7 +604,7 @@ func TestACopyMovesToAnotherNode(t *testing.T) {
 	r.Pass(ctx)
 	f.change(t, func(st *store.SQLite) {
 		for _, name := range []string{"acme", "b", "c"} {
-			if err := st.ReplicaReady(name, "n2"); err != nil {
+			if err := markReady(st, name, "n2"); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -638,7 +638,7 @@ func TestACopyMovesToAnotherNode(t *testing.T) {
 		t.Fatalf("dropped before the switch: %v", err)
 	}
 	for _, st := range []*store.SQLite{n2.store, n3.store} {
-		if _, err := st.SwitchReplica("acme", "n3"); err != nil {
+		if _, err := st.SwitchReplica("acme", "n3", "n1"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -681,7 +681,7 @@ func TestAStuckCopyMoveIsGivenUp(t *testing.T) {
 	r.Pass(ctx)
 	f.change(t, func(st *store.SQLite) {
 		for _, name := range []string{"acme", "b", "c"} {
-			if err := st.ReplicaReady(name, "n2"); err != nil {
+			if err := markReady(st, name, "n2"); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -756,5 +756,127 @@ func TestAReplicaThatNeverGetsItsCopyIsReplaced(t *testing.T) {
 		if node.Name == "n2" && !node.CopiesRefusedUntil.IsZero() {
 			t.Fatalf("n2 still refused: %+v", node)
 		}
+	}
+}
+
+// markReady reports name's copy on replica whole, as its node would.
+func markReady(st interface {
+	Get(string) (store.Record, error)
+	ReplicaReady(string, string, string) error
+}, name, replica string) error {
+	record, err := st.Get(name)
+	if err != nil {
+		return err
+	}
+	return st.ReplicaReady(name, replica, record.Node)
+}
+
+// blockingPeer is peer whose sends wait, once begun, for unblock.
+type blockingPeer struct {
+	*peer
+	once    sync.Once
+	begun   chan struct{}
+	unblock chan struct{}
+}
+
+func newBlockingPeer(p *peer) *blockingPeer {
+	return &blockingPeer{peer: p, begun: make(chan struct{}), unblock: make(chan struct{})}
+}
+
+func (b *blockingPeer) Send(ctx context.Context, to, tenant string, whole bool, data io.Reader) error {
+	b.once.Do(func() { close(b.begun) })
+	<-b.unblock
+	return b.peer.Send(ctx, to, tenant, whole, data)
+}
+
+// A change of the tenant while its copy is sent, to its containers here,
+// leaves its data as it is: the send still reports the copy whole.
+func TestASendReportsTheCopyWholeThroughChangesOfTheTenant(t *testing.T) {
+	f := newFixture(t)
+	n1 := f.nodes["n1"]
+	n1.volumes.write("acme")
+	r, p := f.replicator("n1")
+	blocking := newBlockingPeer(p)
+	r.Peer = blocking
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() { r.Pass(ctx); close(done) }()
+	<-blocking.begun
+	f.change(t, func(st *store.SQLite) {
+		if _, err := st.Roll("acme", "test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	close(blocking.unblock)
+	<-done
+	if record, _ := n1.store.Get("acme"); !record.ReplicaReady {
+		t.Fatal("a send was not reported for a change that left the data")
+	}
+}
+
+// A replacement of the data holds the tenant's sends: it waits for the one
+// under way, and its report, before the copy is marked stale, and none
+// runs until it ends; the next send then makes the copy whole again.
+func TestASendBegunBeforeAReplacementReportsNothingAfter(t *testing.T) {
+	f := newFixture(t)
+	n1 := f.nodes["n1"]
+	n1.volumes.write("acme")
+	r, p := f.replicator("n1")
+	blocking := newBlockingPeer(p)
+	r.Peer = blocking
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() { r.Pass(ctx); close(done) }()
+	<-blocking.begun
+	// A caller that gives up waiting holds nothing.
+	gaveUp, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := r.Hold(gaveUp, "acme"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a hold given up: %v", err)
+	}
+	held := make(chan func(), 1)
+	go func() {
+		release, err := r.Hold(ctx, "acme")
+		if err != nil {
+			t.Error(err)
+			release = func() {}
+		}
+		held <- release
+	}()
+	select {
+	case <-held:
+		t.Fatal("held while a send was under way")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(blocking.unblock)
+	<-done
+	release := <-held
+	// The replacement: the copy no longer matches, and the data is new,
+	// with no snapshot in common with the copy.
+	if err := n1.store.ReplicaStale("acme", "its data is replaced", "test"); err != nil {
+		t.Fatal(err)
+	}
+	n1.volumes.mu.Lock()
+	n1.volumes.data["acme"] = &memoryData{version: 100, mounted: true, snapshots: map[string]int{}}
+	n1.volumes.mu.Unlock()
+	if record, _ := n1.store.Get("acme"); record.ReplicaReady {
+		t.Fatal("the copy of the data replaced is whole")
+	}
+	p.sends = nil
+	r.Pass(ctx)
+	if err := r.Replicate(ctx, "acme", "n2"); !errors.Is(err, ErrHeld) {
+		t.Fatalf("a send while held: %v", err)
+	}
+	if record, _ := n1.store.Get("acme"); len(p.sends) != 0 || record.ReplicaReady {
+		t.Fatalf("held: sends %v, ready %v", p.sends, record.ReplicaReady)
+	}
+	release()
+	release() // twice is once
+	r.Pass(ctx)
+	if !slices.Equal(p.sends, []string{"acme→n2 whole=true"}) {
+		t.Fatalf("sends after the replacement: %v", p.sends)
+	}
+	if record, _ := n1.store.Get("acme"); !record.ReplicaReady || f.nodes["n2"].volumes.data["acme"].version != 100 {
+		t.Fatal("the copy of the new data is not whole")
 	}
 }

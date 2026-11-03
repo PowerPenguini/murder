@@ -277,7 +277,12 @@ func runAgent(args []string) error {
 		if member != nil {
 			leader = member.Leader
 		}
-		if backups, err = newAgentBackups(cfg, st, reconciler.Exclusive, leader, log.With("component", "backups")); err != nil {
+		// A replacement of a tenant's data holds its sends to its copies.
+		var hold func(context.Context, string) (func(), error)
+		if replicator != nil {
+			hold = replicator.Hold
+		}
+		if backups, err = newAgentBackups(cfg, st, reconciler.Exclusive, leader, hold, log.With("component", "backups")); err != nil {
 			return err
 		}
 		apiHandler.WithBackups(backups)

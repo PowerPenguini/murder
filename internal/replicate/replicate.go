@@ -74,7 +74,83 @@ type Replicator struct {
 	copyFailures map[string]int
 	// caughtUp is set, by Run only, once this node first caught up.
 	caughtUp bool
+	// sending counts each tenant's sends under way, with their reports;
+	// held, the holds keeping its sends off (see Hold). ended is closed,
+	// and replaced, whenever a send ends.
+	sending map[string]int
+	held    map[string]int
+	ended   chan struct{}
 }
+
+// Hold keeps tenant's data from being sent, or reported whole, until
+// release is called: for a replacement of the data, after which no copy
+// matches it. It first waits, or until ctx ends, for the sends of tenant
+// under way, and their reports, to end: a send begun before cannot report
+// the old data whole once the replacement began. A tenant held is left out
+// of sends, without counting as a failure.
+func (r *Replicator) Hold(ctx context.Context, tenant string) (release func(), err error) {
+	r.mu.Lock()
+	if r.held == nil {
+		r.held = map[string]int{}
+	}
+	r.held[tenant]++
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			r.mu.Lock()
+			if r.held[tenant]--; r.held[tenant] == 0 {
+				delete(r.held, tenant)
+			}
+			r.mu.Unlock()
+		})
+	}
+	for r.sending[tenant] > 0 {
+		if r.ended == nil {
+			r.ended = make(chan struct{})
+		}
+		ended := r.ended
+		r.mu.Unlock()
+		select {
+		case <-ended:
+		case <-ctx.Done():
+			release()
+			return nil, ctx.Err()
+		}
+		r.mu.Lock()
+	}
+	r.mu.Unlock()
+	return release, nil
+}
+
+// begin starts a send of tenant, unless a hold keeps it off; end ends it.
+func (r *Replicator) begin(tenant string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.held[tenant] > 0 {
+		return false
+	}
+	if r.sending == nil {
+		r.sending = map[string]int{}
+	}
+	r.sending[tenant]++
+	return true
+}
+
+func (r *Replicator) end(tenant string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sending[tenant]--; r.sending[tenant] == 0 {
+		delete(r.sending, tenant)
+	}
+	if r.ended != nil {
+		close(r.ended)
+		r.ended = nil
+	}
+}
+
+// ErrHeld is the error of a send of a tenant whose data a replacement
+// holds.
+var ErrHeld = errors.New("its data is being replaced")
 
 // ReplicaReason names the snapshots replication takes.
 const ReplicaReason = volume.ReplicaReason
@@ -194,13 +270,18 @@ func (r *Replicator) Pass(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer func() { <-slots; wg.Done() }()
-			err := r.Replicate(ctx, record.Spec.Name, record.Replica)
+			// The send and its report, together, or neither while held.
+			if !r.begin(record.Spec.Name) {
+				return
+			}
+			defer r.end(record.Spec.Name)
+			err := r.replicate(ctx, record.Spec.Name, record.Replica, true)
 			if !record.ReplicaReady && ctx.Err() == nil {
 				r.copyFailed(record.Spec.Name, record.Replica, err)
 			}
 			// Once the copy holds the whole data, it may take over.
 			if err == nil && !record.ReplicaReady {
-				err = r.Store.ReplicaReady(record.Spec.Name, record.Replica)
+				err = r.Store.ReplicaReady(record.Spec.Name, record.Replica, record.Node)
 			}
 			r.mu.Lock()
 			if r.failing == nil {
@@ -226,13 +307,17 @@ func (r *Replicator) Pass(ctx context.Context) {
 		go func() {
 			defer func() { <-slots; wg.Done() }()
 			name, next := record.Spec.Name, record.ReplicaNext
+			if !r.begin(name) {
+				return
+			}
+			defer r.end(name)
 			switched := false
 			err := r.replicate(ctx, name, next, false)
 			if ctx.Err() == nil {
 				r.copyFailed(name, next, err)
 			}
 			if err == nil {
-				switched, err = r.Store.SwitchReplica(name, next)
+				switched, err = r.Store.SwitchReplica(name, next, record.Node)
 			}
 			switch {
 			case err != nil && ctx.Err() == nil:
@@ -249,6 +334,10 @@ func (r *Replicator) Pass(ctx context.Context) {
 // the changes since the newest snapshot both have, or the whole data if
 // they have none in common. Nothing is sent when nothing changed.
 func (r *Replicator) Replicate(ctx context.Context, tenant, node string) error {
+	if !r.begin(tenant) {
+		return fmt.Errorf("tenant %s: %w", tenant, ErrHeld)
+	}
+	defer r.end(tenant)
 	return r.replicate(ctx, tenant, node, true)
 }
 

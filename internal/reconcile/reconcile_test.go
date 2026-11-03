@@ -1662,8 +1662,10 @@ func movedHere(t *testing.T, f *fixture, names ...string) {
 	if _, err := source.PutApp(store.App{Name: "web", Spec: app}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := source.PutNode(store.Node{Name: "test-node", Address: "10.0.0.1:7400"}, "test"); err != nil {
-		t.Fatal(err)
+	for i, node := range []string{"test-node", "other-node"} {
+		if err := source.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, name := range names {
 		if _, err := source.Create(store.NewTenant{Name: name, App: "web"}, "test"); err != nil {

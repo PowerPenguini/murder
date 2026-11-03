@@ -685,8 +685,14 @@ func (s *SQLite) FinishMove(name, actor string) (Record, error) {
 // targetMember refuses to hand a tenant to a node that left the cluster:
 // nothing could run it or move it back.
 func targetMember(current *snapshot, record Record) error {
-	if _, member := current.nodes[record.MoveTo]; !member {
+	node, member := current.nodes[record.MoveTo]
+	if !member {
 		return fmt.Errorf("%w: node %s, which tenant %s was moving to, left the cluster", ErrConflict, record.MoveTo, record.Spec.Name)
+	}
+	// Handed to a failed node, the tenant would serve nowhere: the move
+	// is undone, its node keeping the data.
+	if node.Failed() {
+		return fmt.Errorf("%w: node %s, which tenant %s was moving to, failed", ErrConflict, record.MoveTo, record.Spec.Name)
 	}
 	return nil
 }
