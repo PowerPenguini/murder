@@ -50,6 +50,7 @@ type fakeRuntime struct {
 	failCreate error
 	failPull   error
 	failRemove error
+	failStart  error
 	// removedImages are the images RemoveImage deleted; aliases gives a
 	// name the ID of an image known by another name.
 	removedImages []string
@@ -217,6 +218,9 @@ func (f *fakeRuntime) Create(_ context.Context, spec runtime.ContainerSpec) (str
 func (f *fakeRuntime) Start(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failStart != nil {
+		return f.failStart
+	}
 	f.containers[id].Running, f.containers[id].State = true, "running"
 	f.record("start " + id)
 	return nil
@@ -1855,6 +1859,70 @@ func TestAnExitedAppIsStartedAgainAndReported(t *testing.T) {
 	f.reconcile(t)
 	if status, _ := f.reconciler.Status("acme"); status.Restarts != 1 || status.Phase != PhaseRunning {
 		t.Fatalf("after a stop and an old exit: %+v", status)
+	}
+}
+
+// One exit is counted once, however many passes fail to start the app
+// again after it.
+func TestAnExitIsCountedOnceThoughStartsFail(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	container := f.runtime.only(t)
+	f.runtime.mu.Lock()
+	container.Running, container.State = false, "exited"
+	f.runtime.failStart = errors.New("the engine is busy")
+	f.runtime.state = runtime.ContainerState{ExitKnown: true, ExitCode: 137, OOMKilled: true, ExitedAt: time.Now()}
+	f.runtime.mu.Unlock()
+	for range 3 {
+		if err := f.reconciler.Reconcile(context.Background()); err == nil {
+			t.Fatal("a pass whose start failed reported success")
+		}
+	}
+	f.runtime.mu.Lock()
+	f.runtime.failStart = nil
+	f.runtime.mu.Unlock()
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.Restarts != 1 || !strings.HasPrefix(status.LastExit, "killed for using more than its 256 MB") {
+		t.Fatalf("after one exit and three failed starts: %+v", status)
+	}
+}
+
+// A pass that stops the old container of an image change but cannot remove
+// it leaves the data's image as it was: the next pass, with the old
+// container stopped, takes the snapshot to go back to, every write in.
+func TestAFailedRemovalStillGetsTheFinalSnapshot(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	old := f.runtime.only(t).ID
+	f.runtime.images[imageB] = true
+	f.updateApp(t, "acme", func(app *spec.Tenant) { app.Image = imageB })
+	f.runtime.failRemove = errors.New("the engine is busy")
+	f.runtime.takeEvents()
+	if err := f.reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("a pass that could not remove the old container reported success")
+	}
+	if record, _ := f.store.Get("acme"); record.DataImage != imageA {
+		t.Fatalf("data image %q with the old container not removed", record.DataImage)
+	}
+	f.runtime.failRemove = nil
+	f.reconcile(t)
+	if container := f.runtime.only(t); container.spec.Image != imageB || !container.Running {
+		t.Fatalf("container = %+v", container)
+	}
+	events := f.runtime.takeEvents()
+	stopped, final := slices.Index(events, "stop "+old), -1
+	for i, event := range events {
+		if strings.HasPrefix(event, "snapshot ") {
+			final = i
+		}
+	}
+	if stopped < 0 || final < stopped {
+		t.Fatalf("events = %v, want a snapshot after the old container stopped", events)
+	}
+	if record, _ := f.store.Get("acme"); record.DataImage != imageB {
+		t.Fatalf("data image = %q", record.DataImage)
 	}
 }
 

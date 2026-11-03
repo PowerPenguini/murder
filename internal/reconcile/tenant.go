@@ -16,10 +16,12 @@ import (
 	"github.com/PowerPenguini/murder/internal/volume"
 )
 
-// appExits are the exits of one container's app.
+// appExits are the exits of one container's app: how many, and the last,
+// when and how.
 type appExits struct {
 	container string
 	count     int
+	at        time.Time
 	last      string
 }
 
@@ -211,10 +213,14 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		restarted := false
 		if state.Pid == 0 && !state.Restarting {
 			// The app's exit, while the agent ran, and not a stop (SIGTERM,
-			// as the engine or the server sends): it is reported.
+			// as the engine or the server sends): it is reported, and
+			// counted once, however many passes fail to start it again.
 			if state.ExitKnown && state.ExitCode != 143 && state.ExitedAt.After(r.started) {
-				exits.count++
-				exits.last = lastExit(state, tenant.Limits.Or(r.config.DefaultLimits).MemoryMB)
+				if !state.ExitedAt.Equal(exits.at) {
+					exits.count++
+					exits.at = state.ExitedAt
+					exits.last = lastExit(state, tenant.Limits.Or(r.config.DefaultLimits).MemoryMB)
+				}
 				restarted = true
 			}
 			if err := r.runtime.Start(ctx, current.ID); err != nil {
@@ -297,11 +303,6 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 			r.log.Info("snapshot before image change", "tenant", tenant.Name, "snapshot", name, "from", record.DataImage, "to", tenant.Image)
 		}
 	}
-	// From here on the data belongs to the new image: a later pass must not
-	// snapshot again for the same change.
-	if err := r.store.Observe(tenant.Name, tenant.Image); err != nil {
-		return "", false, fmt.Errorf("record the data's image: %w", err)
-	}
 	// A running tenant runs nowhere from here until its new container
 	// answers: requests for it wait meanwhile.
 	held := len(outdated) > 0 && !tenant.Suspended
@@ -322,6 +323,13 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, desired r
 		if err := r.volumes.Prune(ctx, tenant.Name, "image-change", snapshotsKept); err != nil {
 			r.log.Warn("prune old snapshots", "tenant", tenant.Name, "error", err)
 		}
+	}
+	// From here on the data belongs to the new image: a later pass must not
+	// snapshot again for the same change. Not before: a pass that failed to
+	// remove the old container leaves the next one to snapshot once it has
+	// stopped.
+	if err := r.store.Observe(tenant.Name, tenant.Image); err != nil {
+		return "", true, fmt.Errorf("record the data's image: %w", err)
 	}
 	id, err = r.runtime.Create(ctx, desired)
 	if err != nil {
