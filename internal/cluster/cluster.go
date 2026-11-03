@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -115,6 +116,14 @@ type Cluster struct {
 	// joins answers hosts that bring an invitation.
 	joins  *http.Server
 	client *http.Client
+	// membership keeps joins and removals one at a time on the leader.
+	membership sync.Mutex
+	// joinHook, if set, runs at each stage of a join (joinWrite, joinVote,
+	// joinAdd): tests pause a join there.
+	joinHook atomic.Pointer[func(stage, name string)]
+	// catchUpVerify and joinVerify each let one VerifyLeader call at a
+	// time hand its request to Raft; see verifyLeader.
+	catchUpVerify, joinVerify chan struct{}
 	// barrierTerm is the last term in which this node, as the leader, has
 	// applied everything committed before it.
 	barrierTerm atomic.Uint64
@@ -159,7 +168,8 @@ func Start(config Config) (*Cluster, error) {
 		_ = logs.Close()
 		return nil, err
 	}
-	c := &Cluster{config: config, address: l.inner.Addr().String(), raft: r, logs: logs, snapshots: snapshots, listener: l, credentials: credentials}
+	c := &Cluster{config: config, address: l.inner.Addr().String(), raft: r, logs: logs, snapshots: snapshots, listener: l, credentials: credentials,
+		catchUpVerify: make(chan struct{}, 1), joinVerify: make(chan struct{}, 1)}
 	c.client = &http.Client{
 		Transport: namedTransport{cluster: config.Store.Cluster, next: &http.Transport{
 			DialTLSContext: func(ctx context.Context, _, address string) (net.Conn, error) {
@@ -303,11 +313,13 @@ func (c *Cluster) leaderApplied() (uint64, error) {
 	term := c.raft.CurrentTerm()
 	var err error
 	if c.barrierTerm.Load() != term {
-		if err = c.raft.Barrier(commitTimeout).Error(); err == nil {
+		if err = waitFuture(c.raft.Barrier(commitTimeout), commitTimeout+futureGrace); err == nil {
 			c.barrierTerm.Store(term)
 		}
 	} else {
-		err = c.raft.VerifyLeader().Error()
+		// A Raft that stalls answers neither: a writer waiting to learn
+		// what happened to its change returns all the same.
+		err = verifyLeader(c.catchUpVerify, c.raft.VerifyLeader, commitTimeout+futureGrace)
 	}
 	switch {
 	case errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost):
@@ -365,6 +377,67 @@ func (c *Cluster) propose(ctx context.Context, data []byte) (uint64, error) {
 	}
 }
 
+// futureGrace is how long past its own timeout a Raft future is waited
+// for.
+const futureGrace = 5 * time.Second
+
+// errStalled is a Raft future that did not end in time: what it did, if
+// anything, is not known.
+var errStalled = errors.New("the log did not answer in time")
+
+// verifyLeader runs verify, Raft's VerifyLeader, and waits for its answer,
+// all within d. Unlike Raft's other calls, VerifyLeader has no timeout for
+// handing its request over: once Raft's queue of them is full, the call
+// itself blocks until Raft takes one. So the call runs in a goroutine,
+// which slot, a channel of one, lets only one caller at a time start: a
+// stalled Raft holds at most one goroutine per slot, and each caller
+// returns errStalled by d all the same. Requests handed over are answered
+// once Raft runs again, or as it shuts down.
+func verifyLeader(slot chan struct{}, verify func() raft.Future, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case slot <- struct{}{}:
+	case <-timer.C:
+		return errStalled
+	}
+	queued := make(chan raft.Future, 1)
+	go func() {
+		future := verify()
+		<-slot
+		queued <- future
+	}()
+	var future raft.Future
+	select {
+	case future = <-queued:
+	case <-timer.C:
+		return errStalled
+	}
+	done := make(chan error, 1)
+	go func() { done <- future.Error() }()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errStalled
+	}
+}
+
+// waitFuture waits for future at most d. One that does not end by then is
+// errStalled: it may still take effect.
+func waitFuture(future raft.Future, d time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- future.Error() }()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errStalled
+	}
+}
+
 // apply appends data to the log on the leader.
 func (c *Cluster) apply(data []byte) (uint64, error) {
 	// Nothing enters the log that a node of this release cannot apply.
@@ -376,7 +449,9 @@ func (c *Cluster) apply(data []byte) (uint64, error) {
 		return 0, &PeerError{Status: http.StatusBadRequest, Message: err.Error()}
 	}
 	future := c.raft.Apply(data, commitTimeout)
-	if err := future.Error(); err != nil {
+	// Apply's timeout bounds getting into the log only; a log that stalls
+	// (a disk that hangs) must not hold the writer for good.
+	if err := waitFuture(future, commitTimeout+futureGrace); err != nil {
 		if errors.Is(err, raft.ErrNotLeader) {
 			return 0, ErrNotLeader
 		}
@@ -828,6 +903,9 @@ func (c *Cluster) Status() (Status, error) {
 
 // Leader reports whether this node leads the cluster.
 func (c *Cluster) Leader() bool { return c.raft.State() == raft.Leader }
+
+// Term is the node's current Raft term.
+func (c *Cluster) Term() uint64 { return c.raft.CurrentTerm() }
 
 func marshal(value any) []byte {
 	data, err := json.Marshal(value)

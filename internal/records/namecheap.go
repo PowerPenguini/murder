@@ -2,8 +2,10 @@ package records
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/libdns/libdns"
@@ -25,6 +27,9 @@ type Namecheap struct {
 	TTL        time.Duration
 	// api is the libdns provider; Namecheap's if nil.
 	api namecheapAPI
+	// busy is set while a call of the provider runs, which a context
+	// cannot stop: one more waits for none to end, it is refused.
+	busy atomic.Bool
 }
 
 // MaxNamecheapTTL is the longest TTL Namecheap takes.
@@ -55,7 +60,7 @@ func (n *Namecheap) Publish(ctx context.Context, addresses []netip.Addr) error {
 	}
 	// Unchanged records are not written: a write sets the whole host list.
 	var existing []libdns.Record
-	if err := withContext(ctx, func() (err error) {
+	if err := n.withContext(ctx, func() (err error) {
 		existing, err = n.api.GetRecords(ctx, n.Zone)
 		return err
 	}); err != nil {
@@ -64,17 +69,30 @@ func (n *Namecheap) Publish(ctx context.Context, addresses []netip.Addr) error {
 	if sameAddresses(existing, records, n.Name) {
 		return nil
 	}
-	return withContext(ctx, func() error {
+	return n.withContext(ctx, func() error {
 		_, err := n.api.SetRecords(ctx, n.Zone, records)
 		return err
 	})
 }
 
+// errBusy refuses a call while one the provider cannot stop still runs.
+var errBusy = errors.New("an earlier call to Namecheap has not ended")
+
 // withContext runs call, returning when ctx ends if call has not: the
-// provider makes some requests without a context.
-func withContext(ctx context.Context, call func() error) error {
+// provider makes some requests without a context. A call still running
+// from before refuses the next, so they do not pile up.
+func (n *Namecheap) withContext(ctx context.Context, call func() error) error {
+	if !n.busy.CompareAndSwap(false, true) {
+		return errBusy
+	}
 	done := make(chan error, 1)
-	go func() { done <- call() }()
+	go func() {
+		err := call()
+		// Cleared before the result is sent: the caller's next call, as
+		// SetRecords right after GetRecords, finds the provider free.
+		n.busy.Store(false)
+		done <- err
+	}()
 	select {
 	case err := <-done:
 		return err

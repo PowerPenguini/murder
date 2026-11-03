@@ -441,7 +441,16 @@ func (s *SQLite) Nodes() []Node {
 	return nodes
 }
 
-func (s *SQLite) PutNode(node Node, actor string) error {
+func (s *SQLite) PutNode(node Node, actor string) error { return s.putNode(node, actor, true) }
+
+// AddNode adds a node, or leaves one at the same address as it is. It
+// refuses, with ErrConflict, a node of that name at another address. The
+// check is part of the replicated write: a leader that lost its leadership
+// while a join waited cannot move a node another leader added meanwhile.
+func (s *SQLite) AddNode(node Node, actor string) error { return s.putNode(node, actor, false) }
+
+// putNode adds node, or changes its address if move.
+func (s *SQLite) putNode(node Node, actor string, move bool) error {
 	if !nodePattern.MatchString(node.Name) {
 		return fmt.Errorf("node name %q must be 1-63 letters, digits, dots or hyphens", node.Name)
 	}
@@ -449,6 +458,9 @@ func (s *SQLite) PutNode(node Node, actor string) error {
 		existing, found := current.nodes[node.Name]
 		if found && existing.Address == node.Address {
 			return errUnchanged
+		}
+		if found && !move {
+			return fmt.Errorf("%w: node %s is already a member at %s; remove it first, or give the new node another name", ErrConflict, node.Name, existing.Address)
 		}
 		for _, name := range slices.Sorted(maps.Keys(current.nodes)) {
 			other := current.nodes[name]
