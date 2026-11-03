@@ -16,11 +16,13 @@ import (
 )
 
 type fakeStore struct {
+	frozen  string
 	cluster string
 	nodes   []store.Node
 	notes   []string
 }
 
+func (f *fakeStore) Frozen() string      { return f.frozen }
 func (f *fakeStore) Cluster() string     { return f.cluster }
 func (f *fakeStore) Nodes() []store.Node { return f.nodes }
 func (f *fakeStore) Note(action, detail, actor string) error {
@@ -111,6 +113,11 @@ func TestAnInvitationExpiresAndKeepsTakenNames(t *testing.T) {
 	if _, _, err := b.Create(25*time.Hour, "root"); err == nil {
 		t.Fatal("an invitation for more than a day")
 	}
+	st.frozen = "master key rotation from n1"
+	if _, _, err := b.Create(time.Hour, "root"); err == nil || !strings.Contains(err.Error(), "takes no new node now") {
+		t.Fatalf("an invitation during a rotation: %v", err)
+	}
+	st.frozen = ""
 	st.cluster = ""
 	if _, _, err := b.Create(time.Hour, "root"); err == nil || !strings.Contains(err.Error(), "not part of a cluster") {
 		t.Fatalf("an invitation outside a cluster: %v", err)

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -11,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,19 +29,100 @@ const (
 )
 
 // Credentials are what a node presents to, and expects of, other nodes.
+// They follow the master key ring: the node presents a certificate of the
+// authority derived from the key in use and trusts the authorities of
+// every key in the ring, so nodes part way through a rotation still know
+// each other. Update changes them as they run.
 type Credentials struct {
-	ca    *x509.CertPool
-	caKey ed25519.PublicKey
-	cert  tls.Certificate
+	node  string
+	state atomic.Pointer[credentialState]
 }
 
-// NewCredentials derives the cluster's certificate authority from seed, so
-// every node with the same master key has the same authority and nothing
-// but the master key is shared, and issues node a certificate for this run
-// of the agent; its key never leaves memory.
-func NewCredentials(seed []byte, node string, now time.Time) (*Credentials, error) {
+type credentialState struct {
+	seeds [][]byte
+	caKey ed25519.PublicKey
+	cert  tls.Certificate
+	pool  *x509.CertPool
+	// nodes, invited and relay are what the cluster port serves nodes and
+	// invited hosts, and what the relay port serves edges.
+	nodes, invited, relay *tls.Config
+}
+
+// NewCredentials derives the cluster's certificate authorities from seeds,
+// the one in use first, so every node with the same master key has the
+// same authorities and nothing but the master key is shared, and issues
+// node a certificate for this run of the agent; its key never leaves
+// memory.
+func NewCredentials(seeds [][]byte, node string, now time.Time) (*Credentials, error) {
+	c := &Credentials{node: node}
+	if err := c.Update(seeds, now); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// Update has the credentials follow seeds, the one in use first. A
+// connection made before stays as it is; every new one uses them.
+func (c *Credentials) Update(seeds [][]byte, now time.Time) error {
+	if len(seeds) == 0 {
+		return errors.New("no cluster seed")
+	}
+	if old := c.state.Load(); old != nil && slices.EqualFunc(old.seeds, seeds, bytes.Equal) {
+		return nil
+	}
+	pool := x509.NewCertPool()
+	var current *x509.Certificate
+	var currentKey ed25519.PrivateKey
+	for i, seed := range seeds {
+		ca, key, err := authority(seed)
+		if err != nil {
+			return err
+		}
+		pool.AddCert(ca)
+		if i == 0 {
+			current, currentKey = ca, key
+		}
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
+	if err != nil {
+		return err
+	}
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: c.node},
+		DNSNames:     []string{serverName},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.AddDate(10, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, current, key.Public(), currentKey)
+	if err != nil {
+		return fmt.Errorf("node certificate: %w", err)
+	}
+	state := &credentialState{
+		seeds: slices.Clone(seeds), caKey: currentKey.Public().(ed25519.PublicKey), pool: pool,
+		cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key},
+	}
+	state.nodes = state.nodesOnly(protocolRaft, protocolHTTP)
+	state.relay = state.nodesOnly("h2", protocolHTTP)
+	state.invited = &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{state.cert},
+		NextProtos:   []string{protocolJoin},
+	}
+	c.state.Store(state)
+	return nil
+}
+
+// authority is the cluster's certificate authority derived from seed.
+func authority(seed []byte) (*x509.Certificate, ed25519.PrivateKey, error) {
 	if len(seed) != ed25519.SeedSize {
-		return nil, fmt.Errorf("cluster seed of %d bytes", len(seed))
+		return nil, nil, fmt.Errorf("cluster seed of %d bytes", len(seed))
 	}
 	caKey := ed25519.NewKeyFromSeed(seed)
 	// Fixed fields: every node makes the same authority.
@@ -54,44 +138,21 @@ func NewCredentials(seed []byte, node string, now time.Time) (*Credentials, erro
 	}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caKey.Public(), caKey)
 	if err != nil {
-		return nil, fmt.Errorf("cluster authority: %w", err)
+		return nil, nil, fmt.Errorf("cluster authority: %w", err)
 	}
 	ca, err := x509.ParseCertificate(caDER)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
-	if err != nil {
-		return nil, err
-	}
-	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: node},
-		DNSNames:     []string{serverName},
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.AddDate(10, 0, 0),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, ca, key.Public(), caKey)
-	if err != nil {
-		return nil, fmt.Errorf("node certificate: %w", err)
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(ca)
-	return &Credentials{ca: pool, caKey: caKey.Public().(ed25519.PublicKey), cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}}, nil
+	return ca, caKey, nil
 }
 
 // nodesOnly accepts nodes of the cluster only, for protocols.
-func (c *Credentials) nodesOnly(protocols ...string) *tls.Config {
+func (s *credentialState) nodesOnly(protocols ...string) *tls.Config {
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{c.cert},
-		ClientCAs:    c.ca,
+		Certificates: []tls.Certificate{s.cert},
+		ClientCAs:    s.pool,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		NextProtos:   protocols,
 	}
@@ -100,28 +161,25 @@ func (c *Credentials) nodesOnly(protocols ...string) *tls.Config {
 // server accepts, on the cluster port, nodes of the cluster, and hosts
 // that bring an invitation, for the invitation alone.
 func (c *Credentials) server() *tls.Config {
-	nodes := c.nodesOnly(protocolRaft, protocolHTTP)
-	invited := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{c.cert},
-		NextProtos:   []string{protocolJoin},
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			state := c.state.Load()
+			if len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == protocolJoin {
+				return state.invited, nil
+			}
+			return state.nodes, nil
+		},
 	}
-	config := nodes.Clone()
-	config.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-		if len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == protocolJoin {
-			return invited, nil
-		}
-		return nodes, nil
-	}
-	return config
 }
 
 // client dials nodes of the cluster only, for one protocol.
 func (c *Credentials) client(protocol string) *tls.Config {
+	state := c.state.Load()
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{c.cert},
-		RootCAs:      c.ca,
+		Certificates: []tls.Certificate{state.cert},
+		RootCAs:      state.pool,
 		ServerName:   serverName,
 		NextProtos:   []string{protocol},
 	}
@@ -130,11 +188,44 @@ func (c *Credentials) client(protocol string) *tls.Config {
 // RelayServer accepts other nodes' edges passing requests on to this
 // node's tenants: over HTTP/2, or HTTP/1.1 for protocol switches.
 func (c *Credentials) RelayServer() *tls.Config {
-	return c.nodesOnly("h2", protocolHTTP)
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{"h2", protocolHTTP},
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return c.state.Load().relay, nil
+		},
+	}
 }
 
-// RelayClient passes requests on to another node's edge.
-func (c *Credentials) RelayClient() *tls.Config { return c.client(protocolHTTP) }
+// RelayClient passes requests on to another node's edge. It is one
+// configuration for as long as the edge runs, so it checks the other edge
+// against the authorities as they are at each connection.
+func (c *Credentials) RelayClient() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{protocolHTTP},
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return &c.state.Load().cert, nil
+		},
+		// Checked below, against the authorities of the moment: the
+		// standard check would hold those of the start.
+		InsecureSkipVerify: true,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("the other edge presented no certificate")
+			}
+			intermediates := x509.NewCertPool()
+			for _, cert := range cs.PeerCertificates[1:] {
+				intermediates.AddCert(cert)
+			}
+			_, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{
+				Roots: c.state.Load().pool, Intermediates: intermediates, DNSName: serverName,
+				KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			})
+			return err
+		},
+	}
+}
 
 // peerName is the node name in the certificate a peer presented.
 func peerName(state *tls.ConnectionState) (string, error) {

@@ -26,6 +26,7 @@ type Client interface {
 	Thaw(ctx context.Context) error
 	List(ctx context.Context) ([]api.Tenant, error)
 	Move(ctx context.Context, tenant, to string) (api.Tenant, error)
+	BalanceMoves(ctx context.Context) ([]store.Move, error)
 }
 
 func shortSHA(sha string) string {
@@ -223,6 +224,35 @@ type refusedError struct{ err error }
 
 func (e *refusedError) Error() string { return e.err.Error() }
 func (e *refusedError) Unwrap() error { return e.err }
+
+// Balance moves tenants from the nodes running the most to those running
+// the fewest, one after the other, as the agent plans it; dryRun only
+// prints the plan.
+func Balance(ctx context.Context, client Client, dryRun bool, out io.Writer) error {
+	moves, err := client.BalanceMoves(ctx)
+	if err != nil {
+		return err
+	}
+	if len(moves) == 0 {
+		fmt.Fprintln(out, "the nodes are balanced: none runs two tenants more than another")
+		return nil
+	}
+	for i, move := range moves {
+		if dryRun {
+			fmt.Fprintf(out, "%s would move from %s to %s\n", move.Tenant, move.From, move.To)
+			continue
+		}
+		start := time.Now()
+		if _, err := client.Move(ctx, move.Tenant, move.To); err != nil {
+			return fmt.Errorf("move %s to %s: %w (moved %d before it)", move.Tenant, move.To, err, i)
+		}
+		fmt.Fprintf(out, "%s moved from %s to %s in %v\n", move.Tenant, move.From, move.To, time.Since(start).Round(time.Second))
+	}
+	if !dryRun {
+		fmt.Fprintf(out, "balanced: %d tenants moved\n", len(moves))
+	}
+	return nil
+}
 
 // Drain moves every tenant of node, live or archived, to target, one after
 // the other, telling out each move, and stops at the first that does not

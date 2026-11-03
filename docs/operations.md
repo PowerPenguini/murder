@@ -152,6 +152,54 @@ events` shows what changed since the backup was taken:
   an empty data directory;
 - secrets rotated since go back to their old values.
 
+## Rotate the master key
+
+The master key seals every tenant's secrets and is what the cluster's
+authority, which every node's certificate comes from, is derived from. If
+a copy of it leaked (a backup of `/etc/murder`, a laptop), or as routine,
+rotate it on every node without stopping one:
+
+```bash
+sudo murder key status    # every node's ring: the key in use, older and next ones
+sudo murder key rotate    # takes a few tens of seconds
+```
+
+The master key file is a ring: one key per line, the first in use, the
+others older keys that still open what they sealed and are still trusted
+between nodes; `next KEY` is a key on its way in. A rotation, run from any
+node:
+
+1. makes a key and sends it to every node as its next key (sent, never
+   fetched: a node that only holds the old key gets nothing by asking);
+   each node, and its edge, trusts it within seconds;
+2. has every node use it: their certificates come from the new authority,
+   new secrets are sealed with it;
+3. seals every secret again with it, in one change (no container is
+   replaced: containers are told apart by digests of their secrets'
+   values, not the sealed values; one made by a release before this one is
+   replaced once);
+4. takes the old key out of every node: from then on, a host with only the
+   old key is a stranger to the cluster.
+
+The cluster takes no change while a rotation runs (a few tens of seconds):
+no node joins, no tenant is created, no app changes; tenants keep serving.
+Every node must answer: bring a stopped node back, or take a failed one out
+of the cluster, first. A rotation stopped part way (a node lost meanwhile,
+`Ctrl-C`) goes on where it was when `murder key rotate` runs again, from
+the node that made the key. Afterwards, copy the new key file to where you
+keep the master key, and keep the old key with the database backups made
+before: `murder restore` opens their secrets with any key in the file, so
+add it as a line when restoring one. What a rotation cannot do: whoever holds the old key and reaches
+the nodes' private network passes for a node until the old key is gone,
+during the rotation too (they could read the state, or take the new key
+as it is sent). If that may have happened, the cluster is theirs: set up
+new nodes with a new key, restore the tenants from their backups and
+rotate their secrets. Connections between nodes made before
+the rotation stay up until they close; to end them at once, run
+`systemctl restart murder-agent` and `systemctl reload murder-edge` on each
+node in turn (tenants keep running through both). Invitations made before
+a rotation no longer work; make new ones.
+
 ## Back tenants up to a bucket
 
 With a `backups:` section, every node backs its tenants up to an S3 bucket

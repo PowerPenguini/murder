@@ -41,8 +41,12 @@ any one of them is down; a node cut off from the other two takes none.
 Tenants and the edge keep running either way.
 
 Every node runs tenants: each tenant runs on one node, which keeps its
-data, and `tenant list` shows which. A tenant runs on the node it was
-created on (run `murder tenant create` there). Every node's edge serves
+data, and `tenant list` shows which. `murder tenant create` puts a new
+tenant on the node running the fewest tenants (live, not suspended; this
+node among equals; never a failed one), or on the one `-node NAME` names.
+The node it goes to creates it, refusing it if it holds data of an
+earlier tenant of that name (a copy, or what a failure left). Creates at
+once through one node are placed one after the other, so they spread. Every node's edge serves
 every tenant: a request for a tenant of another node goes on, over TLS on
 the private network, to that node's edge (`edge.relayPort`, 7402, the same
 on every node), so DNS may point at any node. If the tenant moved while the
@@ -77,6 +81,15 @@ Point the DNS records at the new server once it has joined (until then its
 edge answers 503, "starting"; the old one's serves every tenant it knows),
 and switch the old one off. `murder cluster drain NODE
 -to TARGET` moves the tenants without taking the node out.
+
+Tenants added one by one, a node that joined later or one drained for
+maintenance leave the nodes uneven. `murder cluster balance` moves tenants,
+one after the other and each with its data, from the node running the most
+to the one running the fewest, until none runs two more than another (the
+panel's Cluster page does the same, as a job). A tenant whose whole copy
+the target keeps goes first: its move sends only what changed. Suspended
+and archived tenants stay; nothing moves while a tenant moves already.
+`-dry-run` prints the moves only.
 
 ## A copy of every tenant on a second node
 
@@ -237,7 +250,8 @@ longer: a minute or two after a node dies, new clients no longer try it.
 Nodes talk over one TLS port on the private network. A node proves it
 belongs to the cluster with a certificate of an authority derived from the
 master key, so every node needs the same master key and nothing else is
-shared. Give each node a `cluster:` section:
+shared. `murder key rotate` replaces it on every node without stopping one
+([Rotate the master key](operations.md#rotate-the-master-key)). Give each node a `cluster:` section:
 
 ```yaml
 cluster:

@@ -8,6 +8,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +122,16 @@ func TestActingOnTenants(t *testing.T) {
 	response, body = submit(t, client, server, "/tenants", url.Values{"name": {"newco"}, "app": {"web"}}, server.URL)
 	if response.Request.URL.Path != "/tenants/newco" || !strings.Contains(body, "newco is created") {
 		t.Fatalf("created: %s", response.Request.URL)
+	}
+	// Without a node chosen, the least busy one; or the one named.
+	if _, page := get(t, server.URL+"/tenants"); !strings.Contains(page, `<option value="auto" selected>`) {
+		t.Fatalf("the form offers no node:\n%s", page)
+	}
+	if !regexp.MustCompile(`newco is created on [a-z]+-1`).MatchString(body) {
+		t.Fatalf("created where: %s", body)
+	}
+	if _, body = submit(t, client, server, "/tenants", url.Values{"name": {"there"}, "app": {"web"}, "node": {"nbg-1"}}, server.URL); !strings.Contains(body, "there is created on nbg-1") {
+		t.Fatalf("created on a named node:\n%s", body)
 	}
 	if _, body = submit(t, client, server, "/tenants", url.Values{"name": {"Bad Name"}, "app": {"web"}}, server.URL); !strings.Contains(body, "lowercase letters") {
 		t.Fatal("a bad name taken")

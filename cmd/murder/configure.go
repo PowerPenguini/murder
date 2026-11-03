@@ -11,6 +11,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // listFlag collects a repeatable flag.
@@ -27,6 +28,7 @@ func configureTenant(command string, args []string) error {
 	socket := socketPath(flags)
 	wait := flags.Duration("wait", 0, "wait up to this long for the tenant to be healthy (e.g. 2m)")
 	app := flags.String("app", "", "the app the tenant runs")
+	node := flags.String("node", store.Auto, "with create: the node that runs the tenant, or auto for the one running the fewest")
 	image := flags.String("image", "", "run this image instead of the app's")
 	appImage := flags.Bool("app-image", false, "drop the image override")
 	memory := flags.Int("memory", 0, "memory limit in MB; 0 is the app's")
@@ -54,6 +56,9 @@ func configureTenant(command string, args []string) error {
 	client := api.NewClient(*socket)
 
 	request := api.TenantRequest{App: *app}
+	if command == "set" && given["node"] {
+		return errors.New("-node only places a new tenant: move one with murder tenant move NAME -to NODE")
+	}
 	var flagsOnly api.TenantFlags
 	for flagName, into := range map[string]**bool{"canary": &flagsOnly.Canary, "hold": &flagsOnly.Hold} {
 		if !given[flagName] {
@@ -94,6 +99,7 @@ func configureTenant(command string, args []string) error {
 		if *app == "" {
 			return errors.New("tenant create needs -app")
 		}
+		request.Node = *node
 		if *appImage || len(unsetEnv) > 0 || len(unsetSecrets) > 0 {
 			return errors.New("-app-image, -unset-env and -unset-secret only make sense with tenant set")
 		}
@@ -157,7 +163,11 @@ func configureTenant(command string, args []string) error {
 	archived := result.Tenant.Archived()
 	switch {
 	case command == "create":
-		fmt.Fprintf(stdout, "%s created at %s, running app %s (%s)\n", name, result.Tenant.URL, result.Tenant.App, shortImage(result.Tenant.Spec.Image))
+		where := ""
+		if result.Tenant.Elsewhere {
+			where = " on node " + result.Tenant.Node
+		}
+		fmt.Fprintf(stdout, "%s created%s at %s, running app %s (%s)\n", name, where, result.Tenant.URL, result.Tenant.App, shortImage(result.Tenant.Spec.Image))
 	case archived && result.Changed:
 		fmt.Fprintf(stdout, "%s updated; it is archived and runs this when restored\n", name)
 	case archived:

@@ -1684,8 +1684,10 @@ func movedHere(t *testing.T, f *fixture, names ...string) {
 	if _, err := source.PutApp(store.App{Name: "web", Spec: app}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := source.PutNode(store.Node{Name: "test-node", Address: "10.0.0.1:7400"}, "test"); err != nil {
-		t.Fatal(err)
+	for i, node := range []string{"test-node", "other-node"} {
+		if err := source.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, name := range names {
 		if _, err := source.Create(store.NewTenant{Name: name, App: "web"}, "test"); err != nil {
@@ -2143,5 +2145,70 @@ func TestANewContainerWaitsForTheEdgesToHoldItsRequests(t *testing.T) {
 		if asked == 0 || f.runtime.only(t).spec.Image != imageB || record.Served == held {
 			t.Fatalf("held %v: asked %d, served %v", held, asked, record.Served)
 		}
+	}
+}
+
+// resealAll seals every secret again: the same values, new ciphertexts, as
+// a master key rotation leaves them.
+func (f *fixture) resealAll(t *testing.T) {
+	t.Helper()
+	count, err := f.store.ResealSecrets(func(tenant, name, sealed string) (string, bool, error) {
+		plain, err := f.key.Open(secrets.Context(tenant, name), sealed)
+		if err != nil {
+			return "", false, err
+		}
+		again, err := f.key.Seal(secrets.Context(tenant, name), plain)
+		return again, err == nil, err
+	}, "test")
+	if err != nil || count == 0 {
+		t.Fatalf("resealed %d, %v", count, err)
+	}
+}
+
+func TestSecretsSealedAgainReplaceNoContainer(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	id := f.runtime.only(t).ID
+	f.resealAll(t)
+	f.reconcile(t)
+	if f.runtime.count() != 1 || f.runtime.only(t).ID != id {
+		t.Fatal("sealing the secrets again replaced the container")
+	}
+	// A new value of a secret does (the fixture gives every secret the
+	// same one).
+	record, _ := f.store.Get("acme")
+	same, _ := f.reconciler.hashInputs(record, "/srv/acme", map[string]string{"SESSION_SECRET": secrets.Digest("acme/SESSION_SECRET", "the-secret")})
+	other, _ := f.reconciler.hashInputs(record, "/srv/acme", map[string]string{"SESSION_SECRET": secrets.Digest("acme/SESSION_SECRET", "another")})
+	if same == other {
+		t.Fatal("a new secret value keeps the container")
+	}
+}
+
+// A container of a release that hashed the sealed values is adopted, and
+// replaced once its secrets are sealed again.
+func TestContainersHashedWithSealedValuesAreAdopted(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	f.reconcile(t)
+	container := f.runtime.only(t)
+	sealedHash, err := f.reconciler.inputsHash(record, filepath.Join(f.volumes.Root, "acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealedHash == container.Labels[runtime.LabelHash] {
+		t.Fatal("the hash of a tenant with secrets did not change")
+	}
+	container.Labels[runtime.LabelHash] = sealedHash
+	container.spec.Labels[runtime.LabelHash] = sealedHash
+	id := container.ID
+	f.reconcile(t)
+	if f.runtime.count() != 1 || f.runtime.only(t).ID != id {
+		t.Fatal("the container of the release before was replaced")
+	}
+	f.resealAll(t)
+	f.reconcile(t)
+	if f.runtime.only(t).ID == id {
+		t.Fatal("a container hashed with sealed values outlived them")
 	}
 }
