@@ -59,7 +59,7 @@
   </dl>
   {{end}}{{end}}
   <dl class="tiles">
-    <div><dt>Image</dt><dd class="mono" title="{{$t.Spec.Image}}">{{short $t.Spec.Image}}</dd></div>
+    <div class="wide"><dt>Image</dt><dd>{{template "image" (list "image-ref" $t.Spec.Image)}}</dd></div>
     {{with $t.Status}}
     <div><dt>Phase</dt><dd>{{.Phase}}{{if and (eq .Phase "running") (not .Healthy)}}, not healthy{{end}}</dd></div>
     <div><dt>Restarts of this container</dt><dd class="num{{if and .Restarts $d.Broken}} red{{end}}">{{.Restarts}}</dd></div>

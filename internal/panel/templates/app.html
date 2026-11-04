@@ -105,7 +105,7 @@
   <table class="kv">
     <tbody>
       <tr><td class="dim">Follows</td><td class="mono">{{if $a.Tag}}{{$a.Tag}}{{else}}<span class="dim">no tag: the image was given pinned</span>{{end}}</td></tr>
-      <tr><td class="dim">Runs</td><td class="mono" title="{{$a.Spec.Image}}">{{short $a.Spec.Image}}</td></tr>
+      <tr><td class="dim">Runs</td><td>{{template "image" (list "image-ref" $a.Spec.Image)}}</td></tr>
     </tbody>
   </table>
 </section>

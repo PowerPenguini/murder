@@ -200,3 +200,8 @@ once it is off; remove it once it runs and keeps nothing. */}}
   </form>
   {{end}}
 {{end}}
+
+{{/* An image: its repository and short digest, the whole reference behind
+a disclosure, to select or copy. Called with (list ID REFERENCE). */}}
+{{define "image"}}{{$id := index . 0}}{{$ref := index . 1}}<span class="imageref"><span class="mono dim">{{imageRepo $ref}}</span> <span class="mono">{{imageShort $ref}}</span></span>
+<details class="howto fullref"><summary>Full reference</summary><span class="cmd"><pre class="secret" id="{{$id}}">{{$ref}}</pre><button type="button" class="small" data-copy="{{$id}}" hidden>Copy</button></span></details>{{end}}

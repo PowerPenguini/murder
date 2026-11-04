@@ -10,15 +10,22 @@
   <div class="head"><h2>What changes</h2>{{if $d.Changed}}<span class="dim num">{{plural $d.Removed "line" "lines"}} out, {{plural $d.Added "line" "lines"}} in</span>{{end}}</div>
   {{if $d.Changed}}
   {{if $d.NewImage}}<div class="imagechange">
-    <p class="flat"><span class="dim">Image</span> <span class="mono">{{imageRepo $d.OldImage}}</span> <span class="mono">{{imageShort $d.OldImage}}</span> → {{if ne (imageRepo $d.OldImage) (imageRepo $d.NewImage)}}<span class="mono">{{imageRepo $d.NewImage}}</span> {{end}}<span class="mono strong">{{imageShort $d.NewImage}}</span></p>
+    <table class="kv">
+      <tbody>
+        <tr><td class="dim">Image now</td><td><span class="mono dim">{{imageRepo $d.OldImage}}</span> <span class="mono">{{imageShort $d.OldImage}}</span></td></tr>
+        <tr><td class="dim">Proposed</td><td><span class="mono dim">{{imageRepo $d.NewImage}}</span> <span class="mono strong">{{imageShort $d.NewImage}}</span></td></tr>
+      </tbody>
+    </table>
     <details class="howto"><summary>Full image reference</summary>
       <div class="panel spaced"><p class="flat dim small">Current</p><pre class="secret" id="image-old">{{$d.OldImage}}</pre><button type="button" class="small" data-copy="image-old" hidden>Copy</button>
       <p class="flat dim small">Proposed</p><pre class="secret" id="image-new">{{$d.NewImage}}</pre><button type="button" class="small" data-copy="image-new" hidden>Copy</button></div>
     </details>
   </div>{{end}}
+  {{if and $d.NewImage (eq $d.Added 1) (eq $d.Removed 1)}}<details class="howto spaced"><summary>Show YAML diff</summary>{{end}}
   <div class="diff" role="table" aria-label="the change, line by line">
     {{range $d.Diff}}{{if eq .Op ""}}<div class="gap" role="row"><span role="cell">…</span></div>{{else}}<div class="{{if eq .Op "+"}}in{{else if eq .Op "-"}}out{{end}}" role="row"><span class="ln" role="cell">{{if .Old}}{{.Old}}{{end}}</span><span class="ln" role="cell">{{if .New}}{{.New}}{{end}}</span><span class="op" role="cell" aria-label="{{if eq .Op "+"}}added{{else if eq .Op "-"}}removed{{else}}kept{{end}}">{{.Op}}</span><span class="tx" role="cell"{{if .Short}} title="{{.Text}}"{{end}}>{{if .Short}}{{.Short}}{{else}}{{.Text}}{{end}}</span></div>{{end}}{{end}}
   </div>
+  {{if and $d.NewImage (eq $d.Added 1) (eq $d.Removed 1)}}</details>{{end}}
   {{else}}
   <p class="calm">Nothing changes: the spec is the one {{$a.Name}} runs.</p>
   {{end}}

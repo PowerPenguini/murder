@@ -1,6 +1,17 @@
 {{define "content"}}{{$d := .Data}}
 <div class="head page-title">
   <h1>Apps</h1>
+  <details class="drop end" id="new-app"{{if $d.Name}} open{{end}}>
+    <summary class="button{{if not $.Alerts.Apps}} primary{{end}}">New app</summary>
+    <div class="pop app-new">
+      <form method="post" action="/apps" class="stack">
+        <label class="field">Name <input type="text" name="name" value="{{$d.Name}}" placeholder="web" autocomplete="off" spellcheck="false" required class="short" maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end"></label>
+        <label class="field"><span>Spec, the file <code>murder app apply</code> takes</span>
+          <textarea name="file" rows="10" spellcheck="false">{{$d.File}}</textarea></label>
+        <div><button type="submit" class="primary">Create the app</button></div>
+      </form>
+    </div>
+  </details>
 </div>
 <p class="lead">The specs their tenants share. A change rolls out to every tenant of the app, in waves.</p>
 
@@ -10,7 +21,7 @@
     <tbody>
     {{range $i, $a := $d.Apps}}{{with $a}}
       <tr>
-        <td class="l-main"><a class="row-link" href="/apps/{{.Name}}">{{.Name}}</a>{{if .Revision}} <span class="dim small">revision {{.Revision}}</span>{{end}}</td>
+        <td class="l-main"><a class="row-link" href="/apps/{{.Name}}">{{.Name}}</a>{{if .Revision}} <span class="dim small nowrap">revision {{.Revision}}</span>{{end}}</td>
         <td class="l-side">{{$st := index $d.States .Name}}{{if $st.Blockers}}<a href="/apps/{{.Name}}#rollout" class="st bad">rollout blocked by {{range $i, $b := $st.Blockers}}{{if $i}}, {{end}}{{$b}}{{end}}</a>{{else}}{{with .Rollout}}{{if eq .State "running"}}<span class="st busy">rolling out</span>{{else if eq .State "paused"}}<span class="st warn">rollout paused</span>{{else}}<span class="st ok">current</span>{{end}}{{else}}<span class="st ok">current</span>{{end}}{{end}}
           {{with $st.Memory}}<div class="reason{{if .Bad}} bad{{end}}"><span class="st {{if .Bad}}bad{{else}}warn{{end}}"></span>{{len .Hit}} of {{.Inherit}} tenants out of memory in 24 h</div>{{end}}
           {{if $a.Latest}}<div class="reason"><span class="st warn"></span>newer image waiting</div>{{end}}</td>
@@ -19,21 +30,10 @@
         <td class="when hide-narrow">{{ago .UpdatedAt}} ago</td>
       </tr>
     {{end}}{{else}}
-      <tr><td colspan="5" class="empty l-main">No app yet. Make one below: its tenants share its spec.</td></tr>
+      <tr><td colspan="5" class="empty l-main">No app yet. Make one with New app, above: its tenants share its spec.</td></tr>
     {{end}}
     </tbody>
   </table>
 </section>
 
-<section id="new-app">
-  <details class="newapp"{{if $d.Name}} open{{end}}>
-    <summary class="button primary">New app</summary>
-    <form method="post" action="/apps" class="stack panel spaced">
-      <label class="field">Name <input type="text" name="name" value="{{$d.Name}}" placeholder="web" autocomplete="off" spellcheck="false" required class="short" maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end"></label>
-      <label class="field">Spec (the same file <code>murder app apply</code> takes)
-        <textarea name="file" rows="10" spellcheck="false">{{$d.File}}</textarea></label>
-      <div><button type="submit" class="primary">Create the app</button></div>
-    </form>
-  </details>
-</section>
 {{end}}
