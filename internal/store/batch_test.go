@@ -1,8 +1,11 @@
 package store
 
 import (
+	"crypto/ed25519"
 	"database/sql"
+	"encoding/base64"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -214,7 +217,7 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{`ALTER TABLE tenants DROP COLUMN app_revision`, `ALTER TABLE tenants DROP COLUMN before_revision`, `ALTER TABLE tenants DROP COLUMN canary`, `ALTER TABLE tenants DROP COLUMN hold`, `ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN moved_on`, `DROP TABLE rollouts`, `DROP TABLE app_revisions`, `ALTER TABLE apps DROP COLUMN tag`, `ALTER TABLE apps DROP COLUMN revision`, `ALTER TABLE apps DROP COLUMN latest`, `ALTER TABLE apps DROP COLUMN latest_at`, `ALTER TABLE nodes DROP COLUMN failed_at`, `ALTER TABLE nodes DROP COLUMN away_until`, `ALTER TABLE nodes DROP COLUMN copies_refused_until`, `DROP TABLE nodes`, `DROP TABLE devices`, `DROP TABLE panel_sessions`, `DROP TABLE panel_enrollments`, `DROP TABLE panel_passkeys`, `DROP TABLE panel_users`, `DROP TABLE panel_secrets`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`, `ALTER TABLE tenants DROP COLUMN rollout`, `ALTER TABLE tenants DROP COLUMN move_to`, `ALTER TABLE tenants DROP COLUMN move_held`, `ALTER TABLE tenants DROP COLUMN replica`, `ALTER TABLE tenants DROP COLUMN replica_ready`, `ALTER TABLE tenants DROP COLUMN replica_next`} {
+	for _, statement := range []string{`ALTER TABLE tenants DROP COLUMN app_revision`, `ALTER TABLE tenants DROP COLUMN before_revision`, `ALTER TABLE tenants DROP COLUMN canary`, `ALTER TABLE tenants DROP COLUMN hold`, `ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN moved_on`, `DROP TABLE admissions`, `DROP TABLE departed_keys`, `DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE rollouts`, `DROP TABLE app_revisions`, `ALTER TABLE apps DROP COLUMN tag`, `ALTER TABLE apps DROP COLUMN revision`, `ALTER TABLE apps DROP COLUMN latest`, `ALTER TABLE apps DROP COLUMN latest_at`, `ALTER TABLE nodes DROP COLUMN failed_at`, `ALTER TABLE nodes DROP COLUMN away_until`, `ALTER TABLE nodes DROP COLUMN copies_refused_until`, `DROP TABLE nodes`, `DROP TABLE devices`, `DROP TABLE panel_sessions`, `DROP TABLE panel_enrollments`, `DROP TABLE panel_passkeys`, `DROP TABLE panel_users`, `DROP TABLE panel_secrets`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`, `ALTER TABLE tenants DROP COLUMN rollout`, `ALTER TABLE tenants DROP COLUMN move_to`, `ALTER TABLE tenants DROP COLUMN move_held`, `ALTER TABLE tenants DROP COLUMN replica`, `ALTER TABLE tenants DROP COLUMN replica_ready`, `ALTER TABLE tenants DROP COLUMN replica_next`} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -272,7 +275,7 @@ func TestOpenUpgradesSchemaVersion5(t *testing.T) {
 		`ALTER TABLE tenants DROP COLUMN canary`,
 		`ALTER TABLE tenants DROP COLUMN hold`,
 		`ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN moved_on`,
-		`DROP TABLE rollouts`,
+		`DROP TABLE admissions`, `DROP TABLE departed_keys`, `DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE rollouts`,
 		`DROP TABLE app_revisions`,
 		`ALTER TABLE apps DROP COLUMN tag`,
 		`ALTER TABLE apps DROP COLUMN revision`,
@@ -326,4 +329,79 @@ func TestOpenUpgradesSchemaVersion5(t *testing.T) {
 	if err := st.Apply(Batch{Schema: 5, Version: st.state.Load().version, Statements: recorded.statements}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A cluster from before identity keys upgrades node by node: the state of
+// schema 15 opens with no keys, its batches still apply, and a snapshot a
+// node of that release made still installs.
+func TestAStateFromBeforeIdentityKeysStillServes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", initDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		schema,
+		`DROP TABLE admissions`,
+		`DROP TABLE departed_keys`,
+		`DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`,
+		`DROP TRIGGER nodes_key_not_replaced`,
+		`ALTER TABLE nodes DROP COLUMN key`,
+		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '4'), ('applied', '9'), ('cluster', 'acme')`,
+		`INSERT INTO nodes (name, address, created_at) VALUES ('n1', '10.0.0.1:7400', '2026-10-01T00:00:00Z')`,
+		`PRAGMA user_version = 15`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A node of this release installs it, as a joining node would.
+	fresh, _ := openNew(t, options())
+	if installed, err := fresh.InstallSnapshot(mustOpen(t, path)); err != nil || !installed {
+		t.Fatalf("install a schema 15 snapshot: %v, %v", installed, err)
+	}
+	if key, ok := fresh.NodeKey("n1"); !ok || key != "" || fresh.Cluster() != "acme" {
+		t.Fatalf("installed node key %q, %v, cluster %s", key, ok, fresh.Cluster())
+	}
+	// The database itself upgrades in place.
+	st, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if key, ok := st.NodeKey("n1"); !ok || key != "" {
+		t.Fatalf("upgraded node key %q, %v", key, ok)
+	}
+	// A batch of a schema 15 node, adding a node without a key, applies.
+	recorded := &recorder{}
+	_ = recorded.Exec(`INSERT INTO nodes (name, address, created_at) VALUES (?, ?, ?)
+			ON CONFLICT (name) DO UPDATE SET address = excluded.address, copies_refused_until = NULL`, "n2", "10.0.0.2:7400", "2026-10-03T00:00:00Z")
+	if err := st.Apply(Batch{Schema: 15, Version: st.state.Load().version, Statements: recorded.statements}); err != nil {
+		t.Fatal(err)
+	}
+	if key, ok := st.NodeKey("n2"); !ok || key != "" {
+		t.Fatalf("node of a schema 15 batch: key %q, %v", key, ok)
+	}
+	// The node registers its key once, and the upgraded state keeps it.
+	if err := st.SetNodeKey("n2", base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)), "node n2"); err != nil {
+		t.Fatal(err)
+	}
+	recorded = &recorder{}
+	_ = recorded.Exec(`UPDATE nodes SET key = '' WHERE name = 'n2'`)
+	if err := st.Apply(Batch{Schema: SchemaVersion, Version: st.state.Load().version, Statements: recorded.statements}); !Refused(err) {
+		t.Fatalf("a pinned key cleared after the upgrade: %v", err)
+	}
+}
+
+func mustOpen(t *testing.T, path string) *os.File {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { file.Close() })
+	return file
 }

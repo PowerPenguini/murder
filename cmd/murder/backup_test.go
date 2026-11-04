@@ -46,7 +46,7 @@ func TestBackupAndRestore(t *testing.T) {
 	if _, err := st.Create(store.NewTenant{Name: "acme", App: "web"}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	socket := filepath.Join(dir, "agent.sock")
+	socket := filepath.Join(socketDir(t), "agent.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

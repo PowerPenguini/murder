@@ -111,7 +111,7 @@ func (a *fakeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func startAgent(t *testing.T, tenants ...api.Tenant) (*fakeAgent, string) {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "agent.sock")
+	socket := filepath.Join(socketDir(t), "agent.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -336,4 +336,21 @@ func TestRollAllGoesOneAtATimeAndStopsAtTheFirstUnhealthy(t *testing.T) {
 	if !slices.Equal(rolled, []string{"acme", "beta", "slow"}) {
 		t.Fatalf("rolled %v", rolled)
 	}
+}
+
+// socketDir is a directory for a Unix socket, with a short path: the test's
+// own temporary directory, named after it, may make one too long to bind
+// (108 bytes at most), and so may a long TMPDIR.
+func socketDir(t *testing.T) string {
+	t.Helper()
+	base := os.TempDir()
+	if len(base) > 60 {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, "ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }

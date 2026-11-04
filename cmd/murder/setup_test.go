@@ -36,7 +36,7 @@ func TestSetupWaitsOnTheConfiguredSocket(t *testing.T) {
 	socket, _ := serveAgent(t, func(_ string, w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("[]"))
 	})
-	t.Setenv("MURDER_SOCKET", filepath.Join(t.TempDir(), "no-agent.sock"))
+	t.Setenv("MURDER_SOCKET", filepath.Join(socketDir(t), "no-agent.sock"))
 	cfg := nodeConfig(t, t.TempDir(), "socket: "+socket+"\n")
 	capture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

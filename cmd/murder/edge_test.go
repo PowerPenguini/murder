@@ -90,7 +90,7 @@ func testEdgeUpgrade(t *testing.T, secure bool) {
 socket: %s
 firewall: "off"
 edge: %s
-`, filepath.Join(dir, "agent.sock"), edgeConfig)
+`, filepath.Join(socketDir(t), "agent.sock"), edgeConfig)
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}

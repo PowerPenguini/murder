@@ -47,6 +47,29 @@ type changes struct {
 	// whole is set by a change the hook cannot place: the state is then
 	// read whole.
 	whole bool
+	// meta are the keys of the meta table's rows changed, while noted.
+	meta map[string]bool
+}
+
+// noteMeta notes the keys of a meta row changed: the old one and the new.
+func (c *changes) noteMeta(data sqlite.SQLitePreUpdateData) {
+	for _, row := range []struct {
+		has  bool
+		read func(...any) error
+	}{
+		{data.Op != sqlite3Insert, data.Old},
+		{data.Op != sqlite3Delete, data.New},
+	} {
+		if !row.has {
+			continue
+		}
+		values := make([]any, 1)
+		if err := row.read(values...); err != nil {
+			c.meta["?"] = true
+			continue
+		}
+		c.meta[fmt.Sprint(values[0])] = true
+	}
 }
 
 // keyed tells, for each table whose rows are read again by key, which of
@@ -68,6 +91,8 @@ var partOf = map[string]string{
 	"app_revisions":     "revisions",
 	"rollouts":          "rollouts",
 	"nodes":             "nodes",
+	"admissions":        "nodes",
+	"departed_keys":     "nodes",
 	"devices":           "devices",
 	"images":            "images",
 	"panel_users":       "panel",
@@ -93,6 +118,9 @@ func (c *changes) note(data sqlite.SQLitePreUpdateData) {
 		return
 	}
 	c.tables[data.TableName] = true
+	if data.TableName == "meta" && c.meta != nil {
+		c.noteMeta(data)
+	}
 	key, ok := keyed[data.TableName]
 	if !ok {
 		if _, known := partOf[data.TableName]; !known && data.TableName != "apps" {
@@ -272,6 +300,8 @@ func snapshotDiff(whole, part *snapshot) string {
 		}
 	}
 	diff("nodes", whole.nodes, part.nodes)
+	diff("admissions", whole.admissions, part.admissions)
+	diff("departed", whole.departed, part.departed)
 	diff("devices", whole.devices, part.devices)
 	diff("panel", whole.panel, part.panel)
 	if !reflect.DeepEqual(whole.images, part.images) {

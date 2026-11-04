@@ -61,6 +61,12 @@ type Batch struct {
 	// state changed.
 	Signal     bool        `json:"signal,omitempty"`
 	Statements []Statement `json:"statements"`
+	// LeaderOnly marks a change of who the cluster's nodes are: a node
+	// added, taken out or given its identity key, or a host admitted. Only
+	// the leader makes one, from its own checks, and appends it itself: it
+	// is never handed to another node, and the leader takes none from one.
+	// It stays with the writer, never in the log.
+	LeaderOnly bool `json:"-"`
 }
 
 // Statement is one SQL statement of a batch with its arguments.
@@ -138,6 +144,9 @@ func DecodeBatch(data []byte) (Batch, error) {
 // statement returns.
 type recorder struct {
 	statements []Statement
+	// leaderOnly makes the batch a change of who the nodes are (see
+	// Batch.LeaderOnly).
+	leaderOnly bool
 }
 
 func (r *recorder) Exec(query string, args ...any) error {
@@ -156,14 +165,25 @@ func (r *recorder) Exec(query string, args ...any) error {
 	return nil
 }
 
+// changesRows matches how a statement of a batch begins: it changes rows,
+// as every statement the store writes does. Anything else (transaction
+// control, schema changes, pragmas, attaching) is refused here, before the
+// log, and by batchAuthorizer as every node applies it, whatever the text.
+var changesRows = regexp.MustCompile(`(?i)^\s*(insert|update|delete|replace)\b`)
+
 // Check refuses a batch no node of this release can apply, of another
 // schema version than a release that writes batches or with malformed
-// arguments, and one whose statements may give nodes different results. The leader checks every batch before it enters the log.
+// arguments, one whose statements may give nodes different results, and
+// one with a statement that does other than change rows. The leader checks
+// every batch before it enters the log.
 func (b Batch) Check() error {
 	if b.Schema < firstBatchSchema || b.Schema > schemaVersion {
 		return fmt.Errorf("%w: a batch for schema version %d, the leader runs %d: upgrade it", ErrSchema, b.Schema, schemaVersion)
 	}
 	for _, statement := range b.Statements {
+		if !changesRows.MatchString(statement.SQL) {
+			return fmt.Errorf("%w: a batch's statements change rows, and this one does not: %s", ErrInvalid, statement.SQL)
+		}
 		if _, err := statement.values(); err != nil {
 			return err
 		}

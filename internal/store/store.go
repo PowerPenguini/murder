@@ -232,6 +232,19 @@ type Node struct {
 	Public []netip.Addr `json:"public,omitempty"`
 	// Tunnel is the node's end of the panel's tunnel, once its panel ran.
 	Tunnel *Tunnel `json:"tunnel,omitempty"`
+	// Key is the public key of the node's identity, which its cluster
+	// certificate must carry: ed25519, in base64. Empty for a node of a
+	// release before keys, until it registers its own.
+	Key string `json:"key,omitempty"`
+}
+
+// Admission lets a host that brought an invitation join as node Name, with
+// the identity key Key, until Expires.
+type Admission struct {
+	Name    string    `json:"name"`
+	Key     string    `json:"key"`
+	Expires time.Time `json:"expires"`
+	Actor   string    `json:"actor"`
 }
 
 // Tunnel is a node's end of the panel's WireGuard tunnel.
@@ -444,13 +457,14 @@ type Store interface {
 
 	// Nodes lists the nodes of the cluster by name; a node outside a
 	// cluster has none. PutNode adds a node or changes its address;
-	// AddNode adds one, refusing a node of that name at another address;
+	// AddNode adds one that joins, refusing a node of that name at another
+	// address, one not admitted and another key for a voter;
 	// RemoveNode removes one that runs no tenant, archived or not.
 	Nodes() []Node
 	// Cluster names the cluster the state belongs to; empty outside one.
 	Cluster() string
 	PutNode(node Node, actor string) error
-	AddNode(node Node, actor string) error
+	AddNode(node Node, voter func(name string) bool, actor string) error
 	RemoveNode(name, actor string) error
 
 	// Frozen says why changes are refused, while an upgrade runs; empty

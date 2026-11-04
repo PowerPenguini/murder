@@ -208,6 +208,8 @@ func runAgent(args []string) error {
 		defer member.Close()
 		started.Store(member)
 		invites.Invitation = member.Invitation
+		invites.Voter = member.Voter
+		invites.Admit = member.Admit
 		upgrader.catchUp = member.CatchUp
 		mover = &move.Mover{Store: st, Reconciler: reconciler, Volumes: volumes, Peer: clusterPeer{member}, Log: log, CatchUp: member.CatchUp}
 		moves.setCluster(member, mover)

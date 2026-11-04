@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -32,10 +33,17 @@ const (
 // They follow the master key ring: the node presents a certificate of the
 // authority derived from the key in use and trusts the authorities of
 // every key in the ring, so nodes part way through a rotation still know
-// each other. Update changes them as they run.
+// each other. Update changes them as they run. A node's certificate is
+// issued over its identity key, which stays as the authorities change.
 type Credentials struct {
-	node  string
-	state atomic.Pointer[credentialState]
+	node string
+	// identity is the node's identity key; nil for an edge, whose
+	// certificate has a key of its own for each run.
+	identity ed25519.PrivateKey
+	state    atomic.Pointer[credentialState]
+	// servers, once set, checks the node a connection this node made
+	// reached: its name and identity key.
+	servers atomic.Pointer[func(name string, key ed25519.PublicKey) error]
 }
 
 type credentialState struct {
@@ -50,11 +58,11 @@ type credentialState struct {
 
 // NewCredentials derives the cluster's certificate authorities from seeds,
 // the one in use first, so every node with the same master key has the
-// same authorities and nothing but the master key is shared, and issues
-// node a certificate for this run of the agent; its key never leaves
-// memory.
-func NewCredentials(seeds [][]byte, node string, now time.Time) (*Credentials, error) {
-	c := &Credentials{node: node}
+// same authorities, and issues node a certificate over its identity key.
+// Without one, as for an edge, the certificate's key is made for this run
+// and never leaves memory.
+func NewCredentials(seeds [][]byte, node string, identity ed25519.PrivateKey, now time.Time) (*Credentials, error) {
+	c := &Credentials{node: node, identity: identity}
 	if err := c.Update(seeds, now); err != nil {
 		return nil, err
 	}
@@ -83,9 +91,13 @@ func (c *Credentials) Update(seeds [][]byte, now time.Time) error {
 			current, currentKey = ca, key
 		}
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return err
+	var key crypto.Signer = c.identity
+	if c.identity == nil {
+		ephemeral, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return err
+		}
+		key = ephemeral
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
@@ -173,7 +185,8 @@ func (c *Credentials) server() *tls.Config {
 	}
 }
 
-// client dials nodes of the cluster only, for one protocol.
+// client dials nodes of the cluster only, for one protocol: certificates
+// of its authorities, of the nodes that servers, once set, accepts.
 func (c *Credentials) client(protocol string) *tls.Config {
 	state := c.state.Load()
 	return &tls.Config{
@@ -182,7 +195,24 @@ func (c *Credentials) client(protocol string) *tls.Config {
 		RootCAs:      state.pool,
 		ServerName:   serverName,
 		NextProtos:   []string{protocol},
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			check := c.servers.Load()
+			if check == nil {
+				return nil
+			}
+			name, key, err := peerIdentity(&cs)
+			if err != nil {
+				return err
+			}
+			return (*check)(name, key)
+		},
 	}
+}
+
+// checkServers has every connection this node makes check the node it
+// reached with check.
+func (c *Credentials) checkServers(check func(name string, key ed25519.PublicKey) error) {
+	c.servers.Store(&check)
 }
 
 // RelayServer accepts other nodes' edges passing requests on to this
@@ -225,12 +255,4 @@ func (c *Credentials) RelayClient() *tls.Config {
 			return err
 		},
 	}
-}
-
-// peerName is the node name in the certificate a peer presented.
-func peerName(state *tls.ConnectionState) (string, error) {
-	if state == nil || len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) == 0 {
-		return "", errors.New("no verified cluster certificate")
-	}
-	return state.VerifiedChains[0][0].Subject.CommonName, nil
 }

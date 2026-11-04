@@ -12,6 +12,9 @@
 #   nodes.sh load SECONDS       read every tenant through every edge, count failures
 #   nodes.sh status             the cluster and its tenants as n1 sees them
 #   nodes.sh counter TENANT S   write a counter to a tenant for S seconds: outages, writes lost
+#   (steady.sh: read every tenant through every edge until told to stop, one
+#   line per request, for counting failures per phase of a test; forge/: what
+#   a certificate made with the master key alone gets on a cluster port)
 #   nodes.sh poweroff NODE      power a node off through Hetzner's API, as if it died
 #   nodes.sh poweron NODE       power it on again
 #   nodes.sh partition NODE     cut a node off the private network; it keeps running
@@ -219,7 +222,12 @@ cmd_join() {
   local node=$1
   log "joining $node"
   init_with_key "$node"
-  on "$node" "murder cluster join $(private_ip n1):7400"
+  # A node joins only with an invitation, which goes over stdin, never on
+  # a command line.
+  local invitation
+  invitation=$(on n1 'murder cluster invite' | grep -o 'setup -join [^ ]*' | head -1 | awk '{print $3}')
+  [[ $invitation == */*/* ]] || die "no invitation from n1"
+  printf '%s\n' "$invitation" | on "$node" 'murder cluster join -'
 }
 
 cmd_cluster() {
@@ -374,5 +382,5 @@ case $cmd in
   partition) cmd_partition "${1:?node}" ;;
   dns) cmd_dns ;;
   ssh) node=${1:?node}; shift; on "$node" "$@" ;;
-  *) sed -n 2,18p "$0" >&2; exit 2 ;;
+  *) sed -n 2,21p "$0" >&2; exit 2 ;;
 esac

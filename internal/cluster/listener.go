@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -41,6 +43,14 @@ type listener struct {
 	raft, http, join chan net.Conn
 	done             chan struct{}
 	once             sync.Once
+	// raftPeer, once set, checks the node a Raft connection comes from:
+	// none is taken before.
+	raftPeer atomic.Pointer[func(name string, key ed25519.PublicKey) error]
+	// raftConns are the Raft connections taken and made, with the node at
+	// the other end of each, so that one with a node no longer a member, or
+	// no longer with that key, is closed.
+	mu        sync.Mutex
+	raftConns map[*raftConn]struct{}
 }
 
 func listen(address string, credentials *Credentials, cluster func() string, log *slog.Logger) (*listener, error) {
@@ -48,7 +58,7 @@ func listen(address string, credentials *Credentials, cluster func() string, log
 	if err != nil {
 		return nil, err
 	}
-	l := &listener{inner: inner, credentials: credentials, cluster: cluster, log: log, pending: make(chan struct{}, handshakes), joining: make(chan struct{}, joins), raft: make(chan net.Conn), http: make(chan net.Conn), join: make(chan net.Conn), done: make(chan struct{})}
+	l := &listener{inner: inner, credentials: credentials, cluster: cluster, log: log, pending: make(chan struct{}, handshakes), joining: make(chan struct{}, joins), raft: make(chan net.Conn), http: make(chan net.Conn), join: make(chan net.Conn), done: make(chan struct{}), raftConns: map[*raftConn]struct{}{}}
 	go l.accept()
 	return l, nil
 }
@@ -90,6 +100,7 @@ func (l *listener) route(conn *tls.Conn) {
 		return
 	}
 	target := l.http
+	var routed net.Conn = conn
 	if conn.ConnectionState().NegotiatedProtocol == protocolJoin {
 		select {
 		case l.joining <- struct{}{}:
@@ -119,12 +130,76 @@ func (l *listener) route(conn *tls.Conn) {
 			_ = conn.Close()
 			return
 		}
+		// Nor from a node that is not one of its members, or names one in
+		// a certificate without the member's identity key: the master key
+		// alone makes a certificate for any name.
+		state := conn.ConnectionState()
+		name, key, err := peerIdentity(&state)
+		if check := l.raftPeer.Load(); err == nil {
+			if check == nil {
+				err = errors.New("the node is starting")
+			} else {
+				err = (*check)(name, key)
+			}
+		}
+		if err != nil {
+			l.log.Debug("refused a Raft connection of a node that is not a member", "from", conn.RemoteAddr().String(), "node", name, "error", err)
+			_ = conn.Close()
+			return
+		}
+		routed = l.track(conn, name, key)
 		target = l.raft
 	}
 	_ = conn.SetDeadline(time.Time{})
 	select {
-	case target <- conn:
+	case target <- routed:
 	case <-l.done:
+		_ = routed.Close()
+	}
+}
+
+// raftConn is a Raft connection taken from node, or made to it, with
+// identity key key.
+type raftConn struct {
+	net.Conn
+	node string
+	key  ed25519.PublicKey
+	l    *listener
+	once sync.Once
+}
+
+func (r *raftConn) Close() error {
+	r.once.Do(func() {
+		r.l.mu.Lock()
+		delete(r.l.raftConns, r)
+		r.l.mu.Unlock()
+	})
+	return r.Conn.Close()
+}
+
+// track keeps a Raft connection taken from node, until it closes.
+func (l *listener) track(conn net.Conn, node string, key ed25519.PublicKey) net.Conn {
+	tracked := &raftConn{Conn: conn, node: node, key: key, l: l}
+	l.mu.Lock()
+	l.raftConns[tracked] = struct{}{}
+	l.mu.Unlock()
+	return tracked
+}
+
+// sweep closes the Raft connections, taken or made, with nodes check no
+// longer accepts, such as one removed from the cluster since, or given
+// another key.
+func (l *listener) sweep(check func(name string, key ed25519.PublicKey) error) {
+	l.mu.Lock()
+	var refused []*raftConn
+	for conn := range l.raftConns {
+		if check(conn.node, conn.key) != nil {
+			refused = append(refused, conn)
+		}
+	}
+	l.mu.Unlock()
+	for _, conn := range refused {
+		l.log.Info("closed a Raft connection of a node that is no longer a member", "node", conn.node)
 		_ = conn.Close()
 	}
 }
@@ -185,7 +260,16 @@ func (s *stream) Dial(address raft.ServerAddress, timeout time.Duration) (net.Co
 		return nil, err
 	}
 	_ = conn.SetWriteDeadline(time.Time{})
-	return conn, nil
+	// Kept with the node it reached, so the sweep closes it once that node
+	// is no member any more, or no longer has that key: Raft dials again,
+	// and the dial checks it.
+	state := conn.(*tls.Conn).ConnectionState()
+	name, key, err := peerIdentity(&state)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return s.l.track(conn, name, key), nil
 }
 
 // handshaken is a TLS connection of a host with an invitation, its

@@ -4,13 +4,20 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 13 in place.
-const schemaVersion = 15
+// versions 4 to 15 in place.
+const schemaVersion = 16
+
+// IdentitySchema is the schema version that pins each node's identity
+// key in the state: a node registers its key only once every node runs a
+// release of this version or later, which applies that write.
+const IdentitySchema = 16
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -154,8 +161,44 @@ CREATE TABLE nodes (
 	public     TEXT NOT NULL DEFAULT '',
 	-- The node's end of the panel's WireGuard tunnel: its address in the
 	-- tunnel, its public key and its UDP port, separated by spaces.
-	tunnel     TEXT NOT NULL DEFAULT ''
+	tunnel     TEXT NOT NULL DEFAULT '',
+	-- The public key of the node's identity, which its cluster certificate
+	-- must carry: ed25519, in base64. Empty for a node of a release before
+	-- keys, until it registers its own.
+	key        TEXT NOT NULL DEFAULT ''
 ) STRICT;
+
+-- Hosts an invitation let in, which may join as the node of that name
+-- with that identity key until the admission expires.
+CREATE TABLE admissions (
+	name       TEXT PRIMARY KEY,
+	key        TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	actor      TEXT NOT NULL
+) STRICT;
+-- The identity keys of nodes taken out of the state, by name: a node is
+-- taken out of the state before the voters, and while it still votes, Raft
+-- takes it by this key, never by its name alone (an empty key: by its
+-- name, for a node of a cluster from before keys that registered none).
+-- seq tells one departure of a name from the next: the state's version as
+-- the node was taken out.
+CREATE TABLE departed_keys (
+	name TEXT PRIMARY KEY,
+	key  TEXT NOT NULL,
+	seq  INTEGER NOT NULL
+) STRICT;
+
+-- A node keeps its identity key: see identityTriggers.
+CREATE TRIGGER nodes_key_kept BEFORE UPDATE ON nodes
+WHEN OLD.key != '' AND (NEW.key != OLD.key OR NEW.name != OLD.name)
+BEGIN
+	SELECT RAISE(ABORT, 'a node keeps its identity key: take the node out to drop it');
+END;
+CREATE TRIGGER nodes_key_not_replaced BEFORE INSERT ON nodes
+WHEN EXISTS (SELECT 1 FROM nodes WHERE name = NEW.name AND key != '' AND key != NEW.key)
+BEGIN
+	SELECT RAISE(ABORT, 'a node keeps its identity key: take the node out to drop it');
+END;
 
 -- The devices that may reach the panel through its tunnel: a WireGuard
 -- public key each, and its address in the tunnel.
@@ -238,6 +281,18 @@ CREATE TABLE events (
 
 CREATE INDEX events_tenant ON events (tenant, id);
 CREATE INDEX events_app ON events (app, id);
+
+-- An event's id stays well below SQLite's largest rowid: see eventTriggers.
+CREATE TRIGGER events_id_bounded BEFORE INSERT ON events
+WHEN NEW.id > 4611686018427387904
+BEGIN
+	SELECT RAISE(ABORT, 'an event id is at most 2^62');
+END;
+CREATE TRIGGER events_id_kept_bounded BEFORE UPDATE ON events
+WHEN NEW.id > 4611686018427387904
+BEGIN
+	SELECT RAISE(ABORT, 'an event id is at most 2^62');
+END;
 `
 
 // checkSchema refuses a database this release cannot run on.
@@ -424,6 +479,31 @@ func upgrade(db *sql.DB) error {
 				return err
 			}
 		}
+		version = 15
+	}
+	// Version 16 pins each node's identity key and admits hosts that bring
+	// an invitation. Nodes stored before have no key until they register
+	// theirs.
+	if version == 15 {
+		// Events of ids past the bound the triggers below keep go below it
+		// first, or the next event would get a random id.
+		if err := boundEventIDs(tx); err != nil {
+			return err
+		}
+		for _, statement := range []string{
+			`ALTER TABLE nodes ADD COLUMN key TEXT NOT NULL DEFAULT ''`,
+			admissionsTable,
+			departedTable,
+			identityTriggers,
+			eventTriggers,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
+		}
+		if err := dropForeignObjects(tx); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return err
@@ -433,6 +513,225 @@ func upgrade(db *sql.DB) error {
 
 // SchemaVersion is the schema version of this release's databases.
 const SchemaVersion = schemaVersion
+
+// maxEventID is the largest id an event may have (see eventTriggers).
+const maxEventID = 1 << 62
+
+// boundEventIDs gives each event of an id past maxEventID an id below it,
+// in the order of their ids (see eventIDs). Every node holds the same
+// events, so every node gives them the same ids, and so does a node that
+// installs a snapshot of an older release (see InstallSnapshot). Events are
+// the audit log, kept, not dropped; nothing refers to an event by its id
+// but readers paging through the log, which an upgrade restarts anyway.
+func boundEventIDs(tx *sql.Tx) error {
+	high, err := highEventIDs(tx, "events")
+	if err != nil {
+		return err
+	}
+	ids, err := newEventIDs(tx, "events")
+	if err != nil {
+		return err
+	}
+	for _, old := range high {
+		id, err := ids.take()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE events SET id = ? WHERE id = ?`, id, old); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// highEventIDs lists the ids past maxEventID of the events in table, in
+// order.
+func highEventIDs(tx *sql.Tx, table string) ([]int64, error) {
+	rows, err := tx.Query(`SELECT id FROM `+table+` WHERE id > ? ORDER BY id`, maxEventID)
+	if err != nil {
+		return nil, err
+	}
+	var high []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		high = append(high, id)
+	}
+	return high, closeRows(rows)
+}
+
+// eventIDs gives events ids at most maxEventID, for events past it: the
+// ones after the largest id at most maxEventID first, then, once those run
+// out, the free ones from 1 up, in order. Each id taken must be in table
+// before the next is taken. Which ids it gives depends only on the ids in
+// table. Giving n ids reads the ids in table at most once, in order, a
+// page at a time: the cost is that of the ids and the events, not their
+// product.
+type eventIDs struct {
+	tx    *sql.Tx
+	table string
+	next  int64
+	// gap is the smallest id not yet known to be taken, once next ran out.
+	gap int64
+	// held are ids of table at least gap, read and not yet passed, in
+	// order; read is the largest id read, and done says none is left.
+	held []int64
+	read int64
+	done bool
+}
+
+// eventIDPage is how many ids eventIDs reads at a time.
+const eventIDPage = 4096
+
+func newEventIDs(tx *sql.Tx, table string) (*eventIDs, error) {
+	ids := &eventIDs{tx: tx, table: table, gap: 1}
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) + 1 FROM `+table+` WHERE id <= ?`, maxEventID).Scan(&ids.next); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func (e *eventIDs) take() (int64, error) {
+	if e.next <= maxEventID {
+		id := e.next
+		e.next++
+		return id, nil
+	}
+	for {
+		if e.gap > maxEventID {
+			return 0, errors.New("no event id is left below 2^62")
+		}
+		if len(e.held) == 0 && !e.done {
+			if err := e.readPage(); err != nil {
+				return 0, err
+			}
+		}
+		// Ids passed already, such as the ones taken, read again.
+		for len(e.held) > 0 && e.held[0] < e.gap {
+			e.held = e.held[1:]
+		}
+		if len(e.held) > 0 && e.held[0] == e.gap {
+			e.gap++
+			continue
+		}
+		if len(e.held) > 0 || e.done {
+			id := e.gap
+			e.gap++
+			return id, nil
+		}
+	}
+}
+
+// readPage reads the next ids of table, at most maxEventID, in order.
+func (e *eventIDs) readPage() error {
+	rows, err := e.tx.Query(`SELECT id FROM `+e.table+` WHERE id > ? AND id <= ? ORDER BY id LIMIT ?`, max(e.read, 0), maxEventID, eventIDPage)
+	if err != nil {
+		return err
+	}
+	count := 0
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		e.held = append(e.held, id)
+		e.read = id
+		count++
+	}
+	if err := closeRows(rows); err != nil {
+		return err
+	}
+	e.done = count < eventIDPage
+	return nil
+}
+
+// ownObjects are the indexes and triggers of the schema; it has no views.
+var ownObjects = []string{"tenants_app", "tenants_node", "events_tenant", "events_app", "nodes_key_kept", "nodes_key_not_replaced", "events_id_bounded", "events_id_kept_bounded"}
+
+// eventTriggers, of schema 16, keep events' ids, SQLite rowids, at most
+// 2^62. An event inserted without an id gets the largest one plus one,
+// unless that is SQLite's largest rowid: then it gets one at random, which
+// differs between nodes. Bounded so, the largest plus one never comes near
+// it, and a batch that would go past the bound is refused on every node
+// alike. events is the only replicated table whose key is a rowid; the
+// others' keys are text the store gives, and their hidden rowids no batch
+// may name (Check refuses rowid, _rowid_ and oid) or read.
+const eventTriggers = `CREATE TRIGGER events_id_bounded BEFORE INSERT ON events
+WHEN NEW.id > 4611686018427387904
+BEGIN
+	SELECT RAISE(ABORT, 'an event id is at most 2^62');
+END;
+CREATE TRIGGER events_id_kept_bounded BEFORE UPDATE ON events
+WHEN NEW.id > 4611686018427387904
+BEGIN
+	SELECT RAISE(ABORT, 'an event id is at most 2^62');
+END`
+
+// dropForeignObjects drops every trigger, view and index that is not part of
+// the schema, such as one a batch of an earlier release made: it would act
+// on changes, or read what differs between nodes, as no batch may.
+func dropForeignObjects(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT type, name FROM sqlite_master WHERE type IN ('trigger', 'view', 'index') AND name NOT LIKE 'sqlite\_%' ESCAPE '\'`)
+	if err != nil {
+		return err
+	}
+	var drops []string
+	for rows.Next() {
+		var kind, name string
+		if err := rows.Scan(&kind, &name); err != nil {
+			rows.Close()
+			return err
+		}
+		if !slices.Contains(ownObjects, name) {
+			drops = append(drops, fmt.Sprintf(`DROP %s "%s"`, strings.ToUpper(kind), strings.ReplaceAll(name, `"`, `""`)))
+		}
+	}
+	if err := closeRows(rows); err != nil {
+		return err
+	}
+	for _, drop := range drops {
+		if _, err := tx.Exec(drop); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// identityTriggers, of schema 16, keep a node's identity key once the
+// state holds one: no statement changes it, renames its node or puts a
+// node of the same name with another key, or none, in its place. Taking
+// the node's row out is the only way to drop it. They hold on every node
+// for every statement, whoever wrote it: a check of the state itself, not
+// of the code that writes it.
+const identityTriggers = `CREATE TRIGGER nodes_key_kept BEFORE UPDATE ON nodes
+WHEN OLD.key != '' AND (NEW.key != OLD.key OR NEW.name != OLD.name)
+BEGIN
+	SELECT RAISE(ABORT, 'a node keeps its identity key: take the node out to drop it');
+END;
+CREATE TRIGGER nodes_key_not_replaced BEFORE INSERT ON nodes
+WHEN EXISTS (SELECT 1 FROM nodes WHERE name = NEW.name AND key != '' AND key != NEW.key)
+BEGIN
+	SELECT RAISE(ABORT, 'a node keeps its identity key: take the node out to drop it');
+END`
+
+// departedTable is a table schema 16 added.
+const departedTable = `CREATE TABLE departed_keys (
+	name TEXT PRIMARY KEY,
+	key  TEXT NOT NULL,
+	seq  INTEGER NOT NULL
+) STRICT`
+
+// admissionsTable is the table schema 16 added.
+const admissionsTable = `CREATE TABLE admissions (
+	name       TEXT PRIMARY KEY,
+	key        TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	actor      TEXT NOT NULL
+) STRICT`
 
 // rolloutsTable is the table schema 15 added.
 const rolloutsTable = `CREATE TABLE rollouts (

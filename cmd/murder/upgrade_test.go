@@ -95,7 +95,7 @@ func (a *upgradeAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func startUpgradeAgent(t *testing.T, agent *upgradeAgent) (*api.Client, string) {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "agent.sock")
+	socket := filepath.Join(socketDir(t), "agent.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -232,11 +233,18 @@ func joinCluster(ctx context.Context, host setup.System, facts setup.Facts, opts
 		return errors.New("nothing was changed; the invitation was not used")
 	}
 	fmt.Fprintln(stdout, "\n→ take the cluster's master key, config and tokens from "+invite.Address)
+	// The node's identity key is made here, so the invitation admits it.
+	if own.Identity, err = cluster.NewIdentity(); err != nil {
+		return err
+	}
 	asking, cancel := context.WithTimeout(ctx, time.Minute)
-	bundle, err := cluster.Join(asking, invite, own.Node)
+	bundle, err := cluster.Redeem(asking, invite, own.Node, own.Identity.Public().(ed25519.PublicKey))
 	cancel()
 	if err != nil {
 		return err
+	}
+	if len(bundle.Members) == 0 {
+		return cluster.ErrOlderCluster
 	}
 	in, agent, err := setup.Adopt(bundle, own)
 	if err != nil {
@@ -254,7 +262,7 @@ func joinCluster(ctx context.Context, host setup.System, facts setup.Facts, opts
 	fmt.Fprintln(stdout, "→ join the cluster "+bundle.Cluster)
 	joining, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	status, err := client.Join(joining, invite.Address)
+	status, err := client.Join(joining, invite.Address, bundle.Members)
 	if err != nil {
 		return fmt.Errorf("join the cluster: %w", err)
 	}

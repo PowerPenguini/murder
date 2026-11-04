@@ -24,6 +24,7 @@ Node commands:
   firewall   load the tenant firewall (murder-firewall.service runs it at boot)
   restore    put a backup in place of the node's database (agent stopped)
   cluster    show, start, join or leave a cluster of nodes
+  node       show this node's identity key in its cluster
   key        show or rotate the master key of every node
   upgrade    install a new murder binary on every node, one after the other
   version    print this binary's hash and schema version
@@ -82,6 +83,8 @@ func run(args []string) error {
 		return runRestore(args[1:])
 	case "cluster":
 		return runCluster(args[1:])
+	case "node":
+		return runNode(args[1:])
 	case "key":
 		return runKey(args[1:])
 	case "upgrade":

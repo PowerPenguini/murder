@@ -92,7 +92,7 @@ func runEdge(args []string) error {
 		if key, err = secrets.LoadKey(cfg.MasterKeyFile); err != nil {
 			return err
 		}
-		if credentials, err = cluster.NewCredentials(key.DeriveAll(clusterSeed), "edge", time.Now()); err != nil {
+		if credentials, err = cluster.NewCredentials(key.DeriveAll(clusterSeed), "edge", nil, time.Now()); err != nil {
 			return err
 		}
 		proxy.WithRelay(credentials.RelayClient())

@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -21,11 +23,11 @@ import (
 // replicatedTables are the tables every node of a cluster holds the same,
 // in an order that inserts referenced rows first. The others (meta's node
 // name, images) belong to one node.
-var replicatedTables = []string{"apps", "app_revisions", "rollouts", "tenants", "secrets", "nodes", "events", "devices", "panel_users", "panel_passkeys", "panel_enrollments", "panel_sessions", "panel_secrets"}
+var replicatedTables = []string{"apps", "app_revisions", "rollouts", "tenants", "secrets", "nodes", "admissions", "departed_keys", "events", "devices", "panel_users", "panel_passkeys", "panel_enrollments", "panel_sessions", "panel_secrets"}
 
 // tableSince is the schema version that added a replicated table: a
 // snapshot of an older release has none.
-var tableSince = map[string]int{"app_revisions": 14, "rollouts": 15, "devices": 12, "panel_users": 13, "panel_passkeys": 13, "panel_enrollments": 13, "panel_sessions": 13, "panel_secrets": 13}
+var tableSince = map[string]int{"admissions": 16, "departed_keys": 16, "app_revisions": 14, "rollouts": 15, "devices": 12, "panel_users": 13, "panel_passkeys": 13, "panel_enrollments": 13, "panel_sessions": 13, "panel_secrets": 13}
 
 // Refused reports whether a batch failed the same way on every node that
 // applies it: stale, malformed, or against the state (a constraint, a
@@ -217,12 +219,11 @@ func (s *SQLite) ApplyEntry(index uint64, batch Batch) error {
 	if index <= s.applied.get() {
 		return nil
 	}
-	next, err := s.transact(batch.Signal, func(tx *sql.Tx, current *snapshot) error {
-		if err := applyBatch(tx, current, batch); err != nil {
-			return err
-		}
-		_, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = 'applied'`, strconv.FormatUint(index, 10))
-		return err
+	next, err := s.transactBatch(batch.Signal, func(tx *sql.Tx, current *snapshot, w *watched) error {
+		// The applied index is counted under the batch's authorizer too.
+		return applyBatch(tx, current, batch, w, func() error {
+			return setMeta(tx, "applied", strconv.FormatUint(index, 10))
+		})
 	})
 	if err == nil {
 		s.recent.put(index, next)
@@ -354,6 +355,15 @@ func (s *SQLite) InstallSnapshot(from io.Reader) (bool, error) {
 			if err != nil {
 				return err
 			}
+			if table == "events" {
+				// Events of ids past the bound, which a snapshot of an
+				// older release may hold, get ids below it as an upgrade
+				// gives them.
+				if err := installEvents(tx, columns); err != nil {
+					return err
+				}
+				continue
+			}
 			if _, err := tx.Exec(`INSERT INTO main.` + table + ` (` + columns + `) SELECT ` + columns + ` FROM snapshot.` + table); err != nil {
 				return err
 			}
@@ -376,6 +386,40 @@ func (s *SQLite) InstallSnapshot(from io.Reader) (bool, error) {
 		s.applied.set(index)
 	}
 	return installed, nil
+}
+
+// installEvents copies a snapshot's events, giving those of ids past
+// maxEventID ids below it, in the order of their ids, as boundEventIDs does
+// on a node that upgrades the same events in place: the ids are the same.
+func installEvents(tx *sql.Tx, columns string) error {
+	if _, err := tx.Exec(`INSERT INTO main.events (`+columns+`) SELECT `+columns+` FROM snapshot.events WHERE id <= ?`, maxEventID); err != nil {
+		return err
+	}
+	high, err := highEventIDs(tx, "snapshot.events")
+	if err != nil || len(high) == 0 {
+		return err
+	}
+	var others []string
+	for _, column := range strings.Split(columns, ", ") {
+		if column != `"id"` {
+			others = append(others, column)
+		}
+	}
+	rest := strings.Join(others, ", ")
+	ids, err := newEventIDs(tx, "main.events")
+	if err != nil {
+		return err
+	}
+	for _, old := range high {
+		id, err := ids.take()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO main.events ("id", `+rest+`) SELECT ?, `+rest+` FROM snapshot.events WHERE id = ?`, id, old); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkSnapshot checks that a snapshot is whole and made by a release that
@@ -441,26 +485,75 @@ func (s *SQLite) Nodes() []Node {
 	return nodes
 }
 
-func (s *SQLite) PutNode(node Node, actor string) error { return s.putNode(node, actor, true) }
+// PutNode adds a node, or changes its address, as a bootstrap does for
+// the node itself, the only voter, on a state that may hold its row from
+// before, as one restored from a backup does. A key given becomes the
+// node's: one held before goes with the node's row, which comes back.
+func (s *SQLite) PutNode(node Node, actor string) error {
+	return s.putNode(node, func(string) bool { return false }, actor, true)
+}
 
-// AddNode adds a node, or leaves one at the same address as it is. It
-// refuses, with ErrConflict, a node of that name at another address. The
-// check is part of the replicated write: a leader that lost its leadership
-// while a join waited cannot move a node another leader added meanwhile.
-func (s *SQLite) AddNode(node Node, actor string) error { return s.putNode(node, actor, false) }
+// AddNode adds a node that joins, or leaves one at the same address and
+// with the same key as it is. It refuses, with ErrConflict, a node of that
+// name at another address, and, with ErrNotAdmitted, a node that brings
+// neither the key an invitation admitted (see Admit) nor the key the state
+// holds for it. An admission replaces the key the state holds for a node
+// only if voter says it is no voter, as after the cluster was rebuilt from
+// a backup: a voter's key stays. The checks are part of the replicated
+// write: a leader that lost its leadership while a join waited cannot move
+// a node another leader added meanwhile. The admission is used up. Only the
+// leader adds a node, and voter is what its voters are.
+func (s *SQLite) AddNode(node Node, voter func(name string) bool, actor string) error {
+	return s.putNode(node, voter, actor, false)
+}
 
-// putNode adds node, or changes its address if move.
-func (s *SQLite) putNode(node Node, actor string, move bool) error {
+// ErrNotAdmitted refuses a node that joins without an admission for its
+// name and identity key.
+var ErrNotAdmitted = errors.New("not admitted")
+
+// AdmissionValid is how long a host has, once it redeemed an invitation,
+// to join with the key it named.
+const AdmissionValid = time.Hour
+
+// putNode adds node, or changes its address and key if move.
+func (s *SQLite) putNode(node Node, voter func(string) bool, actor string, move bool) error {
 	if !nodePattern.MatchString(node.Name) {
 		return fmt.Errorf("node name %q must be 1-63 letters, digits, dots or hyphens", node.Name)
 	}
-	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
-		existing, found := current.nodes[node.Name]
-		if found && existing.Address == node.Address {
-			return errUnchanged
+	if node.Key != "" {
+		if err := checkNodeKey(node.Key); err != nil {
+			return err
 		}
-		if found && !move {
+	}
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		tx.leaderOnly = true
+		existing, found := current.nodes[node.Name]
+		admission, admitted := current.admissions[node.Name]
+		admitted = admitted && node.Key != "" && admission.Key == node.Key && now.Before(admission.Expires)
+		if found && !move && existing.Address != node.Address {
 			return fmt.Errorf("%w: node %s is already a member at %s; remove it first, or give the new node another name", ErrConflict, node.Name, existing.Address)
+		}
+		if !move && !admitted && (!found || node.Key == "" || existing.Key != node.Key) {
+			return fmt.Errorf("%w: node %s did not bring the identity key an invitation let in: join with an invitation (murder cluster invite on a node of the cluster)", ErrNotAdmitted, node.Name)
+		}
+		// An admission is for a node to come: never a voter's, with a key
+		// or without, in the state or not. A voter with no key registers
+		// its own, presenting it.
+		if !move && admitted && voter(node.Name) {
+			return fmt.Errorf("%w: node %s is a voter of the cluster: an admission is for a new node; remove it first, or give the new node another name", ErrConflict, node.Name)
+		}
+		key := existing.Key
+		if node.Key != "" {
+			key = node.Key
+		}
+		// Another key in a node's place: only for a node no voter, and
+		// then the node goes and comes back, as its key never changes.
+		replaced := found && existing.Key != "" && key != existing.Key
+		if replaced && voter(node.Name) {
+			return fmt.Errorf("%w: node %s is a voter of the cluster with another identity key; remove it first, or give the new node another name", ErrConflict, node.Name)
+		}
+		if found && existing.Address == node.Address && existing.Key == key && !admitted {
+			return errUnchanged
 		}
 		for _, name := range slices.Sorted(maps.Keys(current.nodes)) {
 			other := current.nodes[name]
@@ -471,10 +564,31 @@ func (s *SQLite) putNode(node Node, actor string, move bool) error {
 				return fmt.Errorf("%w: node %s already has address %s", ErrConflict, other.Name, node.Address)
 			}
 		}
-		if err := tx.Exec(`INSERT INTO nodes (name, address, created_at) VALUES (?, ?, ?)
-			ON CONFLICT (name) DO UPDATE SET address = excluded.address, copies_refused_until = NULL`,
-			node.Name, node.Address, formatTime(now)); err != nil {
+		if replaced {
+			// The key goes with the row, which comes back as it was, at
+			// the node's address, with its new key.
+			kept := existing
+			kept.Address = node.Address
+			kept.CopiesRefusedUntil = time.Time{}
+			if err := rekeyNode(tx, kept, key); err != nil {
+				return err
+			}
+		} else if err := tx.Exec(`INSERT INTO nodes (name, address, created_at, key) VALUES (?, ?, ?, ?)
+			ON CONFLICT (name) DO UPDATE SET address = excluded.address, copies_refused_until = NULL, key = excluded.key`,
+			node.Name, node.Address, formatTime(now), key); err != nil {
 			return err
+		}
+		if admitted {
+			if err := tx.Exec(`DELETE FROM admissions WHERE name = ?`, node.Name); err != nil {
+				return err
+			}
+		}
+		// A node of the name taken out before is a voter no more: the one
+		// added now is checked by its own key.
+		if _, departed := current.departed[node.Name]; departed && !found {
+			if err := tx.Exec(`DELETE FROM departed_keys WHERE name = ?`, node.Name); err != nil {
+				return err
+			}
 		}
 		action := "node.joined"
 		if found {
@@ -488,25 +602,238 @@ func (s *SQLite) putNode(node Node, actor string, move bool) error {
 	return err
 }
 
+// rekeyNode puts node's row back with key: a node keeps its identity key
+// (see identityTriggers), so its row is taken out and put back, with every
+// other column as it was, and the tenants that name the node still do.
+func rekeyNode(tx *recorder, node Node, key string) error {
+	if err := tx.Exec(`DELETE FROM nodes WHERE name = ?`, node.Name); err != nil {
+		return err
+	}
+	optional := func(t time.Time) any {
+		if t.IsZero() {
+			return nil
+		}
+		return formatTime(t)
+	}
+	tunnel := ""
+	if node.Tunnel != nil {
+		tunnel = node.Tunnel.Address.String() + " " + node.Tunnel.Key + " " + strconv.Itoa(node.Tunnel.Port)
+	}
+	return tx.Exec(`INSERT INTO nodes (name, address, created_at, failed_at, away_until, copies_refused_until, public, tunnel, key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		node.Name, node.Address, formatTime(node.CreatedAt), optional(node.FailedAt), optional(node.AwayUntil), optional(node.CopiesRefusedUntil), publicField(node.Public), tunnel, key)
+}
+
+// ReplaceNodeKey gives node name the identity key key in place of the one
+// the state holds: the way back for a node that lost its key file, which
+// keeps its place, its tenants and its data. Only the leader does, as an
+// operator asks it, on another node, with the key the node shows; never
+// while changes are frozen.
+func (s *SQLite) ReplaceNodeKey(name, key, actor string) error {
+	if err := checkNodeKey(key); err != nil {
+		return err
+	}
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		tx.leaderOnly = true
+		node, found := current.nodes[name]
+		switch {
+		case !found:
+			return fmt.Errorf("node %s: %w", name, ErrNotFound)
+		case node.Key == key:
+			return errUnchanged
+		}
+		if err := rekeyNode(tx, node, key); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "node.rekeyed", "", "", name)
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
+}
+
+// checkNodeKey refuses what is not an ed25519 public key in base64.
+func checkNodeKey(key string) error {
+	raw, err := base64.StdEncoding.DecodeString(key)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return fmt.Errorf("%w: a node's identity key is an ed25519 public key in base64", ErrInvalid)
+	}
+	return nil
+}
+
+// NodeKey is the identity key the state holds for node name, empty for a
+// node of a release before keys; ok is false if no node has that name.
+func (s *SQLite) NodeKey(name string) (key string, ok bool) {
+	node, ok := s.state.Load().nodes[name]
+	return node.Key, ok
+}
+
+// SetNodeKey registers a node's identity key, once: a node of a release
+// before keys registers its own as it starts on one that has them. A key
+// the state holds already is not replaced (ErrConflict).
+func (s *SQLite) SetNodeKey(name, key, actor string) error {
+	if err := checkNodeKey(key); err != nil {
+		return err
+	}
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		tx.leaderOnly = true
+		node, found := current.nodes[name]
+		switch {
+		case !found:
+			return fmt.Errorf("node %s: %w", name, ErrNotFound)
+		case node.Key == key:
+			return errUnchanged
+		case node.Key != "":
+			return fmt.Errorf("%w: the state holds another identity key for node %s", ErrConflict, name)
+		}
+		if err := tx.Exec(`UPDATE nodes SET key = ? WHERE name = ? AND key = ''`, key, name); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "node.key-registered", "", "", name)
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
+}
+
+// Admit lets a host that brought an invitation join as node name, with
+// the identity key key, until expires: only it may fetch the state and be
+// added. An admission for the same name replaces the one before; expired
+// ones go. A name voter says is a voter is refused, whether the state names
+// it or not: a node at work keeps its key. A name the state holds but the
+// voters do not, as after a cluster was rebuilt from a backup, may be let
+// in again with a new key. Only the leader admits, under its lock on
+// changes of the members, and voter is what its voters are.
+func (s *SQLite) Admit(name, key string, expires time.Time, voter func(name string) bool, actor string) error {
+	if !nodePattern.MatchString(name) {
+		return fmt.Errorf("node name %q must be 1-63 letters, digits, dots or hyphens", name)
+	}
+	if err := checkNodeKey(key); err != nil {
+		return err
+	}
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		tx.leaderOnly = true
+		if !expires.After(now) {
+			return fmt.Errorf("%w: an admission that expired already", ErrInvalid)
+		}
+		if voter(name) {
+			return fmt.Errorf("%w: a node named %s is in the cluster already: give the new one another name, or remove that one first", ErrConflict, name)
+		}
+		for _, other := range slices.Sorted(maps.Keys(current.admissions)) {
+			if !current.admissions[other].Expires.After(now) {
+				if err := tx.Exec(`DELETE FROM admissions WHERE name = ?`, other); err != nil {
+					return err
+				}
+			}
+		}
+		if err := tx.Exec(`INSERT INTO admissions (name, key, expires_at, actor) VALUES (?, ?, ?, ?)
+			ON CONFLICT (name) DO UPDATE SET key = excluded.key, expires_at = excluded.expires_at, actor = excluded.actor`,
+			name, key, formatTime(expires), actor); err != nil {
+			return err
+		}
+		return event(tx, now, actor, "node.admitted", "", "", name+" until "+expires.UTC().Format(time.RFC3339))
+	})
+	return err
+}
+
+// Admitted reports whether a host may join as node name with the identity
+// key key at now.
+func (s *SQLite) Admitted(name, key string, now time.Time) bool {
+	admission, ok := s.state.Load().admissions[name]
+	return ok && key != "" && admission.Key == key && now.Before(admission.Expires)
+}
+
+// Departure is a node taken out of the state, kept with the identity key
+// it had while it may still be a voter. Seq tells it from another departure
+// of the same name.
+type Departure struct {
+	Name string
+	Key  string
+	Seq  int64
+}
+
+// Departed lists the nodes taken out of the state whose identity keys the
+// state keeps for Raft (see DepartedKey), by name.
+func (s *SQLite) Departed() []Departure {
+	departed := s.state.Load().departed
+	list := make([]Departure, 0, len(departed))
+	for _, name := range slices.Sorted(maps.Keys(departed)) {
+		list = append(list, departed[name])
+	}
+	return list
+}
+
+// Departure is node name's departure, if it was taken out of the state and
+// its key is still kept.
+func (s *SQLite) Departure(name string) (Departure, bool) {
+	departure, ok := s.state.Load().departed[name]
+	return departure, ok
+}
+
+// ForgetDeparted drops the key kept for departure, once its node is out of
+// the voters: nothing takes it by that key any more. It drops that one
+// departure only: a later one of the same name, after the node joined
+// again and was taken out again, stays. Only the leader does, which knows
+// its voters.
+func (s *SQLite) ForgetDeparted(departure Departure, actor string) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, _ time.Time) error {
+		tx.leaderOnly = true
+		if current.departed[departure.Name] != departure {
+			return errUnchanged
+		}
+		return tx.Exec(`DELETE FROM departed_keys WHERE name = ? AND key = ? AND seq = ?`, departure.Name, departure.Key, departure.Seq)
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
+}
+
+// DepartedKey is the identity key node name had when it was taken out of
+// the state, if it was: a removal takes a node out of the state before the
+// voters, and until then Raft takes it by this key alone. It is empty for
+// a node that had registered none, which is taken by its name until then.
+func (s *SQLite) DepartedKey(name string) (string, bool) {
+	departure, ok := s.state.Load().departed[name]
+	return departure.Key, ok
+}
+
+// removable says why node name cannot be taken out of current.
+func removable(current *snapshot, name string) error {
+	if _, found := current.nodes[name]; !found {
+		return fmt.Errorf("node %s: %w", name, ErrNotFound)
+	}
+	var tenants []string
+	for _, tenant := range slices.Sorted(maps.Keys(current.tenants)) {
+		if current.tenants[tenant].Node == name {
+			tenants = append(tenants, tenant)
+		}
+	}
+	if len(tenants) > 0 {
+		return fmt.Errorf("%w: node %s runs tenants %s; purge them first (archived ones count)", ErrInUse, name, strings.Join(tenants, ", "))
+	}
+	for _, tenant := range slices.Sorted(maps.Keys(current.tenants)) {
+		if current.tenants[tenant].MoveTo == name {
+			return fmt.Errorf("%w: tenant %s is moving to node %s; wait until it has moved, or the move is undone", ErrInUse, tenant, name)
+		}
+	}
+	return nil
+}
+
+// RemoveNode takes a node out of the state, keeping its identity key as
+// departed (see DepartedKey) for Raft until the node is out of the voters
+// too, which comes next. Only the leader does, and every check of the
+// removal is part of this write, before anything changes in Raft.
 func (s *SQLite) RemoveNode(name, actor string) error {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		tx.leaderOnly = true
 		node, found := current.nodes[name]
 		if !found {
 			return fmt.Errorf("node %s: %w", name, ErrNotFound)
 		}
-		var tenants []string
-		for _, tenant := range slices.Sorted(maps.Keys(current.tenants)) {
-			if current.tenants[tenant].Node == name {
-				tenants = append(tenants, tenant)
-			}
-		}
-		if len(tenants) > 0 {
-			return fmt.Errorf("%w: node %s runs tenants %s; purge them first (archived ones count)", ErrInUse, name, strings.Join(tenants, ", "))
-		}
-		for _, tenant := range slices.Sorted(maps.Keys(current.tenants)) {
-			if current.tenants[tenant].MoveTo == name {
-				return fmt.Errorf("%w: tenant %s is moving to node %s; wait until it has moved, or the move is undone", ErrInUse, tenant, name)
-			}
+		if err := removable(current, name); err != nil {
+			return err
 		}
 		// Copies kept there go with it; placement gives those tenants others.
 		if err := tx.Exec(`UPDATE tenants SET replica = '', replica_ready = 0 WHERE replica = ?`, name); err != nil {
@@ -516,6 +843,12 @@ func (s *SQLite) RemoveNode(name, actor string) error {
 			return err
 		}
 		if err := tx.Exec(`DELETE FROM nodes WHERE name = ?`, name); err != nil {
+			return err
+		}
+		// Until it is out of the voters too, Raft takes it by its key: one
+		// that has none yet, of a cluster from before keys, by its name, as
+		// it was taken until now. Either way it may finish its own removal.
+		if err := tx.Exec(`INSERT INTO departed_keys (name, key, seq) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET key = excluded.key, seq = excluded.seq`, name, node.Key, current.version); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "node.removed", "", "", node.Name+" at "+node.Address)
