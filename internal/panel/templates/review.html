@@ -75,7 +75,7 @@
     <p class="flat spaced">No health gate: nothing waits to see one healthy before the next, so a change that breaks them breaks them all.</p></div>
   {{else}}
   <ol class="waves plan">
-    {{range $i, $w := $d.Waves}}<li class="next"><span class="wn">{{add1 $i}}. {{$w.Name}}</span><span class="wc">{{range $j, $n := $w.Tenants}}{{if $j}}, {{end}}{{$n}}{{end}}</span></li>{{end}}
+    {{range $i, $w := $d.Waves}}<li class="next"><span class="wn">{{add1 $i}}. {{$w.Name}}</span><span class="wc">{{range $j, $n := $w.Tenants}}{{if $j}}, {{end}}{{$n}}{{if joins $d $n}} <span class="faint">(no restart)</span>{{end}}{{end}}</span></li>{{end}}
   </ol>
   <p class="hint spaced">{{if eq $d.Pace "first"}}{{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} move{{if eq (len $d.Broken) 1}}s{{end}} as you roll it out. Each wave after moves once the one before has stayed healthy: two minutes for the first, a minute after.{{else}}Each wave moves once the one before has stayed healthy: two minutes for canaries, a minute after.{{end}} A tenant not healthy within 5 minutes of its move pauses the rollout; you can then resume, abort, or restore their data.</p>
   {{end}}

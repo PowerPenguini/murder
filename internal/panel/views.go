@@ -916,7 +916,12 @@ func (s *Server) funcs() template.FuncMap {
 			}
 			return false
 		},
-		"repeat":  func(n int) []int { return make([]int, n) },
+		"repeat": func(n int) []int { return make([]int, n) },
+		// joins says a review's tenant takes the revision without a new
+		// container: it runs it already.
+		"joins": func(d reviewData, name string) bool {
+			return slices.ContainsFunc(d.Join, func(t reviewTenant) bool { return t.Name == name })
+		},
 		"envshow": envValue,
 		"causeOf": func(b interface{ Cause() (string, string) }) []string {
 			cause, fix := b.Cause()

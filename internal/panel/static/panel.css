@@ -829,7 +829,7 @@ table.env tr.add td { background: var(--raised); }
 .pop.app-new { width: min(560px, 90vw); }
 .pop.app-new textarea { width: 100%; }
 /* A command to run elsewhere, with its own copy button beside it. */
-.cmd { display: flex; align-items: flex-start; gap: var(--s2); margin-top: var(--s2); }
+.cmd { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); }
 .cmd pre { flex: 1; min-width: 0; margin: 0; }
 .cmd button { flex: none; }
 .nowrap { white-space: nowrap; }
@@ -883,11 +883,12 @@ table.secrets td.own select, table.secrets tr.add select { width: auto; }
   table.settings.list tr.add td.l-sub[data-label]::before { content: none; }
   table.list td.l-sub[data-label]::before { font-family: var(--sans); }
 }
-table.settings tr.add td.own { display: flex; align-items: center; gap: var(--s2); }
-table.settings tr.add td.own input[type=text] { flex: 1 1 auto; min-width: 0; width: auto; }
-table.settings tr.add .remove-row { margin-left: 0; flex: none; }
+table.env tr.add td.own { white-space: nowrap; }
+table.env tr.add td.own input[type=text] { width: calc(100% - 72px); }
+table.env tr.add .remove-row { margin-left: var(--s2); }
 @media (max-width: 760px) {
-  table.settings.list tr.add td.own { display: flex; }
+  table.settings.list tr.add td.own { display: flex; align-items: center; gap: var(--s2); }
+  table.settings.list tr.add td.own input[type=text] { flex: 1 1 auto; width: auto; min-width: 0; }
 }
 table.secrets td.l-main input, table.env td.l-main input { width: 100%; min-width: 0; }
 @media (max-width: 1279px) {

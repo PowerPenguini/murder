@@ -131,7 +131,7 @@
     }
     if (lostWhy) {
       state.classList.add("lost");
-      text.textContent = "Offline since " + clock(readAt).slice(0, 5) + " · ";
+      text.textContent = "Offline " + clock(readAt).slice(0, 5) + " ";
       state.title = "Can't reach " + node + " since " + clock(readAt);
       const retry = document.createElement("button");
       retry.type = "button";
