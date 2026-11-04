@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -191,8 +192,15 @@ func appOutcome(name string, applied api.AppApplied) string {
 		message = "app " + name + " is unchanged"
 	case len(applied.Tenants) == 0:
 		message = "app " + name + " is changed; no live tenant runs it"
-	case applied.Rollout && applied.App.Rollout != nil && applied.App.Rollout.Wave > 0:
-		message = fmt.Sprintf("app %s is changed; it rolls out to %d tenants: the first now, the rest in waves", name, len(applied.Tenants))
+	case applied.Rollout && applied.App.Rollout != nil && applied.App.Rollout.First > 0:
+		// Those moved first, by name.
+		var first []string
+		for _, t := range applied.Tenants {
+			if t.AppRevision == 0 && t.BeforeRevision != 0 {
+				first = append(first, t.Spec.Name)
+			}
+		}
+		message = fmt.Sprintf("app %s is changed: %s restart%s now, %d more in waves", name, strings.Join(first, ", "), map[bool]string{true: "s", false: ""}[len(first) == 1], len(applied.Tenants)-len(first))
 	case applied.Rollout:
 		message = fmt.Sprintf("app %s is changed; it rolls out in waves to %d tenants", name, len(applied.Tenants))
 	default:
@@ -377,6 +385,8 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 		// Back from a review to the editor, the text kept.
 		s.appPage(w, r, appData{App: current, File: r.FormValue("file"), Updated: r.FormValue("updated")}, "", http.StatusOK)
 	case "review":
+		// Checked here; shown at its own address, so that a reload or the
+		// back button shows it again rather than sending the form again.
 		file := r.FormValue("file")
 		refuse := func(problem string) {
 			s.appPage(w, r, appData{App: current, File: file, Updated: r.FormValue("updated")}, problem, http.StatusUnprocessableEntity)
@@ -389,47 +399,19 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 			refuse(err.Error())
 			return
 		}
-		from, err := shownFile(current)
-		if err != nil {
-			s.fail(w, r, err)
-			return
+		q := url.Values{"do": {"review"}, "updated": {r.FormValue("updated")}, "draft": {s.drafts.keep(name, file)}}
+		if pace := r.FormValue("pace"); pace != "" {
+			q.Set("pace", pace)
 		}
-		s.review(w, r, current, reviewData{Do: "save", Title: "Your change to " + name + "'s spec", File: file, Updated: r.FormValue("updated")}, from, file)
+		http.Redirect(w, r, "/apps/"+url.PathEscape(name)+"/review?"+q.Encode(), http.StatusSeeOther)
 	case "review-restore", "review-update":
-		if current.UpdatedAt.IsZero() || r.FormValue("updated") != stampOf(current.UpdatedAt) {
-			back("problem", "someone changed the app since you opened it: look again, then try again")
-			return
-		}
-		from, err := spec.AppFile(current.Spec)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		data := reviewData{Do: "update", Title: "The newer image of " + current.Tag, Updated: r.FormValue("updated")}
-		next := current.Spec
-		if r.FormValue("do") == "review-restore" {
-			revision, _ := strconv.ParseInt(r.FormValue("revision"), 10, 64)
-			revisions, err := agent.AppRevisions(ctx, name)
-			if err != nil {
-				back("problem", err.Error())
-				return
+		q := url.Values{"do": {r.FormValue("do")}, "updated": {r.FormValue("updated")}}
+		for _, key := range []string{"revision", "pace"} {
+			if v := r.FormValue(key); v != "" {
+				q.Set(key, v)
 			}
-			i := slices.IndexFunc(revisions, func(rev store.Revision) bool { return rev.Revision == revision })
-			if i < 0 {
-				back("problem", "no such revision")
-				return
-			}
-			next = revisions[i].Spec
-			data.Do, data.Revision, data.Title = "restore", revision, "Going back to revision "+strconv.FormatInt(revision, 10)
-		} else if current.Latest != "" {
-			next.Image = current.Latest
 		}
-		to, err := spec.AppFile(next)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		s.review(w, r, current, data, string(from), string(to))
+		http.Redirect(w, r, "/apps/"+url.PathEscape(name)+"/review?"+q.Encode(), http.StatusSeeOther)
 	case "save":
 		file := r.FormValue("file")
 		refuse := func(problem string) {
@@ -1035,4 +1017,122 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// appReview shows a change of an app before it is made, at its own address:
+// an edited spec (kept as a draft), a revision gone back to, or the newer
+// image; with ?pace= the pace its plan describes.
+func (s *Server) appReview(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	agent := s.Apps(s.actor(userOf(r)))
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	current, err := agent.App(ctx, name)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	back := func(kind, message string) {
+		flash(w, r, kind, message)
+		http.Redirect(w, r, "/apps/"+url.PathEscape(name), http.StatusSeeOther)
+	}
+	q := r.URL.Query()
+	if current.UpdatedAt.IsZero() || q.Get("updated") != stampOf(current.UpdatedAt) {
+		back("problem", "someone changed the app since you opened it: look again, then try again")
+		return
+	}
+	switch q.Get("do") {
+	case "review":
+		file, ok := s.drafts.get(name, q.Get("draft"))
+		if !ok {
+			back("problem", "that review is no longer kept: review the change again")
+			return
+		}
+		from, err := shownFile(current)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		s.review(w, r, current, reviewData{Do: "save", Title: "Your change to " + name + "'s spec", File: file, Updated: q.Get("updated"), Draft: q.Get("draft")}, from, file)
+	case "review-restore", "review-update":
+		from, err := spec.AppFile(current.Spec)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		data := reviewData{Do: "update", Title: "The newer image of " + current.Tag, Updated: q.Get("updated")}
+		next := current.Spec
+		if q.Get("do") == "review-restore" {
+			revision, _ := strconv.ParseInt(q.Get("revision"), 10, 64)
+			revisions, err := agent.AppRevisions(ctx, name)
+			if err != nil {
+				back("problem", err.Error())
+				return
+			}
+			i := slices.IndexFunc(revisions, func(rev store.Revision) bool { return rev.Revision == revision })
+			if i < 0 {
+				back("problem", "no such revision")
+				return
+			}
+			next = revisions[i].Spec
+			data.Do, data.Revision, data.Title = "restore", revision, "Going back to revision "+strconv.FormatInt(revision, 10)
+		} else if current.Latest != "" {
+			next.Image = current.Latest
+		}
+		to, err := spec.AppFile(next)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		s.review(w, r, current, data, string(from), string(to))
+	default:
+		back("problem", "nothing to review")
+	}
+}
+
+// reviewDrafts keeps the specs being reviewed, for their review's own
+// address: a few, for an hour, in this panel only.
+type reviewDrafts struct {
+	mu    sync.Mutex
+	kept  map[string]reviewDraft
+	order []string
+}
+
+type reviewDraft struct {
+	app, file string
+	at        time.Time
+}
+
+// draftsKept and draftLife bound what is kept.
+const (
+	draftsKept = 200
+	draftLife  = time.Hour
+)
+
+// keep keeps a draft of app, and names it.
+func (d *reviewDrafts) keep(app, file string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.kept == nil {
+		d.kept = map[string]reviewDraft{}
+	}
+	id := Token(12)
+	d.kept[id] = reviewDraft{app: app, file: file, at: time.Now()}
+	d.order = append(d.order, id)
+	for len(d.order) > draftsKept {
+		delete(d.kept, d.order[0])
+		d.order = d.order[1:]
+	}
+	return id
+}
+
+// get is the draft named id, of app, while it is kept.
+func (d *reviewDrafts) get(app, id string) (string, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	draft, ok := d.kept[id]
+	if !ok || draft.app != app || time.Since(draft.at) > draftLife {
+		return "", false
+	}
+	return draft.file, true
 }

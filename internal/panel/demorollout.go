@@ -80,7 +80,7 @@ func (d *DemoCluster) drive() {
 		}
 		if ro.Wave > 0 {
 			soak := demoSoak
-			if ro.Wave == 1 {
+			if ro.Wave <= ro.First+1 {
 				soak = demoCanarySoak
 			}
 			through := now.Sub(ro.WaveStarted) >= soak
@@ -106,7 +106,7 @@ func (d *DemoCluster) drive() {
 			d.note("murder (rollout)", "rollout.done", "", name, "revision "+strconv.FormatInt(ro.ToRevision, 10)+" reached every tenant")
 			continue
 		}
-		for _, tenant := range rollout.NextWave(ro.Wave, total, len(moved), pending) {
+		for _, tenant := range rollout.NextWave(ro.Wave-ro.First, total, len(moved), pending) {
 			t := d.tenants[tenant]
 			from := t.AppRevision
 			t.BeforeRevision, t.AppRevision = from, 0

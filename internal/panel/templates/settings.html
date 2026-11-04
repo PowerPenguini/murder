@@ -75,7 +75,7 @@
         <td class="l-sub own" data-label="Override"><input type="hidden" name="secretname" value="{{.Name}}">
           <label class="check own-check"><input type="checkbox" name="secretown" value="{{.Name}}" class="own-switch" data-key="{{.Name}}"{{if .DraftOwn}} checked{{end}}><span class="sr">A secret of its own for {{.Name}}</span></label>
           <span class="own-field"><select name="secretkind" data-key="{{.Name}}" aria-label="{{.Name}}: its kind">{{$k := .DraftKind}}{{range $d.Kinds}}<option{{if eq . $k}} selected{{end}}>{{.}}</option>{{end}}</select> <input type="number" name="secretbytes" value="{{if .DraftBytes}}{{.DraftBytes}}{{end}}" min="1" placeholder="length" class="tiny" data-key="{{.Name}}" aria-label="{{.Name}}: its length"></span></td>
-        <td class="end l-more">{{if and (not $t.Archived) (or .Own .FromApp)}}<details class="menu-text">
+        <td class="end act">{{if and (not $t.Archived) (or .Own .FromApp)}}<details class="menu-text">
             <summary class="button small">New value…</summary>
             <div class="pop">
               <div class="stack">

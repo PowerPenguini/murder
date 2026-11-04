@@ -184,7 +184,8 @@ func (d *Driver) drive(ctx context.Context, rollout store.Rollout, records []sto
 		d.Log.Info("rollout done", "app", rollout.App, "revision", rollout.ToRevision, "waves", rollout.Wave)
 		return d.Store.FinishRollout(rollout.App, rollout.At(), Actor)
 	}
-	next := nextWave(rollout.Wave, total, len(moved), pending)
+	// Waves count after those moved first: the next is the canaries then.
+	next := nextWave(rollout.Wave-rollout.First, total, len(moved), pending)
 	d.Log.Info("rollout moves a wave", "app", rollout.App, "wave", rollout.Wave+1, "tenants", next)
 	if err := d.Store.AdvanceRollout(rollout.App, rollout.At(), next, Actor); err != nil {
 		return err
@@ -252,7 +253,9 @@ func (d *Driver) judge(ctx context.Context, rollout store.Rollout, moved []store
 	if soak == 0 {
 		soak = DefaultSoak
 	}
-	if rollout.Wave == 1 {
+	// The first wave soaks as canaries do; after tenants moved first, the
+	// canaries' wave too.
+	if rollout.Wave <= rollout.First+1 {
 		soak = d.CanarySoak
 		if soak == 0 {
 			soak = DefaultCanarySoak

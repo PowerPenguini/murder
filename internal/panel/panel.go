@@ -61,6 +61,9 @@ func staticURL(name string) string { return "/static/" + name + "?v=" + staticVe
 
 // Server serves the panel's pages.
 type Server struct {
+	// drafts keeps the app specs under review, for their review's address.
+	drafts reviewDrafts
+
 	// Name is the panel's host name in its tunnel; requests are answered
 	// only as it or as a loopback name.
 	Name string
@@ -130,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 		pages.HandleFunc("POST /apps", s.createApp)
 		pages.HandleFunc("GET /apps/{name}", s.app)
 		pages.HandleFunc("POST /apps/{name}", s.appAction)
+		pages.HandleFunc("GET /apps/{name}/review", s.appReview)
 		pages.HandleFunc("GET /tenants/{name}/settings", s.settings)
 		pages.HandleFunc("POST /tenants/{name}/settings", s.settingsAction)
 	}

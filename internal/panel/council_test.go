@@ -34,7 +34,7 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	file := between(page, `aria-label="the app's spec">`, "</textarea>")
 	changed := strings.Replace(file, "memoryMB: 256", "memoryMB: 512", 1)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review"}, "file": {changed}, "updated": {updated}}, server.URL)
-	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked at A tenth by baltic-freight",
+	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked in its wave \"a tenth\" by baltic-freight",
 		// Only the tenants whose spec changes restart, and are counted:
 		// atlas keeps its own memory, so the change leaves it.
 		"5 restart · 1 unchanged · 1 held, left out", "Memory 256 MB → 512 MB", "Unchanged: memory stays 768 MB",
@@ -43,7 +43,7 @@ func TestAppChangesAreReviewed(t *testing.T) {
 		// tenants on revision 2 take revision 3's image with it, named.
 		`name="pace" value="first" checked`, "baltic-freight now, the rest in waves <span class=\"dim\">(proposed)</span>",
 		"3 tenants also take a new image with it:</span> kowalski-trans, nordwind, vistula-cargo",
-		`<span class="wn">1. First, now</span><span class="wc">baltic-freight</span>`, "Restart baltic-freight now, the rest in waves",
+		`<span class="wn">1. First, now</span><span class="wc">baltic-freight</span>`, `<span class="wn">2. Canaries</span><span class="wc">acme-logistics</span>`, "Restart baltic-freight now, the rest in waves",
 		`name="first" value="baltic-freight"`, `name="pace" value="first">`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the review lacks %q:\n%s", want, body)
@@ -563,7 +563,7 @@ func TestRestoreAtAChosenTimeAndImageReferences(t *testing.T) {
 	_, page = get(t, server.URL+"/apps/web")
 	updated := between(page, `name="updated" value="`, `"`)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review-update"}, "updated": {updated}}, server.URL)
-	if !strings.Contains(body, "Full image reference") || !strings.Contains(body, strings.Repeat("5e", 32)) || !strings.Contains(body, "is blocked at A tenth by baltic-freight") {
+	if !strings.Contains(body, "Full image reference") || !strings.Contains(body, strings.Repeat("5e", 32)) || !strings.Contains(body, "is blocked in its wave \"a tenth\" by baltic-freight") {
 		t.Fatalf("the image review:\n%s", body)
 	}
 }
@@ -885,8 +885,22 @@ func TestTheBrokenFirstPace(t *testing.T) {
 	updated := between(page, `name="updated" value="`, `"`)
 	file := between(page, `aria-label="the app's spec">`, "</textarea>")
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"save"}, "file": {file}, "updated": {updated}, "pace": {"first"}, "first": {"baltic-freight"}}, server.URL)
-	if !strings.Contains(body, "the first now, the rest in waves") {
+	if !strings.Contains(body, "app web is changed: baltic-freight restarts now, 4 more in waves") {
 		t.Fatalf("after rolling out:\n%s", body)
+	}
+	// The waves are named as the plan named them, on every page: the
+	// first, then the canaries.
+	for _, want := range []string{`<span class="wn">First, now</span><span class="wc">1 tenant · moving, watched</span>`, `<span class="wn">Canaries</span>`,
+		"Canaries (acme-logistics) moves once"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("the rollout lacks %q:\n%s", want, body)
+		}
+	}
+	if _, page := get(t, server.URL+"/tenants/baltic-freight"); !strings.Contains(page, `it moved from revision 3 to 4 in its wave "first, now"`) {
+		t.Fatalf("baltic-freight's wave:\n%s", page)
+	}
+	if _, page := get(t, server.URL+"/tenants/acme-logistics"); !strings.Contains(page, `moves to 4 in its wave "canaries"`) {
+		t.Fatalf("acme-logistics's wave:\n%s", page)
 	}
 	ctx := context.Background()
 	baltic, _ := cluster.Get(ctx, "baltic-freight")
@@ -978,5 +992,43 @@ func TestEventLinksKeepTheirScope(t *testing.T) {
 	}
 	if got := d.Link("since", "", "until", ""); got != "/events?show=people&tenant=atlas" {
 		t.Fatalf("every time: %s", got)
+	}
+}
+
+// A review is shown at its own address, after the form that asked for it
+// (post, redirect, get): a reload shows it again, and the pace is a link.
+// A secret's "New value…" is a cell of its own at every width.
+func TestReviewsHaveTheirOwnAddress(t *testing.T) {
+	_, server, client := newAppsPanel(t)
+	_, page := get(t, server.URL+"/apps/web?memoryMB=512")
+	updated := between(page, `name="updated" value="`, `"`)
+	file := between(page, `aria-label="the app's spec">`, "</textarea>")
+	noFollow := *client
+	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, _ := submit(t, &noFollow, server, "/apps/web", url.Values{"do": {"review"}, "file": {file}, "updated": {updated}}, server.URL)
+	where := response.Header.Get("Location")
+	if response.StatusCode != http.StatusSeeOther || !strings.HasPrefix(where, "/apps/web/review?") || !strings.Contains(where, "draft=") {
+		t.Fatalf("after asking for the review: %d %q", response.StatusCode, where)
+	}
+	_, body := get(t, server.URL+where)
+	if !strings.Contains(body, "Your change to web&#39;s spec") || !strings.Contains(body, `form method="get" action="/apps/web/review#pace"`) {
+		t.Fatalf("the review at its address:\n%s", body)
+	}
+	if _, again := get(t, server.URL+where+"&pace=now"); !strings.Contains(again, "Together, now") {
+		t.Fatalf("the review at another pace:\n%s", again)
+	}
+	// A draft not kept is said so, not shown empty.
+	gone, err := client.Get(server.URL + "/apps/web/review?do=review&updated=" + url.QueryEscape(updated) + "&draft=nothing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(gone.Body)
+	gone.Body.Close()
+	if body = string(data); gone.Request.URL.Path != "/apps/web" || !strings.Contains(body, "that review is no longer kept") {
+		t.Fatalf("an unknown draft:\n%s", body)
+	}
+	_, body = get(t, server.URL+"/tenants/atlas/settings")
+	if !strings.Contains(body, `<td class="end act"><details class="menu-text">`) || strings.Contains(body, `class="end l-more"`) {
+		t.Fatalf("the secrets' actions:\n%s", body)
 	}
 }

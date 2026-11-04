@@ -42,7 +42,43 @@ const probe = `JSON.stringify((() => {
     const r = e.getBoundingClientRect();
     return r.width > 0 && r.right > edge;
   }).slice(0, 3).map((e) => e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (e.className && typeof e.className === "string" ? "." + e.className.split(" ").join(".") : "") + " " + Math.round(e.getBoundingClientRect().right));
-  return { doc: document.documentElement.scrollWidth, win: innerWidth, out };
+  // A column whose header shows but whose cells are hidden in every row:
+  // a control drawn at one width and lost at another.
+  const lost = [];
+  for (const table of main.querySelectorAll("table")) {
+    if (getComputedStyle(table).display !== "table" || !table.tHead || !table.tBodies[0]) continue;
+    const heads = [...table.tHead.rows[0].cells];
+    let col = 0;
+    const cols = heads.filter((th) => getComputedStyle(th).display !== "none").map((th) => { const c = col; col += th.colSpan; return [th, c]; });
+    for (const [th, c] of cols) {
+      if (th.getBoundingClientRect().width === 0) continue;
+      let seen = false, rows = 0;
+      for (const tr of table.tBodies[0].rows) {
+        if (tr.getBoundingClientRect().height === 0) continue;
+        rows++;
+        let at = 0;
+        // A hidden cell takes no column: the next visible one does.
+        for (const td of tr.cells) {
+          if (getComputedStyle(td).display === "none") continue;
+          if (at <= c && c < at + td.colSpan) seen = true;
+          at += td.colSpan;
+        }
+      }
+      if (rows && !seen) lost.push((table.id || table.className || "table") + ": " + (th.textContent.trim() || "column " + (c + 1)));
+    }
+    // A row of several cells that shows fewer than the header's columns
+    // has a cell hidden at this width.
+    for (const tr of table.tBodies[0].rows) {
+      if (tr.getBoundingClientRect().height === 0) continue;
+      const shown = [...tr.cells].filter((td) => getComputedStyle(td).display !== "none");
+      const width = shown.reduce((n, td) => n + td.colSpan, 0);
+      if (shown.length > 1 && width < col) {
+        lost.push((table.id || table.className || "table") + ": a row shows " + width + " of " + col + " columns");
+        break;
+      }
+    }
+  }
+  return { doc: document.documentElement.scrollWidth, win: innerWidth, out: out.concat(lost.map((l) => "no cells under " + l)) };
 })())`;
 await send("Page.enable");
 let failed = 0;

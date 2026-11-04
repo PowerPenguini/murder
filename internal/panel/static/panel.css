@@ -877,7 +877,8 @@ table.secrets td.own select, table.secrets tr.add select { width: auto; }
   table.settings.list tr.setting td.own .own-check { grid-column: 2; grid-row: 2; justify-self: end; margin: 0; }
   table.settings.list tr.setting td.own .own-field { grid-column: 1 / -1; grid-row: 3; width: 100%; }
   table.settings.list tr.setting td.own .caption { grid-column: 1 / -1; grid-row: 4; }
-  table.settings.list tr.setting td.l-more { grid-column: 1 / -1; grid-row: 5; }
+  table.settings.list tr.setting td.act { display: block; grid-column: 1 / -1; grid-row: 5; }
+  table.settings.list tr.setting td.act:empty { display: none; }
   table.settings.list tr.add { grid-template-columns: minmax(0, 1fr); }
   table.settings.list tr.add td.l-sub[data-label] { padding-left: 0; }
   table.settings.list tr.add td.l-sub[data-label]::before { content: none; }
@@ -896,3 +897,6 @@ table.secrets td.l-main input, table.env td.l-main input { width: 100%; min-widt
   table.secrets td.own .own-field, table.secrets tr.add td.own { flex-wrap: wrap; }
 }
 .scope-line { display: block; }
+
+/* A row's own actions (a secret's "New value…"): a cell at every width. */
+table.settings td.act { width: 1%; white-space: nowrap; }

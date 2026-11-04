@@ -135,8 +135,10 @@
   }, true);
   arm();
   // What is shown once can be copied with a button, which says it did.
-  for (const button of document.querySelectorAll("button[data-copy]")) {
-    if (!navigator.clipboard) continue;
+  const armCopy = (root) => {
+  for (const button of root.querySelectorAll("button[data-copy]")) {
+    if (!navigator.clipboard || button.dataset.armed) continue;
+    button.dataset.armed = "1";
     button.hidden = false;
     button.addEventListener("click", async () => {
       const source = document.getElementById(button.dataset.copy);
@@ -151,6 +153,8 @@
       setTimeout(() => { button.textContent = label; }, 2400);
     });
   }
+  };
+  armCopy(document);
   // A page that comes back with a problem beside a field goes to it, and
   // puts the caret on the line it names.
   const problem = document.querySelector("[data-focus]");
@@ -175,7 +179,8 @@
     const changed = () => form.hasAttribute("data-proposed") || state() !== initial;
     form.addEventListener("submit", () => { sending = true; });
     addEventListener("beforeunload", (event) => {
-      if (!sending && changed()) event.preventDefault();
+      // Leaving on purpose (the draft discarded) asks nothing.
+      if (!sending && !document.body.dataset.leaving && changed()) event.preventDefault();
     });
     document.addEventListener("submit", (event) => {
       if (event.target === form || !changed() || event.target.method === "get") return;
@@ -192,7 +197,7 @@
     let sending = false;
     draft.form.addEventListener("submit", () => { sending = true; });
     addEventListener("beforeunload", (event) => {
-      if (!sending && draft.value !== draft.defaultValue) event.preventDefault();
+      if (!sending && !document.body.dataset.leaving && draft.value !== draft.defaultValue) event.preventDefault();
     });
   }
   // "Add a variable" adds a row here, without sending the form; without
@@ -207,10 +212,13 @@
       if (!remove) return;
       remove.hidden = false;
       remove.addEventListener("click", () => {
+        // The form is found before the row leaves it: the draft kept for
+        // the tab is saved again without the row.
+        const form = row.closest("form") || table.closest("form");
         const rows = body.querySelectorAll("tr.add");
         if (rows.length > 1) row.remove();
         else for (const input of row.querySelectorAll("input")) input.value = "";
-        row.closest("form").dispatchEvent(new Event("input", { bubbles: true }));
+        if (form) form.dispatchEvent(new Event("input", { bubbles: true }));
       });
     };
     for (const row of body.querySelectorAll("tr.add")) arm(row);
@@ -302,6 +310,7 @@
       discard.textContent = "Discard the draft";
       discard.addEventListener("click", () => {
         try { keep.removeItem(key); } catch {}
+        document.body.dataset.leaving = "1";
         location.replace(location.pathname + location.search);
       });
       note.append(discard);
@@ -335,9 +344,43 @@
   window.addEventListener("hashchange", target);
   // A form that only chooses what the page shows (a review's pace) shows
   // it as soon as it is chosen; without this script, its button does.
-  for (const form of document.querySelectorAll("form[data-autosubmit]")) {
+  // A review's pace: choosing one (by click, or the arrow keys) shows its
+  // plan in place, fetched from the review's own address, the radio keeping
+  // the focus; the address follows, so a reload shows the same. Without
+  // this script, "Show this plan" does.
+  for (const form of document.querySelectorAll("form[data-pace]")) {
     for (const hide of form.querySelectorAll(".js-hide")) hide.hidden = true;
-    form.addEventListener("change", () => form.requestSubmit());
+    let asked = 0;
+    form.addEventListener("change", async (event) => {
+      const pace = event.target.value;
+      const url = form.action.split("#")[0] + "?" + new URLSearchParams(new FormData(form)).toString();
+      const n = ++asked;
+      let html;
+      try {
+        const response = await fetch(url, { credentials: "same-origin" });
+        if (!response.ok || response.redirected) throw new Error(response.status);
+        html = await response.text();
+      } catch {
+        location.href = url + "#pace";
+        return;
+      }
+      if (n !== asked) return;
+      const fresh = new DOMParser().parseFromString(html, "text/html").getElementById("main");
+      const main = document.getElementById("main");
+      if (!fresh || !main) {
+        location.href = url + "#pace";
+        return;
+      }
+      // Everything but the pace's own form, which keeps its focus.
+      const keepForm = main.querySelector("form[data-pace]");
+      const freshForm = fresh.querySelector("form[data-pace]");
+      if (keepForm && freshForm) freshForm.replaceWith(keepForm);
+      main.replaceChildren(...fresh.childNodes);
+      history.replaceState(null, "", url + "#pace");
+      armCopy(main);
+      const radio = main.querySelector('input[name=pace][value="' + CSS.escape(pace) + '"]');
+      if (radio) radio.focus();
+    });
   }
   // How logs are shown (wrapped, full times) is kept for the tab, across
   // their filters, containers and following.

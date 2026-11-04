@@ -199,6 +199,9 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 		composed := spec.Compose(app, tenant, t.Overrides)
 		composed.Suspended = t.Spec.Suspended
 		if composed.Equal(t.Spec) && t.AppRevision == 0 {
+			// As the store does: no earlier rollout's move is said of it.
+			t.BeforeRevision = 0
+			a.tenants[tenant] = t
 			continue
 		}
 		if t.Hold {
@@ -208,17 +211,18 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 			a.tenants[tenant] = t
 			continue
 		}
-		applied.Tenants = append(applied.Tenants, t)
 		if waves {
 			if t.AppRevision == 0 {
 				t.AppRevision, t.BeforeRevision = old.Revision, 0
 			}
 			a.tenants[tenant] = t
+			applied.Tenants = append(applied.Tenants, t)
 			continue
 		}
 		t.AppRevision, t.BeforeRevision = 0, 0
 		a.moveTenant(&t, composed, "app changed")
 		a.tenants[tenant] = t
+		applied.Tenants = append(applied.Tenants, t)
 	}
 	if waves && len(applied.Tenants) > 0 {
 		applied.Rollout = true
@@ -235,7 +239,12 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 			t.BeforeRevision, t.AppRevision = from, 0
 			a.moveTenant(&t, composed, "wave 1, first: revision "+strconv.FormatInt(from, 10)+" → "+strconv.FormatInt(stored.Revision, 10))
 			a.tenants[tenant] = t
-			stored.Rollout.Wave = 1
+			stored.Rollout.Wave, stored.Rollout.First = 1, 1
+			for i := range applied.Tenants {
+				if applied.Tenants[i].Spec.Name == tenant {
+					applied.Tenants[i] = t
+				}
+			}
 		}
 	}
 	a.apps[name] = stored

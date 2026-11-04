@@ -472,8 +472,13 @@ func TestSomeTenantsGoFirst(t *testing.T) {
 		t.Fatalf("change %+v, %v", change, err)
 	}
 	rollout, err := st.Rollout("web")
-	if err != nil || rollout.Wave != 1 || rollout.State != RolloutRunning {
+	if err != nil || rollout.Wave != 1 || rollout.First != 1 || rollout.State != RolloutRunning {
 		t.Fatalf("rollout %+v, %v", rollout, err)
+	}
+	// Its waves are named as its plan names them: the first, then the
+	// canaries.
+	if rollout.WaveName(1) != "First, now" || rollout.WaveName(2) != "Canaries" || rollout.WaveName(3) != "A tenth" {
+		t.Fatalf("wave names %q, %q, %q", rollout.WaveName(1), rollout.WaveName(2), rollout.WaveName(3))
 	}
 	b, _ := st.Get("b")
 	if b.AppRevision != 0 || b.BeforeRevision != 1 || b.Spec.Image != otherImage || b.Generation != 2 {
@@ -488,5 +493,31 @@ func TestSomeTenantsGoFirst(t *testing.T) {
 	events, _ := st.Events(EventQuery{Tenant: "b"})
 	if len(events) == 0 || !strings.Contains(events[0].Detail, "wave 1, first: revision 1 → 2") {
 		t.Fatalf("b's events: %+v", events)
+	}
+}
+
+// A tenant a new change leaves as it runs is not said to have moved in it:
+// an earlier rollout's "before" revision goes.
+func TestATenantTheChangeLeavesIsNotMoved(t *testing.T) {
+	st, _ := rolling(t)
+	// a moves to revision 2 in the rollout's first wave.
+	if err := st.AdvanceRollout("web", at(t, st), []string{"a"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := st.Get("a"); a.BeforeRevision != 1 {
+		t.Fatalf("a after its wave: %+v", a)
+	}
+	// a keeps its own image; the next change is only of the image, so it
+	// leaves a as it runs.
+	if _, _, err := st.Configure("a", "web", spec.Overrides{Image: otherImage}, 0, "test"); err != nil {
+		t.Fatal(err)
+	}
+	third := appSpec()
+	third.Image = "sha256:" + strings.Repeat("ab", 32)
+	if _, err := st.PutApp(App{Name: "web", Spec: third}, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := st.Get("a"); a.BeforeRevision != 0 || a.AppRevision != 0 {
+		t.Fatalf("a, which the change leaves: %+v", a)
 	}
 }

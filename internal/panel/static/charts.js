@@ -134,6 +134,7 @@
         if (event.target.closest("a") && (event.pointerType === "mouse" || event.detail === 0)) return;
         event.preventDefault();
         fromEvent(event);
+        pin(true);
       });
       // One lane in a group is reached by the keyboard: the others repeat it.
       if (group && peers().length > 0 && peers()[0].figure !== figure) {
@@ -141,9 +142,26 @@
         for (const link of lane.querySelectorAll("a")) link.setAttribute("tabindex", "-1");
       }
     }
-    plot.addEventListener("pointermove", fromEvent);
-    plot.addEventListener("pointerdown", fromEvent);
-    plot.addEventListener("pointerleave", (event) => { if (event.pointerType === "mouse" && document.activeElement !== plot) rest(); });
+    // The reading stays while the pointer is anywhere in the figure (its
+    // plot, lane, readout line and nearby list), so its links can be
+    // reached; it goes as the pointer leaves the figure. A click or tap
+    // pins it until Escape, or a click elsewhere.
+    let pinned = false;
+    const pin = (on) => {
+      pinned = on;
+      figure.classList.toggle("pinned", on);
+    };
+    plot.addEventListener("pointermove", (event) => { if (!pinned) fromEvent(event); });
+    plot.addEventListener("pointerdown", (event) => { fromEvent(event); pin(true); });
+    figure.addEventListener("pointerleave", (event) => {
+      if (event.pointerType === "mouse" && !pinned && !figure.contains(document.activeElement)) rest();
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (pinned && !figure.contains(event.target)) { pin(false); rest(); }
+    });
+    figure.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && at >= 0) { pin(false); rest(); }
+    });
     // Focus moving to the chart's own links keeps what is read.
     plot.addEventListener("blur", (event) => { if (!figure.contains(event.relatedTarget)) rest(); });
     figure.addEventListener("focusout", (event) => {
@@ -160,8 +178,6 @@
       } else if (event.key === "End") {
         event.preventDefault();
         show(points.length - 1);
-      } else if (event.key === "Escape") {
-        rest();
       }
     });
   };

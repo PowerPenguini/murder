@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,28 @@ type Rollout struct {
 	Actor     string    `json:"actor"`
 	// Epoch counts its changes of state: each wave, pause and resume.
 	Epoch int64 `json:"epoch"`
+	// First counts its leading waves of tenants named to move first: 0 or
+	// 1. The wave after them is the canaries.
+	First int `json:"first,omitempty"`
+}
+
+// WaveName names its wave w, from 1, as its plan does: the tenants moved
+// first, the canaries, a tenth, half, the rest.
+func (r Rollout) WaveName(w int) string {
+	if w <= r.First {
+		return "First, now"
+	}
+	return WaveName(w - 1 - r.First)
+}
+
+// WaveName names a rollout's wave by its place among the waves after any
+// moved first, from 0: the canaries first.
+func WaveName(w int) string {
+	names := []string{"Canaries", "A tenth", "Half", "The rest"}
+	if w >= 0 && w < len(names) {
+		return names[w]
+	}
+	return "Wave " + strconv.Itoa(w+1)
 }
 
 // RestorePending reports whether the tenant's data is to go back to the
@@ -77,14 +100,14 @@ func (s *SQLite) RolloutState() ([]Rollout, []Record) {
 
 func loadRollouts(q querier, state *snapshot) error {
 	state.rollouts = map[string]Rollout{}
-	rows, err := q.Query(`SELECT app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor, epoch FROM rollouts`)
+	rows, err := q.Query(`SELECT app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor, epoch, first FROM rollouts`)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var r Rollout
 		var waveStarted, started, updated string
-		if err := rows.Scan(&r.App, &r.ToRevision, &r.State, &r.Wave, &waveStarted, &r.Reason, &started, &updated, &r.Actor, &r.Epoch); err != nil {
+		if err := rows.Scan(&r.App, &r.ToRevision, &r.State, &r.Wave, &waveStarted, &r.Reason, &started, &updated, &r.Actor, &r.Epoch, &r.First); err != nil {
 			rows.Close()
 			return err
 		}

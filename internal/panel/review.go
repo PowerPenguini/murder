@@ -186,8 +186,9 @@ type reviewData struct {
 	ImageTenants []string
 	ImageChange  string
 	// ReviewDo is the action that shows this review again, for another
-	// pace.
+	// pace; Draft names the spec under review, kept for its address.
 	ReviewDo string
+	Draft    string
 }
 
 // paceOption is one way a change can reach its tenants.
@@ -249,9 +250,6 @@ func ImageParts(ref string) (repository, short string) {
 	return ref, ""
 }
 
-// waveNames say each wave as the rollout's plan does.
-var waveNames = []string{"Canaries", "A tenth", "Half", "The rest"}
-
 // planWaves splits the live tenants into the waves a rollout moves them
 // in, as the rollout driver will.
 func planWaves(tenants []api.Tenant) []wave {
@@ -275,13 +273,9 @@ func planFrom(from, total, moved int, pending []store.Record) []wave {
 	return waves
 }
 
-// waveName says a wave, from 0.
-func waveName(w int) string {
-	if w < len(waveNames) {
-		return waveNames[w]
-	}
-	return "Wave " + strconv.Itoa(w+1)
-}
+// waveName says a wave by its place among the waves after any moved
+// first, from 0: the canaries first (store.WaveName).
+func waveName(w int) string { return store.WaveName(w) }
 
 // overridesOf names what of its own a tenant keeps over its app's spec.
 func overridesOf(o spec.Overrides) []string {
@@ -338,7 +332,7 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 	}
 	if ro := app.Rollout; ro != nil && ro.Active() {
 		if v := rolloutOf(app, tenants, nil, s.now()); v != nil {
-			data.Blocked, data.AtWave = v.Blockers, waveName(max(ro.Wave-1, 0))
+			data.Blocked, data.AtWave = v.Blockers, ro.WaveName(max(ro.Wave, 1))
 			for _, row := range v.Rows {
 				if row.Moved {
 					data.Moved = append(data.Moved, row.Name)
@@ -407,8 +401,8 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 			data.Restart = append(data.Restart, rt)
 			if rt.State.Kind == "bad" {
 				data.Broken = append(data.Broken, rt.Name)
-				if data.BrokenWave == "" {
-					data.BrokenWave = waveName(rt.Wave - 1)
+				if data.BrokenWave == "" && rt.Wave > 0 && rt.Wave <= len(data.Waves) {
+					data.BrokenWave = data.Waves[rt.Wave-1].Name
 				}
 			}
 		case sc.Joins:
@@ -460,7 +454,8 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 				pending = append(pending, store.Record{Spec: t.Spec, Canary: t.Canary})
 			}
 		}
-		data.Waves = append([]wave{{Name: "First, now", Tenants: data.Broken}}, planFrom(1, len(moving), len(data.Broken), pending)...)
+		// The canaries' wave comes next, as the driver moves it.
+		data.Waves = append([]wave{{Name: "First, now", Tenants: data.Broken}}, planFrom(0, len(moving), len(data.Broken), pending)...)
 	}
 	s.render(w, r, "review", "Review "+app.Name, "apps", data)
 }
@@ -512,8 +507,10 @@ type rolloutRow struct {
 	From, To int64
 	// Wave is the wave it moved in or will, from 1; 0 if not known.
 	Wave int
-	// Moved says it runs the new revision; Held that it stays.
+	// Moved says it runs the new revision; Held that it stays. WaveName
+	// names its wave as the rollout does.
 	Moved, Held, Blocks bool
+	WaveName            string
 	// Result says how its move goes, from its health now, and Kind its
 	// colour: "moved, healthy" only for a check that passes now.
 	Result, Kind string
@@ -593,7 +590,8 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 		}
 		v.Rows = append(v.Rows, row)
 	}
-	plan := planFrom(r.Wave, v.Total, v.Moved, pending)
+	// Planned as the driver moves them: waves count after those moved first.
+	plan := planFrom(r.Wave-r.First, v.Total, v.Moved, pending)
 	planned := map[string]int{}
 	for i, w := range plan {
 		for _, name := range w.Tenants {
@@ -607,9 +605,12 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 		if w, ok := planned[v.Rows[i].Name]; ok {
 			v.Rows[i].Wave = w
 		}
+		if v.Rows[i].Wave > 0 {
+			v.Rows[i].WaveName = r.WaveName(v.Rows[i].Wave)
+		}
 	}
 	for w := 1; w <= r.Wave; w++ {
-		step := rolloutStep{Name: waveName(w - 1), Count: waveCount[w], State: "done"}
+		step := rolloutStep{Name: r.WaveName(w), Count: waveCount[w], State: "done"}
 		if w == r.Wave {
 			step.State = "now"
 			switch {
@@ -622,7 +623,7 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 		v.Steps = append(v.Steps, step)
 	}
 	for i, w := range plan {
-		v.Steps = append(v.Steps, rolloutStep{Name: waveName(r.Wave + i), Count: len(w.Tenants), State: "next"})
+		v.Steps = append(v.Steps, rolloutStep{Name: r.WaveName(r.Wave + 1 + i), Count: len(w.Tenants), State: "next"})
 	}
 	for _, b := range v.Blockers {
 		if n := exitsBefore(events, b, r.StartedAt); n > 0 {
@@ -636,7 +637,7 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 	}
 	next := "The rollout ends"
 	if len(v.Next) > 0 {
-		next = waveName(r.Wave) + " (" + strings.Join(v.Next, ", ") + ") moves"
+		next = r.WaveName(r.Wave+1) + " (" + strings.Join(v.Next, ", ") + ") moves"
 	}
 	switch {
 	case r.State == store.RolloutPaused:
@@ -655,4 +656,4 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 
 // fmtSscan reads the wave from an app.rolled-out event's detail, "wave 2:
 // revision 2 → 3".
-func fmtSscan(detail string, wave *int) (int, error) { return fmt.Sscanf(detail, "wave %d:", wave) }
+func fmtSscan(detail string, wave *int) (int, error) { return fmt.Sscanf(detail, "wave %d", wave) }

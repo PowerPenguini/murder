@@ -1036,6 +1036,13 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			composed := spec.Compose(app.Spec, name, record.Overrides)
 			composed.Suspended = record.Spec.Suspended
 			if composed.Equal(record.Spec) && record.AppRevision == 0 {
+				// It runs the change already: no earlier rollout's move is
+				// said of it in this one.
+				if record.BeforeRevision != 0 {
+					if err := tx.Exec(`UPDATE tenants SET before_revision = 0 WHERE name = ?`, name); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			if err := s.sealMissing(tx, now, composed, record.Sealed); err != nil {
@@ -1073,7 +1080,7 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			result.Rollout = true
 			if err := tx.Exec(`INSERT INTO rollouts (app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor) VALUES (?, ?, 'running', 0, ?, '', ?, ?, ?)
 				ON CONFLICT (app) DO UPDATE SET to_revision = excluded.to_revision, state = 'running', wave = 0, wave_started = excluded.wave_started,
-					reason = '', started_at = excluded.started_at, updated_at = excluded.updated_at, actor = excluded.actor, epoch = rollouts.epoch + 1`,
+					reason = '', started_at = excluded.started_at, updated_at = excluded.updated_at, actor = excluded.actor, epoch = rollouts.epoch + 1, first = 0`,
 				app.Name, revision, stamp, stamp, stamp, actorOf(actor)); err != nil {
 				return err
 			}
@@ -1098,7 +1105,7 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 						return err
 					}
 				}
-				if err := tx.Exec(`UPDATE rollouts SET wave = 1, epoch = epoch + 1 WHERE app = ?`, app.Name); err != nil {
+				if err := tx.Exec(`UPDATE rollouts SET wave = 1, first = 1, epoch = epoch + 1 WHERE app = ?`, app.Name); err != nil {
 					return err
 				}
 				detail += "; first, now: " + strings.Join(first, ", ")

@@ -384,7 +384,7 @@ func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []s
 				state.Blockers, state.ToRevision = view.Blockers, ro.ToRevision
 				for _, name := range view.Blockers {
 					if n := find(name); n != nil {
-						text := fmt.Sprintf("It blocks %s's rollout of revision %d: the next wave (%s) waits for it.", app.Name, ro.ToRevision, strings.ToLower(waveName(ro.Wave)))
+						text := fmt.Sprintf("It blocks %s's rollout of revision %d: the next wave (%s) waits for it.", app.Name, ro.ToRevision, strings.ToLower(ro.WaveName(ro.Wave+1)))
 						n.Subs = append(n.Subs, sub{Bad: true, Short: text, Text: text, Fixes: []fix{{"The rollout", appHref + "#rollout"}}})
 					}
 				}
@@ -396,7 +396,7 @@ func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []s
 						note.Text += ": " + ro.Reason
 					}
 				} else {
-					note.Text = fmt.Sprintf(" rolls out revision %d: %s, for %s", ro.ToRevision, strings.ToLower(waveName(max(ro.Wave-1, 0))), ago(now, ro.WaveStarted))
+					note.Text = fmt.Sprintf(" rolls out revision %d: %s, for %s", ro.ToRevision, strings.ToLower(ro.WaveName(max(ro.Wave, 1))), ago(now, ro.WaveStarted))
 				}
 				notes = append(notes, note)
 			}

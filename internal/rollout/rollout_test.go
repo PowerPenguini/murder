@@ -432,3 +432,44 @@ func TestANewLeaderSoaksFromItsOwnFirstFreshLook(t *testing.T) {
 		t.Fatalf("not moved on after a whole soak: %v", got)
 	}
 }
+
+// A change whose broken tenants move first: they are its first wave, the
+// canaries its next, then the shares; the first soak as canaries do.
+func TestTenantsMovedFirstThenCanaries(t *testing.T) {
+	f := newFixture(t, 10, "t07")
+	app := spec.Tenant{Image: imageA, User: "1000:1000"}
+	app.Limits.MemoryMB = 512
+	if change, err := f.store.PutApp(store.App{Name: "web", Spec: app, First: []string{"t03"}}, "alice"); err != nil || !change.Rollout {
+		t.Fatalf("change %+v, %v", change, err)
+	}
+	if got := f.onNewest(); !slices.Equal(got, []string{"t03"}) {
+		t.Fatalf("moved first %v", got)
+	}
+	if r := f.rollout(t); r.Wave != 1 || r.First != 1 || r.WaveName(1) != "First, now" {
+		t.Fatalf("rollout %+v", r)
+	}
+	// Two minutes of soak, then the canary.
+	f.step(time.Minute)
+	if got := f.onNewest(); len(got) != 1 {
+		t.Fatalf("moved before the first soaked: %v", got)
+	}
+	f.step(time.Minute + 10*time.Second)
+	if got := f.onNewest(); !slices.Equal(got, []string{"t03", "t07"}) {
+		t.Fatalf("second wave %v, want the canary", got)
+	}
+	if r := f.rollout(t); r.WaveName(r.Wave) != "Canaries" {
+		t.Fatalf("second wave named %q", r.WaveName(r.Wave))
+	}
+	// The canaries soak two minutes too, then a tenth.
+	f.step(time.Minute)
+	if got := f.onNewest(); len(got) != 2 {
+		t.Fatalf("moved before the canary soaked: %v", got)
+	}
+	f.step(time.Minute + 10*time.Second)
+	if got := f.onNewest(); len(got) != 3 {
+		t.Fatalf("third wave %v", got)
+	}
+	if r := f.rollout(t); r.WaveName(r.Wave) != "A tenth" {
+		t.Fatalf("third wave named %q", r.WaveName(r.Wave))
+	}
+}
