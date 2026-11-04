@@ -132,7 +132,9 @@ type overviewData struct {
 // rolloutNote is an app's rollout under way, as the overview says it.
 type rolloutNote struct {
 	App, Text string
-	Paused    bool
+	// Paused says it was paused; Blocked that a tenant it moved is not
+	// healthy, which is wrong.
+	Paused, Blocked bool
 }
 
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
@@ -247,17 +249,43 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 			slices.SortFunc(apps, func(a, b api.App) int { return strings.Compare(a.Name, b.Name) })
 			for _, app := range apps {
 				data.Apps = append(data.Apps, app.Name)
-				if ro := app.Rollout; ro != nil && ro.Active() {
-					note := rolloutNote{App: app.Name, Paused: ro.State == store.RolloutPaused}
-					if note.Paused {
-						note.Text = fmt.Sprintf("rollout of revision %d is paused", ro.ToRevision)
-						if ro.Reason != "" {
-							note.Text += ": " + ro.Reason
+				ro := app.Rollout
+				if ro == nil || !ro.Active() {
+					continue
+				}
+				note := rolloutNote{App: app.Name, Paused: ro.State == store.RolloutPaused}
+				view := rolloutOf(app, tenants, events, now)
+				switch {
+				case view != nil && len(view.Blockers) > 0:
+					note.Blocked = true
+					note.Text = fmt.Sprintf("'s rollout of revision %d is blocked: its next wave (%s) waits for %s, not healthy on it", ro.ToRevision, strings.ToLower(waveName(ro.Wave)), strings.Join(view.Blockers, ", "))
+					// The tenant that blocks says so too.
+					for i := range data.Attention {
+						if slices.Contains(view.Blockers, data.Attention[i].Subject) && !data.Attention[i].Node {
+							data.Attention[i].Text += fmt.Sprintf("; it blocks %s's rollout of revision %d", app.Name, ro.ToRevision)
+							data.Attention[i].Fixes = append(data.Attention[i].Fixes, fix{"The rollout", "/apps/" + url.PathEscape(app.Name) + "#rollout"})
 						}
-					} else {
-						note.Text = fmt.Sprintf("rolls out revision %d: wave %d of %d, for %s", ro.ToRevision, ro.Wave, rolloutWaves, ago(now, ro.WaveStarted))
 					}
-					data.Rollouts = append(data.Rollouts, note)
+				case note.Paused:
+					note.Text = fmt.Sprintf("'s rollout of revision %d is paused", ro.ToRevision)
+					if ro.Reason != "" {
+						note.Text += ": " + ro.Reason
+					}
+				default:
+					note.Text = fmt.Sprintf(" rolls out revision %d: wave %d of %d, for %s", ro.ToRevision, ro.Wave, rolloutWaves, ago(now, ro.WaveStarted))
+				}
+				data.Rollouts = append(data.Rollouts, note)
+			}
+			// The same failure in several of an app's tenants is the app's.
+			memories := appMemories(apps, tenants, events, now)
+			for _, name := range slices.Sorted(maps.Keys(memories)) {
+				m := memories[name]
+				data.Attention = append(data.Attention, notice{App: true, Subject: name, Href: "/apps/" + url.PathEscape(name), Text: m.Text(),
+					Fixes: []fix{{"Raise " + name + "'s memory limit", m.Href()}}})
+				for i := range data.Attention {
+					if n := &data.Attention[i]; !n.Node && !n.App && m.Hit[n.Subject] > 0 {
+						n.Fixes = append(n.Fixes, fix{"Raise " + name + "'s, for all its tenants", m.Href()})
+					}
 				}
 			}
 		}
@@ -265,7 +293,7 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 	data.Show, data.Query, data.ByName = tenantFilter(r)
 	attention := map[string]int{}
 	for _, n := range data.Attention {
-		if !n.Node {
+		if !n.Node && !n.App {
 			attention[n.Subject] = map[bool]int{true: 0, false: 1}[n.Bad]
 		}
 	}
@@ -311,6 +339,43 @@ func failingNodes(use clusterUse) int {
 // rolloutWaves is how many waves a rollout moves in: canaries, a tenth,
 // half, the rest.
 const rolloutWaves = 4
+
+// appContext puts in a tenant's page what its app says of it: the
+// rollout it is in, and whether its app's tenants run out of memory.
+func (s *Server) appContext(ctx context.Context, r *http.Request, t api.Tenant, data *tenantData) {
+	if s.Actions == nil || t.Archived() {
+		return
+	}
+	var apps []api.App
+	var tenants []api.Tenant
+	var events []store.Event
+	if all(
+		func() (err error) { apps, err = s.Actions(s.actor(userOf(r))).Apps(ctx); return },
+		func() (err error) { tenants, err = s.backend.List(ctx); return },
+		func() (err error) {
+			events, err = s.backend.Events(ctx, store.EventQuery{App: t.App, Limit: activityEvents})
+			return
+		},
+	) != nil {
+		return
+	}
+	i := slices.IndexFunc(apps, func(a api.App) bool { return a.Name == t.App })
+	if i < 0 {
+		return
+	}
+	now := s.now()
+	if v := rolloutOf(apps[i], tenants, events, now); v != nil {
+		data.Rollout = v
+		for j := range v.Rows {
+			if v.Rows[j].Name == t.Spec.Name {
+				data.Place = &v.Rows[j]
+			}
+		}
+	}
+	if m := appMemoryOf(apps[i], tenants, events, now); m != nil && m.Hit[t.Spec.Name] > 0 {
+		data.AppMemory = m
+	}
+}
 
 // tenantFilters are the tenants' page's filters, in order.
 var tenantFilters = []string{"all", "attention", "unprotected", "suspended", "archived"}
@@ -411,7 +476,14 @@ type tenantData struct {
 	ErrorsBad bool
 	// BackupsKnown says the cluster said how its backups go.
 	BackupsKnown bool
-	Head         tenantHead
+	// Rollout is its app's rollout under way, and Place its own row in it.
+	Rollout *rolloutView
+	Place   *rolloutRow
+	// AppMemory says its app's tenants run out of memory, if they do.
+	AppMemory *appMemory
+	// Operation is what a person did to it lately, and how it went.
+	Operation *operation
+	Head      tenantHead
 }
 
 type envVar struct{ Key, Value string }
@@ -463,6 +535,13 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	slices.SortFunc(data.Env, func(a, b envVar) int { return strings.Compare(a.Key, b.Key) })
 	if use != nil {
 		data.ErrorsBad = use.ErrorsBad
+	}
+	s.appContext(ctx, r, t, &data)
+	data.Operation = operationOf(t, events, s.now())
+	// While its new container starts, what was wrong was of the old one.
+	if op := data.Operation; op != nil && op.Kind == "busy" && data.Problem != "" {
+		data.Problem = "Before: " + data.Problem
+		data.Broken = false
 	}
 	data.Head = s.headOf(t, nodes, "overview")
 	s.write(w, "tenant", s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data), http.StatusOK)
@@ -594,8 +673,10 @@ func (s *Server) funcs() template.FuncMap {
 		"nodeActs": func(n api.NodeState, self bool, targets, tenants []string, from string) nodeActs {
 			return nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, Tenants: tenants, From: from}
 		},
-		"every": every,
-		"sub":   func(a, b int) int { return a - b },
+		"every":    every,
+		"lower":    strings.ToLower,
+		"wavename": waveName,
+		"sub":      func(a, b int) int { return a - b },
 		"others": func(n api.Nodes) string {
 			var out []string
 			for _, node := range n.Nodes {

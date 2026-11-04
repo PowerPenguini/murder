@@ -171,6 +171,10 @@ type appData struct {
 	EditorProblem string
 	// Rows are its tenants, with their state.
 	Rows []tenantRow
+	// Memory says its tenants run out of memory; Proposed that the editor
+	// holds a proposed change, from a link.
+	Memory   *appMemory
+	Proposed string
 }
 
 func (s *Server) app(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +190,18 @@ func (s *Server) app(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.appPage(w, r, appData{App: app, File: file, Updated: stampOf(app.UpdatedAt)}, "", http.StatusOK)
+	data := appData{App: app, File: file, Updated: stampOf(app.UpdatedAt)}
+	// A link that proposes a memory limit ("Raise web's memory limit")
+	// puts it in the editor, to be reviewed.
+	if mb, err := strconv.Atoi(r.URL.Query().Get("memoryMB")); err == nil && mb > 0 && mb <= 1<<20 && mb != app.Spec.Limits.MemoryMB {
+		proposed := app
+		proposed.Spec.Limits.MemoryMB = mb
+		if file, err := shownFile(proposed); err == nil {
+			data.File = file
+			data.Proposed = "Proposed in the editor below: memory " + memory(mb) + " for every tenant of " + app.Name + ", up from " + memory(app.Spec.Limits.MemoryMB) + ". Nothing changes until you review it and roll it out."
+		}
+	}
+	s.appPage(w, r, data, "", http.StatusOK)
 }
 
 // shownFile is an app's spec as its editor shows it. An app given a tag
@@ -218,6 +233,7 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, p
 		return
 	}
 	data.Rollout = rolloutOf(data.App, tenants, events, s.now())
+	data.Memory = appMemoryOf(data.App, tenants, events, s.now())
 	slices.SortFunc(tenants, func(a, b api.Tenant) int { return strings.Compare(a.Spec.Name, b.Spec.Name) })
 	for _, t := range tenants {
 		if t.App == data.App.Name {

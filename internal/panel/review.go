@@ -270,6 +270,9 @@ type rolloutView struct {
 	Waits    string
 	// Moved and Total count the tenants it moves.
 	Moved, Total int
+	// Before says a blocker broke the same way before the rollout began,
+	// so the new revision is likely not the cause.
+	Before string
 }
 
 type rolloutStep struct {
@@ -329,7 +332,8 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 			waveCount[row.Wave]++
 			v.Moved++
 			v.Total++
-			if row.State.Kind != "ok" {
+			// A tenant still starting is not yet a blocker: one broken is.
+			if row.State.Kind == "bad" {
 				row.Blocks = true
 				v.Blockers = append(v.Blockers, t.Spec.Name)
 			}
@@ -365,6 +369,12 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 	}
 	for i, w := range plan {
 		v.Steps = append(v.Steps, rolloutStep{Name: waveName(r.Wave + i), Count: len(w.Tenants), State: "next"})
+	}
+	for _, b := range v.Blockers {
+		if n := exitsBefore(events, b, r.StartedAt); n > 0 {
+			v.Before = fmt.Sprintf("%s also ran out of memory %s in the 24 hours before revision %d began: the new revision is likely not the cause.", b, plural(n, "time", "times"), r.ToRevision)
+			break
+		}
 	}
 	soak := "a minute"
 	if r.Wave == 1 {

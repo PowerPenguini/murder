@@ -581,3 +581,6 @@ details.howto .panel { margin-top: var(--s3); display: grid; gap: var(--s3); }
 .livestate { flex-wrap: nowrap; align-items: baseline; }
 .livestate .live { align-self: flex-start; margin-top: 6px; }
 .nowrap { white-space: nowrap; }
+
+.opline, .rolloutline { margin: var(--s4) 0 0; padding: var(--s2) var(--pad-x); border: 1px solid var(--frame); font-size: 13.5px; }
+.rolloutline:has(.st.bad) { border-color: #4a1712; background: var(--bad-wash); }

@@ -83,7 +83,7 @@ func TestAttentionOnThePages(t *testing.T) {
 	server := httptest.NewServer(s.Handler())
 	defer server.Close()
 	_, page := get(t, server.URL+"/")
-	if !strings.Contains(page, `<ul class="attention">`) || !strings.Contains(page, "hel-1</a> failed") || !strings.Contains(page, "baltic-freight</a> is unhealthy") || !strings.Contains(page, "web</a> rolls out revision 3") {
+	if !strings.Contains(page, `<ul class="attention">`) || !strings.Contains(page, "hel-1</a> failed") || !strings.Contains(page, "baltic-freight</a> is unhealthy") || !strings.Contains(page, "web</a>&#39;s rollout of revision 3 is blocked") {
 		t.Fatalf("the overview does not say what needs attention:\n%s", page)
 	}
 	_, page = get(t, server.URL+"/tenants/baltic-freight")

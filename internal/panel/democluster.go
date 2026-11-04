@@ -3,8 +3,6 @@ package panel
 import (
 	"context"
 	"fmt"
-	"maps"
-	"slices"
 	"sync"
 	"time"
 
@@ -46,7 +44,12 @@ func (d *DemoCluster) As(actor string) ActionAgent { return &demoActor{d, actor}
 func (d *DemoCluster) List(context.Context) ([]api.Tenant, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return slices.Collect(maps.Values(d.tenants)), nil
+	var out []api.Tenant
+	for name, t := range d.tenants {
+		d.tenants[name] = settle(t)
+		out = append(out, d.tenants[name])
+	}
+	return out, nil
 }
 
 func (d *DemoCluster) Get(_ context.Context, name string) (api.Tenant, error) {
@@ -56,7 +59,8 @@ func (d *DemoCluster) Get(_ context.Context, name string) (api.Tenant, error) {
 	if !ok {
 		return t, &api.Error{Status: 404, Message: fmt.Sprintf("tenant %s: not found", name)}
 	}
-	return t, nil
+	d.tenants[name] = settle(t)
+	return d.tenants[name], nil
 }
 
 func (d *DemoCluster) Events(_ context.Context, query store.EventQuery) ([]store.Event, error) {
@@ -98,9 +102,33 @@ func (a *demoActor) change(name, action, detail string, change func(*api.Tenant)
 		return t, err
 	}
 	t.Generation++
+	// A new container starts, and settles a few seconds later (settle).
+	if _, starts := operations[action]; starts && t.Status != nil && !t.Spec.Suspended {
+		restarts := t.Status.Restarts
+		t.Status = &reconcile.Status{Phase: "starting", Generation: t.Generation, Restarts: restarts, CheckedAt: time.Now()}
+	}
 	a.tenants[name] = t
 	a.record(action, name, detail)
 	return t, nil
+}
+
+// demoStart is how long the demo's new containers take to start.
+const demoStart = 6 * time.Second
+
+// settle has a demo tenant's starting container run, a few seconds after
+// it started: healthy, but for baltic-freight, which runs out of memory
+// again.
+func settle(t api.Tenant) api.Tenant {
+	if t.Status == nil || t.Status.Phase != "starting" || time.Since(t.Status.CheckedAt) < demoStart {
+		return t
+	}
+	status := *t.Status
+	status.Phase, status.Healthy, status.CheckedAt = "running", true, time.Now()
+	if t.Spec.Name == "baltic-freight" {
+		status.Healthy, status.Restarts, status.LastExit = false, status.Restarts+1, "exit 137 (most likely out of memory) just now"
+	}
+	t.Status = &status
+	return t
 }
 
 func (a *demoActor) Create(ctx context.Context, request api.TenantRequest) (api.Applied, error) {

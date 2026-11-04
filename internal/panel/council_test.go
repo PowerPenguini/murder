@@ -5,10 +5,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
 )
@@ -216,4 +218,51 @@ func newServerOf(t *testing.T, cluster *DemoCluster) *httptest.Server {
 	server := httptest.NewServer(s.Handler())
 	t.Cleanup(server.Close)
 	return server
+}
+
+// A broken tenant, the rollout it blocks and the app-wide cause point at
+// each other: on the overview, the tenant and the app.
+func TestCauseTenantAndRolloutJoin(t *testing.T) {
+	server := newServerOf(t, NewDemoCluster())
+	_, page := get(t, server.URL+"/")
+	for _, want := range []string{"waits for baltic-freight, not healthy on it", "it blocks web&#39;s rollout of revision 3", "web</a>: all 7 tenants ran out of memory", "Raise web&#39;s memory limit", "/apps/web?memoryMB=512#spec"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the overview lacks %q:\n%s", want, page)
+		}
+	}
+	_, page = get(t, server.URL+"/tenants/baltic-freight")
+	for _, want := range []string{"It blocks web's rollout", `href="/apps/web#r-baltic-freight"`, "The cause is likely web's", "Raise web's, for all its tenants"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the tenant lacks %q:\n%s", want, page)
+		}
+	}
+	_, page = get(t, server.URL+"/apps/web?memoryMB=512")
+	for _, want := range []string{"memoryMB: 512", "Proposed in the editor below", "also ran out of memory", `id="r-baltic-freight"`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the app lacks %q:\n%s", want, page)
+		}
+	}
+}
+
+// After an action, the tenant's page follows how it goes.
+func TestOperationIsFollowed(t *testing.T) {
+	cluster := NewDemoCluster()
+	server := newServerOf(t, cluster)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	_, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}}, server.URL)
+	if !strings.Contains(body, `class="opline"`) || !strings.Contains(body, "its new container is starting") {
+		t.Fatalf("after a restart:\n%s", body)
+	}
+	// Settled, it says so.
+	tenant, _ := cluster.Get(context.Background(), "acme-logistics")
+	status := *tenant.Status
+	status.CheckedAt = status.CheckedAt.Add(-time.Minute)
+	cluster.mu.Lock()
+	tenant.Status = &status
+	cluster.tenants["acme-logistics"] = tenant
+	cluster.mu.Unlock()
+	if _, page := get(t, server.URL+"/tenants/acme-logistics"); !strings.Contains(page, "done: it runs healthy") {
+		t.Fatalf("after it settled:\n%s", page)
+	}
 }

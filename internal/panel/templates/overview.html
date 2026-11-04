@@ -18,7 +18,7 @@
   {{end}}
   {{with $d.Rollouts}}
   <ul class="attention under">
-    {{range .}}<li><span class="st {{if .Paused}}warn{{else}}busy{{end}}"></span><div><a href="/apps/{{.App}}" class="subject">{{.App}}</a> {{.Text}}<span class="fixes"><a href="/apps/{{.App}}#rollout">Follow the rollout</a></span></div></li>{{end}}
+    {{range .}}<li{{if .Blocked}} class="broken"{{end}}><span class="st {{if .Blocked}}bad{{else if .Paused}}warn{{else}}busy{{end}}"></span><div><a href="/apps/{{.App}}" class="subject">{{.App}}</a>{{.Text}}.<span class="fixes"><a href="/apps/{{.App}}#rollout">{{if .Blocked}}Pause, abort or move on{{else}}Follow the rollout{{end}}</a></span></div></li>{{end}}
   </ul>
   {{end}}
 </section>

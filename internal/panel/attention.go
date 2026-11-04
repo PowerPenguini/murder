@@ -22,8 +22,8 @@ type notice struct {
 	Text string
 	// Fixes are where to act on it.
 	Fixes []fix
-	// Node says it is about a node, not a tenant.
-	Node bool
+	// Node says it is about a node, App about an app, not a tenant.
+	Node, App bool
 }
 
 // fix is a way to act on what needs attention.
@@ -127,6 +127,9 @@ func alertsOf(notices []notice, failing int) navAlerts {
 	a := navAlerts{Cluster: failing}
 	for _, n := range notices {
 		if !n.Bad {
+			continue
+		}
+		if n.App {
 			continue
 		}
 		a.Overview++

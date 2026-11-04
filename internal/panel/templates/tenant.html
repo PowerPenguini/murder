@@ -1,6 +1,8 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}
 {{template "tenant-head" $d.Head}}
-{{with $d.Problem}}<div class="problem{{if $d.Broken}} bad{{end}}" role="alert">{{.}}{{if or $d.Broken (and $d.MemoryHigh $.Edits)}}<span class="fixes">{{if $.Acts}}<a href="/tenants/{{$t.Spec.Name}}/logs">Read its logs</a>{{end}}{{if and $d.MemoryHigh $.Edits}}<a href="{{raise $t}}">Raise its memory limit</a>{{end}}</span>{{end}}</div>{{end}}
+{{with $d.Operation}}<div class="opline" role="status"><span class="st {{.Kind}}">{{.Said}}</span> by {{.Event.Actor}} {{ago .Event.At}} ago: {{.State}}. <a href="/events?tenant={{$t.Spec.Name}}">Its events</a>{{if eq .Kind "busy"}} · <a href="/tenants/{{$t.Spec.Name}}/logs?follow=1">Follow its logs</a>{{end}}</div>{{end}}
+{{with $d.Place}}{{$r := $d.Rollout}}<p class="rolloutline">{{if .Blocks}}<span class="st bad">It blocks {{$t.App}}'s rollout</span>: it moved to revision {{.To}} in wave {{.Wave}} and is not healthy on it, so the next wave ({{lower (wavename $r.Wave)}}) waits.{{else if .Moved}}<span class="st busy">Rolling out</span>: it moved from revision {{.From}} to {{.To}} in wave {{.Wave}}.{{else if .Held}}<span class="st mute">Held</span> on revision {{.From}} while {{$t.App}} rolls out revision {{.To}}.{{else if ne .From .To}}<span class="st busy">Rolling out</span>: it runs revision {{.From}} and moves to {{.To}} in wave {{.Wave}}.{{end}} <a href="/apps/{{$t.App}}#r-{{.Name}}">Its place in the rollout</a></p>{{end}}
+{{with $d.Problem}}<div class="problem{{if $d.Broken}} bad{{end}}" role="alert">{{.}}{{if or $d.Broken (and $d.MemoryHigh $.Edits)}}<span class="fixes">{{if $.Acts}}<a href="/tenants/{{$t.Spec.Name}}/logs">Read its logs</a>{{end}}{{if and $d.MemoryHigh $.Edits}}<a href="{{raise $t}}">Raise its memory limit</a>{{end}}{{with $d.AppMemory}}{{if $.Edits}}<a href="{{.Href}}">Raise {{.App}}'s, for all its tenants</a>{{end}}{{end}}</span>{{end}}{{with $d.AppMemory}}<p class="flat spaced">The cause is likely {{.App}}'s, not {{$t.Spec.Name}}'s: {{if eq (len .Hit) .Live}}all {{.Live}} of its tenants{{else}}{{len .Hit}} of its {{plural .Live "tenant" "tenants"}}{{end}} ran out of memory in the last 24 hours{{if .LimitMB}}, each with a limit of {{mem .LimitMB}}{{end}}. Raising {{.App}}'s limit fixes them all.</p>{{end}}</div>{{end}}
 
 <section class="near">
   <div class="stats">
@@ -16,7 +18,7 @@
     <div class="stat"><div class="caps">CPU limit</div><div class="v">{{if $t.Spec.Limits.CPUs}}{{limit $t.Spec.Limits.CPUs}} <small>cores</small>{{else}}<span class="dim">node default</span>{{end}}</div></div>
     {{end}}
     <div class="stat"><div class="caps">Copy</div><div class="v">{{template "copy" $d.Row}}</div>
-      {{if not $t.ReplicaSyncedAt.IsZero}}<div class="dim small">matched {{ago $t.ReplicaSyncedAt}} ago</div>{{end}}</div>
+      {{if and $t.Replica $t.ReplicaReady (not $t.ReplicaSyncedAt.IsZero)}}<div class="dim small">matched {{ago $t.ReplicaSyncedAt}} ago</div>{{end}}</div>
     {{if $d.BackupsKnown}}<div class="stat"><div class="caps">Newest backup</div><div class="v">{{if $d.Row.Backup}}{{template "backup" $d.Row}}{{else}}<span class="dim">none</span>{{end}}</div>
       <div class="dim small">{{with $d.Row.Backup}}every {{every .Every}} · {{end}}<a href="/cluster#backups">how to restore</a></div></div>{{end}}
   </div>
