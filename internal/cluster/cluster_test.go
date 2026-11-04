@@ -60,6 +60,10 @@ type node struct {
 	replicas Replicas
 	// stable wraps where Raft keeps its term; nil leaves it.
 	stable func(raft.StableStore) raft.StableStore
+	// invites takes invitations; none if nil.
+	invites Invites
+	// unregistered leaves the node's identity key unregistered.
+	unregistered bool
 }
 
 func newNode(t *testing.T, name string) *node {
@@ -94,7 +98,7 @@ func (n *node) start() {
 	}
 	c, err := Start(Config{
 		Node: n.name, Address: n.address, Dir: filepath.Join(n.dir, "raft"),
-		Seeds: n.key.DeriveAll("cluster ca"), Store: st, Replicas: n.replicas, Keys: nodeKeys{n},
+		Seeds: n.key.DeriveAll("cluster ca"), Store: st, Replicas: n.replicas, Keys: nodeKeys{n}, Invites: n.invites, unregistered: n.unregistered,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Fatal:  func(err error) { n.fatal <- err },
 		stable: n.stable,
@@ -171,6 +175,25 @@ func eventually(t *testing.T, what string, check func() bool) {
 	}
 }
 
+// invite admits joiner to the cluster of member, as an invitation does,
+// and returns the members' identity keys it names.
+func invite(t *testing.T, member, joiner *node) map[string]string {
+	t.Helper()
+	if err := member.cluster.Admit(ctx(t), joiner.name, joiner.cluster.IdentityKey()); err != nil {
+		t.Fatalf("admit %s: %v", joiner.name, err)
+	}
+	return members(member)
+}
+
+// members are the identity keys of the nodes n knows, by name.
+func members(n *node) map[string]string {
+	keys := map[string]string{}
+	for _, node := range n.store.Nodes() {
+		keys[node.Name] = node.Key
+	}
+	return keys
+}
+
 // threeNodes starts a cluster of three nodes.
 func threeNodes(t *testing.T) []*node {
 	t.Helper()
@@ -182,13 +205,13 @@ func threeNodes(t *testing.T) []*node {
 func threeTunedNodes(t *testing.T, tune func(*raft.Config)) []*node {
 	t.Helper()
 	worker := newTunedNode(t, "fsn-1", tune)
-	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+	if err := worker.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 		t.Fatal(err)
 	}
 	nodes := []*node{worker}
 	for _, name := range []string{"nbg-1", "hel-1"} {
 		witness := newTunedNode(t, name, tune)
-		if err := witness.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
+		if err := witness.cluster.Join(ctx(t), worker.address, invite(t, worker, witness), "alice"); err != nil {
 			t.Fatalf("join %s: %v", name, err)
 		}
 		// Join returns once the node follows a leader (under load,
@@ -267,7 +290,7 @@ func TestWritesOnAnyNodeReachEveryNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status.Leader != "fsn-1" || status.State != "Follower" || len(status.Members) != 3 ||
-		status.Members[0] != (Member{Name: "fsn-1", Address: worker.address, Suffrage: "Voter"}) {
+		status.Members[0] != (Member{Name: "fsn-1", Address: worker.address, Suffrage: "Voter", Key: EncodeKey(worker.cluster.IdentityKey())}) {
 		t.Fatalf("status = %+v", status)
 	}
 }
@@ -405,14 +428,14 @@ func TestOneNodeLeftWritesNothing(t *testing.T) {
 
 func TestJoinRules(t *testing.T) {
 	worker := newNode(t, "fsn-1")
-	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+	if err := worker.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err == nil || !strings.Contains(err.Error(), "already part of a cluster") {
+	if err := worker.cluster.Bootstrap(ctx(t), "alice", false); err == nil || !strings.Contains(err.Error(), "already part of a cluster") {
 		t.Fatalf("bootstrap twice: %v", err)
 	}
 	second := newNode(t, "nbg-1")
-	if err := second.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
+	if err := second.cluster.Join(ctx(t), worker.address, invite(t, worker, second), "alice"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -426,21 +449,21 @@ func TestJoinRules(t *testing.T) {
 
 func TestANodeWithStateCannotJoin(t *testing.T) {
 	worker := newNode(t, "fsn-1")
-	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+	if err := worker.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 		t.Fatal(err)
 	}
 	other := newNode(t, "hel-1")
-	if err := other.cluster.Bootstrap(ctx(t), "bob"); err != nil {
+	if err := other.cluster.Bootstrap(ctx(t), "bob", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := other.cluster.Join(ctx(t), worker.address, "bob"); err == nil || !strings.Contains(err.Error(), "already part of a cluster") {
+	if err := other.cluster.Join(ctx(t), worker.address, members(worker), "bob"); err == nil || !strings.Contains(err.Error(), "already part of a cluster") {
 		t.Fatalf("a node of another cluster joined: %v", err)
 	}
 }
 
 func TestAnotherMasterKeyIsNotTheCluster(t *testing.T) {
 	worker := newNode(t, "fsn-1")
-	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+	if err := worker.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 		t.Fatal(err)
 	}
 	stranger := &node{t: t, name: "evil", dir: t.TempDir(), key: masterKey(t, 8), address: "127.0.0.1:0", fatal: make(chan error, 1)}
@@ -449,7 +472,7 @@ func TestAnotherMasterKeyIsNotTheCluster(t *testing.T) {
 	}
 	stranger.start()
 	t.Cleanup(stranger.stop)
-	if err := stranger.cluster.Join(ctx(t), worker.address, "mallory"); err == nil {
+	if err := stranger.cluster.Join(ctx(t), worker.address, invite(t, worker, stranger), "mallory"); err == nil {
 		t.Fatal("a node with another master key joined")
 	}
 	if nodes := worker.store.Nodes(); len(nodes) != 1 {
@@ -477,7 +500,7 @@ func TestRemoveTakesANodeOut(t *testing.T) {
 
 func TestAFailureOfTheNodesOwnStopsIt(t *testing.T) {
 	n := newNode(t, "fsn-1")
-	if err := n.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+	if err := n.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 		t.Fatal(err)
 	}
 	f := &fsm{store: n.store, fatal: func(err error) { n.fatal <- err }}
@@ -523,11 +546,11 @@ func TestANodeOfAnotherClusterCannotJoin(t *testing.T) {
 	// A witness of a cluster since rebuilt keeps its old database: it must
 	// not join the new cluster with it.
 	old := newNode(t, "fsn-1")
-	if err := old.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+	if err := old.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 		t.Fatal(err)
 	}
 	witness := newNode(t, "hel-1")
-	if err := witness.cluster.Join(ctx(t), old.address, "alice"); err != nil {
+	if err := witness.cluster.Join(ctx(t), old.address, invite(t, old, witness), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	// The old cluster is gone; the witness's log is moved aside.
@@ -539,10 +562,10 @@ func TestANodeOfAnotherClusterCannotJoin(t *testing.T) {
 	witness.start()
 
 	rebuilt := newNode(t, "nbg-1")
-	if err := rebuilt.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+	if err := rebuilt.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 		t.Fatal(err)
 	}
-	err := witness.cluster.Join(ctx(t), rebuilt.address, "alice")
+	err := witness.cluster.Join(ctx(t), rebuilt.address, invite(t, rebuilt, witness), "alice")
 	if !errors.Is(err, ErrMember) || !strings.Contains(err.Error(), "belongs to cluster") {
 		t.Fatalf("a node of another cluster joined: %v", err)
 	}
@@ -553,15 +576,15 @@ func TestANodeOfAnotherClusterCannotJoin(t *testing.T) {
 
 func TestANameIsNotTakenOver(t *testing.T) {
 	worker := newNode(t, "fsn-1")
-	if err := worker.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+	if err := worker.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 		t.Fatal(err)
 	}
 	witness := newNode(t, "hel-1")
-	if err := witness.cluster.Join(ctx(t), worker.address, "alice"); err != nil {
+	if err := witness.cluster.Join(ctx(t), worker.address, invite(t, worker, witness), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	impostor := newNode(t, "hel-1")
-	if err := impostor.cluster.Join(ctx(t), worker.address, "mallory"); err == nil || !strings.Contains(err.Error(), "already a member at "+witness.address) {
+	if err := impostor.cluster.Join(ctx(t), worker.address, members(worker), "mallory"); err == nil || !strings.Contains(err.Error(), "already a member at "+witness.address) {
 		t.Fatalf("a second node named hel-1: %v", err)
 	}
 	status, err := worker.cluster.Status()
@@ -583,13 +606,13 @@ func TestBootstrapFinishesWhatItStarted(t *testing.T) {
 	if err := n.cluster.raft.BootstrapCluster(configuration).Error(); err != nil {
 		t.Fatal(err)
 	}
-	if err := n.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+	if err := n.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 		t.Fatal(err)
 	}
 	if n.store.Cluster() == "" || len(n.store.Nodes()) != 1 {
 		t.Fatalf("cluster %q, nodes %+v", n.store.Cluster(), n.store.Nodes())
 	}
-	if err := n.cluster.Bootstrap(ctx(t), "alice"); !errors.Is(err, ErrMember) {
+	if err := n.cluster.Bootstrap(ctx(t), "alice", false); !errors.Is(err, ErrMember) {
 		t.Fatalf("bootstrap a finished cluster: %v", err)
 	}
 }
@@ -679,13 +702,17 @@ func TestAMemberIsRemovedBeforeItJoinsAgain(t *testing.T) {
 	}
 	again.start()
 	t.Cleanup(again.stop)
-	if err := again.cluster.Join(ctx(t), nodes[0].address, "alice"); err == nil || !strings.Contains(err.Error(), "murder cluster remove "+old.name) {
+	// A voter's name is admitted to no one.
+	if err := nodes[0].cluster.Admit(ctx(t), again.name, again.cluster.IdentityKey()); !errors.Is(err, store.ErrConflict) && (err == nil || !strings.Contains(err.Error(), "in the cluster already")) {
+		t.Fatalf("an admission for a voter's name: %v", err)
+	}
+	if err := again.cluster.Join(ctx(t), nodes[0].address, members(nodes[0]), "alice"); err == nil || !strings.Contains(err.Error(), "murder cluster remove "+old.name) {
 		t.Fatalf("joining over a member: %v", err)
 	}
 	if err := nodes[0].cluster.Remove(ctx(t), old.name, "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := again.cluster.Join(ctx(t), nodes[0].address, "alice"); err != nil {
+	if err := again.cluster.Join(ctx(t), nodes[0].address, invite(t, nodes[0], again), "alice"); err != nil {
 		t.Fatalf("joining once removed: %v", err)
 	}
 	sameState(t, []*node{nodes[0], nodes[1], again})
@@ -698,13 +725,16 @@ func TestAMemberIsRemovedBeforeItJoinsAgain(t *testing.T) {
 func TestOnlyMembersOfTheClusterReachIt(t *testing.T) {
 	nodes := threeNodes(t)
 	other := newNode(t, "fsn-1")
-	if err := other.cluster.Bootstrap(ctx(t), "mallory"); err != nil {
+	if err := other.cluster.Bootstrap(ctx(t), "mallory", false); err != nil {
 		t.Fatal(err)
 	}
 	if other.store.Cluster() == nodes[0].store.Cluster() {
 		t.Fatal("two clusters of one name")
 	}
-	// Raft: a connection naming another cluster is closed unread.
+	// Raft: a connection naming another cluster is closed unread. (The
+	// other cluster's node, named as a member is, does not even take the
+	// member for its own: its key is another.)
+	other.cluster.credentials.servers.Store(nil)
 	conn, err := other.cluster.listener.raftLayer().Dial(raft.ServerAddress(nodes[0].address), 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -717,6 +747,8 @@ func TestOnlyMembersOfTheClusterReachIt(t *testing.T) {
 	// Its requests are refused, and so are those of a node removed.
 	asked := func(from *node, what string) {
 		t.Helper()
+		from.cluster.credentials.servers.Store(nil)
+		from.cluster.client.CloseIdleConnections()
 		request, _ := http.NewRequestWithContext(ctx(t), http.MethodGet, "https://"+nodes[1].address+"/cluster/v1/node", nil)
 		response, err := from.cluster.client.Do(request)
 		if err != nil {
@@ -1049,7 +1081,8 @@ func TestAJoinAcrossTwoLeadershipChangesMakesNoUnknownVoter(t *testing.T) {
 			pause := pauseJoins(t, nodes, stage)
 			x := newNode(t, "x-1")
 			joined := make(chan error, 1)
-			go func() { joined <- x.cluster.Join(ctx(t), nodes[0].address, "alice") }()
+			keys := invite(t, nodes[0], x)
+			go func() { joined <- x.cluster.Join(ctx(t), nodes[0].address, keys, "alice") }()
 			old, next := pause.wait(t, joined)
 			asLeader(t, nodes, next, "remove x-1", func(ctx context.Context) error {
 				return next.cluster.Remove(ctx, "x-1", "bob")
@@ -1057,6 +1090,10 @@ func TestAJoinAcrossTwoLeadershipChangesMakesNoUnknownVoter(t *testing.T) {
 			eventually(t, old.name+" applied the removal", func() bool {
 				_, known := nodeNamed(old.store.Nodes(), "x-1")
 				return !known
+			})
+			// A removed node joins again only with a new invitation.
+			asLeader(t, nodes, next, "admit x-1 again", func(ctx context.Context) error {
+				return next.cluster.Admit(ctx, x.name, x.cluster.IdentityKey())
 			})
 			handOver(t, nodes, old)
 			pause.resume()
@@ -1086,10 +1123,15 @@ func TestAJoinAcrossALeadershipChangeKeepsOneAddress(t *testing.T) {
 	pause := pauseJoins(t, nodes, joinWrite)
 	first, second := newNode(t, "x-1"), newNode(t, "x-1")
 	joined := make(chan error, 1)
-	go func() { joined <- first.cluster.Join(ctx(t), nodes[0].address, "mallory") }()
+	firstKeys := invite(t, nodes[0], first)
+	go func() { joined <- first.cluster.Join(ctx(t), nodes[0].address, firstKeys, "mallory") }()
 	_, next := pause.wait(t, joined)
+	// The second host's admission takes the place of the first's.
+	asLeader(t, nodes, next, "admit the second host", func(ctx context.Context) error {
+		return next.cluster.Admit(ctx, second.name, second.cluster.IdentityKey())
+	})
 	asLeader(t, nodes, next, "the second join", func(ctx context.Context) error {
-		return joinedAgain(second.cluster.Join(ctx, next.address, "alice"))
+		return joinedAgain(second.cluster.Join(ctx, next.address, members(next), "alice"))
 	})
 	pause.resume()
 	if err := awaitJoin(t, joined); err == nil || !strings.Contains(err.Error(), "already a member at "+second.address) {
@@ -1122,15 +1164,20 @@ func staleJoin(t *testing.T, stage string) {
 	pause := pauseJoins(t, nodes, stage)
 	stale := newNode(t, "x-1")
 	joined := make(chan error, 1)
-	go func() { joined <- stale.cluster.Join(ctx(t), nodes[0].address, "alice") }()
+	staleKeys := invite(t, nodes[0], stale)
+	go func() { joined <- stale.cluster.Join(ctx(t), nodes[0].address, staleKeys, "alice") }()
 	old, next := pause.wait(t, joined)
 	asLeader(t, nodes, next, "remove x-1", func(ctx context.Context) error {
 		return next.cluster.Remove(ctx, "x-1", "bob")
 	})
-	// Another host joins as x-1, through the new leader.
+	// Another host joins as x-1, through the new leader, with its own
+	// invitation.
 	replacement := newNode(t, "x-1")
+	asLeader(t, nodes, next, "admit the replacement", func(ctx context.Context) error {
+		return next.cluster.Admit(ctx, replacement.name, replacement.cluster.IdentityKey())
+	})
 	asLeader(t, nodes, next, "the replacement joins", func(ctx context.Context) error {
-		return joinedAgain(replacement.cluster.Join(ctx, next.address, "bob"))
+		return joinedAgain(replacement.cluster.Join(ctx, next.address, members(next), "bob"))
 	})
 	eventually(t, old.name+" knows the replacement", func() bool {
 		node, known := nodeNamed(old.store.Nodes(), "x-1")
@@ -1297,7 +1344,7 @@ func TestHeartbeatsDuringCloseDoNotCrash(t *testing.T) {
 				return slowTerms{StableStore: inner, saving: &saving}
 			}
 		})
-		if err := n.cluster.Bootstrap(ctx(t), "alice"); err != nil {
+		if err := n.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
 			t.Fatal(err)
 		}
 		// Heartbeats as from a leader of ever newer terms: each one has
@@ -1372,7 +1419,7 @@ func TestAJoinAfterTheLogIsCompacted(t *testing.T) {
 		t.Fatalf("configuration %+v at %d, want %+v at %d", configuration, index, want, snapshots[0].ConfigurationIndex)
 	}
 	x := newNode(t, "x-1")
-	if err := x.cluster.Join(ctx(t), leader.address, "alice"); err != nil {
+	if err := x.cluster.Join(ctx(t), leader.address, invite(t, leader, x), "alice"); err != nil {
 		t.Fatalf("join after compaction: %v", err)
 	}
 	eventually(t, "x-1 is a voter", func() bool {
@@ -1385,13 +1432,18 @@ func TestAJoinAfterTheLogIsCompacted(t *testing.T) {
 // meanwhile, is not made once the other is done.
 func TestAChangeWhoseSenderGaveUpIsNotMade(t *testing.T) {
 	nodes := threeNodes(t)
+	// y-1 is admitted, and trusts the members, before x-1's join holds the
+	// members.
+	y := newNode(t, "y-1")
+	yKeys := invite(t, nodes[0], y)
+	y.cluster.joinKeys.Store(&yKeys)
 	pause := pauseJoins(t, nodes, joinWrite)
 	x := newNode(t, "x-1")
 	joined := make(chan error, 1)
-	go func() { joined <- x.cluster.Join(ctx(t), nodes[0].address, "alice") }()
+	xKeys := invite(t, nodes[0], x)
+	go func() { joined <- x.cluster.Join(ctx(t), nodes[0].address, xKeys, "alice") }()
 	held, _ := pause.wait(t, joined)
 	// y-1 asks the node holding x-1's join to add it, and gives up.
-	y := newNode(t, "y-1")
 	request := marshal(joinRequest{Address: y.address, Actor: "bob"})
 	for {
 		attempt, cancel := context.WithTimeout(context.Background(), 2*time.Second)

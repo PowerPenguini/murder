@@ -41,7 +41,11 @@ panel:
 func TestAHostMakesTheClustersConfigItsOwn(t *testing.T) {
 	bundle := cluster.Bundle{Cluster: "acme", Key: []byte("a2V5\n"), Config: []byte(clusterConfig), TunnelAddress: "10.77.0.2",
 		Files: map[string][]byte{"/etc/murder/hetzner.token": []byte("hcloud\n"), "/etc/murder/ghcr.token": []byte("ghp\n")}}
-	in, agent, err := Adopt(bundle, Own{Node: "n2", ZFSPool: "data", ClusterAddress: "10.0.0.3:7400", Public: []string{"203.0.113.11"}})
+	identity, err := cluster.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, agent, err := Adopt(bundle, Own{Node: "n2", ZFSPool: "data", ClusterAddress: "10.0.0.3:7400", Public: []string{"203.0.113.11"}, Identity: identity})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,16 +63,24 @@ func TestAHostMakesTheClustersConfigItsOwn(t *testing.T) {
 	if !strings.Contains(string(in.Config), "this node on the private network") {
 		t.Fatalf("comments lost:\n%s", in.Config)
 	}
-	if string(in.Secrets["/etc/murder/master.key"]) != "a2V5\n" || string(in.Secrets["/etc/murder/ghcr.token"]) != "ghp\n" || len(in.Secrets) != 3 || !in.Panel || in.ZFSPool != "data" {
+	if string(in.Secrets["/etc/murder/master.key"]) != "a2V5\n" || string(in.Secrets["/etc/murder/ghcr.token"]) != "ghp\n" || len(in.Secrets) != 4 || !in.Panel || in.ZFSPool != "data" {
 		t.Fatalf("install %+v", in)
 	}
+	// The identity key the invitation admitted goes where the agent reads
+	// it.
+	if written, _ := cluster.EncodeIdentity(identity); string(in.Secrets["/var/lib/murder/cluster/node.key"]) != string(written) {
+		t.Fatalf("identity key at %v", in.Secrets)
+	}
+	if _, _, err := Adopt(bundle, Own{Node: "n2", ZFSPool: "data", ClusterAddress: "10.0.0.3:7400"}); err == nil || !strings.Contains(err.Error(), "identity key") {
+		t.Fatalf("a host without an identity key: %v", err)
+	}
 	// A cluster that keeps copies refuses a node without ZFS.
-	if _, _, err := Adopt(bundle, Own{Node: "n2", ClusterAddress: "10.0.0.3:7400"}); err == nil || !strings.Contains(err.Error(), "zfs") {
+	if _, _, err := Adopt(bundle, Own{Node: "n2", ClusterAddress: "10.0.0.3:7400", Identity: identity}); err == nil || !strings.Contains(err.Error(), "zfs") {
 		t.Fatalf("plain directories in a failover cluster: %v", err)
 	}
 	// Files outside the config's directory are refused.
 	bundle.Files["/root/.ssh/authorized_keys"] = []byte("x")
-	if _, _, err := Adopt(bundle, Own{Node: "n2", ZFSPool: "data", ClusterAddress: "10.0.0.3:7400"}); err == nil || !strings.Contains(err.Error(), "not in /etc/murder") {
+	if _, _, err := Adopt(bundle, Own{Node: "n2", ZFSPool: "data", ClusterAddress: "10.0.0.3:7400", Identity: identity}); err == nil || !strings.Contains(err.Error(), "not in /etc/murder") {
 		t.Fatalf("a file elsewhere: %v", err)
 	}
 }

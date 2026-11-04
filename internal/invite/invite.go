@@ -1,11 +1,13 @@
 // Package invite keeps a node's invitations: one-time secrets, valid for a
 // while, with which a host gets what it needs to join the cluster as a
 // node like this one: the master key, this node's config and the files it
-// names.
+// names, and an admission for its name and identity key, without which no
+// node joins.
 package invite
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -41,7 +43,14 @@ type Book struct {
 	// Invitation makes an invitation to this node for a secret; nil until
 	// the node runs its part of a cluster.
 	Invitation func(secret []byte) cluster.Invite
-	Now        func() time.Time
+	// Voter reports whether a node is one of the cluster's voters; nil
+	// until the node runs its part of a cluster.
+	Voter func(name string) bool
+	// Admit has the cluster's leader let a host join as node name, with
+	// identity key key, for a while; it refuses a name of the voters. Nil
+	// until the node runs its part of a cluster.
+	Admit func(ctx context.Context, name string, key ed25519.PublicKey) error
+	Now   func() time.Time
 
 	mu      sync.Mutex
 	pending map[[sha256.Size]byte]time.Time
@@ -112,8 +121,9 @@ func (b *Book) forgetExpired() {
 
 var nodePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$`)
 
-// Redeem takes an invitation's secret once.
-func (b *Book) Redeem(_ context.Context, secret []byte, node string) (cluster.Bundle, error) {
+// Redeem takes an invitation's secret once, and admits node with the
+// identity key key.
+func (b *Book) Redeem(ctx context.Context, secret []byte, node string, key ed25519.PublicKey) (cluster.Bundle, error) {
 	hash := sha256.Sum256(secret)
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -124,19 +134,31 @@ func (b *Book) Redeem(_ context.Context, secret []byte, node string) (cluster.Bu
 	if !nodePattern.MatchString(node) {
 		return cluster.Bundle{}, fmt.Errorf("node name %q: letters, digits, dots and hyphens", node)
 	}
+	if len(key) != ed25519.PublicKeySize {
+		return cluster.Bundle{}, errors.New("the host sent no identity key: it runs a release before them; set it up with the cluster's release")
+	}
 	// During a master key rotation, the key ring sent now would be out of
 	// date by the time the host joins.
 	if frozen := b.Store.Frozen(); frozen != "" {
 		return cluster.Bundle{}, fmt.Errorf("the cluster takes no new node now (%s): try again once that ends", frozen)
 	}
+	// A node the state names but the voters do not, as after the cluster
+	// was rebuilt from a backup, may join again, with a new key. Checked
+	// here to say so early; the leader checks again as it admits.
 	for _, member := range b.Store.Nodes() {
-		if member.Name == node {
+		if member.Name == node && (b.Voter == nil || b.Voter(node)) {
 			return cluster.Bundle{}, fmt.Errorf("a node named %s is in the cluster already: give this one another name with -node", node)
 		}
 	}
 	bundle, err := b.bundle()
 	if err != nil {
 		return cluster.Bundle{}, err
+	}
+	if b.Admit == nil {
+		return cluster.Bundle{}, errors.New("this node is not part of a cluster yet")
+	}
+	if err := b.Admit(ctx, node, key); err != nil {
+		return cluster.Bundle{}, fmt.Errorf("admit %s: %w", node, err)
 	}
 	delete(b.pending, hash)
 	if bundle.TunnelAddress != "" {
@@ -168,7 +190,10 @@ func (b *Book) bundle() (cluster.Bundle, error) {
 	if err != nil {
 		return cluster.Bundle{}, fmt.Errorf("read the master key: %w", err)
 	}
-	bundle := cluster.Bundle{Cluster: b.Store.Cluster(), Key: key, Config: data, Files: map[string][]byte{}}
+	bundle := cluster.Bundle{Cluster: b.Store.Cluster(), Key: key, Config: data, Files: map[string][]byte{}, Members: map[string]string{}}
+	for _, node := range b.Store.Nodes() {
+		bundle.Members[node.Name] = node.Key
+	}
 	for _, path := range Shared(agent) {
 		// Only files beside the config: a host writes them where this
 		// node keeps them.

@@ -16,7 +16,7 @@ import (
 
 func TestDirSendsAndReceivesTheWholeTree(t *testing.T) {
 	ctx := context.Background()
-	from := Dir{Root: filepath.Join(t.TempDir(), "from")}
+	from := Dir{Root: filepath.Join(socketDir(t), "from")}
 	to := Dir{Root: filepath.Join(t.TempDir(), "to")}
 	path, err := from.Ensure(ctx, "acme", os.Getuid(), os.Getgid(), 0)
 	if err != nil {
@@ -179,7 +179,7 @@ func TestReceiveDropsSetuidBits(t *testing.T) {
 }
 
 func TestATenantWithoutDataSendsAnEmptyTree(t *testing.T) {
-	from := Dir{Root: filepath.Join(t.TempDir(), "from")}
+	from := Dir{Root: filepath.Join(socketDir(t), "from")}
 	to := Dir{Root: filepath.Join(t.TempDir(), "to")}
 	var stream bytes.Buffer
 	if _, err := from.Send(context.Background(), "acme", "", &stream); err != nil {
@@ -197,7 +197,7 @@ func TestATenantWithoutDataSendsAnEmptyTree(t *testing.T) {
 // and are left out, instead of failing the copy.
 func TestDirLeavesOutSocketsAndPipes(t *testing.T) {
 	ctx := context.Background()
-	from := Dir{Root: filepath.Join(t.TempDir(), "from")}
+	from := Dir{Root: filepath.Join(socketDir(t), "from")}
 	to := Dir{Root: filepath.Join(t.TempDir(), "to")}
 	path, err := from.Ensure(ctx, "acme", os.Getuid(), os.Getgid(), 0)
 	if err != nil {
@@ -342,4 +342,21 @@ func TestCompareTarFindsWhatARestoreWouldChange(t *testing.T) {
 			}
 		})
 	}
+}
+
+// socketDir is a directory for a Unix socket, with a short path: the test's
+// own temporary directory, named after it, may make one too long to bind
+// (108 bytes at most), and so may a long TMPDIR.
+func socketDir(t *testing.T) string {
+	t.Helper()
+	base := os.TempDir()
+	if len(base) > 60 {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, "mv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }

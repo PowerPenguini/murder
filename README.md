@@ -90,8 +90,9 @@ everything and, on a private network, starts a cluster of this node. It
 asks only for what it cannot find out, such as a DNS token for Let's
 Encrypt; every answer is also an option, for scripts (`murder setup -h`).
 
-More nodes join with an invitation, and take the master key, the config
-and its tokens from the cluster:
+More nodes join with an invitation, which admits each new node's own
+identity key, and take the master key, the config and its tokens from the
+cluster:
 
 ```bash
 sudo murder cluster invite                      # on a node: prints the invitation

@@ -116,6 +116,14 @@ sudo systemctl reload murder-edge     # the new edge takes the listeners over; t
 sudo systemctl restart murder-agent   # tenants keep running, the edge keeps serving
 ```
 
+**From a release before node identity keys,** finish the upgrade promptly.
+While any node shows no key in `murder cluster status`, someone with the
+master key can still pose as that node, and as any node while a leader of
+the older release runs. Each node registers its key within seconds of the
+upgrade thawing changes, once every node runs the new release. If a node
+still shows no key a minute after the upgrade, check its agent's log
+("register this node's identity key").
+
 From a release in which the agent served the edge itself, the first
 upgrade has a short gap, once: install `murder-edge.service`, install the
 binary, `systemctl restart murder-agent` (which frees ports 80 and 443) and
@@ -218,12 +226,21 @@ of the cluster, first. A rotation stopped part way (a node lost meanwhile,
 the node that made the key. Afterwards, copy the new key file to where you
 keep the master key, and keep the old key with the database backups made
 before: `murder restore` opens their secrets with any key in the file, so
-add it as a line when restoring one. What a rotation cannot do: whoever holds the old key and reaches
-the nodes' private network passes for a node until the old key is gone,
-during the rotation too (they could read the state, or take the new key
-as it is sent). If that may have happened, the cluster is theirs: set up
-new nodes with a new key, restore the tenants from their backups and
-rotate their secrets. Connections between nodes made before
+add it as a line when restoring one. A rotation leaves each node's identity
+key ([Node identity](cluster.md#node-identity)) as it is: nodes keep their
+places. Whoever holds the old key and reaches the nodes' private network
+cannot pass for a node whose identity key the cluster holds, during the
+rotation either: they cannot read the state, write to it or take the new
+key as it is sent. Until the old key is out of every node's ring, they can
+still send requests to tenants through a node's edge relay
+([Security](security.md)), as anyone can through the public ports. They
+also keep what the old key sealed: a copy of the state they took before (a
+backup, a removed node's database) opens with it, so rotate the secrets of
+tenants whose values matter. Nodes without a key yet, in a cluster from
+before identity keys, can still be passed for with the master key alone.
+These are the nodes with no key in `murder cluster status` (on a node of
+this release), or with no `node.key-registered` in the audit log. Rotate
+once every node shows its key. Connections between nodes made before
 the rotation stay up until they close; to end them at once, run
 `systemctl restart murder-agent` and `systemctl reload murder-edge` on each
 node in turn (tenants keep running through both). Invitations made before

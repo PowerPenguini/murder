@@ -1,8 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -199,7 +202,7 @@ func TestNodesAreReplicatedState(t *testing.T) {
 	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.PutNode(Node{Name: "hel-1", Address: "10.0.0.3:7400"}, "alice"); err != nil {
+	if err := st.PutNode(Node{Name: "hel-1", Address: "10.0.0.3:7400", Key: testKey(3)}, "alice"); err != nil {
 		t.Fatal(err)
 	}
 	version := st.state.Load().version
@@ -207,10 +210,10 @@ func TestNodesAreReplicatedState(t *testing.T) {
 		t.Fatalf("an unchanged node was written again: %v", err)
 	}
 	// A join adds a node; it does not move one already there.
-	if err := st.AddNode(Node{Name: "hel-1", Address: "10.0.0.3:7400"}, "alice"); err != nil || st.state.Load().version != version {
+	if err := st.AddNode(Node{Name: "hel-1", Address: "10.0.0.3:7400", Key: testKey(3)}, noVoters, "alice"); err != nil || st.state.Load().version != version {
 		t.Fatalf("a node added again at its address: %v", err)
 	}
-	if err := st.AddNode(Node{Name: "hel-1", Address: "10.0.0.4:7400"}, "mallory"); !errors.Is(err, ErrConflict) {
+	if err := st.AddNode(Node{Name: "hel-1", Address: "10.0.0.4:7400", Key: testKey(3)}, noVoters, "mallory"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("a node added at another address: %v", err)
 	}
 	if address := st.state.Load().nodes["hel-1"].Address; address != "10.0.0.3:7400" {
@@ -237,6 +240,199 @@ func TestNodesAreReplicatedState(t *testing.T) {
 	events, _ := st.Events(EventQuery{})
 	if len(events) != 3 || events[0].Action != "node.removed" || events[0].Detail != "fsn-1 at 10.0.0.1:7400" {
 		t.Fatalf("events = %+v", events)
+	}
+}
+
+// testKey is an identity key in base64, made of fill.
+func testKey(fill byte) string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{fill}, ed25519.PublicKeySize))
+}
+
+func TestANodeJoinsOnlyWithTheKeyItWasAdmittedWith(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	st, _ := openNew(t, options())
+	st.now = func() time.Time { return now }
+	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400", Key: testKey(1)}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// No admission: no join, with a key or without.
+	for _, key := range []string{"", testKey(2)} {
+		if err := st.AddNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400", Key: key}, noVoters, "mallory"); !errors.Is(err, ErrNotAdmitted) {
+			t.Fatalf("a join without an admission (key %q): %v", key, err)
+		}
+	}
+	if err := st.Admit("nbg-1", testKey(2), now.Add(AdmissionValid), noVoters, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if !st.Admitted("nbg-1", testKey(2), now) || st.Admitted("nbg-1", testKey(9), now) || st.Admitted("nbg-1", testKey(2), now.Add(AdmissionValid)) {
+		t.Fatal("Admitted is wrong")
+	}
+	// Another key than the one admitted is refused.
+	if err := st.AddNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400", Key: testKey(9)}, noVoters, "mallory"); !errors.Is(err, ErrNotAdmitted) {
+		t.Fatalf("a join with another key: %v", err)
+	}
+	if err := st.AddNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400", Key: testKey(2)}, noVoters, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if key, ok := st.NodeKey("nbg-1"); !ok || key != testKey(2) {
+		t.Fatalf("key %q, %v", key, ok)
+	}
+	// The admission is used up; the same join asked again changes nothing.
+	if st.Admitted("nbg-1", testKey(2), now) {
+		t.Fatal("the admission was not used up")
+	}
+	version := st.state.Load().version
+	if err := st.AddNode(Node{Name: "nbg-1", Address: "10.0.0.2:7400", Key: testKey(2)}, noVoters, "alice"); err != nil || st.state.Load().version != version {
+		t.Fatalf("the join again: %v", err)
+	}
+	// An admission expires.
+	if err := st.Admit("hel-1", testKey(3), now.Add(AdmissionValid), noVoters, "root"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(AdmissionValid + time.Second)
+	if err := st.AddNode(Node{Name: "hel-1", Address: "10.0.0.3:7400", Key: testKey(3)}, noVoters, "alice"); !errors.Is(err, ErrNotAdmitted) {
+		t.Fatalf("a join on an expired admission: %v", err)
+	}
+	// The next admission takes the expired one away.
+	if err := st.Admit("hel-2", testKey(4), now.Add(AdmissionValid), noVoters, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.state.Load().admissions["hel-1"]; ok {
+		t.Fatal("an expired admission stayed")
+	}
+	if err := st.Admit("hel-3", "short", now.Add(AdmissionValid), noVoters, "root"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a malformed key: %v", err)
+	}
+}
+
+// noVoters says no node is a voter, as for a store outside a cluster.
+func noVoters(string) bool { return false }
+
+// A key the state holds stays, whoever writes what: the state itself
+// refuses any statement that would change it, rename its node or put
+// another key, or none, in its place. Taking the row out is the only way.
+func TestAPinnedKeyNeverChanges(t *testing.T) {
+	st, _ := openNew(t, options())
+	logged(t, st)
+	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400", Key: testKey(1)}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`UPDATE nodes SET key = '` + testKey(2) + `' WHERE name = 'fsn-1'`,
+		`UPDATE nodes SET key = '' WHERE name = 'fsn-1'`,
+		`UPDATE nodes SET name = 'other' WHERE name = 'fsn-1'`,
+		`INSERT OR REPLACE INTO nodes (name, address, created_at, key) VALUES ('fsn-1', '10.0.0.1:7400', '2026-11-04T00:00:00Z', '` + testKey(2) + `')`,
+		`INSERT OR REPLACE INTO nodes (name, address, created_at) VALUES ('fsn-1', '10.0.0.1:7400', '2026-11-04T00:00:00Z')`,
+		`INSERT INTO nodes (name, address, created_at, key) VALUES ('fsn-1', '10.0.0.1:7400', '2026-11-04T00:00:00Z', '` + testKey(2) + `') ON CONFLICT (name) DO UPDATE SET key = excluded.key`,
+	} {
+		recorded := &recorder{}
+		if err := recorded.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+		err := st.Apply(Batch{Schema: SchemaVersion, Version: st.state.Load().version, Statements: recorded.statements})
+		if !Refused(err) || !strings.Contains(err.Error(), "keeps its identity key") {
+			t.Fatalf("%s: %v", statement, err)
+		}
+		if key, _ := st.NodeKey("fsn-1"); key != testKey(1) {
+			t.Fatalf("%s changed the key to %q", statement, key)
+		}
+	}
+	// A node that installs the state as a snapshot holds the key, and keeps
+	// it the same way.
+	snapshot, err := st.SnapshotFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeDatabase(snapshot)
+	other, _ := openNew(t, options())
+	file, err := os.Open(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := other.InstallSnapshot(file); err != nil {
+		t.Fatal(err)
+	}
+	if key, _ := other.NodeKey("fsn-1"); key != testKey(1) {
+		t.Fatalf("installed key %q", key)
+	}
+	cleared := &recorder{}
+	_ = cleared.Exec(`UPDATE nodes SET key = '' WHERE name = 'fsn-1'`)
+	if err := other.Apply(Batch{Schema: SchemaVersion, Version: other.state.Load().version, Statements: cleared.statements}); !Refused(err) {
+		t.Fatalf("a pinned key cleared on a node that installed the state: %v", err)
+	}
+	// Other columns change as before, and the row may go, key and all.
+	recorded := &recorder{}
+	_ = recorded.Exec(`UPDATE nodes SET public = '203.0.113.1' WHERE name = 'fsn-1'`)
+	if err := st.Apply(Batch{Schema: SchemaVersion, Version: st.state.Load().version, Statements: recorded.statements}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RemoveNode("fsn-1", "alice"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A voter keeps its key: no admission for its name, no join with another
+// key. A node the state holds but the voters do not, as after a rebuild
+// from a backup, is let in again with a new key.
+func TestAVotersKeyIsNotReplaced(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	st, _ := openNew(t, options())
+	st.now = func() time.Time { return now }
+	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400", Key: testKey(1)}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	voter := func(name string) bool { return name == "fsn-1" || name == "ghost" }
+	for _, name := range []string{"fsn-1", "ghost"} {
+		if err := st.Admit(name, testKey(2), now.Add(AdmissionValid), voter, "root"); !errors.Is(err, ErrConflict) {
+			t.Fatalf("an admission for voter %s: %v", name, err)
+		}
+	}
+	// An admission that got in before the node became a voter replaces
+	// nothing once it is one.
+	if err := st.Admit("fsn-1", testKey(2), now.Add(AdmissionValid), noVoters, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400", Key: testKey(2)}, voter, "mallory"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("another key for a voter: %v", err)
+	}
+	if key, _ := st.NodeKey("fsn-1"); key != testKey(1) {
+		t.Fatalf("key %q", key)
+	}
+	// No voter: the node comes back with its new key.
+	if err := st.AddNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400", Key: testKey(2)}, noVoters, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if key, _ := st.NodeKey("fsn-1"); key != testKey(2) || st.Admitted("fsn-1", testKey(2), now) {
+		t.Fatalf("after the rebuild: key %q", key)
+	}
+}
+
+func TestANodeOfAnOlderReleaseRegistersItsKeyOnce(t *testing.T) {
+	st, _ := openNew(t, options())
+	// A node stored by a release before keys.
+	if err := st.PutNode(Node{Name: "fsn-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if key, ok := st.NodeKey("fsn-1"); !ok || key != "" {
+		t.Fatalf("key %q, %v", key, ok)
+	}
+	if err := st.SetNodeKey("fsn-1", testKey(1), "murder"); err != nil {
+		t.Fatal(err)
+	}
+	version := st.state.Load().version
+	if err := st.SetNodeKey("fsn-1", testKey(1), "murder"); err != nil || st.state.Load().version != version {
+		t.Fatalf("the same key again: %v", err)
+	}
+	// Once pinned, no other key replaces it.
+	if err := st.SetNodeKey("fsn-1", testKey(2), "mallory"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("another key: %v", err)
+	}
+	if err := st.SetNodeKey("nbg-1", testKey(2), "mallory"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a key for no node: %v", err)
+	}
+	if key, _ := st.NodeKey("fsn-1"); key != testKey(1) {
+		t.Fatalf("key %q", key)
 	}
 }
 

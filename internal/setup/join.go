@@ -2,6 +2,7 @@ package setup
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"fmt"
 	"net/netip"
 	"path"
@@ -20,6 +21,9 @@ type Own struct {
 	ZFSPool        string // "" for plain directories
 	ClusterAddress string
 	Public         []string
+	// Identity is the host's identity key as a node, made before it
+	// redeems the invitation, which admits its public half.
+	Identity ed25519.PrivateKey
 }
 
 // SettleOwn makes a joining host's own choices: from the options, then
@@ -190,6 +194,16 @@ func Adopt(bundle cluster.Bundle, own Own) (Install, config.Agent, error) {
 		return Install{}, config.Agent{}, fmt.Errorf("the cluster's master key %s is not in %s", agent.MasterKeyFile, ConfigDir)
 	}
 	in.Secrets[agent.MasterKeyFile] = bundle.Key
+	// The identity key the invitation admitted, where the agent looks for
+	// it: without it, the node would make another, which no node accepts.
+	if len(own.Identity) != ed25519.PrivateKeySize || !path.IsAbs(agent.Cluster.Dir) {
+		return Install{}, config.Agent{}, fmt.Errorf("the host has no identity key, or the cluster's config no absolute cluster.dir (%q)", agent.Cluster.Dir)
+	}
+	identity, err := cluster.EncodeIdentity(own.Identity)
+	if err != nil {
+		return Install{}, config.Agent{}, err
+	}
+	in.Secrets[path.Join(agent.Cluster.Dir, cluster.IdentityFile)] = identity
 	return in, agent, nil
 }
 

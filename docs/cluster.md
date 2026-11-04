@@ -9,13 +9,21 @@ Docker, nftables and a ZFS pool, set up with it:
 
 ```bash
 sudo murder cluster invite                 # valid an hour, once (-valid up to 24h)
-sudo murder setup -join 10.0.0.2:7400/…    # on the new server
+sudo murder setup -join 10.0.0.2:7400/fsn-1/…    # on the new server
 ```
 
-The new server reaches the node on the private network and checks, with
-the key the invitation names, that it talks to the cluster. It hands over
-the invitation's secret and takes the master key, the node's config and
-the tokens the config names (files in `/etc/murder` only). It makes the
+An invitation names the node that made it: its address, its name and the
+public half of its identity key. The new server reaches that node on the
+private network and talks to it only if the node proves it holds that
+key. Anyone else at the address is refused before the secret goes out,
+even someone with the cluster's master key. The server then makes its own
+identity key (see [Node identity](#node-identity)) and hands over the
+invitation's secret with the key's public half. The cluster admits that
+key for the server's name for an hour. In return the server takes, over
+the same connection, the master key, the node's config, the tokens the
+config names (files in `/etc/murder` only) and the members' identity
+keys. Invitations of a release before node identity keys
+(`address/secret.key`, which name no node) are refused: make a new one. It makes the
 config its own: its name (the host name, or `-node`), its address on the
 private network (the one on the node's network, or `-cluster-address`),
 its public addresses, its ZFS pool and its address in the panel's tunnel.
@@ -31,7 +39,7 @@ refused: move them aside first. The node takes at most 8 hosts with
 invitations at once, each for 30 seconds.
 
 To join by hand instead, as below: copy the master key, give the node a
-`cluster:` section, then join.
+`cluster:` section, then join with an invitation.
 
 A cluster keeps the same state (apps, tenants, sealed secrets, the audit
 log and its nodes) on every node, replicated with Raft: a change made on any
@@ -58,7 +66,80 @@ Only members reach a cluster: Raft connections and requests between nodes
 carry the cluster's name, so nodes of another cluster with the same master
 key, such as the one a backup was restored from, are refused, as is a node
 removed from it. A node brought back with a new database rejoins only once
-removed (`murder cluster remove`).
+removed (`murder cluster remove`), with a new invitation.
+
+### Node identity
+
+The master key is shared by every node, so it cannot tell nodes apart:
+whoever holds it can make a certificate of the cluster's authority naming
+any node. So each node also has an identity key of its own, an ed25519 key
+in its cluster directory (`node.key`, readable by root only). The agent
+makes it when it first starts, or `murder setup -join` makes it before it
+uses the invitation. The node's cluster certificate is issued over that
+key, and the cluster's state pins the key's public half to the node's
+name. A peer is a member only if the state names it and its certificate
+carries that key. This is checked for every request between nodes, every
+Raft connection, and every request a node sends, including on connections
+it keeps open. The key never leaves its node, and a master key rotation
+leaves it as it is. Members are trusted with the state; the keys keep out
+those who only have the master key (see [Security](security.md)).
+
+- **Joining** takes an invitation. Redeeming it has the leader admit the
+  host's name with its identity key for an hour (`node.admitted` in the
+  audit log). The name of a current voter is never admitted. Only an
+  admitted host may fetch the state and be added, with that key, and the
+  join uses up the admission. A host with the master key alone is
+  refused. While it joins, the host trusts only the members the
+  invitation named, with their keys.
+- **Removing** a node checks everything that could refuse it first: the
+  freeze, and tenants on the node or moving to it. Then the node's row
+  goes from the state, and the node goes from the voters. A removal that
+  stops between the two leaves a voter that Raft takes only by the key it
+  had, never by its name alone. A node that had registered no key yet, in
+  a cluster from before keys, is taken by its name, as before, until it
+  is out of the voters. Running `murder cluster remove NAME` again
+  finishes the removal, on any node of the cluster or on the node being
+  removed, which is served for its own removal and nothing else. The
+  state keeps the departed key only while the node votes: it goes with
+  the removal, or with the leader's upkeep once the node is out of the
+  voters.
+  A leader asked to remove itself hands leadership over first, and the
+  next leader removes it. Every request the removed node makes afterwards
+  is refused, and its Raft connections are closed within seconds.
+- **A cluster from before identity keys** keeps working through a rolling
+  upgrade. A node the state holds no key for is taken by its name and the
+  master key, as before. Each node on a release with keys registers its
+  own key once every node runs such a release and changes are not frozen
+  (`murder upgrade` thaws when its last node is done). It does this
+  within seconds, through the leader, which takes the key from the node
+  whose certificate carries it; `node.key-registered` shows in the audit
+  log. From then on the key is required. Until every node shows a key in
+  `murder cluster status`, someone with the master key can still pose as
+  a node without one, so finish the upgrade promptly. A node of the
+  release before cannot join a cluster of this one: set it up with this
+  release.
+- **A lost `node.key`** (the file deleted, or the cluster directory moved
+  aside) makes the node a stranger. Its agent makes a new key as it
+  starts, and the other nodes refuse it. To bring it back with its tenants
+  and their data, give the cluster its new key:
+
+  ```bash
+  sudo murder node key                        # on that node: prints its new identity key
+  sudo murder cluster rekey fsn-2 <key>       # on any other node of the cluster
+  ```
+
+  The leader puts the new key in place of the old one. It keeps the node's
+  place, its tenants and everything else the state holds of it, and
+  closes the connections of the old key. It is refused while changes are
+  frozen, and is in the audit log (`node.rekeyed`). A node that runs no
+  tenant may instead be removed (`murder cluster remove`) and joined
+  again with an invitation and a new database. A node that runs tenants
+  cannot be removed until they are gone, and cannot be drained while the
+  other nodes refuse it.
+- **`murder cluster status`** shows each voter's pinned key, "none yet"
+  for a node of a cluster from before keys that has registered none, and
+  "leaving" for a node out of the state on its way out of the voters,
+  with the key Raft still takes it by.
 
 ## Move tenants, replace a server
 
@@ -253,8 +334,9 @@ longer: a minute or two after a node dies, new clients no longer try it.
 
 Nodes talk over one TLS port on the private network. A node proves it
 belongs to the cluster with a certificate of an authority derived from the
-master key, so every node needs the same master key and nothing else is
-shared. `murder key rotate` replaces it on every node without stopping one
+master key, issued over its own identity key, which the state pins to its
+name ([Node identity](#node-identity)). `murder key rotate` replaces the
+master key on every node without stopping one
 ([Rotate the master key](operations.md#rotate-the-master-key)). Give each node a `cluster:` section:
 
 ```yaml
@@ -270,12 +352,17 @@ sudo murder cluster bootstrap
 ```
 
 On every other node, copy `/etc/murder/master.key` from the first node
-before `murder init` (which keeps a key that is there), start the agent and:
+before `murder init` (which keeps a key that is there), start the agent,
+make an invitation on a node of the cluster and:
 
 ```bash
-sudo murder cluster join 10.0.0.2:7400   # any node of the cluster
+sudo murder cluster invite                    # on a node of the cluster
+sudo murder cluster join 10.0.0.2:7400/fsn-1/…  # on the new node; - reads it from standard input
 sudo murder cluster status
 ```
+
+`murder cluster join` with an address alone, as releases before identity
+keys took it, is refused: the master key no longer lets a node in.
 
 Only a node with a new database joins: it takes the cluster's state. Each
 cluster has a name, given at bootstrap, so a node holding the state of
@@ -284,6 +371,23 @@ node with the name of a member at another address. An agent whose config
 lost its `cluster:` section refuses to start on a database of a cluster.
 `murder cluster remove <node>` takes a node out; to bring it back, give it a
 new database and an empty cluster directory. A node is removed only once it
-runs no tenant, archived ones included. A backup is restored into a cluster
-by rebuilding it: move the cluster directory aside on every node, restore on
-one node, bootstrap there and join the others with new databases.
+runs no tenant, archived ones included.
+
+A backup is restored into a cluster by rebuilding the cluster around it:
+
+1. On every node, stop the agent and move the cluster directory
+   (`cluster.dir`, with `node.key` in it) aside.
+2. On one node, `murder restore <backup>`, start the agent, then run
+   `murder cluster bootstrap -restored`. This starts a cluster of that node
+   alone from the restored state, under a new name, so no node of the
+   cluster the backup came from is taken for one of it. It pins the
+   node's new identity key in place of the one the backup held for it.
+3. On each other node, give it a new database (`murder init` after moving
+   the old one aside) and start its agent. Make an invitation on the first
+   node and run `murder cluster join <invitation>`. The state already names
+   the node, with its tenants, but it is no voter of the rebuilt cluster,
+   so the invitation admits it again under its name, with its new key and
+   at its address.
+
+A plain `murder cluster bootstrap` refuses a database that names a
+cluster.

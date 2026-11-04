@@ -40,3 +40,72 @@
   users.
 - **Docker's `userns-remap` is not supported.** The data owner is the
   container user's numeric id on the host, which remapping would change.
+- **Nodes prove who they are with keys of their own.** Nodes talk over
+  mutual TLS on the private network, with certificates of an authority
+  derived from the master key. The master key is on every node and in
+  every invitation, so it only proves that a certificate is the
+  cluster's. Each node also has an identity key (`node.key` in its
+  cluster directory, readable by root only, never sent anywhere). Its
+  certificate is issued over that key, and the replicated state pins the
+  key's public half to the node's name. A peer is a member only if the
+  state names it and its certificate carries the key pinned for that
+  name. Every request between nodes, every Raft connection, and every
+  request a node sends on a connection it keeps is checked this way.
+  - **What this keeps out:** anyone with the master key but without a
+    member's `node.key`. That covers a node removed from the cluster, a
+    copy of `/etc/murder`, and a cluster restored from a backup. Such a
+    party is refused the state, writes, Raft, binary installs, moves and
+    copies, whatever name its certificate gives. A node joins only with
+    an invitation, which admits its name and identity key for an hour.
+    The invitation names the inviting node and its identity key. The new
+    host sends the secret, and takes the master key and the members' keys,
+    only from a node that proves it holds that key. So someone with the
+    master key who intercepts the host's connection, or takes over the
+    inviter's address, gets nothing and hands out nothing. Removing a node
+    deletes its row, and with it its key. Only root on a member can give a
+    node another key (`murder cluster rekey`, for a node that lost its
+    `node.key`); the leader applies it, never while changes are frozen.
+  - **Members are trusted with the state.** A member is a node you run.
+    It holds the master key and every secret, and as a voter it can win
+    an election and append what it likes to the log. Nothing here
+    protects the state from a member; the keys exist to keep
+    non-members out. Some checks guard against our own bugs, and keep a
+    batch from doing different things on different nodes:
+    - The state refuses any statement that would change a pinned key.
+    - A batch's statements run under SQLite's authorizer. It allows reads
+      and row changes of the replicated tables, and of the meta table's
+      keys, but not its values, which differ between nodes. It allows no
+      function call, no transaction control, no schema change, no pragma,
+      no attached database and no read of SQLite's own tables.
+    - A batch may not write the meta rows the store keeps for itself (the
+      node's name, the version, the applied index). The store's own count
+      of those rows after a batch runs under the same rules, triggers
+      included.
+    - These checks cover what we found a batch could do differently on
+      different nodes; they are not a proof that nothing else can.
+    - Only the leader adds and removes nodes, admits hosts and registers
+      keys. It registers a key only for the node whose certificate
+      carries it.
+  - **What the master key still gives:**
+    - It opens every tenant's sealed secrets in any copy of the state.
+    - It makes certificates the edges' relay port (`edge.relayPort`, on
+      the private network) accepts. Edges have no identity keys, so the
+      relay checks only that a certificate is the cluster's. A master key
+      holder, a removed node included, can send requests to any tenant
+      through a node's relay. The relay believes the client address and
+      scheme the sender gives, so the `X-Forwarded-For` a tenant sees may
+      be made up. That is all it gives: the relay serves tenants' own
+      HTTP, as the public ports do, and nothing of the cluster. A tenant
+      should not rely on the client address for access control on a
+      cluster whose master key may have leaked: rotate the key.
+  - **The upgrade window.** In a cluster from before identity keys, a
+    node the state holds no key for is taken by its name, as before: the
+    master key passes for it. That includes such a node on its way out,
+    taken out of the state but not yet out of the voters. The same goes
+    for every node while a leader of the older release runs, since it
+    checks no keys. Each node
+    registers its key once every node runs a release that has keys and
+    changes are not frozen, so the window closes within seconds of the
+    end of a rolling upgrade. Until every node shows a key in
+    `murder cluster status`, finish the upgrade promptly, and keep the
+    master key's copies as close as before.

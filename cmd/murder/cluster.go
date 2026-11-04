@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -18,10 +21,20 @@ const clusterUsage = `Usage: murder cluster <command> [arguments]
   status              show the cluster as this node sees it
   invite [-valid 1h]  let a new host join: prints the command to run on it
                       (sudo murder setup -join …), valid once
-  bootstrap           start a cluster of this node alone, with its state
-  join <address>      add this node, with a new database, to the cluster of
-                      the node at address (host:port on the private network)
+  bootstrap [-restored]
+                      start a cluster of this node alone, with its state;
+                      -restored rebuilds one, under a new name, from a
+                      database a backup restored (the other nodes join
+                      again with invitations)
+  join <invitation>   add this node, with a new database and the cluster's
+                      master key, to the cluster an invitation names (made
+                      by "murder cluster invite" on a node of it; - reads
+                      it from standard input)
   remove <node>       take a node out of the cluster
+  rekey <node> <key>  give a node that lost its identity key (node.key in
+                      its cluster directory) the new one, as
+                      "murder node key" prints it on that node: it keeps
+                      its place, tenants and data
   drain <node> -to <target>
                       move every tenant of node, with its data, to target,
                       one after the other
@@ -37,9 +50,11 @@ const clusterUsage = `Usage: murder cluster <command> [arguments]
                       answers (with cluster.failover set, the leader does
                       this by itself, after powering the node off)
 
-A node joins with the cluster's master key: "murder cluster invite" and
-"murder setup -join" hand it over, or copy /etc/murder/master.key from a
-node of the cluster before "murder init". Every node runs tenants.
+A node joins with an invitation, which admits its name and identity key:
+"murder setup -join" sets a host up with one, master key included; on a
+node set up by hand, copy /etc/murder/master.key from a node of the
+cluster before "murder init", then "murder cluster join". Every node runs
+tenants.
 `
 
 func runCluster(args []string) error {
@@ -54,6 +69,7 @@ func runCluster(args []string) error {
 	poweredOff := flags.Bool("powered-off", false, "with failover: the node is powered off, checked by you")
 	valid := flags.Duration("valid", time.Hour, "with invite: how long the invitation is valid (up to 24h)")
 	dryRun := flags.Bool("dry-run", false, "with balance: only print the moves")
+	restored := flags.Bool("restored", false, "with bootstrap: rebuild the cluster from a database a backup restored")
 	rest, err := parseInterspersed(flags, args[1:])
 	if err != nil {
 		return err
@@ -73,10 +89,32 @@ func runCluster(args []string) error {
 		fmt.Fprintf(stdout, "On the new host, as root, with murder installed:\n\n  murder setup -join %s\n\n", invitation.Invitation)
 		fmt.Fprintf(stdout, "It joins it to the cluster as a node like this one. The invitation is valid once,\nuntil %s, and hands the cluster's master key to whoever brings it:\nsend it only over a channel you trust. On a host others log in to, run\n`murder setup -join -` and paste it, so it is not in the process list.\n", invitation.Expires.Local().Format(time.DateTime))
 		return nil
+	case command == "bootstrap" && len(rest) == 0 && *restored:
+		status, err = client.BootstrapRestored(ctx)
 	case command == "bootstrap" && len(rest) == 0:
 		status, err = client.Bootstrap(ctx)
+	case command == "rekey" && len(rest) == 2:
+		if err := client.ReplaceNodeKey(ctx, rest[0], rest[1]); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "node %s has its new identity key: it is a member again\n", rest[0])
+		return nil
 	case command == "join" && len(rest) == 1:
-		status, err = client.Join(ctx, rest[0])
+		invitation := rest[0]
+		if invitation == "-" {
+			line, readErr := bufio.NewReader(stdin).ReadString('\n')
+			if readErr != nil && line == "" {
+				return fmt.Errorf("read the invitation from standard input: %w", readErr)
+			}
+			invitation = strings.TrimSpace(line)
+		}
+		if _, parseErr := cluster.ParseInvite(invitation); parseErr != nil {
+			if _, addressErr := netip.ParseAddrPort(invitation); addressErr == nil {
+				return fmt.Errorf("a node no longer joins with an address and the master key alone: run `murder cluster invite` on a node of the cluster, then `murder cluster join <invitation>` here")
+			}
+			return parseErr
+		}
+		status, err = client.JoinInvited(ctx, invitation)
 	case command == "balance" && len(rest) == 0:
 		return clusterops.Balance(context.Background(), client, *dryRun, stdout)
 	case command == "drain" && len(rest) == 1 && *to != "":
@@ -134,9 +172,21 @@ func printCluster(status cluster.Status) error {
 		fmt.Fprintf(stdout, "last heard from the leader %s ago\n", time.Since(status.LastContact).Round(time.Millisecond))
 	}
 	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "NODE\tADDRESS\tVOTE")
+	fmt.Fprintln(table, "NODE\tADDRESS\tVOTE\tIDENTITY KEY")
 	for _, member := range status.Members {
-		fmt.Fprintf(table, "%s\t%s\t%s\n", member.Name, member.Address, member.Suffrage)
+		key := member.Key
+		if len(key) > 12 {
+			key = key[:12] + "…"
+		}
+		switch {
+		case member.Leaving && key == "":
+			key = "leaving (taken by name)"
+		case member.Leaving:
+			key = "leaving (" + key + ")"
+		case key == "":
+			key = "none yet (taken by name)"
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", member.Name, member.Address, member.Suffrage, key)
 	}
 	return table.Flush()
 }

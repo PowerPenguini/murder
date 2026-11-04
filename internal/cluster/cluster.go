@@ -3,20 +3,25 @@
 // leader appends to the log, and every node applies the log's batches in
 // order. A write on any node is computed there and handed to the leader.
 //
-// Nodes talk over one TLS port on the private network. They prove that
-// they belong to the cluster with certificates of an authority derived from
-// the master key, so a node needs nothing but the master key to join.
+// Nodes talk over one TLS port on the private network. Their certificates
+// come from an authority derived from the master key, and each is issued
+// over the node's own identity key, which the state pins to its name: a
+// peer is a member only if the state names it and holds the key its
+// certificate carries. A node joins with an invitation, which admits its
+// name and key.
 package cluster
 
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -103,6 +108,9 @@ type Config struct {
 	raft func(*raft.Config)
 	// stable, if set, wraps where Raft keeps its term and vote, in tests.
 	stable func(raft.StableStore) raft.StableStore
+	// unregistered leaves the node's identity key unregistered, for tests
+	// of a cluster from before keys.
+	unregistered bool
 }
 
 // Cluster is this node's part of the cluster.
@@ -125,23 +133,37 @@ type Cluster struct {
 	// joinHook, if set, runs at each stage of a join (joinWrite, joinVote,
 	// joinReading, joinAdd): tests pause a join there.
 	joinHook atomic.Pointer[func(stage, name string)]
+	// departedHook, if set, runs as the upkeep is about to drop a node's
+	// departure: tests pause it there.
+	departedHook atomic.Pointer[func(name string)]
 	// catchUpVerify and joinVerify each let one VerifyLeader call at a
 	// time hand its request to Raft; see verifyLeader.
 	catchUpVerify, joinVerify chan struct{}
 	// barrierTerm is the last term in which this node, as the leader, has
 	// applied everything committed before it.
 	barrierTerm atomic.Uint64
+	// identity is the node's identity key.
+	identity ed25519.PrivateKey
+	// joinKeys are the members' identity keys an invitation named, by
+	// name, which this node trusts until it holds the cluster's state.
+	joinKeys atomic.Pointer[map[string]string]
+	// done stops the node's upkeep of its members as it closes.
+	done chan struct{}
 }
 
 // Start opens the node's log, listens for other nodes and has the store
 // commit every change through the log. A new node waits, without a
 // leader, until it is bootstrapped or joins a cluster.
 func Start(config Config) (*Cluster, error) {
-	credentials, err := NewCredentials(config.Seeds, config.Node, time.Now())
+	if err := os.MkdirAll(config.Dir, 0o700); err != nil {
+		return nil, err
+	}
+	identity, err := LoadIdentity(config.Dir)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(config.Dir, 0o700); err != nil {
+	credentials, err := NewCredentials(config.Seeds, config.Node, identity, time.Now())
+	if err != nil {
 		return nil, err
 	}
 	logger := raftLogger(config.Log)
@@ -177,9 +199,12 @@ func Start(config Config) (*Cluster, error) {
 		return nil, err
 	}
 	c := &Cluster{config: config, address: l.inner.Addr().String(), raft: r, logs: logs, snapshots: snapshots, transport: transport, listener: l, credentials: credentials,
-		catchUpVerify: make(chan struct{}, 1), joinVerify: make(chan struct{}, 1), membership: make(chan struct{}, 1)}
+		catchUpVerify: make(chan struct{}, 1), joinVerify: make(chan struct{}, 1), membership: make(chan struct{}, 1), identity: identity, done: make(chan struct{})}
+	raftPeer := c.raftPeer
+	l.raftPeer.Store(&raftPeer)
+	credentials.checkServers(c.knownServer)
 	c.client = &http.Client{
-		Transport: namedTransport{cluster: config.Store.Cluster, next: &http.Transport{
+		Transport: namedTransport{cluster: config.Store.Cluster, check: c.knownServer, next: &http.Transport{
 			DialTLSContext: func(ctx context.Context, _, address string) (net.Conn, error) {
 				return dial(ctx, credentials, protocolHTTP, address)
 			},
@@ -201,6 +226,7 @@ func Start(config Config) (*Cluster, error) {
 		}
 	}()
 	config.Store.Replicate(c.commit, c.catchUp)
+	go c.upkeep()
 	return c, nil
 }
 
@@ -218,9 +244,257 @@ func transportConfig(stream raft.StreamLayer, logger hclog.Logger) *raft.Network
 	return &raft.NetworkTransportConfig{Stream: stream, MaxPool: 3, MaxRPCsInFlight: 1, Timeout: 10 * time.Second, Logger: logger}
 }
 
+// IdentityKey is the public key of this node's identity.
+func (c *Cluster) IdentityKey() ed25519.PublicKey {
+	return c.identity.Public().(ed25519.PublicKey)
+}
+
+// upkeepEvery is how often a node closes the Raft connections of nodes no
+// longer members and, until it has, registers its identity key.
+const upkeepEvery = 5 * time.Second
+
+// upkeep closes Raft connections of nodes that left, and registers this
+// node's identity key if the state holds none for it yet, until the node
+// closes.
+func (c *Cluster) upkeep() {
+	registered := false
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-timer.C:
+		}
+		c.listener.sweep(c.raftPeer)
+		c.forgetDeparted()
+		if !registered && !c.config.unregistered {
+			ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+			var err error
+			registered, err = c.registerKey(ctx)
+			cancel()
+			if err != nil {
+				c.config.Log.Warn("could not register this node's identity key", "error", err)
+			}
+		}
+		timer.Reset(upkeepEvery)
+	}
+}
+
+// forgetDeparted, on the leader, drops the identity keys kept for nodes
+// taken out of the state that are out of the voters too, as a removal that
+// stopped half way and was finished another way leaves them. It holds the
+// lock on changes of the members, so no join or removal of the name runs
+// between its look at the voters and its change, and it drops only the
+// very departure it looked at.
+func (c *Cluster) forgetDeparted() {
+	if c.raft.State() != raft.Leader || len(c.config.Store.Departed()) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+	defer cancel()
+	if c.holdMembership(ctx) != nil {
+		return // a change of the members runs: the next upkeep tries again
+	}
+	defer c.unlockMembership()
+	for _, departure := range c.config.Store.Departed() {
+		if c.isVoter(departure.Name) {
+			continue
+		}
+		if hook := c.departedHook.Load(); hook != nil {
+			(*hook)(departure.Name)
+		}
+		if err := c.config.Store.ForgetDeparted(departure, "murder"); err != nil {
+			c.config.Log.Debug("could not drop the identity key of a node removed", "node", departure.Name, "error", err)
+			return
+		}
+	}
+}
+
+// registerKey has the state hold this node's identity key, if it holds
+// none for it: a node of a cluster from before identity keys registers
+// its own once it runs a release that has them. It reports whether there
+// is nothing left to do. It waits until every node runs such a release, as
+// one before would not apply the change, and while changes are frozen, by
+// an upgrade above all: the write is refused under any freeze, and leaves
+// the freeze, its owner and operation, to whoever holds it. An upgrade
+// thaws once every node runs the new release, and the key goes in then.
+func (c *Cluster) registerKey(ctx context.Context) (bool, error) {
+	own := EncodeKey(c.IdentityKey())
+	pinned, member := c.config.Store.NodeKey(c.config.Node)
+	switch {
+	case !member:
+		return false, nil // not joined yet, or removed
+	case pinned == own:
+		return true, nil
+	case pinned != "":
+		return true, fmt.Errorf("the cluster holds another identity key for node %s than the one in %s, so the other nodes refuse it: take it out of the cluster (murder cluster remove %s, on another node) and join it again with an invitation", c.config.Node, IdentityPath(c.config.Dir), c.config.Node)
+	}
+	// The leader registers it, for the node that presents it.
+	var err error
+	if c.raft.State() == raft.Leader {
+		err = c.registerHere(ctx, c.config.Node, c.IdentityKey())
+	} else {
+		err = c.toLeader(ctx, http.MethodPost, "/cluster/v1/node/key", marshal(identityRequest{Key: own}), nil)
+	}
+	var peer *PeerError
+	switch {
+	case err == nil:
+		c.config.Log.Info("registered this node's identity key with the cluster")
+		return true, nil
+	case errors.Is(err, store.ErrFrozen), errors.Is(err, errNotEveryNode), errors.Is(err, ErrNoLeader), errors.Is(err, ErrNotLeader), errors.Is(err, ErrNotJoined),
+		errors.As(err, &peer) && (peer.Status == http.StatusServiceUnavailable || peer.Status == http.StatusNotFound):
+		// Not yet: the leader says when it may, or runs a release before
+		// keys (it knows no such request) during a rolling upgrade.
+		return false, nil
+	case errors.As(err, &peer):
+		return false, err
+	default:
+		// The leader did not answer: asked again later.
+		return false, nil
+	}
+}
+
+// errNotEveryNode reports a cluster with a node of a release before
+// identity keys, which could not apply their registration.
+var errNotEveryNode = errors.New("not every node runs a release with identity keys yet")
+
+// identityRequest asks the leader to register the identity key of the node that
+// presents it.
+type identityRequest struct {
+	Key string `json:"key"`
+}
+
+// registerHere, on the leader, registers key as node name's identity key,
+// for name itself: the caller made sure that name presented key. It waits
+// while changes are frozen (an upgrade thaws once every node runs its
+// release) and until every node runs a release that applies the change.
+func (c *Cluster) registerHere(ctx context.Context, name string, key ed25519.PublicKey) error {
+	if frozen := c.config.Store.Frozen(); frozen != "" {
+		return fmt.Errorf("%w: %s", store.ErrFrozen, frozen)
+	}
+	for _, node := range c.config.Store.Nodes() {
+		if node.Name == c.config.Node {
+			continue
+		}
+		var answer releaseAnswer
+		if err := c.request(ctx, node.Name, http.MethodGet, "/cluster/v1/release", nil, &answer); err != nil || answer.Schema < store.IdentitySchema {
+			return errNotEveryNode
+		}
+	}
+	return c.config.Store.SetNodeKey(name, EncodeKey(key), "node "+name)
+}
+
+// Admit lets a host that brought an invitation join as node name, with the
+// identity key key, for store.AdmissionValid. The leader admits it, under
+// its lock on changes of the members: a name of one of the voters, or a
+// node at work, is refused.
+func (c *Cluster) Admit(ctx context.Context, name string, key ed25519.PublicKey) error {
+	for {
+		var err error
+		if c.raft.State() == raft.Leader {
+			err = c.admitHere(ctx, name, key)
+		} else {
+			err = c.toLeader(ctx, http.MethodPost, "/cluster/v1/admissions", marshal(admitRequest{Name: name, Key: EncodeKey(key)}), nil)
+		}
+		if !errors.Is(err, ErrNoLeader) && !errors.Is(err, ErrNotLeader) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// admitRequest asks the leader to admit a host.
+type admitRequest struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
+
+// admitHere admits a host, on the leader.
+func (c *Cluster) admitHere(ctx context.Context, name string, key ed25519.PublicKey) error {
+	if err := c.holdMembership(ctx); err != nil {
+		return err
+	}
+	defer c.unlockMembership()
+	return c.config.Store.Admit(name, EncodeKey(key), time.Now().Add(store.AdmissionValid), c.isVoter, "murder")
+}
+
+// releaseAnswer is what release of Murder a node runs.
+type releaseAnswer struct {
+	Schema int `json:"schema"`
+}
+
+// member checks that the node name, presenting identity key key, is a
+// member of the cluster: the state names it, and holds that key for it,
+// or none, for a node of a release before identity keys that has not
+// registered its own yet.
+func (c *Cluster) member(name string, key ed25519.PublicKey) error {
+	pinned, member := c.config.Store.NodeKey(name)
+	switch {
+	case !member:
+		return fmt.Errorf("node %s is not a member of cluster %s", name, c.config.Store.Cluster())
+	case pinned != "" && pinned != EncodeKey(key):
+		return fmt.Errorf("the certificate naming node %s does not carry the identity key cluster %s holds for it", name, c.config.Store.Cluster())
+	}
+	return nil
+}
+
+// raftPeer checks a node Raft talks with: a member, or a voter the state
+// no longer names, as a removal leaves it between taking the node out of
+// the state and out of the voters, or for good if it stopped there. That
+// one is taken by the identity key it had, which the state keeps as
+// departed: never by its name alone.
+func (c *Cluster) raftPeer(name string, key ed25519.PublicKey) error {
+	err := c.member(name, key)
+	if err == nil {
+		return nil
+	}
+	if _, named := c.config.Store.NodeKey(name); named || !c.isVoter(name) {
+		return err
+	}
+	return c.departing(name, key)
+}
+
+// departing checks a node taken out of the state on its way out of the
+// voters: it presents the identity key it had, or, if it had registered
+// none (a cluster from before keys), it is taken by its name, as it was
+// while it was a member.
+func (c *Cluster) departing(name string, key ed25519.PublicKey) error {
+	departed, ok := c.config.Store.DepartedKey(name)
+	if ok && (departed == "" || departed == EncodeKey(key)) {
+		return nil
+	}
+	return fmt.Errorf("node %s, a voter on its way out, did not present the identity key it had", name)
+}
+
+// knownServer checks the node a connection this node made reached: a
+// member, or, while this node joins a cluster, one of the members the
+// invitation named, with the key it named.
+func (c *Cluster) knownServer(name string, key ed25519.PublicKey) error {
+	keys := c.joinKeys.Load()
+	if keys == nil {
+		if c.config.Store.Cluster() == "" {
+			return errors.New("this node is part of no cluster yet, and trusts no node: join one with an invitation")
+		}
+		return c.raftPeer(name, key)
+	}
+	want, named := (*keys)[name]
+	switch {
+	case !named:
+		return fmt.Errorf("node %s is not one of the members the invitation named", name)
+	case want != "" && want != EncodeKey(key):
+		return fmt.Errorf("node %s does not present the identity key the invitation named for it", name)
+	}
+	return nil
+}
+
 // Invitation is an invitation to this node, for its secret.
 func (c *Cluster) Invitation(secret []byte) Invite {
-	return Invite{Address: c.config.Address, Secret: secret, CA: c.credentials.CAKey()}
+	return Invite{Address: c.config.Address, Node: c.config.Node, Key: c.IdentityKey(), Secret: secret}
 }
 
 // Rekey has the node present and trust what seeds, derived from the master
@@ -243,6 +517,7 @@ func InviteSecret() ([]byte, error) {
 
 // Close stops the node's part of the cluster; the store's own state stays.
 func (c *Cluster) Close() error {
+	close(c.done)
 	err := errors.Join(c.server.Close(), c.joins.Close())
 	err = errors.Join(err, c.raft.Shutdown().Error(), c.listener.close())
 	// Shutdown does not wait for the heartbeats the transport is handling:
@@ -261,6 +536,9 @@ func (c *Cluster) commit(batch store.Batch) (uint64, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
+	if batch.LeaderOnly {
+		return c.commitHere(ctx, batch, data)
+	}
 	index, err := c.propose(ctx, data)
 	for attempt := 0; errors.Is(err, ErrMaybe) && attempt < 3; attempt++ {
 		// Leadership moved while the batch was in flight: it is in the
@@ -281,6 +559,35 @@ func (c *Cluster) commit(batch store.Batch) (uint64, error) {
 		if outcome, ok := c.config.Store.Outcome(batch.ID); ok && outcome.Err == nil {
 			index, err = outcome.Index, nil
 		}
+	}
+	if index == 0 {
+		return 0, err
+	}
+	if waitErr := c.config.Store.WaitApplied(ctx, index); waitErr != nil {
+		return 0, errors.Join(err, fmt.Errorf("the change was made (log entry %d) but this node has not applied it yet: %w", index, waitErr))
+	}
+	return index, err
+}
+
+// commitHere appends a change of who the nodes are, which only the leader
+// makes, to the log: never through another node. A node that does not lead
+// returns ErrNotLeader, and whoever asked asks the leader.
+func (c *Cluster) commitHere(ctx context.Context, batch store.Batch, data []byte) (uint64, error) {
+	if c.raft.State() != raft.Leader {
+		return 0, ErrNotLeader
+	}
+	index, err := c.apply(data)
+	if errors.Is(err, ErrMaybe) {
+		// Leadership moved while it was in flight: once this node has
+		// applied what the new leader has, it knows whether it was made.
+		if catchUpErr := c.catchUp(); catchUpErr != nil {
+			return 0, errors.Join(err, catchUpErr)
+		}
+		outcome, ok := c.config.Store.Outcome(batch.ID)
+		if !ok {
+			return 0, ErrNotLeader
+		}
+		index, err = outcome.Index, outcome.Err
 	}
 	if index == 0 {
 		return 0, err
@@ -514,10 +821,23 @@ func (r commitResult) err() error {
 
 // Bootstrap starts a new cluster of this node alone, with the state its
 // database holds, and names it. A bootstrap stopped half way finishes.
-func (c *Cluster) Bootstrap(ctx context.Context, actor string) error {
+// restored starts one from the state of a cluster, as a backup restored
+// it: the cluster is rebuilt under a new name, so no node of the one the
+// backup came from is taken for one of it, and this node's identity key
+// goes in place of the one the state held for it. Its other nodes join
+// again with invitations.
+func (c *Cluster) Bootstrap(ctx context.Context, actor string, restored bool) error {
+	own := EncodeKey(c.IdentityKey())
 	if err := c.unconfigured(); err == nil {
-		if c.config.Store.Cluster() != "" {
-			return fmt.Errorf("%w: this node's database belongs to cluster %s; give it a new database, or rebuild the cluster from a backup", ErrMember, c.config.Store.Cluster())
+		if c.config.Store.Cluster() != "" && !restored {
+			return fmt.Errorf("%w: this node's database belongs to cluster %s; give it a new database, or, for one restored from a backup, rebuild the cluster from it with `murder cluster bootstrap -restored`", ErrMember, c.config.Store.Cluster())
+		}
+		// A rebuild is noted before anything changes, with the name it
+		// leaves: asked again, the bootstrap goes on with it.
+		if restored && c.config.Store.Cluster() != "" {
+			if err := beginRebuild(c.config.Dir, c.config.Store.Cluster()); err != nil {
+				return fmt.Errorf("note the rebuild: %w", err)
+			}
 		}
 		if err := c.config.Store.StartLog(); err != nil {
 			return err
@@ -526,7 +846,8 @@ func (c *Cluster) Bootstrap(ctx context.Context, actor string) error {
 		if err := c.raft.BootstrapCluster(configuration).Error(); err != nil {
 			return fmt.Errorf("bootstrap: %w", err)
 		}
-	} else if !c.alone() || c.config.Store.Cluster() != "" && c.joined() {
+	} else if key, _ := c.config.Store.NodeKey(c.config.Node); !c.alone() || c.rebuilding() == "" && c.config.Store.Cluster() != "" && key == own {
+		// Done already, or a node of a cluster of more.
 		return err
 	}
 	for c.raft.State() != raft.Leader {
@@ -536,12 +857,73 @@ func (c *Cluster) Bootstrap(ctx context.Context, actor string) error {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	if c.config.Store.Cluster() == "" {
+	// A new cluster, or one rebuilt that still has the name of the one it
+	// was restored from, gets a name of its own.
+	rebuilt, err := rebuilding(c.config.Dir)
+	if err != nil {
+		return fmt.Errorf("read the note of the rebuild: %w", err)
+	}
+	if c.config.Store.Cluster() == "" || rebuilt != "" && c.config.Store.Cluster() == rebuilt {
 		if err := c.config.Store.NameCluster(newClusterName(), actor); err != nil {
 			return err
 		}
 	}
-	return c.config.Store.PutNode(store.Node{Name: c.config.Node, Address: c.address}, actor)
+	if err := c.config.Store.PutNode(store.Node{Name: c.config.Node, Address: c.address, Key: own}, actor); err != nil {
+		return err
+	}
+	return endRebuild(c.config.Dir)
+}
+
+// rebuilding is the name a rebuild under way leaves, or empty.
+func (c *Cluster) rebuilding() string {
+	name, err := rebuilding(c.config.Dir)
+	if err != nil {
+		return "?"
+	}
+	return name
+}
+
+// ReplaceKey gives node name the identity key key in place of the one the
+// state holds, as an operator asks for a node that lost its key file (it
+// shows its new key with `murder node key`): it keeps its place, its
+// tenants and its data. The leader does it, under its lock on changes of
+// the members, never while changes are frozen, and the connections of the
+// old key are closed.
+func (c *Cluster) ReplaceKey(ctx context.Context, name string, key ed25519.PublicKey, actor string) error {
+	for {
+		var err error
+		if c.raft.State() == raft.Leader {
+			err = c.replaceKeyHere(ctx, name, key, actor)
+		} else {
+			err = c.toLeader(ctx, http.MethodPut, "/cluster/v1/nodes/"+url.PathEscape(name)+"/key?actor="+url.QueryEscape(actor), marshal(identityRequest{Key: EncodeKey(key)}), nil)
+		}
+		if !errors.Is(err, ErrNoLeader) && !errors.Is(err, ErrNotLeader) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// replaceKeyHere replaces a node's key, on the leader.
+func (c *Cluster) replaceKeyHere(ctx context.Context, name string, key ed25519.PublicKey, actor string) error {
+	if err := c.holdMembership(ctx); err != nil {
+		return err
+	}
+	defer c.unlockMembership()
+	if frozen := c.config.Store.Frozen(); frozen != "" {
+		return fmt.Errorf("%w: %s; give node %s its new key once changes are taken again", store.ErrFrozen, frozen, name)
+	}
+	if err := c.config.Store.ReplaceNodeKey(name, EncodeKey(key), actor); err != nil {
+		return err
+	}
+	// Nothing goes on over a connection of the old key.
+	c.listener.sweep(c.raftPeer)
+	c.client.CloseIdleConnections()
+	return nil
 }
 
 // alone reports whether this node is the only voter of its cluster.
@@ -578,13 +960,56 @@ func (c *Cluster) unconfigured() error {
 	return nil
 }
 
-// Join adds this node to the cluster of the node at peer. Only a node
-// with a new database joins, since it takes the cluster's state; a node
-// whose join stopped half way, holding this cluster's state, tries again.
-func (c *Cluster) Join(ctx context.Context, peer, actor string) error {
+// ErrOlderCluster refuses to join a cluster whose nodes run a release
+// before identity keys: they neither admit a node's key nor name theirs.
+var ErrOlderCluster = errors.New("the cluster runs a release before node identity keys, which admits no node of this one: upgrade it first (murder upgrade), then make a new invitation")
+
+// JoinInvited joins this node to the cluster an invitation names: the node
+// the invitation names admits this node's name and identity key, and
+// tells which members to trust, then this node joins.
+func (c *Cluster) JoinInvited(ctx context.Context, invite Invite, actor string) error {
 	if err := c.unconfigured(); err != nil {
 		return err
 	}
+	// The inviting node's certificate must be of this node's authority: a
+	// node of another master key would not take it in.
+	invite.CA = c.credentials.CAKey()
+	bundle, err := Redeem(ctx, invite, c.config.Node, c.IdentityKey())
+	if errors.Is(err, errOtherAuthority) {
+		return errOtherAuthority
+	}
+	if err != nil {
+		return err
+	}
+	if len(bundle.Members) == 0 {
+		return ErrOlderCluster
+	}
+	return c.Join(ctx, invite.Address, bundle.Members, actor)
+}
+
+// Join adds this node to the cluster of the node at peer, once an
+// invitation admitted its name and identity key. members are the
+// members' identity keys the invitation named, by name: until this node
+// holds the cluster's state, it talks to them only. Only a node with a new
+// database joins, since it takes the cluster's state; a node whose join
+// stopped half way, holding this cluster's state, tries again.
+func (c *Cluster) Join(ctx context.Context, peer string, members map[string]string, actor string) error {
+	if len(members) == 0 {
+		return errors.New("a node joins with an invitation: run `murder cluster invite` on a node of the cluster, then `murder cluster join <invitation>` here")
+	}
+	if err := c.unconfigured(); err != nil {
+		return err
+	}
+	// While it joins, the node talks to the members the invitation named;
+	// once it has, to those its state names.
+	// Connections made before, under other trust, are not reused.
+	keys := maps.Clone(members)
+	c.joinKeys.Store(&keys)
+	c.client.CloseIdleConnections()
+	defer func() {
+		c.joinKeys.Store(nil)
+		c.client.CloseIdleConnections()
+	}()
 	// The leader checks the node first, so a node it refuses keeps its
 	// state as it was.
 	request := joinRequest{Address: c.address, Actor: actor, Check: true}
@@ -905,6 +1330,14 @@ type Member struct {
 	Name     string `json:"name"`
 	Address  string `json:"address"`
 	Suffrage string `json:"suffrage"`
+	// Key is the identity key the state holds for the node: empty for a
+	// node of a cluster from before identity keys that has not registered
+	// its own yet. For a node on its way out, it is the key it had.
+	Key string `json:"key,omitempty"`
+	// Leaving is set for a node taken out of the state that is still a
+	// voter: Raft takes it by Key, or by its name if that is empty, until
+	// its removal finishes.
+	Leaving bool `json:"leaving,omitempty"`
 }
 
 func (c *Cluster) Status() (Status, error) {
@@ -920,7 +1353,13 @@ func (c *Cluster) Status() (Status, error) {
 		return Status{}, err
 	}
 	for _, server := range future.Configuration().Servers {
-		status.Members = append(status.Members, Member{Name: string(server.ID), Address: string(server.Address), Suffrage: server.Suffrage.String()})
+		member := Member{Name: string(server.ID), Address: string(server.Address), Suffrage: server.Suffrage.String()}
+		key, named := c.config.Store.NodeKey(member.Name)
+		member.Key = key
+		if !named {
+			member.Key, member.Leaving = c.config.Store.DepartedKey(member.Name)
+		}
+		status.Members = append(status.Members, member)
 	}
 	slices.SortFunc(status.Members, func(a, b Member) int { return strings.Compare(a.Name, b.Name) })
 	return status, nil

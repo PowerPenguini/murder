@@ -26,7 +26,7 @@ const (
 // each call with its query.
 func serveAgent(t *testing.T, handler func(call string, w http.ResponseWriter, r *http.Request)) (string, func() []string) {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "agent.sock")
+	socket := filepath.Join(socketDir(t), "agent.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

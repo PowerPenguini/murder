@@ -148,7 +148,7 @@ func TestTheMasterKeyRotatesWhileTheClusterRuns(t *testing.T) {
 		t.Fatalf("a write after the rotation: %v", err)
 	}
 	// A node with the old key alone is a stranger now.
-	stranger, err := NewCredentials(masterKey(t, 7).DeriveAll("cluster ca"), "fsn-1", time.Now())
+	stranger, err := NewCredentials(masterKey(t, 7).DeriveAll("cluster ca"), "fsn-1", nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

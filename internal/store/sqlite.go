@@ -75,6 +75,11 @@ type snapshot struct {
 	rollouts map[string]Rollout
 	tenants  map[string]Record
 	nodes    map[string]Node
+	// admissions are the hosts an invitation let in, by name.
+	admissions map[string]Admission
+	// departed are the nodes taken out of the state, with the identity
+	// keys they had, by name.
+	departed map[string]Departure
 	devices  map[string]Device
 	panel    panelState
 	images   map[string]bool
@@ -486,7 +491,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 
 func loadNodes(q querier, state *snapshot) error {
 	state.nodes = map[string]Node{}
-	rows, err := q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until, public, tunnel FROM nodes`)
+	rows, err := q.Query(`SELECT name, address, created_at, failed_at, away_until, copies_refused_until, public, tunnel, key FROM nodes`)
 	if err != nil {
 		return err
 	}
@@ -495,7 +500,7 @@ func loadNodes(q querier, state *snapshot) error {
 		var created string
 		var failed, away, refused sql.NullString
 		var public, tunnel string
-		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away, &refused, &public, &tunnel); err != nil {
+		if err := rows.Scan(&node.Name, &node.Address, &created, &failed, &away, &refused, &public, &tunnel, &node.Key); err != nil {
 			rows.Close()
 			return err
 		}
@@ -520,7 +525,44 @@ func loadNodes(q querier, state *snapshot) error {
 	if err := closeRows(rows); err != nil {
 		return err
 	}
-	return nil
+	return loadAdmissions(q, state)
+}
+
+// loadAdmissions reads the hosts an invitation let in; the nodes' part
+// of the state holds them.
+func loadAdmissions(q querier, state *snapshot) error {
+	state.admissions = map[string]Admission{}
+	rows, err := q.Query(`SELECT name, key, expires_at, actor FROM admissions`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var admission Admission
+		var expires string
+		if err := rows.Scan(&admission.Name, &admission.Key, &expires, &admission.Actor); err != nil {
+			rows.Close()
+			return err
+		}
+		admission.Expires = parseTime(expires)
+		state.admissions[admission.Name] = admission
+	}
+	if err := closeRows(rows); err != nil {
+		return err
+	}
+	state.departed = map[string]Departure{}
+	rows, err = q.Query(`SELECT name, key, seq FROM departed_keys`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var departure Departure
+		if err := rows.Scan(&departure.Name, &departure.Key, &departure.Seq); err != nil {
+			rows.Close()
+			return err
+		}
+		state.departed[departure.Name] = departure
+	}
+	return closeRows(rows)
 }
 
 func loadDevices(q querier, state *snapshot) error {
@@ -628,7 +670,7 @@ func (s *SQLite) writeAs(schema int, unlessFrozen, signal bool, change func(tx *
 		if err := change(tx, current, s.now().UTC()); err != nil {
 			return nil, err
 		}
-		next, err := s.commit(Batch{ID: rand.Text(), Schema: schema, Version: current.version, Signal: signal, Statements: tx.statements})
+		next, err := s.commit(Batch{ID: rand.Text(), Schema: schema, Version: current.version, Signal: signal, Statements: tx.statements, LeaderOnly: tx.leaderOnly})
 		if !errors.Is(err, ErrStale) || attempt == staleAttempts {
 			return next, err
 		}
@@ -651,21 +693,29 @@ func (s *SQLite) Apply(batch Batch) error {
 }
 
 func (s *SQLite) apply(batch Batch) (*snapshot, error) {
-	return s.transact(batch.Signal, func(tx *sql.Tx, current *snapshot) error {
-		return applyBatch(tx, current, batch)
+	return s.transactBatch(batch.Signal, func(tx *sql.Tx, current *snapshot, w *watched) error {
+		return applyBatch(tx, current, batch, w, nil)
 	})
 }
 
 // applyBatch applies a batch of this schema version or an older one: a
 // migration keeps the statements of earlier releases valid, so a node
 // upgraded first still applies what the others write.
-func applyBatch(tx *sql.Tx, current *snapshot, batch Batch) error {
+func applyBatch(tx *sql.Tx, current *snapshot, batch Batch, w *watched, then func() error) error {
 	if batch.Schema < firstBatchSchema || batch.Schema > schemaVersion {
 		return fmt.Errorf("%w: a batch for schema version %d, this node runs %d", ErrSchema, batch.Schema, schemaVersion)
 	}
 	if batch.Version != current.version {
 		return fmt.Errorf("%w: computed against version %d, the state is at %d", ErrStale, batch.Version, current.version)
 	}
+	// The batch's statements run under batchAuthorizer, and so does the
+	// store's count of the version and applied index that follows: a
+	// trigger they fire is held to it too.
+	if err := w.authorize(batchAuthorizer); err != nil {
+		return err
+	}
+	defer w.authorize(nil)
+	w.changes.meta = map[string]bool{}
 	for _, statement := range batch.Statements {
 		args, err := statement.values()
 		if err != nil {
@@ -678,8 +728,34 @@ func applyBatch(tx *sql.Tx, current *snapshot, batch Batch) error {
 			return refusal{err}
 		}
 	}
-	_, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = 'version'`, strconv.FormatInt(current.version+1, 10))
-	return err
+	err := w.changes.bookkeeping()
+	w.changes.meta = nil
+	if err != nil {
+		return err
+	}
+	if err := setMeta(tx, "version", strconv.FormatInt(current.version+1, 10)); err != nil {
+		return err
+	}
+	if then != nil {
+		return then()
+	}
+	return nil
+}
+
+// setMeta sets one of the meta rows the store keeps, which must be there:
+// a database without it is broken, and the change is not made.
+func setMeta(tx *sql.Tx, key, value string) error {
+	result, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = ?`, value, key)
+	if err != nil {
+		if nodeFailure(err) {
+			return err
+		}
+		return refusal{err}
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return fmt.Errorf("the database's meta table has %d rows %q, not one: it is broken (%v)", rows, key, err)
+	}
+	return nil
 }
 
 // local changes what only this node keeps, such as the images it pulled,
@@ -698,6 +774,20 @@ func (s *SQLite) transact(signal bool, change func(tx *sql.Tx, current *snapshot
 }
 
 func (s *SQLite) transactLocked(signal bool, change func(tx *sql.Tx, current *snapshot) error) (*snapshot, error) {
+	return s.transactWatched(signal, func(tx *sql.Tx, current *snapshot, _ *watched) error { return change(tx, current) })
+}
+
+// transactBatch is transact for applying a batch, whose statements run
+// under batchAuthorizer.
+func (s *SQLite) transactBatch(signal bool, change func(tx *sql.Tx, current *snapshot, w *watched) error) (*snapshot, error) {
+	s.applying.Lock()
+	defer s.applying.Unlock()
+	return s.transactWatched(signal, change)
+}
+
+// transactWatched is transactLocked, handing change the connection it
+// runs on; the caller holds s.applying.
+func (s *SQLite) transactWatched(signal bool, change func(tx *sql.Tx, current *snapshot, w *watched) error) (*snapshot, error) {
 	ctx := context.Background()
 	watched, err := s.watch(ctx)
 	if err != nil {
@@ -710,7 +800,7 @@ func (s *SQLite) transactLocked(signal bool, change func(tx *sql.Tx, current *sn
 	}
 	defer tx.Rollback()
 	current := s.state.Load()
-	if err := change(tx, current); err != nil {
+	if err := change(tx, current, watched); err != nil {
 		return nil, err
 	}
 	next, err := reload(tx, current, watched.changes)
