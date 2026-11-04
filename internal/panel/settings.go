@@ -1,0 +1,180 @@
+package panel
+
+import (
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/spec"
+)
+
+// A tenant's settings show each value in effect and where it comes from:
+// its own, its app's, or the node's default. A value of its own is turned
+// on with a switch; turned off, the app's value is used again. Saving is
+// reviewed first: the changed fields, then "Save and restart".
+
+// settingField is one of a tenant's settings that it may keep its own.
+type settingField struct {
+	// Name is the form's field; Label says it, Unit its unit.
+	Name, Label, Unit string
+	// Effective is the value in effect, said; Source where it comes from.
+	Effective, Source string
+	// Own says the tenant keeps its own value, Value is it.
+	Own   bool
+	Value string
+	// Mono says the value is code-like (an image).
+	Mono bool
+	// Kind, Step and Min shape the input.
+	Kind, Step, Min string
+}
+
+// envRow is one variable of the environment, as the tenant gets it.
+type envRow struct {
+	Key, Value string
+	// Own says the tenant sets it; App the value its app gives, if any.
+	Own bool
+	App string
+	// FromApp says the app sets it too.
+	FromApp bool
+}
+
+// settingChange is one changed field of a review.
+type settingChange struct{ Field, From, To string }
+
+// settingFields are a tenant's fields, from its app's spec and its form.
+func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingField {
+	source := func(own bool, appValue bool) string {
+		switch {
+		case own:
+			return "its own"
+		case appValue:
+			return "from app " + t.App
+		}
+		return "the node's default"
+	}
+	l, a := t.Spec.Limits, app.Limits
+	field := func(name, label, unit, kind, step, value string, effective string, appSet bool) settingField {
+		return settingField{Name: name, Label: label, Unit: unit, Kind: kind, Step: step, Min: "0", Own: value != "", Value: value,
+			Effective: effective, Source: source(value != "", appSet)}
+	}
+	number := func(n int, unit string) string {
+		if n == 0 {
+			return "none set"
+		}
+		return strconv.Itoa(n) + unit
+	}
+	cpus := "none set"
+	if l.CPUs != 0 {
+		cpus = strconv.FormatFloat(l.CPUs, 'f', -1, 64)
+	}
+	memoryText := "none set"
+	if l.MemoryMB != 0 {
+		memoryText = memory(l.MemoryMB)
+	}
+	return []settingField{
+		{Name: "image", Label: "Image", Kind: "text", Own: form.Image != "", Value: form.Image, Mono: true,
+			Effective: shortImage(t.Spec.Image), Source: source(form.Image != "", true)},
+		field("memoryMB", "Memory", "MB", "number", "1", form.MemoryMB, memoryText, a.MemoryMB != 0),
+		field("cpus", "CPUs", "cores", "number", "0.05", form.CPUs, cpus, a.CPUs != 0),
+		field("pids", "Processes", "at most", "number", "1", form.PIDs, number(l.PIDs, ""), a.PIDs != 0),
+		field("diskGB", "Disk", "GB", "number", "1", form.DiskGB, number(l.DiskGB, " GB"), a.DiskGB != 0),
+	}
+}
+
+// envRows is the environment the tenant gets: the app's, with its own
+// over it.
+func envRows(app spec.Tenant, own map[string]string) []envRow {
+	rows := map[string]*envRow{}
+	for key, value := range app.Env {
+		rows[key] = &envRow{Key: key, Value: value, App: value, FromApp: true}
+	}
+	for key, value := range own {
+		row := rows[key]
+		if row == nil {
+			row = &envRow{Key: key}
+			rows[key] = row
+		}
+		row.Own, row.Value = true, value
+	}
+	var out []envRow
+	for _, key := range slices.Sorted(maps.Keys(rows)) {
+		out = append(out, *rows[key])
+	}
+	return out
+}
+
+// settingChanges says what a form changes of a tenant's settings.
+func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingChange {
+	was := formOf(t)
+	var out []settingChange
+	if form.App != was.App {
+		out = append(out, settingChange{"App", was.App, form.App + ": its whole spec changes"})
+	}
+	say := func(own, unit string, appValue string) string {
+		if own == "" {
+			if appValue == "" || appValue == "0" {
+				return "the node's default"
+			}
+			return appValue + unit + ", app " + t.App + "'s"
+		}
+		return own + unit + ", its own"
+	}
+	appImage := shortImage(app.Image)
+	pairs := []struct {
+		field, unit, before, after, app string
+	}{
+		{"Image", "", was.Image, form.Image, appImage},
+		{"Memory", " MB", was.MemoryMB, form.MemoryMB, strconv.Itoa(app.Limits.MemoryMB)},
+		{"CPUs", "", was.CPUs, form.CPUs, strconv.FormatFloat(app.Limits.CPUs, 'f', -1, 64)},
+		{"Processes", "", was.PIDs, form.PIDs, strconv.Itoa(app.Limits.PIDs)},
+		{"Disk", " GB", was.DiskGB, form.DiskGB, strconv.Itoa(app.Limits.DiskGB)},
+	}
+	for _, p := range pairs {
+		if p.before != p.after {
+			out = append(out, settingChange{p.field, say(p.before, p.unit, p.app), say(p.after, p.unit, p.app)})
+		}
+	}
+	before, _ := was.overrides()
+	after, _ := form.overrides()
+	keys := map[string]bool{}
+	for key := range before.Env {
+		keys[key] = true
+	}
+	for key := range after.Env {
+		keys[key] = true
+	}
+	for _, key := range slices.Sorted(maps.Keys(keys)) {
+		old, had := before.Env[key]
+		next, has := after.Env[key]
+		appValue, appHas := app.Env[key]
+		switch {
+		case had && !has:
+			to := "unset"
+			if appHas {
+				to = appValue + ", app " + t.App + "'s"
+			}
+			out = append(out, settingChange{"Environment " + key, old + ", its own", to})
+		case !had && has:
+			from := "unset"
+			if appHas {
+				from = appValue + ", app " + t.App + "'s"
+			}
+			out = append(out, settingChange{"Environment " + key, from, next + ", its own"})
+		case had && has && old != next:
+			out = append(out, settingChange{"Environment " + key, old, next})
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(after.Secrets)) {
+		if _, had := before.Secrets[key]; !had {
+			out = append(out, settingChange{"Secret " + key, "none of its own", "made once, " + after.Secrets[key].Kind})
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(before.Secrets)) {
+		if _, has := after.Secrets[key]; !has {
+			out = append(out, settingChange{"Secret " + key, "its own", "dropped: " + strings.TrimSpace("the app's, if it has one")})
+		}
+	}
+	return out
+}

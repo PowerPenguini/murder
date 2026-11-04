@@ -2,6 +2,7 @@ package panel
 
 import (
 	"strings"
+	"time"
 
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -43,8 +44,12 @@ func byPeople(e store.Event) bool {
 	return e.Actor != "murder" && !strings.HasPrefix(e.Actor, "murder (")
 }
 
-// logLine is one line of a container's output, and how loud it is.
-type logLine struct{ Text, Level string }
+// logLine is one line of a container's output, and how loud it is; a
+// line that begins with its time has it apart, Short as hh:mm:ss.
+type logLine struct {
+	Text, Level  string
+	Stamp, Short string
+}
 
 // logLines splits output into lines, marking those that warn or tell of
 // an error, as apps commonly write them.
@@ -63,7 +68,13 @@ func logLines(output string) []logLine {
 		case strings.Contains(upper, "WARN"):
 			level = "warn"
 		}
-		out = append(out, logLine{Text: line, Level: level})
+		l := logLine{Text: line, Level: level}
+		if stamp, rest, ok := strings.Cut(line, " "); ok && len(stamp) >= 20 && stamp[4] == '-' && stamp[10] == 'T' {
+			if at, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+				l.Stamp, l.Short, l.Text = stamp, at.UTC().Format("15:04:05"), rest
+			}
+		}
+		out = append(out, l)
 	}
 	return out
 }

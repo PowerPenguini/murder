@@ -164,6 +164,13 @@ type appData struct {
 	Revisions []store.Revision
 	// Restoring are its tenants waiting for their data to go back.
 	Restoring []string
+	// Rollout is its rollout under way, if one is.
+	Rollout *rolloutView
+	// EditorProblem is what is wrong with the spec in the editor, said
+	// beside it.
+	EditorProblem string
+	// Rows are its tenants, with their state.
+	Rows []tenantRow
 }
 
 func (s *Server) app(w http.ResponseWriter, r *http.Request) {
@@ -174,30 +181,48 @@ func (s *Server) app(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	// An app given a tag shows the tag: saving the file keeps the image it
-	// is pinned to, and the tag is still asked about.
+	file, err := shownFile(app)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.appPage(w, r, appData{App: app, File: file, Updated: stampOf(app.UpdatedAt)}, "", http.StatusOK)
+}
+
+// shownFile is an app's spec as its editor shows it. An app given a tag
+// shows the tag: saving the file keeps the image it is pinned to, and the
+// tag is still asked about.
+func shownFile(app api.App) (string, error) {
 	shown := app.Spec
 	if app.Tag != "" {
 		shown.Image = app.Tag
 	}
 	file, err := spec.AppFile(shown)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	s.appPage(w, r, appData{App: app, File: string(file), Updated: stampOf(app.UpdatedAt)}, "", http.StatusOK)
+	return string(file), err
 }
 
 // appPage shows an app, with the archived tenants that keep it.
 func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, problem string, status int) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	tenants, err := s.backend.List(ctx)
-	if err != nil {
+	var tenants []api.Tenant
+	var events []store.Event
+	if err := all(
+		func() (err error) { tenants, err = s.backend.List(ctx); return },
+		func() (err error) {
+			events, err = s.backend.Events(ctx, store.EventQuery{App: data.App.Name, Limit: activityEvents})
+			return
+		},
+	); err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	data.Rollout = rolloutOf(data.App, tenants, events, s.now())
+	slices.SortFunc(tenants, func(a, b api.Tenant) int { return strings.Compare(a.Spec.Name, b.Spec.Name) })
 	for _, t := range tenants {
+		if t.App == data.App.Name {
+			data.Rows = append(data.Rows, tenantRow{Tenant: t, State: tenantState(t)})
+		}
 		if t.App == data.App.Name && t.Archived() {
 			data.Archived = append(data.Archived, t.Spec.Name)
 		}
@@ -207,9 +232,14 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, p
 	}
 	slices.Sort(data.Archived)
 	slices.Sort(data.Restoring)
+	var err error
 	if data.Revisions, err = s.Apps(s.actor(userOf(r))).AppRevisions(ctx, data.App.Name); err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	// What is wrong with the spec is said beside the editor.
+	if data.File != "" && problem != "" {
+		data.EditorProblem, problem = problem, ""
 	}
 	s.renderWith(w, r, "app", data.App.Name, "apps", data, problem, status)
 }
@@ -234,6 +264,63 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/apps/"+url.PathEscape(name), http.StatusSeeOther)
 	}
 	switch r.FormValue("do") {
+	case "edit":
+		// Back from a review to the editor, the text kept.
+		s.appPage(w, r, appData{App: current, File: r.FormValue("file"), Updated: r.FormValue("updated")}, "", http.StatusOK)
+	case "review":
+		file := r.FormValue("file")
+		refuse := func(problem string) {
+			s.appPage(w, r, appData{App: current, File: file, Updated: r.FormValue("updated")}, problem, http.StatusUnprocessableEntity)
+		}
+		if current.UpdatedAt.IsZero() || r.FormValue("updated") != stampOf(current.UpdatedAt) {
+			refuse("someone changed the app since you opened it: your text is below; reload the page for theirs")
+			return
+		}
+		if _, err := readApp(name, file); err != nil {
+			refuse(err.Error())
+			return
+		}
+		from, err := shownFile(current)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		s.review(w, r, current, reviewData{Do: "save", Title: "Your change to " + name + "'s spec", File: file, Updated: r.FormValue("updated")}, from, file)
+	case "review-restore", "review-update":
+		if current.UpdatedAt.IsZero() || r.FormValue("updated") != stampOf(current.UpdatedAt) {
+			back("problem", "someone changed the app since you opened it: look again, then try again")
+			return
+		}
+		from, err := spec.AppFile(current.Spec)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		data := reviewData{Do: "update", Title: "The newer image of " + current.Tag, Updated: r.FormValue("updated")}
+		next := current.Spec
+		if r.FormValue("do") == "review-restore" {
+			revision, _ := strconv.ParseInt(r.FormValue("revision"), 10, 64)
+			revisions, err := agent.AppRevisions(ctx, name)
+			if err != nil {
+				back("problem", err.Error())
+				return
+			}
+			i := slices.IndexFunc(revisions, func(rev store.Revision) bool { return rev.Revision == revision })
+			if i < 0 {
+				back("problem", "no such revision")
+				return
+			}
+			next = revisions[i].Spec
+			data.Do, data.Revision, data.Title = "restore", revision, "Going back to revision "+strconv.FormatInt(revision, 10)
+		} else if current.Latest != "" {
+			next.Image = current.Latest
+		}
+		to, err := spec.AppFile(next)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		s.review(w, r, current, data, string(from), string(to))
 	case "save":
 		file := r.FormValue("file")
 		refuse := func(problem string) {
@@ -365,11 +452,22 @@ func formOf(t api.Tenant) settingsForm {
 
 func formFrom(r *http.Request) settingsForm {
 	generation, _ := strconv.ParseInt(r.FormValue("generation"), 10, 64)
-	return settingsForm{
+	form := settingsForm{
 		App: r.FormValue("app"), Image: strings.TrimSpace(r.FormValue("image")), Env: r.FormValue("env"), Secrets: r.FormValue("secrets"),
 		MemoryMB: strings.TrimSpace(r.FormValue("memoryMB")), CPUs: strings.TrimSpace(r.FormValue("cpus")),
 		PIDs: strings.TrimSpace(r.FormValue("pids")), DiskGB: strings.TrimSpace(r.FormValue("diskGB")), Generation: generation,
 	}
+	// The page's form says, by a switch each, which values are the
+	// tenant's own: one switched off takes the app's again, whatever its
+	// field holds.
+	if r.FormValue("owns") != "" {
+		for name, field := range map[string]*string{"image": &form.Image, "memoryMB": &form.MemoryMB, "cpus": &form.CPUs, "pids": &form.PIDs, "diskGB": &form.DiskGB} {
+			if r.FormValue("own-"+name) == "" {
+				*field = ""
+			}
+		}
+	}
+	return form
 }
 
 // overrides reads the form: env as NAME=value lines, secrets as "NAME
@@ -504,6 +602,14 @@ type settingsData struct {
 	Form    settingsForm
 	Apps    []string
 	Secrets []secretRow
+	// Fields are its settings that may be its own, with the values in
+	// effect; Env the environment it gets.
+	Fields []settingField
+	Env    []envRow
+	// Review lists what the form changes, once asked to review it;
+	// Reviewing says it was.
+	Review    []settingChange
+	Reviewing bool
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -526,6 +632,18 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 		return
 	}
 	data := settingsData{Tenant: t, Form: form}
+	var appSpec spec.Tenant
+	for _, app := range apps {
+		if app.Name == t.App {
+			appSpec = app.Spec
+		}
+	}
+	data.Fields = settingFields(t, appSpec, form)
+	data.Env = envRows(appSpec, t.Overrides.Env)
+	if r.FormValue("do") == "review" {
+		data.Reviewing = true
+		data.Review = settingChanges(t, appSpec, form)
+	}
 	if nodes, err := s.backend.Nodes(ctx); err == nil {
 		data.Head = s.headOf(t, nodes, "settings")
 	} else {
@@ -561,6 +679,17 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/tenants/"+url.PathEscape(name)+"/settings", http.StatusSeeOther)
 	}
 	switch r.FormValue("do") {
+	case "review", "edit":
+		// What the form changes, shown before it is saved; or back to it.
+		form := formFrom(r)
+		if _, err := form.overrides(); err != nil {
+			s.settingsPage(w, r, t, form, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		if r.FormValue("do") == "edit" {
+			r.Form.Set("do", "")
+		}
+		s.settingsPage(w, r, t, form, "", http.StatusOK)
 	case "save":
 		form := formFrom(r)
 		refuse := func(problem string) { s.settingsPage(w, r, t, form, problem, http.StatusUnprocessableEntity) }
@@ -592,7 +721,7 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", err.Error())
 			return
 		}
-		back("done", fmt.Sprintf("%s takes rollouts %s", name, map[bool]string{true: "never: it is held", false: map[bool]string{true: "first: it is a canary", false: "with the others"}[canary]}[hold]))
+		back("done", fmt.Sprintf("rollout flags saved: %s takes rollouts %s", name, map[bool]string{true: "never: it is held", false: map[bool]string{true: "first: it is a canary", false: "with the others"}[canary]}[hold]))
 	case "rotate":
 		key := r.FormValue("key")
 		if strings.TrimSpace(r.FormValue("confirm")) != key {

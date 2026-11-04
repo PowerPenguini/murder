@@ -1,0 +1,107 @@
+{{define "content"}}{{$d := .Data}}{{$n := $d.Node}}
+<nav class="crumbs" aria-label="where this is"><a href="/cluster">Cluster</a><span>/</span><span>{{$n.Name}}</span></nav>
+<header class="pagehead">
+  <div class="title"><h1>{{$n.Name}}</h1><span class="st {{$d.State.Kind}}">{{$d.State.Label}}{{if not $n.FailedAt.IsZero}} {{ago $n.FailedAt}} ago{{end}}</span></div>
+  {{if and $d.Acts (or (and $n.Answers $d.Targets) (not $n.Answers) (not $d.Self))}}
+  <div class="actions">
+    <details class="drop end">
+      <summary class="button">Act on {{$n.Name}}</summary>
+      <div class="pop">{{template "node-actions" (nodeActs $n $d.Self $d.Targets "node")}}</div>
+    </details>
+  </div>
+  {{end}}
+  <p class="lead">{{if $d.Leader}}Leads the cluster · {{end}}{{if $d.Self}}The node this panel asks · {{end}}public {{addrs $n}}{{with $n.Tunnel}} · tunnel <span class="mono">{{.Address}}</span>{{end}} · joined {{ago $n.CreatedAt}} ago</p>
+</header>
+
+{{if $n.Failed}}
+<div class="problem bad" role="alert">
+  <p class="flat">It failed {{ago $n.FailedAt}} ago ({{utc $n.FailedAt}}). Its tenants were failed over to their copies; {{if $d.Moved}}{{len $d.Moved}} moved, listed below{{else}}none was left on it{{end}}{{if $d.Runs}}, but {{len $d.Runs}} with no copy {{if eq (len $d.Runs) 1}}stays{{else}}stay{{end}} stopped on it{{end}}.</p>
+  <ol class="steps">
+    <li>If it comes back, it rejoins and is emptied first: nothing runs twice.</li>
+    <li>To replace it, make an invitation on a live node (<code>sudo murder invite</code>) and join a new server with it.</li>
+    <li>Once it runs no tenant and keeps no copy, remove it here{{if $d.Runs}}; first restore its stopped tenants from their backups{{end}}.</li>
+  </ol>
+</div>
+{{else if not $n.Answers}}
+<div class="problem bad" role="alert">
+  <p class="flat">It does not answer. If it only restarts, wait: its tenants are back as it is. If it is gone, make sure it is powered off, then fail it over: each tenant starts from its copy on another node.</p>
+</div>
+{{end}}
+
+<section class="near">
+  <div class="stats">
+    {{with $d.Use}}
+    <div class="stat"><div class="caps">CPU, cores</div><div class="v num">{{.CPUText}}</div>{{template "bar" .CPU}}</div>
+    <div class="stat"><div class="caps">Memory</div><div class="v num">{{.MemoryText}}</div>{{template "bar" .Memory}}</div>
+    {{else}}
+    <div class="stat"><div class="caps">Use</div><div class="v dim">not measured</div></div>
+    {{end}}
+    <div class="stat"><div class="caps">Runs</div><div class="v num">{{plural (len $d.Runs) "tenant" "tenants"}}</div></div>
+    <div class="stat"><div class="caps">Keeps copies of</div><div class="v num">{{plural (len $d.Keeps) "tenant" "tenants"}}</div></div>
+    <div class="stat"><div class="caps">Backups</div><div class="v">{{with $d.Backups}}{{if .Failing}}<span class="st bad">{{.Failing}} failing</span>{{else if .Stale}}<span class="st warn">{{.Stale}} late</span>{{else if .Ready}}<span class="st ok">every {{every .Every}}</span>{{else}}<span class="st warn">not running</span>{{end}}{{else}}<span class="dim">{{if $n.Answers}}not set up{{else}}not known{{end}}</span>{{end}}</div></div>
+  </div>
+</section>
+
+{{with $d.Moved}}
+<section>
+  <div class="head"><h2>Failed over from {{$n.Name}}</h2></div>
+  <table class="list rows">
+    <thead><tr><th>Tenant</th><th>State</th><th>Went to</th><th>Runs on now</th><th class="when">When</th></tr></thead>
+    <tbody>
+    {{range .}}
+      <tr>
+        <td class="l-main"><a class="row-link" href="/tenants/{{.Tenant}}">{{.Tenant}}</a></td>
+        <td class="l-side">{{with .Row}}<span class="st {{.State.Kind}}">{{.State.Label}}</span>{{else}}<span class="dim">gone</span>{{end}}</td>
+        <td class="hide-narrow">{{.To}}</td>
+        <td class="l-sub" data-label="Runs on">{{with .Row}}{{.Node}}{{with .Tenant.Replica}} <span class="dim">· copy on {{.}}</span>{{end}}{{else}}<span class="dim">purged</span>{{end}}</td>
+        <td class="when hide-narrow">{{ago .At}} ago</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+
+<section>
+  <div class="head"><h2>Tenants it runs</h2></div>
+  <table class="list rows">
+    <thead><tr><th>Tenant</th><th>State</th><th>Copy</th><th>Newest backup</th></tr></thead>
+    <tbody>
+    {{range $d.Runs}}
+      <tr>
+        <td class="l-main"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
+        <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
+        <td class="l-sub" data-label="Copy">{{template "copy" .}}</td>
+        <td class="l-sub" data-label="Backup">{{template "backup" .}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="4" class="empty l-main">None{{if $n.Failed}}: every tenant it ran was failed over{{end}}.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <div class="head"><h2>Copies it keeps</h2></div>
+  <table class="list rows">
+    <thead><tr><th>Tenant</th><th>State</th><th>Runs on</th><th>Copy</th></tr></thead>
+    <tbody>
+    {{range $d.Keeps}}
+      <tr>
+        <td class="l-main"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
+        <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
+        <td class="l-sub" data-label="Runs on">{{.Node}}</td>
+        <td class="l-sub" data-label="Copy">{{if .ReplicaReady}}ready, matched {{ago .ReplicaSyncedAt}} ago{{else}}<span class="st warn">catching up</span>{{end}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="4" class="empty l-main">None.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <div class="head"><h2>Events that name it</h2><a href="/events?all=1" class="dim">All events</a></div>
+  {{template "events" $d.Events}}
+</section>
+{{end}}

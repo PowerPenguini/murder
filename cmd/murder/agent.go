@@ -296,6 +296,7 @@ func runAgent(args []string) error {
 			return err
 		}
 		apiHandler.WithBackups(backups)
+		recorder.SetBackups(backups.useReport)
 	}
 	if replicator != nil {
 		apiHandler.WithReplicas(replicator)

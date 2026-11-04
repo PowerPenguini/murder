@@ -1,17 +1,22 @@
 {{define "content"}}{{$d := .Data}}
 <h1>Events</h1>
-<p class="lead">The audit log: who changed what, newest first. Open an event for its exact time and whole record.</p>
-<form class="row filters" method="get" action="/events">
+<p class="lead">The audit log, newest first: what operators did, and what broke. Open an event for its exact time and whole record.</p>
+<form class="filters" method="get" action="/events">
   <label class="field">Tenant <input type="search" name="tenant" value="{{$d.Tenant}}" placeholder="any" list="tenant-names" autocomplete="off" class="short"></label>
   <label class="field">App <input type="search" name="app" value="{{$d.App}}" placeholder="any" list="app-names" autocomplete="off" class="short"></label>
-  <label class="check"><input type="checkbox" name="people" value="1" {{if $d.People}}checked{{end}}> Operator actions only</label>
-  <button type="submit">Show</button>
-  {{if or $d.Tenant $d.App $d.People}}<a href="/events" class="dim">Clear</a>{{end}}
+  <label class="field">Show <select name="show">
+    <option value="" {{if eq $d.Show ""}}selected{{end}}>Operator actions and failures</option>
+    <option value="people" {{if eq $d.Show "people"}}selected{{end}}>Operator actions only</option>
+    <option value="all" {{if eq $d.Show "all"}}selected{{end}}>Everything, the cluster's own records too</option>
+  </select></label>
+  <div class="row"><button type="submit">Show</button>
+  {{if or $d.Tenant $d.App $d.Show}}<a href="/events" class="dim">Clear</a>{{end}}</div>
   <datalist id="tenant-names">{{range $d.Tenants}}<option value="{{.}}">{{end}}</datalist>
   <datalist id="app-names">{{range $d.Apps}}<option value="{{.}}">{{end}}</datalist>
 </form>
 <section class="near">
+  {{if and $d.Hidden (ne $d.Show "all")}}<p class="count-line dim">{{plural $d.Hidden "record" "records"}} of the cluster's own keeping (copies placed, new containers) left out. <a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}show=all">Include them</a></p>{{end}}
   {{template "events" $d.Events}}
-  {{if $d.Older}}<div class="more"><a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}{{if $d.People}}people=1&amp;{{end}}before={{$d.Older}}">Older</a></div>{{end}}
+  {{if $d.Older}}<div class="more"><a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}{{if $d.Show}}show={{$d.Show}}&amp;{{end}}before={{$d.Older}}">Older events</a></div>{{end}}
 </section>
 {{end}}

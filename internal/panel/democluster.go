@@ -189,6 +189,10 @@ func (a *demoActor) Logs(_ context.Context, name string, tail int) ([]byte, erro
 	for i := 12; i > 0; i-- {
 		lines = fmt.Appendf(lines, "%s INFO request method=GET path=/api/freights status=200 took=%dms\n", now.Add(-time.Duration(i)*7*time.Second).Format(time.RFC3339), 3+i%5)
 	}
-	lines = fmt.Appendf(lines, "%s WARN \x1b[33mslow query\x1b[0m table=fuelings took=412ms\n", now.Format(time.RFC3339))
+	lines = fmt.Appendf(lines, "%s WARN \x1b[33mslow query\x1b[0m table=fuelings took=412ms\n", now.Add(-5*time.Second).Format(time.RFC3339))
+	if name == "baltic-freight" {
+		lines = fmt.Appendf(lines, "%s WARN heap at 241 MB of 256 MB: caches trimmed\n", now.Add(-3*time.Second).Format(time.RFC3339))
+		lines = fmt.Appendf(lines, "%s ERROR export failed: cannot allocate memory path=/api/freights/export rows=184220\n", now.Add(-time.Second).Format(time.RFC3339))
+	}
 	return lines, nil
 }

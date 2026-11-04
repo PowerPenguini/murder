@@ -85,7 +85,7 @@ func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, 
 	now := d.now()
 	all := []store.Event{
 		{ID: 214, At: now.Add(-50 * time.Second), Actor: "murder", Action: "tenant.replica", Tenant: "vistula-cargo", App: "web", Detail: "a new copy on fsn-1, as hel-1 failed"},
-		{ID: 213, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "node.failed-over", Detail: "hel-1: 2 tenants run from their replicas"},
+		{ID: 213, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "node.failed-over", Detail: "hel-1: 2 tenants run from their copies"},
 		{ID: 212, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "vistula-cargo", App: "web", Detail: "hel-1 → nbg-1"},
 		{ID: 211, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "nordwind", App: "web", Detail: "hel-1 → fsn-1"},
 		{ID: 210, At: now.Add(-48 * time.Minute), Actor: "jan via murder-panel", Action: "tenant.suspended", Tenant: "test-staging", App: "web"},

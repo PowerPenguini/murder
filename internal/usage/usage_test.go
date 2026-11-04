@@ -354,3 +354,19 @@ func TestAHostWithoutCgroup2(t *testing.T) {
 		t.Fatalf("containers were read on a host without cgroup v2: %d", looked)
 	}
 }
+
+// A report says how the node's backups go, once told how to know.
+func TestReportSaysBackups(t *testing.T) {
+	r := NewRecorder("n1")
+	if r.Report(time.Now()).Backups != nil {
+		t.Fatal("backups without a source")
+	}
+	last := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	r.SetBackups(func() *Backups {
+		return &Backups{Ready: true, Every: 3600, Tenants: map[string]Backup{"acme": {Last: last}, "web": {Failing: true}}}
+	})
+	b := r.Report(time.Now()).Backups
+	if b == nil || !b.Ready || b.Every != 3600 || !b.Tenants["acme"].Last.Equal(last) || !b.Tenants["web"].Failing {
+		t.Fatalf("backups %+v", b)
+	}
+}

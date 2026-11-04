@@ -9,7 +9,8 @@
 <section class="once">
   <h2>The invitation, shown once</h2>
   <p>Send it through a channel you trust; it adds one passkey, within 24 hours.</p>
-  <code class="secret">{{.}}</code>
+  <code class="secret" id="invite-link">{{.}}</code>
+  <div class="actions spaced"><button type="button" data-copy="invite-link" hidden>Copy the link</button></div>
 </section>
 {{end}}
 
@@ -26,8 +27,9 @@
   <div class="device">
     {{if .QR}}<div class="qr">{{.QR}}</div>{{end}}
     <div>
-      <p>Scan the code with the WireGuard app, or import this configuration on a computer. It holds the device's private key, kept nowhere else.</p>
-      <pre class="secret">{{.Config}}</pre>
+      <p>Scan the code with the WireGuard app, or import this configuration on a computer. It holds the device's private key, kept nowhere else: save it now.</p>
+      <pre class="secret" id="device-config">{{.Config}}</pre>
+      <div class="actions spaced"><a class="button primary" href="{{.Download}}" download="{{.Name}}.conf">Download {{.Name}}.conf</a><button type="button" data-copy="device-config" hidden>Copy</button></div>
     </div>
   </div>
 </section>

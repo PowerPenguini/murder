@@ -1,18 +1,92 @@
 {{define "content"}}{{$d := .Data}}{{$a := $d.App}}
 <nav class="crumbs" aria-label="where this is"><a href="/apps">Apps</a><span>/</span><span>{{$a.Name}}</span></nav>
-<div class="title"><h1>{{$a.Name}}</h1></div>
-<p class="lead">{{len $a.Tenants}} live tenants · {{if $a.Revision}}revision {{$a.Revision}} · {{end}}changed {{ago $a.UpdatedAt}} ago · <a href="/events?app={{$a.Name}}">Events</a></p>
+<div class="title"><h1>{{$a.Name}}</h1>{{with $d.Rollout}}{{if eq .State "paused"}}<span class="st warn">rollout paused</span>{{else}}<span class="st busy">rolling out</span>{{end}}{{end}}</div>
+<p class="lead">{{plural (len $a.Tenants) "live tenant" "live tenants"}} · {{if $a.Revision}}revision {{$a.Revision}} · {{end}}changed {{ago $a.UpdatedAt}} ago · <a href="/events?app={{$a.Name}}&amp;all=1">Its events</a></p>
 
-<section class="near">
+{{with $d.Rollout}}{{$r := .}}
+<section class="near" id="rollout" data-live>
+  <div class="head"><h2>Rollout of revision {{.ToRevision}}</h2><span class="dim">{{.Moved}} of {{.Total}} moved · began {{ago .StartedAt}} ago by {{.Actor}}</span></div>
+  <ol class="waves" aria-label="its waves">
+    {{range .Steps}}<li class="{{.State}}"><span class="wn">{{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{if eq .State "done"}}moved{{else if eq .State "now"}}moving, watched{{else if eq .State "paused"}}paused{{else}}waits{{end}}</span></li>{{end}}
+  </ol>
+  <div class="notice{{if or .Blockers (eq .State "paused")}} bad{{end}} spaced">{{if .Blockers}}<span class="lead-in">Blocked by {{range $i, $b := .Blockers}}{{if $i}}, {{end}}<a href="/tenants/{{$b}}">{{$b}}</a>{{end}}.</span> {{end}}{{.Waits}}</div>
+  <table class="list rows">
+    <thead><tr><th>Tenant</th><th>Health</th><th>Revision</th><th>Wave</th><th>Result</th></tr></thead>
+    <tbody>
+    {{range .Rows}}
+      <tr>
+        <td class="l-main"><a class="row-link" href="/tenants/{{.Name}}">{{.Name}}</a></td>
+        <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
+        <td class="num l-sub" data-label="Revision">{{if .Moved}}{{.From}} → {{.To}}{{else if .Held}}{{.From}}, held{{else if eq .From .To}}{{.To}}{{else}}{{.From}}, to {{.To}}{{end}}</td>
+        <td class="hide-narrow">{{if .Wave}}{{.Wave}}{{else}}<span class="faint">none</span>{{end}}</td>
+        <td class="l-sub" data-label="Result">{{if .Blocks}}<span class="st bad">moved, not healthy: blocks the next wave</span>{{else if .Moved}}moved, healthy{{else if .Held}}<span class="dim">stays: it is held</span>{{else if eq .From .To}}<span class="dim">ran it already</span>{{else}}<span class="dim">waits for wave {{.Wave}}</span>{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <div class="actions spaced">
+    {{if eq .State "running"}}<form method="post" class="row"><input type="hidden" name="do" value="pause"><button type="submit">Pause</button></form>
+    <details class="drop">
+      <summary class="button">Roll out to the rest now</summary>
+      <div class="pop">
+        <form method="post" class="stack"><input type="hidden" name="do" value="promote">
+          <p class="hint">Moves {{if .Next}}the next wave ({{range $i, $n := .Next}}{{if $i}}, {{end}}{{$n}}{{end}}){{else}}every waiting tenant{{end}} now, without waiting for the wave before to stay healthy. Each still has to come up healthy.</p>
+          <div><button type="submit">Roll out now</button></div>
+        </form>
+      </div>
+    </details>
+    {{else}}<form method="post" class="row"><input type="hidden" name="do" value="resume"><button type="submit" class="primary">Resume the rollout</button></form>{{end}}
+    <details class="drop">
+      <summary class="button">Abort</summary>
+      <div class="pop">
+        <form method="post" class="stack"><input type="hidden" name="do" value="abort">
+          <p class="hint">Every tenant it moved goes back to the revision it ran before; their data stays as it is now. Type the app's name.</p>
+          <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <div><button type="submit" class="danger">Abort the rollout</button></div>
+        </form>
+      </div>
+    </details>
+    <details class="drop">
+      <summary class="button">Restore data snapshot</summary>
+      <div class="pop">
+        <form method="post" class="stack"><input type="hidden" name="do" value="restore-data">
+          <p class="hint">Every tenant it moved goes back to the revision before, and its data to the snapshot taken as it moved: what it wrote since is lost. Type the app's name.</p>
+          <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <div><button type="submit" class="danger">Restore their data</button></div>
+        </form>
+      </div>
+    </details>
+  </div>
+</section>
+{{else}}{{if $d.Restoring}}
+<section class="near" id="rollout" data-live>
+  <div class="head"><h2>Rollout</h2></div>
+  <div class="notice bad">
+    <p class="flat">{{range $i, $t := $d.Restoring}}{{if $i}}, {{end}}{{$t}}{{end}} wait{{if eq (len $d.Restoring) 1}}s{{end}} for their data from before the rollout, which their node may not have: they stay stopped until it does.</p>
+    <details class="drop spaced">
+      <summary class="button">Abort</summary>
+      <div class="pop">
+        <form method="post" class="stack"><input type="hidden" name="do" value="abort">
+          <p class="hint">They start on their data as it is, on the revision before. Type the app's name.</p>
+          <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <div><button type="submit" class="danger">Start them as they are</button></div>
+        </form>
+      </div>
+    </details>
+  </div>
+</section>
+{{end}}{{end}}
+
+<section{{if not $d.Rollout}} class="near"{{end}}>
   <div class="head"><h2>Image</h2>
-    {{if $a.Tag}}<form method="post" class="row"><input type="hidden" name="do" value="check"><button type="submit" title="ask the registry now; the cluster asks every few minutes by itself">Check now</button></form>{{end}}
+    {{if $a.Tag}}<form method="post" class="row"><input type="hidden" name="do" value="check"><button type="submit" title="ask the registry now; the cluster asks every few minutes by itself">Check for a newer image</button></form>{{end}}
   </div>
   {{if $a.Latest}}
   <div class="notice">
-    <p class="flat">A newer image of <span class="mono">{{$a.Tag}}</span> is in its registry: <span class="mono" title="{{$a.Latest}}">{{short $a.Latest}}</span>, found {{ago $a.LatestAt}} ago.</p>
-    <form method="post" class="row spaced"><input type="hidden" name="do" value="update"><input type="hidden" name="updated" value="{{$d.Updated}}">
-      <button type="submit" class="primary">Update and roll out</button>
-      <span class="hint">{{if $a.Tenants}}to {{len $a.Tenants}} live tenants, in waves{{else}}no live tenant runs it{{end}}</span></form>
+    <p class="flat"><span class="st warn"></span> A newer image of <span class="mono">{{$a.Tag}}</span> is in its registry: <span class="mono" title="{{$a.Latest}}">{{short $a.Latest}}</span>, found {{ago $a.LatestAt}} ago.</p>
+    <form method="post" class="row spaced"><input type="hidden" name="do" value="review-update"><input type="hidden" name="updated" value="{{$d.Updated}}">
+      <button type="submit" class="primary">Review the update</button>
+      <span class="hint">{{if $a.Tenants}}to {{plural (len $a.Tenants) "live tenant" "live tenants"}}, in waves{{else}}no live tenant runs it{{end}}</span></form>
   </div>
   {{end}}
   <table class="kv">
@@ -23,74 +97,32 @@
   </table>
 </section>
 
-{{with $a.Rollout}}{{if or (eq .State "running") (eq .State "paused")}}
-<section class="near">
-  <div class="head"><h2>Rollout</h2></div>
-  <div class="notice{{if eq .State "paused"}} bad{{end}}">
-    <p class="flat">Revision {{.ToRevision}}: {{.State}}, wave {{.Wave}}, since {{ago .WaveStarted}} ago.{{with .Reason}} {{.}}{{end}}</p>
-    <div class="row spaced">
-      {{if eq .State "running"}}<form method="post" class="row"><input type="hidden" name="do" value="pause"><button type="submit">Pause</button></form>
-      <form method="post" class="row"><input type="hidden" name="do" value="promote"><button type="submit" title="move every waiting tenant now; the rollout still waits for them to be healthy">Move the rest now</button></form>
-      {{else}}<form method="post" class="row"><input type="hidden" name="do" value="resume"><button type="submit" class="primary">Resume</button></form>{{end}}
-      <details class="drop">
-        <summary class="button">Abort</summary>
-        <div class="pop">
-          <form method="post" class="stack"><input type="hidden" name="do" value="abort">
-            <span class="hint">Every tenant it moved goes back to the revision before; their data stays. Type the app's name.</span>
-            <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="the app's name" autocomplete="off" required>
-            <div><button type="submit" class="danger">Abort the rollout</button></div>
-          </form>
-        </div>
-      </details>
-      <details class="drop">
-        <summary class="button">Restore</summary>
-        <div class="pop">
-          <form method="post" class="stack"><input type="hidden" name="do" value="restore-data">
-            <span class="hint">Every tenant it moved goes back to the revision before, and its data to the snapshot taken as it moved: what it wrote since is lost. Type the app's name.</span>
-            <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="the app's name" autocomplete="off" required>
-            <div><button type="submit" class="danger">Restore their data</button></div>
-          </form>
-        </div>
-      </details>
-    </div>
-  </div>
-</section>
-{{else}}{{if $d.Restoring}}
-<section class="near">
-  <div class="head"><h2>Rollout</h2></div>
-  <div class="notice bad">
-    <p class="flat">{{range $i, $t := $d.Restoring}}{{if $i}}, {{end}}{{$t}}{{end}} wait{{if eq (len $d.Restoring) 1}}s{{end}} for their data from before the rollout, which their node may not have: they stay stopped until it does.</p>
-    <details class="drop">
-      <summary class="button">Abort</summary>
-      <div class="pop">
-        <form method="post" class="stack"><input type="hidden" name="do" value="abort">
-          <span class="hint">They start on their data as it is, on the revision before. Type the app's name.</span>
-          <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="the app's name" autocomplete="off" required>
-          <div><button type="submit" class="danger">Start them as they are</button></div>
-        </form>
-      </div>
-    </details>
-  </div>
-</section>
-{{end}}{{end}}{{end}}
-
-<section data-still class="near">
+<section data-still id="spec">
+  <div class="head"><h2>App spec</h2><span class="dim">the file of <code>murder app apply</code>; keep it in git in step</span></div>
   <form method="post" class="stack">
-    <input type="hidden" name="do" value="save">
+    <input type="hidden" name="do" value="review">
     <input type="hidden" name="updated" value="{{$d.Updated}}">
-    <textarea name="file" rows="{{add1 (lines $d.File)}}" spellcheck="false" aria-label="the app's spec">{{$d.File}}</textarea>
-    <div class="row"><button type="submit" class="primary">Save and roll out</button>
-      <span class="hint">Rolls out in waves: canaries, a tenth, half, the rest, each healthy before the next; a change that would break a tenant is refused whole. Keep the file in git in step.</span></div>
+    {{with $d.EditorProblem}}<div class="notice bad flat" role="alert" id="spec-problem"><span class="lead-in">The spec is not taken.</span> {{.}}</div>{{end}}
+    <textarea name="file" rows="{{add1 (lines $d.File)}}" spellcheck="false" aria-label="the app's spec"{{if $d.EditorProblem}} aria-invalid="true" aria-describedby="spec-problem"{{end}}>{{$d.File}}</textarea>
+    <div class="row"><button type="submit" class="primary">Review changes</button>
+      <span class="hint">Shows what changes, the tenants it reaches and its waves. Nothing changes until you roll it out there.</span></div>
   </form>
 </section>
 
-<section>
+<section id="tenants" data-live>
   <div class="head"><h2>Tenants</h2></div>
-  <table>
+  <table class="list rows">
+    <thead><tr><th>Tenant</th><th>State</th><th>Runs on</th><th>Revision</th><th>Rollouts</th></tr></thead>
     <tbody>
-    {{range $a.Tenants}}<tr><td><a href="/tenants/{{.}}">{{.}}</a></td><td class="end"><a href="/tenants/{{.}}/settings" class="dim">Settings</a></td></tr>
-    {{else}}<tr><td class="empty">No live tenant runs it.</td></tr>{{end}}
-    {{range $d.Archived}}<tr><td><a href="/tenants/{{.}}">{{.}}</a> <span class="dim">archived</span></td><td class="end"><a href="/tenants/{{.}}/settings" class="dim">Settings</a></td></tr>{{end}}
+    {{range $d.Rows}}
+      <tr>
+        <td class="l-main"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
+        <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
+        <td class="hide-narrow">{{if .Archived}}<span class="faint">nowhere</span>{{else}}{{.Node}}{{end}}</td>
+        <td class="num hide-narrow">{{if .AppRevision}}{{.AppRevision}}{{else}}{{$a.Revision}}{{end}}</td>
+        <td class="l-sub" data-label="Rollouts">{{if .Canary}}canary: first{{else if .Hold}}held: stays{{else if .Archived}}<span class="dim">archived</span>{{else}}<span class="dim">with the others</span>{{end}}</td>
+      </tr>
+    {{else}}<tr><td colspan="5" class="empty l-main">No tenant runs it.</td></tr>{{end}}
     </tbody>
   </table>
   {{if $d.Archived}}<p class="hint spaced">Archived tenants run the app's spec once restored, and keep it from being deleted.</p>{{end}}
@@ -98,23 +130,23 @@
 
 <section>
   <div class="head"><h2>Revisions</h2></div>
-  <table>
-    <thead><tr><th>Revision</th><th>Image</th><th class="hide-narrow">Stored</th><th class="hide-narrow">By</th><th></th></tr></thead>
+  <table class="list">
+    <thead><tr><th>Revision</th><th>Image</th><th class="hide-narrow">Stored</th><th class="hide-narrow">By</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
     <tbody>
     {{range $r := $d.Revisions}}
       <tr>
-        <td class="mono-num">{{$r.Revision}}</td>
-        <td class="mono" title="{{$r.Spec.Image}}">{{short $r.Spec.Image}}{{if ne $r.Tag $a.Tag}} <span class="dim">{{if $r.Tag}}{{$r.Tag}}{{else}}pinned{{end}}</span>{{end}}</td>
+        <td class="num l-main">{{$r.Revision}}{{if eq $r.Revision $a.Revision}} <span class="dim">current</span>{{end}}</td>
+        <td class="mono l-sub" title="{{$r.Spec.Image}}">{{short $r.Spec.Image}}{{if ne $r.Tag $a.Tag}} <span class="dim">{{if $r.Tag}}{{$r.Tag}}{{else}}pinned{{end}}</span>{{end}}</td>
         <td class="when hide-narrow">{{ago $r.CreatedAt}} ago</td>
         <td class="dim hide-narrow">{{$r.Actor}}</td>
-        <td class="end">{{if eq $r.Revision $a.Revision}}<span class="dim">current</span>{{else}}<form method="post" class="row"><input type="hidden" name="do" value="restore"><input type="hidden" name="revision" value="{{$r.Revision}}"><input type="hidden" name="updated" value="{{$d.Updated}}"><button type="submit" title="store this revision again and roll it out">Go back to this</button></form>{{end}}</td>
+        <td class="end l-side">{{if ne $r.Revision $a.Revision}}<form method="post" class="row"><input type="hidden" name="do" value="review-restore"><input type="hidden" name="revision" value="{{$r.Revision}}"><input type="hidden" name="updated" value="{{$d.Updated}}"><button type="submit" class="small">Review going back</button></form>{{end}}</td>
       </tr>
     {{else}}
-      <tr><td colspan="5" class="empty">No revision yet: the app was stored by an older release and has not changed since.</td></tr>
+      <tr><td colspan="5" class="empty l-main">No revision yet: the app was stored by an older release and has not changed since.</td></tr>
     {{end}}
     </tbody>
   </table>
-  {{if gt (len $d.Revisions) 1}}<p class="hint spaced">Going back stores that revision again, its image and tag with it, and rolls it out. The data stays as the newer image left it.</p>{{end}}
+  {{if gt (len $d.Revisions) 1}}<p class="hint spaced">Going back stores that revision again, its image and tag with it, and rolls it out in waves. The data stays as the newer image left it.</p>{{end}}
 </section>
 
 {{if and (not $a.Tenants) (not $d.Archived)}}
@@ -123,8 +155,8 @@
     <summary class="button">Delete</summary>
     <div class="pop">
       <form method="post" class="stack"><input type="hidden" name="do" value="delete">
-        <span class="hint">No tenant runs it. Type its name.</span>
-        <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="the app's name" autocomplete="off" required>
+        <p class="hint">No tenant runs it. Its revisions go with it. Type its name.</p>
+        <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
         <div><button type="submit" class="danger">Delete the app</button></div>
       </form>
     </div>

@@ -17,6 +17,8 @@
     {{end}}
     <div class="stat"><div class="caps">Copy</div><div class="v">{{template "copy" $d.Row}}</div>
       {{if not $t.ReplicaSyncedAt.IsZero}}<div class="dim small">matched {{ago $t.ReplicaSyncedAt}} ago</div>{{end}}</div>
+    {{if $d.BackupsKnown}}<div class="stat"><div class="caps">Newest backup</div><div class="v">{{if $d.Row.Backup}}{{template "backup" $d.Row}}{{else}}<span class="dim">none</span>{{end}}</div>
+      <div class="dim small">{{with $d.Row.Backup}}every {{every .Every}} · {{end}}<a href="/cluster#backups">how to restore</a></div></div>{{end}}
   </div>
 </section>
 
@@ -76,7 +78,7 @@
 </section>
 
 <section>
-  <div class="head"><h2>Events</h2><a href="/events?tenant={{$t.Spec.Name}}&amp;all=1" class="dim">All events of {{$t.Spec.Name}}</a></div>
+  <div class="head"><h2>Actions and failures</h2><a href="/events?tenant={{$t.Spec.Name}}&amp;show=all" class="dim">All events of {{$t.Spec.Name}}</a></div>
   {{template "events" $d.Events}}
 </section>
 {{end}}

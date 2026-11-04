@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -66,6 +67,9 @@ type accessData struct {
 type deviceShown struct {
 	Name, Config string
 	QR           template.HTML
+	// Download is the configuration as a file to save, from the page
+	// itself: it is kept nowhere to be asked for again.
+	Download template.URL
 }
 
 // access is the people and devices page; a POST does one thing and shows
@@ -219,7 +223,8 @@ func (s *Server) addDevice(ctx context.Context, agent AccessAgent, name string) 
 	if err != nil {
 		svg = ""
 	}
-	return &deviceShown{Name: name, Config: config.String(), QR: template.HTML(svg)}, nil
+	text := config.String()
+	return &deviceShown{Name: name, Config: text, QR: template.HTML(svg), Download: template.URL("data:text/plain;charset=utf-8," + url.PathEscape(text))}, nil
 }
 
 // origin is where the panel's pages are.

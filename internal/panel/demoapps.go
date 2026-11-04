@@ -54,6 +54,30 @@ func (d *DemoCluster) demoApps() {
 			WaveStarted: time.Now().Add(-40 * time.Second), StartedAt: time.Now().Add(-3 * time.Minute), UpdatedAt: time.Now().Add(-40 * time.Second), Actor: "root"}
 		d.apps["web"] = web
 	}
+	// Its tenants, as that rollout left them: two canaries moved in the
+	// first wave, baltic-freight in the second and broke; three wait on
+	// revision 2, and test-staging is held there.
+	started := time.Now().Add(-3 * time.Minute)
+	for name, moved := range map[string]int{"atlas": 1, "acme-logistics": 1, "baltic-freight": 2} {
+		t := d.tenants[name]
+		t.BeforeRevision, t.Canary = 2, moved == 1
+		d.tenants[name] = t
+		at := started
+		if moved == 2 {
+			at = time.Now().Add(-40 * time.Second)
+		}
+		d.events = append(d.events, store.Event{At: at, Actor: "murder (rollout)", Action: "app.rolled-out", Tenant: name, App: "web", Detail: "wave " + strconv.Itoa(moved) + ": revision 2 → 3"})
+	}
+	for _, name := range []string{"kowalski-trans", "nordwind", "vistula-cargo", "test-staging"} {
+		t := d.tenants[name]
+		t.AppRevision = 2
+		t.Hold = name == "test-staging"
+		d.tenants[name] = t
+	}
+	slices.SortStableFunc(d.events, func(a, b store.Event) int { return b.At.Compare(a.At) })
+	for i := range d.events {
+		d.events[i].ID = int64(len(d.events) - i)
+	}
 	d.apps["testapp"] = api.App{Name: "testapp", Spec: spec.Tenant{Image: "ghcr.io/powerpenguini/murder-testapp@sha256:" + strings.Repeat("7", 64), User: "10001:10001", HealthPath: "/health"}.WithDefaults(),
 		CreatedAt: created, UpdatedAt: created}
 	t := d.tenants["atlas"]

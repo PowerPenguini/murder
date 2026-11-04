@@ -78,6 +78,27 @@ func (d *DemoCluster) Usage(ctx context.Context) (api.UsageReport, error) {
 			memory += p.Memory
 			cpu += p.CPU
 		}
+		// Backed up hourly; kowalski-trans's backups fail, its newest
+		// three hours old.
+		r.Backups = &usage.Backups{Ready: true, Every: 3600, Tenants: map[string]usage.Backup{}}
+		for _, t := range tenants {
+			if t.Node != n.Name {
+				continue
+			}
+			h := fnv.New32a()
+			_, _ = h.Write([]byte(t.Spec.Name))
+			backup := usage.Backup{Last: now.Add(-time.Duration(4+h.Sum32()%50) * time.Minute)}
+			if t.Spec.Name == "kowalski-trans" {
+				backup = usage.Backup{Last: now.Add(-3*time.Hour - 12*time.Minute), Failing: true}
+			}
+			if t.Archived() {
+				backup.Last = t.ArchivedAt
+			}
+			r.Backups.Tenants[t.Spec.Name] = backup
+		}
+		if n.Name == nodes.Leader {
+			r.Backups.State = &usage.Backup{Last: now.Add(-21 * time.Minute)}
+		}
 		r.Host = usage.Host{CPUs: cpus, CPU: cpu + 0.3, MemoryTotal: total, MemoryAvailable: total - memory - 900<<20, Load1: cpu + 0.2}
 		report.Nodes = append(report.Nodes, r)
 	}

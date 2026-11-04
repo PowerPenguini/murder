@@ -92,6 +92,9 @@ type tenantRow struct {
 	State, Replica tag
 	// Use is what it uses now; nil if it was not measured.
 	Use *tenantUse
+	// Backup is its newest backup; nil if its node backs up nothing, or
+	// did not say.
+	Backup *backupView
 }
 
 type overviewData struct {
@@ -160,10 +163,9 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 	var tenants []api.Tenant
 	var events []store.Event
 	// Use is shown when it can be had: a page without it is still the page.
-	var nodeUses map[string]nodeUse
-	var tenantUses map[string]tenantUse
+	var use clusterUse
 	if err := all(
-		func() error { nodeUses, tenantUses = s.usageNow(ctx); return nil },
+		func() error { use = s.usageNow(ctx); return nil },
 		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
 		func() (err error) { tenants, err = s.backend.List(ctx); return },
 		func() (err error) {
@@ -175,7 +177,7 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 	}
 	now := s.now()
 	clustered := len(nodes.Nodes) > 1
-	data := overviewData{Events: events[:min(len(events), 8)],
+	data := overviewData{Events: shownEvents(events, "", 8),
 		Activity: activityOf(events, now, 24*time.Hour, time.Hour, len(events) < activityEvents, hourLabel)}
 	byName := map[string]*nodeView{}
 	for _, node := range nodes.Nodes {
@@ -183,15 +185,20 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 	}
 	for i := range data.Nodes {
 		byName[data.Nodes[i].Name] = &data.Nodes[i]
-		if use, ok := nodeUses[data.Nodes[i].Name]; ok {
-			data.Nodes[i].Use = &use
+		if u, ok := use.Nodes[data.Nodes[i].Name]; ok {
+			data.Nodes[i].Use = &u
 		}
 	}
 	slices.SortFunc(tenants, func(a, b api.Tenant) int { return strings.Compare(a.Spec.Name, b.Spec.Name) })
 	for _, t := range tenants {
 		row := tenantRow{Tenant: t, State: tenantState(t), Replica: replicaState(t, clustered)}
-		if use, ok := tenantUses[t.Spec.Name]; ok && !t.Archived() {
-			row.Use = &use
+		if u, ok := use.Tenants[t.Spec.Name]; ok && !t.Archived() {
+			row.Use = &u
+		}
+		if b, ok := use.Backups[t.Spec.Name]; ok {
+			// An archived tenant is backed up once, as it was archived.
+			b.Stale = b.Stale && !t.Archived()
+			row.Backup = &b
 		}
 		data.Tenants = append(data.Tenants, row)
 		if t.Archived() {
@@ -351,7 +358,9 @@ type tenantData struct {
 	Env        []envVar
 	// ErrorsBad says its errors are past errorShare of its requests.
 	ErrorsBad bool
-	Head      tenantHead
+	// BackupsKnown says the cluster said how its backups go.
+	BackupsKnown bool
+	Head         tenantHead
 }
 
 type envVar struct{ Key, Value string }
@@ -364,9 +373,11 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	var events []store.Event
 	var nodes api.Nodes
 	var use *tenantUsage
+	var cluster clusterUse
 	if err := all(
 		// An archived tenant is measured no more: it has no day to show.
 		func() error { use = s.tenantUsage(ctx, name); return nil },
+		func() error { cluster = s.usageNow(ctx); return nil },
 		func() (err error) { t, err = s.backend.Get(ctx, name); return },
 		func() (err error) {
 			events, err = s.backend.Events(ctx, store.EventQuery{Tenant: name, Limit: activityEvents})
@@ -377,9 +388,14 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	data := tenantData{Tenant: t, State: tenantState(t), Replica: replicaState(t, len(nodes.Nodes) > 1), Events: events[:min(len(events), 30)],
+	data := tenantData{Tenant: t, State: tenantState(t), Replica: replicaState(t, len(nodes.Nodes) > 1), Events: shownEvents(events, "", 20),
 		Activity: activityOf(events, s.now(), 14*24*time.Hour, 24*time.Hour, len(events) < activityEvents, dayLabel), Usage: use}
 	data.Row = tenantRow{Tenant: t, State: data.State, Replica: data.Replica}
+	if b, ok := cluster.Backups[name]; ok {
+		b.Stale = b.Stale && !t.Archived()
+		data.Row.Backup = &b
+	}
+	data.BackupsKnown = cluster.Measured
 	if !t.Archived() && !t.Spec.Suspended {
 		data.Problem, data.Broken = tenantProblem(t, data.State)
 		if data.Problem != "" {
@@ -404,24 +420,62 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 type eventsData struct {
 	Events      []store.Event
 	Tenant, App string
-	// People shows only what people did; Tenants and Apps are the names
-	// the filters offer.
-	People        bool
+	// Show is what is shown: "" for what people did and failures, people
+	// for what people did only, all for the cluster's own records too.
+	Show string
+	// Tenants and Apps are the names the filters offer.
 	Tenants, Apps []string
 	// Older is the ID to page back from; zero when there are no more.
 	Older int64
+	// Hidden counts the cluster's own records left out of those read.
+	Hidden int
 }
 
 const eventsPage = 100
 
+// eventShown says whether an event is shown: show is "" for what people
+// did and what broke, people for what people did, all for every event.
+func eventShown(e store.Event, show string) bool {
+	switch show {
+	case "all":
+		return true
+	case "people":
+		return byPeople(e)
+	}
+	return byPeople(e) || failureEvent(e.Action)
+}
+
+// shownEvents keeps the events show lets through, at most n.
+func shownEvents(events []store.Event, show string, n int) []store.Event {
+	var out []store.Event
+	for _, e := range events {
+		if eventShown(e, show) {
+			out = append(out, e)
+			if len(out) == n {
+				break
+			}
+		}
+	}
+	return out
+}
+
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	query := store.EventQuery{Tenant: r.URL.Query().Get("tenant"), App: r.URL.Query().Get("app"), Limit: eventsPage}
-	if before, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64); err == nil && before > 0 {
+	q := r.URL.Query()
+	query := store.EventQuery{Tenant: q.Get("tenant"), App: q.Get("app"), Limit: eventsPage}
+	if before, err := strconv.ParseInt(q.Get("before"), 10, 64); err == nil && before > 0 {
 		query.Before = before
 	}
-	people := r.URL.Query().Get("people") != ""
-	if people {
-		// What people did is found among more of the cluster's own.
+	show := q.Get("show")
+	switch {
+	case q.Get("all") != "":
+		show = "all"
+	case q.Get("people") != "":
+		show = "people"
+	case show != "all" && show != "people":
+		show = ""
+	}
+	if show != "all" {
+		// What is shown is found among more of the cluster's own.
 		query.Limit = activityEvents
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -436,7 +490,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	data := eventsData{Tenant: query.Tenant, App: query.App, People: people}
+	data := eventsData{Tenant: query.Tenant, App: query.App, Show: show}
 	apps := map[string]bool{}
 	for _, t := range tenants {
 		data.Tenants = append(data.Tenants, t.Spec.Name)
@@ -445,8 +499,9 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	slices.Sort(data.Tenants)
 	data.Apps = slices.Sorted(maps.Keys(apps))
 	read := events
-	if people {
-		events = slices.DeleteFunc(slices.Clone(events), func(e store.Event) bool { return !byPeople(e) })
+	if show != "all" {
+		events = slices.DeleteFunc(slices.Clone(events), func(e store.Event) bool { return !eventShown(e, show) })
+		data.Hidden = len(read) - len(events)
 	}
 	switch {
 	case len(events) > eventsPage:
@@ -481,10 +536,16 @@ func all(calls ...func() error) error {
 
 func (s *Server) funcs() template.FuncMap {
 	return template.FuncMap{
-		"static":      staticURL,
-		"action":      actionText,
-		"loglines":    logLines,
-		"failure":     failureEvent,
+		"static":   staticURL,
+		"action":   actionText,
+		"loglines": logLines,
+		"failure":  failureEvent,
+		"nodeActs": func(n api.NodeState, self bool, targets []string, from string) nodeActs {
+			return nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, From: from}
+		},
+		"every":       every,
+		"add":         func(a, b int) int { return a + b },
+		"next":        func(n int64) int64 { return n + 1 },
 		"list":        func(items ...string) []string { return items },
 		"passkeyName": passkeyName,
 		"sortName": func(byName bool) string {
@@ -601,6 +662,15 @@ func (s *Server) headOf(t api.Tenant, nodes api.Nodes, on string) tenantHead {
 		}
 	}
 	return h
+}
+
+// nodeActs is what can be done to a node, for its menu: on the cluster
+// page, or its own (From "node").
+type nodeActs struct {
+	Name                  string
+	Answers, Failed, Self bool
+	Targets               []string
+	From                  string
 }
 
 // tenantsQuery is the tenants' page's address with a filter: pairs of a

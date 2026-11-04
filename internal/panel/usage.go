@@ -122,38 +122,128 @@ type tenantUse struct {
 	MemoryLimit string
 }
 
-// usageNow is the cluster's use now, by node and by tenant; nil maps when
-// the backend measures none, or did not answer.
-func (s *Server) usageNow(ctx context.Context) (map[string]nodeUse, map[string]tenantUse) {
+// clusterUse is the cluster's use now, by node and by tenant, and how its
+// backups go; empty maps when the backend measures none, or did not
+// answer.
+type clusterUse struct {
+	Nodes   map[string]nodeUse
+	Tenants map[string]tenantUse
+	// Backups are each tenant's newest backup, by tenant; NodeBackups each
+	// node's backups, by node, for those that report them.
+	Backups     map[string]backupView
+	NodeBackups map[string]nodeBackups
+	// Missing are the nodes that did not answer.
+	Missing []string
+	// Measured says the backend answered.
+	Measured bool
+}
+
+// backupView is a tenant's backups, as the panel says them.
+type backupView struct {
+	Node string
+	Last time.Time
+	// Every is how often its node backs it up.
+	Every time.Duration
+	// Failing says its last try failed; Stale that its newest is older
+	// than two runs; None that it has none yet.
+	Failing, Stale, None bool
+}
+
+// Bad says something is wrong with its backups.
+func (b backupView) Bad() bool { return b.Failing || b.Stale }
+
+// nodeBackups is a node's backups of its tenants.
+type nodeBackups struct {
+	Node    string
+	Ready   bool
+	Every   time.Duration
+	Tenants int
+	// Failing and Stale count its tenants whose backups are so; Oldest is
+	// the oldest of their newest backups.
+	Failing, Stale, None int
+	Oldest               time.Time
+	// State is the cluster's state's backups, on the leader.
+	State *backupView
+}
+
+func backupOf(node string, b usage.Backup, every time.Duration, now time.Time) backupView {
+	v := backupView{Node: node, Last: b.Last, Every: every, Failing: b.Failing, None: b.Last.IsZero()}
+	v.Stale = every > 0 && !b.Last.IsZero() && now.Sub(b.Last) > 2*every
+	return v
+}
+
+// usageNow is the cluster's use now, and how its backups go; the
+// archived tenants named, backed up once as archived, are never late and
+// count in no node's backups.
+func (s *Server) usageNow(ctx context.Context, archived ...map[string]bool) clusterUse {
+	isArchived := func(name string) bool {
+		for _, a := range archived {
+			if a[name] {
+				return true
+			}
+		}
+		return false
+	}
+	use := clusterUse{Nodes: map[string]nodeUse{}, Tenants: map[string]tenantUse{}, Backups: map[string]backupView{}, NodeBackups: map[string]nodeBackups{}}
 	measured, ok := s.backend.(Usage)
 	if !ok {
-		return nil, nil
+		return use
 	}
 	report, err := measured.Usage(ctx)
 	if err != nil {
-		return nil, nil
+		return use
 	}
-	nodes, tenants := map[string]nodeUse{}, map[string]tenantUse{}
+	use.Measured, use.Missing = true, report.Missing
+	now := s.now()
 	for _, n := range report.Nodes {
 		h := n.Host
 		used := h.MemoryTotal - h.MemoryAvailable
-		nodes[n.Node] = nodeUse{
+		use.Nodes[n.Node] = nodeUse{
 			CPU: meterOf(int(h.CPU*100), h.CPUs*100), CPUText: cores(h.CPU) + " of " + strconv.Itoa(h.CPUs),
 			Memory: meterOf(int(used>>20), int(h.MemoryTotal>>20)), MemoryText: size(float64(used)) + " of " + size(float64(h.MemoryTotal)),
 		}
 		for name, t := range n.Tenants {
-			use := tenantUse{MemoryText: size(float64(t.Memory)), CPUText: cores(t.CPU), Requests: rate(float64(t.Requests))}
+			tu := tenantUse{MemoryText: size(float64(t.Memory)), CPUText: cores(t.CPU), Requests: rate(float64(t.Requests))}
 			if t.MemoryLimit > 0 {
-				use.Memory = meterOf(int(t.Memory>>20), int(t.MemoryLimit>>20))
-				use.MemoryLimit = size(float64(t.MemoryLimit))
+				tu.Memory = meterOf(int(t.Memory>>20), int(t.MemoryLimit>>20))
+				tu.MemoryLimit = size(float64(t.MemoryLimit))
 			}
 			if t.CPULimit > 0 {
-				use.CPU = meterOf(int(t.CPU*1000), int(t.CPULimit*1000))
+				tu.CPU = meterOf(int(t.CPU*1000), int(t.CPULimit*1000))
 			}
-			tenants[name] = use
+			use.Tenants[name] = tu
+		}
+		if b := n.Backups; b != nil {
+			every := time.Duration(b.Every) * time.Second
+			nb := nodeBackups{Node: n.Node, Ready: b.Ready, Every: every}
+			for name, backup := range b.Tenants {
+				v := backupOf(n.Node, backup, every, now)
+				v.Stale = v.Stale && !isArchived(name)
+				use.Backups[name] = v
+				if isArchived(name) {
+					continue
+				}
+				nb.Tenants++
+				switch {
+				case v.Failing:
+					nb.Failing++
+				case v.Stale:
+					nb.Stale++
+				case v.None:
+					nb.None++
+				}
+				if !v.Last.IsZero() && (nb.Oldest.IsZero() || v.Last.Before(nb.Oldest)) {
+					nb.Oldest = v.Last
+				}
+			}
+			if b.State != nil {
+				v := backupOf(n.Node, *b.State, every, now)
+				nb.State = &v
+			}
+			use.NodeBackups[n.Node] = nb
 		}
 	}
-	return nodes, tenants
+	return use
 }
 
 // size says an amount of bytes: 812 KB, 312 MB, 1.2 GB.

@@ -26,7 +26,7 @@ tenant, its detail), then who. A row opens on its whole record. */}}
       <td class="by hide-narrow">{{.Actor}}</td>
     </tr>
   {{else}}
-    <tr><td colspan="3" class="empty l-main">Nothing happened yet.</td></tr>
+    <tr><td colspan="3" class="empty l-main">None to show.</td></tr>
   {{end}}
   </tbody>
 </table>
@@ -140,6 +140,37 @@ its pages beside it, what can be done to it, and where it runs. */}}
     </details>
   </div>
   {{end}}
-  <p class="lead">Of app <a href="/apps/{{$t.App}}">{{$t.App}}</a>{{if $t.Archived}}, archived {{ago $t.ArchivedAt}} ago{{else}}, on <a href="{{node $t.Node}}">{{$t.Node}}</a>{{end}}, at <a href="{{$t.URL}}">{{$t.Host}}</a>{{if $t.Canary}} · <span class="dim">canary</span>{{end}}{{if $t.Hold}} · <span class="dim">held on revision {{$t.AppRevision}}</span>{{end}}</p>
+  <p class="lead">App <a href="/apps/{{$t.App}}">{{$t.App}}</a>{{if $t.Archived}} · archived {{ago $t.ArchivedAt}} ago{{else}} · runs on <a href="{{node $t.Node}}">{{$t.Node}}</a>{{end}} · <a href="{{$t.URL}}">{{$t.Host}}</a>{{if $t.Canary}} · <span class="dim">canary</span>{{end}}{{if $t.Hold}} · <span class="dim">held on revision {{$t.AppRevision}}</span>{{end}}</p>
 </header>
 {{end}}
+
+{{/* What can be done to a node: drain it while it answers; fail it over
+once it is off; remove it once it runs and keeps nothing. */}}
+{{define "node-actions"}}
+  {{if and .Answers .Targets}}
+  <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="drain"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
+    <label class="field">Drain to <select name="to" required><option value="" selected disabled>choose a node</option>{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
+    <p class="hint">Moves every tenant of {{.Name}} there, one after the other, each with its data. Requests to each wait a few seconds as it moves.</p>
+    <div><button type="submit">Drain {{.Name}}</button></div>
+  </form>
+  {{end}}
+  {{if and (not .Answers) (not .Failed)}}
+  <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="failover"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
+    <p class="hint">Only once you made sure it is powered off: its tenants must never run twice. Their copies take over; a tenant without a copy stays stopped. Type its name to confirm.</p>
+    <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+    <div><button type="submit" class="danger">It is off: fail it over</button></div>
+  </form>
+  {{end}}
+  {{if not .Self}}
+  <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="remove"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
+    <p class="hint">Only once it runs no tenant and keeps no copy: the cluster forgets it, and it must be switched off. Type its name to remove it.</p>
+    <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+    <div><button type="submit" class="danger">Remove {{.Name}} from the cluster</button></div>
+  </form>
+  {{else if not (and .Answers .Targets)}}
+  <p class="hint">Nothing to do with the node this panel asks: act on it from another node's panel.</p>
+  {{end}}
+{{end}}
+
+{{/* A tenant's newest backup: when, and whether something is wrong. */}}
+{{define "backup"}}{{with .Backup}}{{if .Failing}}<span class="st bad">last try failed</span>{{if not .None}} <span class="dim">newest {{ago .Last}} ago</span>{{end}}{{else if .Stale}}<span class="st warn">{{ago .Last}} ago</span> <span class="dim">late, runs every {{every .Every}}</span>{{else if .None}}<span class="dim">none yet</span>{{else}}{{ago .Last}} ago{{end}}{{else}}<span class="faint">not reported</span>{{end}}{{end}}

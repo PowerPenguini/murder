@@ -108,6 +108,29 @@ type Report struct {
 	At      time.Time      `json:"at"`
 	Host    Host           `json:"host"`
 	Tenants map[string]Now `json:"tenants"`
+	// Backups is how the node's backups go; nil on a node without backups
+	// set up in its config, or of an older release.
+	Backups *Backups `json:"backups,omitempty"`
+}
+
+// Backups is how a node's backups of its tenants go, read only.
+type Backups struct {
+	// Ready says backups are set up and run; not while a key file is
+	// missing, say.
+	Ready bool `json:"ready"`
+	// Every is how often each tenant is backed up, in seconds.
+	Every int `json:"every"`
+	// Tenants are this node's tenants' newest backups, by name.
+	Tenants map[string]Backup `json:"tenants,omitempty"`
+	// State is the cluster's state's, on the leader only.
+	State *Backup `json:"state,omitempty"`
+}
+
+// Backup is one thing's backups: when the newest that worked was made,
+// and whether the last try failed.
+type Backup struct {
+	Last    time.Time `json:"last,omitzero"`
+	Failing bool      `json:"failing,omitempty"`
 }
 
 // Series is a tenant's use over the kept day, in steps.
@@ -122,8 +145,10 @@ type Series struct {
 
 // Recorder keeps the tenants' use.
 type Recorder struct {
-	node    string
-	mu      sync.Mutex
+	node string
+	mu   sync.Mutex
+	// backups says how the node's backups go; nil without backups.
+	backups func() *Backups
 	tenants map[string]*history
 	host    Host
 	hostAt  time.Time
@@ -138,6 +163,14 @@ type Recorder struct {
 }
 
 // NewRecorder keeps node's use.
+// SetBackups has every report say how the node's backups go, as status
+// tells it.
+func (r *Recorder) SetBackups(status func() *Backups) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.backups = status
+}
+
 func NewRecorder(node string) *Recorder {
 	return &Recorder{node: node, tenants: map[string]*history{}, started: time.Now(), edges: map[string]*edgeSeen{}}
 }
@@ -410,9 +443,16 @@ func (h *history) roll(at time.Time) {
 
 // Report is the node's use now.
 func (r *Recorder) Report(at time.Time) Report {
+	var backups *Backups
+	r.mu.Lock()
+	status := r.backups
+	r.mu.Unlock()
+	if status != nil {
+		backups = status()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	report := Report{Node: r.node, At: at, Host: r.host, Tenants: make(map[string]Now, len(r.tenants))}
+	report := Report{Node: r.node, At: at, Host: r.host, Tenants: make(map[string]Now, len(r.tenants)), Backups: backups}
 	for name, h := range r.tenants {
 		h.roll(at)
 		if !h.now.At.IsZero() {

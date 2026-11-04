@@ -8,7 +8,7 @@
     <tbody>
     {{range $d.Nodes}}{{$n := .}}
       <tr id="node-{{.Name}}">
-        <td class="l-main">{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}{{if eq .Name $d.Self}} <span class="dim">· this node</span>{{end}}</td>
+        <td class="l-main"><a href="{{node .Name}}" class="strong">{{.Name}}</a>{{if .Leader}} <span class="dim">leader</span>{{end}}{{if eq .Name $d.Self}} <span class="dim">· this panel asks it</span>{{end}}</td>
         <td class="l-sub"><span class="st {{.State.Kind}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
         <td class="mono dim hide-narrow">{{if .Version}}{{.Version}} · schema {{.Schema}}{{else}}not known{{end}}</td>
         <td class="dim hide-narrow">{{if .Started.IsZero}}not known{{else}}{{ago .Started}}{{end}}</td>
@@ -16,31 +16,7 @@
         <td class="end l-side">
           <details class="menu">
             <summary aria-label="what to do with {{.Name}}">⋯</summary>
-            <div class="pop">
-              {{if and .Answers .Targets}}
-              <form method="post" class="stack"><input type="hidden" name="do" value="drain"><input type="hidden" name="node" value="{{.Name}}">
-                <label class="field">Drain to <select name="to" aria-label="to" required><option value="" selected disabled>choose a node</option>{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
-                <p class="hint">Moves every tenant of {{.Name}} there, one after the other, each with its data.</p>
-                <div><button type="submit">Drain {{.Name}}</button></div>
-              </form>
-              {{end}}
-              {{if and (not .Answers) (not .Failed)}}
-              <form method="post" class="stack"><input type="hidden" name="do" value="failover"><input type="hidden" name="node" value="{{.Name}}">
-                <p class="hint">Only once you made sure it is powered off: its tenants must never run twice. Their copies take over. Type its name to confirm.</p>
-                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
-                <div><button type="submit" class="danger">It is off: fail it over</button></div>
-              </form>
-              {{end}}
-              {{if ne .Name $d.Self}}
-              <form method="post" class="stack"><input type="hidden" name="do" value="remove"><input type="hidden" name="node" value="{{.Name}}">
-                <p class="hint">Only once it runs no tenant and keeps no copy: the cluster forgets it. Type its name to remove it.</p>
-                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
-                <div><button type="submit" class="danger">Remove from the cluster</button></div>
-              </form>
-              {{else if not (and .Answers .Targets)}}
-              <span class="hint">Nothing to do with the node you ask.</span>
-              {{end}}
-            </div>
+            <div class="pop">{{template "node-actions" (nodeActs .NodeState (eq .Name $d.Self) .Targets "")}}            </div>
           </details>
         </td>
       </tr>
@@ -85,9 +61,52 @@
 </section>
 {{end}}
 
+<section id="backups">
+  <div class="head"><h2>Backups</h2><span class="dim">encrypted, to S3, by each node of its own tenants</span></div>
+  {{if $d.Reported}}
+  <table class="list">
+    <thead><tr><th>Node</th><th>State</th><th>Runs</th><th class="num">Tenants</th><th>Oldest newest backup</th><th class="hide-narrow">Cluster's state</th></tr></thead>
+    <tbody>
+    {{range $d.Backups}}
+      <tr>
+        <td class="l-main"><a href="{{node .Node}}" class="strong">{{.Node}}</a></td>
+        {{with .Backups}}
+        <td class="l-side">{{if .Failing}}<span class="st bad">{{.Failing}} failing</span>{{else if .Stale}}<span class="st warn">{{.Stale}} late</span>{{else if not .Ready}}<span class="st warn">not running</span>{{else}}<span class="st ok">fresh</span>{{end}}</td>
+        <td class="l-sub" data-label="Runs">{{if .Ready}}every {{every .Every}}{{else}}<span class="dim">waits for its keys</span>{{end}}</td>
+        <td class="num hide-narrow">{{.Tenants}}</td>
+        <td class="l-sub" data-label="Oldest">{{if .Oldest.IsZero}}<span class="dim">none yet</span>{{else}}{{ago .Oldest}} ago{{end}}</td>
+        <td class="hide-narrow">{{with .State}}{{if .Failing}}<span class="st bad">failing</span>{{else}}{{ago .Last}} ago{{end}}{{else}}<span class="faint">kept by the leader</span>{{end}}</td>
+        {{else}}
+        <td class="l-side" colspan="5">{{if .Answers}}<span class="dim">not set up on it</span>{{else}}<span class="dim">not known: it does not answer</span>{{end}}</td>
+        {{end}}
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{with $d.Failing}}
+  <ul class="attention spaced">
+    {{range .}}<li{{if .Failing}} class="broken"{{end}}><span class="st {{if .Failing}}bad{{else}}warn{{end}}"></span><div><a href="/tenants/{{.Tenant}}" class="subject">{{.Tenant}}</a> {{if .Failing}}its last backup failed{{if not .None}}; the newest is {{ago .Last}} old{{end}}{{else}}its newest backup is {{ago .Last}} old, though they run every {{every .Every}}{{end}}. <span class="dim">On {{.Node}}: its agent's log says why (journalctl -u murder-agent).</span></div></li>{{end}}
+  </ul>
+  {{end}}
+  {{else}}
+  <p class="calm">No node reports backups: they are set up in each node's config (<code>backups:</code>), then <code>sudo murder backups setup</code>.</p>
+  {{end}}
+  <details class="howto spaced">
+    <summary>How to restore a tenant from its backup</summary>
+    <div class="panel">
+      <p class="flat">A restore puts a backup in place of a tenant's data, on the node that runs it. The panel does not do it: it needs the backups' private key, which stays off the cluster. On that node:</p>
+      <pre class="secret">sudo murder backups list {{$d.Tenant}}
+sudo murder tenant archive {{$d.Tenant}}
+sudo murder backups restore {{$d.Tenant}} -at 2026-11-01T18:50:55Z -identity key.txt
+sudo murder tenant restore {{$d.Tenant}}</pre>
+      <p class="hint">Archiving stops it while its data is replaced; what it had stays aside, unmounted, until you remove it. Pick the time from the list.</p>
+    </div>
+  </details>
+</section>
+
 <section>
   <div class="head"><h2>Maintenance</h2></div>
-  <div class="actions flush">
+  <div class="actions">
     {{with $d.Busy}}
     <span class="dim">Upgrading waits for <a href="/jobs/{{.ID}}">{{.Title}}</a>.</span>
     {{else}}
@@ -95,17 +114,17 @@
       <summary class="button">Upgrade</summary>
       <div class="pop wide">
         <form method="post" action="/cluster/upgrade" enctype="multipart/form-data" class="stack">
-          <span class="hint">A new murder binary, installed on every node one after the other, this one last. Tenants keep serving; changes wait meanwhile. It runs as root on every node.</span>
-          <input type="text" name="confirm" placeholder="type upgrade" data-confirm="upgrade" aria-label="type upgrade" autocomplete="off" required>
+          <p class="hint">A new murder binary, installed on every node one after the other, this one last. Tenants keep serving; changes wait meanwhile. It runs as root on every node. Type upgrade.</p>
+          <input type="text" name="confirm" placeholder="type upgrade" data-confirm="upgrade" aria-label="type upgrade to confirm" autocomplete="off" required>
           <input type="file" name="binary" required aria-label="the murder binary">
           <div><button type="submit" class="primary">Upgrade the cluster</button></div>
         </form>
       </div>
     </details>
     {{end}}
-    <form method="post" class="row"><input type="hidden" name="do" value="backups"><button type="submit">Back up {{$d.Self}}'s tenants</button></form>
+    <form method="post" class="row"><input type="hidden" name="do" value="backups"><button type="submit">Back up {{$d.Self}}'s tenants now</button></form>
   </div>
-  <p class="hint spaced">Each node backs up its own tenants on schedule; restore one from a node with <code>murder backups restore</code>.</p>
+  <p class="hint spaced">Each node backs up its own tenants on schedule; this backs up {{$d.Self}}'s at once, as a job.</p>
 </section>
 
 <section>

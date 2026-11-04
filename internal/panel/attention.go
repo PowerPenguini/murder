@@ -76,6 +76,14 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 				causes = append(causes, "its copy moves to "+row.ReplicaNext+", which failed")
 			}
 		}
+		if b := row.Backup; b != nil && b.Bad() {
+			if b.Failing {
+				causes = append(causes, "its last backup failed")
+			} else {
+				causes = append(causes, "its newest backup is "+ago(now, b.Last)+" old, though they run every "+every(b.Every))
+			}
+			n.Fixes = append(n.Fixes, fix{"Backups", "/cluster#backups"})
+		}
 		if len(causes) == 0 {
 			continue
 		}
@@ -162,4 +170,17 @@ func tenantProblem(t api.Tenant, state tag) (string, bool) {
 }
 
 // nodeHref is where a node is shown.
-func nodeHref(name string) string { return "/cluster#node-" + url.PathEscape(name) }
+func nodeHref(name string) string { return "/nodes/" + url.PathEscape(name) }
+
+// every says how often something runs: 6h, 30m, a day.
+func every(d time.Duration) string {
+	switch {
+	case d <= 0:
+		return "now and then"
+	case d%(24*time.Hour) == 0:
+		return plural(int(d/(24*time.Hour)), "day", "days")
+	case d%time.Hour == 0:
+		return strconv.Itoa(int(d/time.Hour)) + "h"
+	}
+	return strconv.Itoa(int(d/time.Minute)) + "m"
+}

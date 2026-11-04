@@ -65,6 +65,25 @@
     if (field) field.focus();
   }, true);
   arm();
+  // What is shown once can be copied with a button, which says it did.
+  for (const button of document.querySelectorAll("button[data-copy]")) {
+    if (!navigator.clipboard) continue;
+    button.hidden = false;
+    button.addEventListener("click", async () => {
+      const source = document.getElementById(button.dataset.copy);
+      if (!source) return;
+      const label = button.textContent;
+      try {
+        await navigator.clipboard.writeText(source.textContent);
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = "Copy failed: select the text";
+      }
+      setTimeout(() => { button.textContent = label; }, 2400);
+    });
+  }
+  // Logs open at their newest line, at the end.
+  for (const lines of document.querySelectorAll("div.logs")) lines.scrollTop = lines.scrollHeight;
   // The page following the cluster puts new forms in: they wait too.
   const live = document.getElementById("live");
   if (live) new MutationObserver(arm).observe(live, { childList: true, subtree: false });

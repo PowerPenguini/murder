@@ -228,7 +228,7 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 	agent := cluster.AsApps("test")
 	_, page := get(t, server.URL+"/apps/web")
 	updated := between(page, `name="updated" value="`, `"`)
-	if !strings.Contains(page, "A newer image of") || !strings.Contains(page, "Update and roll out") || !strings.Contains(page, "Go back to this") {
+	if !strings.Contains(page, "A newer image of") || !strings.Contains(page, "Review the update") || !strings.Contains(page, "Review going back") {
 		t.Fatalf("the app's page:\n%s", page)
 	}
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"check"}}, server.URL)
@@ -277,7 +277,7 @@ func TestARolloutFromThePanel(t *testing.T) {
 	ctx := context.Background()
 	agent := cluster.AsApps("test")
 	_, page := get(t, server.URL+"/apps/web")
-	if !strings.Contains(page, "Revision 3: running, wave 2") || !strings.Contains(page, `value="pause"`) || !strings.Contains(page, `value="promote"`) {
+	if !strings.Contains(page, "Rollout of revision 3") || !strings.Contains(page, "Blocked by <a href=\"/tenants/baltic-freight\">") || !strings.Contains(page, `value="pause"`) || !strings.Contains(page, `value="promote"`) {
 		t.Fatalf("the app's page:\n%s", page)
 	}
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"pause"}}, server.URL)

@@ -145,10 +145,15 @@
     const fresh = page.getElementById("live");
     if (!fresh) return;
     if (document.querySelector("[data-still]")) {
+      // Lines followed stay at their end, unless scrolled back.
+      const lines = document.querySelector("[data-follow]");
+      const atEnd = !lines || lines.scrollTop + lines.clientHeight >= lines.scrollHeight - 24;
       for (const part of document.querySelectorAll("[data-live][id]")) {
         const next = fresh.querySelector("#" + CSS.escape(part.id));
         if (next && !part.contains(document.activeElement) && !part.querySelector("details[open], button[data-label]")) part.replaceWith(next);
       }
+      const followed = document.querySelector("[data-follow]");
+      if (followed && atEnd) followed.scrollTop = followed.scrollHeight;
       return;
     }
     // What an action did is shown once, not again.

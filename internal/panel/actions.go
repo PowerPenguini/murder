@@ -163,9 +163,23 @@ const logBytes = 2 << 20
 
 type logsData struct {
 	Tenant string
-	Lines  string
 	Tail   int
 	Head   tenantHead
+	// Lines are those the filter lets through, of All read; Warnings and
+	// Errors count those read.
+	Lines            []logLine
+	All              int
+	Warnings, Errors int
+	// Level is all, warn (warnings and errors) or error; Query the text
+	// asked for; Follow says the page follows new lines.
+	Level, Query string
+	Follow       bool
+	// ReadAt is when they were read.
+	ReadAt time.Time
+	// Restarted says its container restarted: the lines of the one before
+	// are gone.
+	Restarted bool
+	LastExit  string
 }
 
 // ansi matches terminal escapes, which a page shows as noise.
@@ -194,6 +208,31 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	if len(data) > logBytes {
 		data = data[len(data)-logBytes:]
 	}
-	logs := logsData{Tenant: name, Lines: ansi.ReplaceAllString(string(data), ""), Tail: tail, Head: s.headOf(t, nodes, "logs")}
+	q := r.URL.Query()
+	logs := logsData{Tenant: name, Tail: tail, Head: s.headOf(t, nodes, "logs"), Level: q.Get("level"), Query: strings.TrimSpace(q.Get("q")),
+		Follow: q.Get("follow") != "", ReadAt: s.now()}
+	if logs.Level != "warn" && logs.Level != "error" {
+		logs.Level = "all"
+	}
+	if t.Status != nil && t.Status.Restarts > 0 {
+		logs.Restarted, logs.LastExit = true, t.Status.LastExit
+	}
+	query := strings.ToLower(logs.Query)
+	for _, line := range logLines(ansi.ReplaceAllString(string(data), "")) {
+		logs.All++
+		switch line.Level {
+		case "warn":
+			logs.Warnings++
+		case "error":
+			logs.Errors++
+		}
+		if (logs.Level == "warn" && line.Level == "") || (logs.Level == "error" && line.Level != "error") {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(line.Stamp+" "+line.Text), query) {
+			continue
+		}
+		logs.Lines = append(logs.Lines, line)
+	}
 	s.write(w, "logs", s.pageFor(w, r, name+" · logs", "tenants", nodes, logs), http.StatusOK)
 }

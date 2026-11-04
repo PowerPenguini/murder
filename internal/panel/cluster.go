@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -257,6 +258,29 @@ type clusterData struct {
 	Self            string
 	// Balance are the moves that would even the nodes' tenants.
 	Balance []store.Move
+	// Backups are each node's backups, in the nodes' order; Reported says
+	// any node reported backups at all. Failing are the tenants whose
+	// backups fail or are late.
+	Backups  []nodeBackupRow
+	Reported bool
+	Failing  []tenantBackup
+	// Tenant is a tenant to show the restore of, the first of this node.
+	Tenant string
+}
+
+// nodeBackupRow is a node's line in the backups' table.
+type nodeBackupRow struct {
+	Node string
+	// Backups is nil when the node did not report any: not set up, or it
+	// did not answer (Answers).
+	Backups *nodeBackups
+	Answers bool
+}
+
+// tenantBackup is a tenant whose backups need a look.
+type tenantBackup struct {
+	Tenant string
+	backupView
 }
 
 func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
@@ -300,6 +324,33 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 	data.Release, data.Mixed = releaseOf(data.Nodes)
+	archived := map[string]bool{}
+	if tenants, err := s.backend.List(ctx); err == nil {
+		for _, t := range tenants {
+			archived[t.Spec.Name] = t.Archived()
+		}
+	}
+	use := s.usageNow(ctx, archived)
+	for _, n := range nodes.Nodes {
+		row := nodeBackupRow{Node: n.Name, Answers: n.Answers && !slices.Contains(use.Missing, n.Name)}
+		if b, ok := use.NodeBackups[n.Name]; ok {
+			row.Backups = &b
+			data.Reported = true
+		}
+		data.Backups = append(data.Backups, row)
+	}
+	for _, name := range slices.Sorted(maps.Keys(use.Backups)) {
+		b := use.Backups[name]
+		if b.Bad() {
+			data.Failing = append(data.Failing, tenantBackup{Tenant: name, backupView: b})
+		}
+		if data.Tenant == "" && use.Backups[name].Node == nodes.Self {
+			data.Tenant = name
+		}
+	}
+	if data.Tenant == "" {
+		data.Tenant = "TENANT"
+	}
 	data.Jobs, data.Busy = s.Jobs.all(), s.Jobs.Busy()
 	if data.Busy != nil && data.Busy.Kind == JobUpgrade {
 		data.Upgrading = data.Busy
@@ -316,7 +367,11 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	confirmed := strings.TrimSpace(r.FormValue("confirm"))
 	back := func(kind, message string) {
 		flash(w, r, kind, message)
-		http.Redirect(w, r, "/cluster", http.StatusSeeOther)
+		to := nodeBack(r, node)
+		if r.FormValue("do") == "remove" && kind == "done" {
+			to = "/cluster"
+		}
+		http.Redirect(w, r, to, http.StatusSeeOther)
 	}
 	toJob := func(job *Job, err error) {
 		if err != nil {

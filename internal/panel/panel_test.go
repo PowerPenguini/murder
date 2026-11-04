@@ -52,7 +52,7 @@ func TestTheOverviewShowsTheCluster(t *testing.T) {
 		"fsn-1", "nbg-1", "hel-1", ">failed<", ">leader<",
 		"2<small> / 3</small>", // nodes up
 		"5<small> / 6</small>", // healthy of those meant to run
-		"a new copy on fsn-1, as hel-1 failed",
+		"failed over to its copy",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the overview lacks %q", want)

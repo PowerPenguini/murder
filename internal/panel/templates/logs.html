@@ -1,10 +1,35 @@
-{{define "content"}}{{$d := .Data}}
+{{define "content"}}{{$d := .Data}}{{$n := $d.Tenant}}
 {{template "tenant-head" $d.Head}}
-<section data-still class="near">
-  <p class="lead flat">The last {{$d.Tail}} lines of its current container, as they were at {{$.Now.UTC.Format "15:04:05"}} UTC. {{if lt $d.Tail 2000}}<a href="?tail=2000">Read the last 2000</a> · {{end}}<a href="">Read again</a></p>
-  {{with loglines $d.Lines}}
-  <div class="head spaced"><input type="search" class="short" placeholder="Filter lines" aria-label="filter the lines" data-filter="log-lines" autocomplete="off"><span class="dim">errors and warnings stand out</span></div>
-  <div class="logs" id="log-lines">{{range .}}<div{{with .Level}} class="{{.}}"{{end}}>{{.Text}}</div>{{end}}</div>
-  {{else}}<pre class="logs">Nothing written yet.</pre>{{end}}
+<section data-still class="near logview">
+  <form method="get" class="filters" role="search">
+    <nav class="seg" aria-label="how loud">
+      <a href="?level=all{{with $d.Query}}&amp;q={{.}}{{end}}{{if $d.Follow}}&amp;follow=1{{end}}&amp;tail={{$d.Tail}}"{{if eq $d.Level "all"}} class="on" aria-current="true"{{end}}>All <span class="n">{{$d.All}}</span></a>
+      <a href="?level=warn{{with $d.Query}}&amp;q={{.}}{{end}}{{if $d.Follow}}&amp;follow=1{{end}}&amp;tail={{$d.Tail}}"{{if eq $d.Level "warn"}} class="on" aria-current="true"{{end}}>Warnings and errors <span class="n">{{add $d.Warnings $d.Errors}}</span></a>
+      <a href="?level=error{{with $d.Query}}&amp;q={{.}}{{end}}{{if $d.Follow}}&amp;follow=1{{end}}&amp;tail={{$d.Tail}}"{{if eq $d.Level "error"}} class="on" aria-current="true"{{end}}>Errors <span class="n">{{$d.Errors}}</span></a>
+    </nav>
+    <div class="row">
+      <input type="hidden" name="level" value="{{$d.Level}}"><input type="hidden" name="tail" value="{{$d.Tail}}">{{if $d.Follow}}<input type="hidden" name="follow" value="1">{{end}}
+      <input type="search" name="q" value="{{$d.Query}}" class="short" placeholder="Filter lines" aria-label="filter the lines" data-filter="log-lines" autocomplete="off">
+      <button type="submit">Filter</button>
+      {{if or $d.Query (ne $d.Level "all")}}<a href="?tail={{$d.Tail}}{{if $d.Follow}}&amp;follow=1{{end}}" class="dim">Clear</a>{{end}}
+    </div>
+    <div class="row toggles">
+      <label class="check"><input type="checkbox" id="wrap" checked> Wrap long lines</label>
+      <label class="check"><input type="checkbox" id="fulltimes"> Full timestamps</label>
+    </div>
+  </form>
+  <div id="log-state"{{if $d.Follow}} data-live{{end}}>
+    <p class="count-line dim" id="log-lines-count">{{if or $d.Query (ne $d.Level "all")}}{{len $d.Lines}} of {{plural $d.All "line" "lines"}} match{{else}}{{plural $d.All "line" "lines"}}{{end}}, the last {{$d.Tail}} of its current container{{if lt $d.Tail 2000}} (<a href="?tail=2000&amp;level={{$d.Level}}{{with $d.Query}}&amp;q={{.}}{{end}}{{if $d.Follow}}&amp;follow=1{{end}}">read 2000</a>){{end}} · read at {{$d.ReadAt.UTC.Format "15:04:05"}} UTC ·
+      {{if $d.Follow}}<span class="st busy">following</span> <a href="?tail={{$d.Tail}}&amp;level={{$d.Level}}{{with $d.Query}}&amp;q={{.}}{{end}}">Pause</a>{{else}}<a href="?tail={{$d.Tail}}&amp;level={{$d.Level}}{{with $d.Query}}&amp;q={{.}}{{end}}&amp;follow=1">Follow new lines</a> · <a href="">Read again</a>{{end}}</p>
+    {{if $d.Restarted}}<p class="hint">Only its current container's lines: the one before it{{with $d.LastExit}} exited ({{.}}){{else}} restarted{{end}}, and its lines went with it.</p>{{end}}
+    {{if $d.Lines}}
+    <div class="logs" id="log-lines"{{if $d.Follow}} data-follow{{end}} tabindex="0" aria-label="{{$n}}'s log lines">{{range $d.Lines}}<div{{with .Level}} class="{{.}}"{{end}}>{{if .Stamp}}<time class="ts" datetime="{{.Stamp}}"><span class="t-short">{{.Short}}</span><span class="t-full">{{.Stamp}}</span></time> {{end}}{{.Text}}</div>{{end}}</div>
+    <p class="empty" id="log-lines-none" hidden>No lines match. Clear the filter to see them all.</p>
+    {{else if $d.All}}
+    <p class="calm">No lines match. <a href="?tail={{$d.Tail}}{{if $d.Follow}}&amp;follow=1{{end}}">Clear the filter</a></p>
+    {{else}}
+    <p class="calm">Nothing written yet{{if $d.Follow}}: new lines show as they come{{end}}.</p>
+    {{end}}
+  </div>
 </section>
 {{end}}

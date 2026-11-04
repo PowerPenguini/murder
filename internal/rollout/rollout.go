@@ -209,6 +209,12 @@ func (d *Driver) drive(ctx context.Context, rollout store.Rollout, records []sto
 	return nil
 }
 
+// NextWave names the tenants of the wave after wave, as the driver moves
+// them: for showing a rollout's plan before it runs.
+func NextWave(wave, total, moved int, pending []store.Record) []string {
+	return nextWave(wave, total, moved, slices.Clone(pending))
+}
+
 // nextWave names the tenants of the wave after wave: the canaries first,
 // or the first tenant by name, then a share of all the tenants at a time.
 func nextWave(wave, total, moved int, pending []store.Record) []string {

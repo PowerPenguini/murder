@@ -487,6 +487,27 @@ func (a *Scheduler) verifyAll(ctx context.Context) {
 	}
 }
 
+// Status is how backups go, as /metrics says it: whether they are set
+// up, how often they run, each tenant's newest that worked and whether
+// its last failed, and, on the leader, the same of the cluster's state.
+type Status struct {
+	Ready        bool
+	Every        time.Duration
+	Last         map[string]time.Time
+	Failing      map[string]bool
+	StateTried   bool
+	StateLast    time.Time
+	StateFailing bool
+}
+
+// Status is how the scheduler's backups go now.
+func (a *Scheduler) Status() Status {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return Status{Ready: a.up, Every: a.every, Last: maps.Clone(a.last), Failing: maps.Clone(a.failing),
+		StateTried: a.stateTried, StateLast: a.stateLast, StateFailing: a.stateFailing}
+}
+
 // WriteMetrics writes whether backups are set up, when each tenant was
 // last backed up, and whether its last backup failed; and, on the leader,
 // the same of the cluster's state.
