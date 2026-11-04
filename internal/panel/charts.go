@@ -158,12 +158,12 @@ func spanText(span time.Duration) string {
 type lineChart struct {
 	Title string
 	// Now is the measure's last value, as text.
-	Now    string
+	Now string
 	// NowSaid says whose the last value is: "now", or while a new container
 	// starts, "previous container, at 18:31"; LastAt is its step.
 	NowSaid string
 	LastAt  time.Time
-	Series []lineSeries
+	Series  []lineSeries
 	// Limit draws the limit's level, when it is within the chart.
 	Limit *level
 	// Top names the top of the scale; the bottom is zero.

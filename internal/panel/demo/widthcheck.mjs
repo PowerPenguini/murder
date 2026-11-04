@@ -34,7 +34,7 @@ ws.addEventListener("message", (m) => {
 const send = (method, params = {}) => new Promise((r) => { const n = ++id; waiting.set(n, r); ws.send(JSON.stringify({ id: n, method, params })); });
 // What sticks out: the document past the window, or a visible block in
 // main past main's content box.
-const probe = `JSON.stringify((() => {
+const probe = `document.readyState !== "complete" ? undefined : JSON.stringify((() => {
   const main = document.querySelector("main"), box = main.getBoundingClientRect(), pad = parseFloat(getComputedStyle(main).paddingRight);
   const edge = box.right - pad + 1;
   const out = [...main.querySelectorAll("*")].filter((e) => {

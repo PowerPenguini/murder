@@ -820,7 +820,7 @@ details.event:target > summary, details.event li:target, details.event.target > 
 table.settings td.own .own-check { margin-right: var(--s3); }
 .caption { display: block; margin-top: 4px; font-size: 12px; color: var(--soft); }
 table.env td.own { width: 34%; }
-table.env td.own input, table.env tr.add input { width: 100%; min-width: 0; }
+table.env td.own input[type=text], table.env tr.add input[type=text] { width: 100%; min-width: 0; }
 table.env tr.add td { background: var(--raised); }
 @media (max-width: 760px) {
   table.env td.own { width: auto; }
@@ -916,3 +916,43 @@ table.secrets td.l-main input, table.env td.l-main input { width: 100%; min-widt
 table.settings td.act { width: 1%; white-space: nowrap; }
 /* A line over its limit keeps a gap of the plot's own black around it. */
 path.halo { stroke: var(--bg); }
+
+/* Settings' three tables share one grid: name, in effect, source, the
+   override (its switch, then its value), and the row's action. One switch
+   size; inputs at the rows' height; the "Override" word shows where no
+   column header says it (a phone). */
+table.settings.grid { table-layout: fixed; width: 100%; }
+table.settings.grid col.c-name { width: 22%; }
+table.settings.grid col.c-effect { width: 19%; }
+table.settings.grid col.c-source { width: 25%; }
+table.settings.grid col.c-own { width: 24%; }
+table.settings.grid col.c-act { width: 10%; }
+table.settings.grid td { overflow-wrap: anywhere; }
+table.settings.grid td.own { width: auto; white-space: nowrap; }
+table.settings.grid td.own .own-field { display: inline-flex; align-items: center; gap: 6px; width: calc(100% - 32px); vertical-align: middle; }
+table.settings.grid td.own .own-field input[type=text] { flex: 1 1 auto; width: auto; min-width: 0; }
+table.settings.grid input[type=text], table.settings.grid input[type=number], table.settings.grid select { height: 32px; padding-top: 0; padding-bottom: 0; }
+table.settings.grid tr.add td.own { white-space: nowrap; }
+table.settings.grid tr.add td.own input[type=text] { width: 100%; }
+table.settings.grid td.act { width: auto; text-align: right; }
+table.settings.grid .own-switch { width: 16px; height: 16px; }
+.own-check .sw { display: none; }
+@media (max-width: 1279px) {
+  table.settings.grid col.c-source { width: 22%; }
+  table.settings.grid col.c-act { width: 13%; }
+  table.settings.grid td.act details.menu-text > summary.button { white-space: normal; text-align: right; }
+  table.settings.grid td.own { white-space: normal; }
+  table.settings.grid td.own .own-field { width: 100%; margin-top: var(--s2); }
+}
+@media (max-width: 760px) {
+  table.settings.grid { table-layout: auto; }
+  .own-check .sw { display: inline; color: var(--soft); font-size: 13px; }
+  table.settings.list tr.setting td.own .own-check { min-height: 32px; padding: 4px 0 4px 8px; gap: 8px; align-items: center; }
+  table.settings.grid tr.add td.act { display: block; grid-column: 1 / -1; text-align: left; }
+  table.settings.grid tr.add td.act:not(:has(button:not([hidden]))) { display: none; }
+}
+/* The value only with its switch on, at every width. */
+table.settings.grid tr.setting:not(:has(.own-switch:checked)) .own-field { display: none; }
+/* A row's action is a quiet text control that opens its menu. */
+table.settings.grid td.act details.menu-text > summary.button { border: 0; padding: 4px 0; min-height: 0; background: none; color: var(--fg); text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
+table.settings.grid td.act details.menu-text > summary.button::after { display: none; }

@@ -143,7 +143,7 @@ func TestSettingsSayTheirSource(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/tenants/atlas/settings")
-	for _, want := range []string{"768 MB", "Tenant override", "Inherited from web", "FEATURE_PLANNER", "over the app's", `<span class="sr">Override Memory</span>`, "Review changes", "One review for the whole page", "Add a variable"} {
+	for _, want := range []string{"768 MB", "Tenant override", "Inherited from web", "FEATURE_PLANNER", "over the app's", `aria-label="Override Memory"><span class="sw" aria-hidden="true">Override</span>`, "Review changes", "One review for the whole page", "Add a variable"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the settings lack %q:\n%s", want, page)
 		}
@@ -959,8 +959,8 @@ func TestSettingsRowsWithoutScript(t *testing.T) {
 	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
 	// The draft is kept: LOG_LEVEL and API_TOKEN as rows of their own,
 	// and an empty row to add another.
-	for _, want := range []string{`name="envown" value="LOG_LEVEL" class="own-switch" data-key="LOG_LEVEL" checked>`, "Added in this draft",
-		`name="secretown" value="API_TOKEN" class="own-switch" data-key="API_TOKEN" checked>`, `name="envnewname"`} {
+	for _, want := range []string{`name="envown" value="LOG_LEVEL" class="own-switch" data-key="LOG_LEVEL" checked aria-label=`, "Added in this draft",
+		`name="secretown" value="API_TOKEN" class="own-switch" data-key="API_TOKEN" checked aria-label=`, `name="envnewname"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("after adding a row, the page lacks %q:\n%s", want, body)
 		}
@@ -1030,5 +1030,29 @@ func TestReviewsHaveTheirOwnAddress(t *testing.T) {
 	_, body = get(t, server.URL+"/tenants/atlas/settings")
 	if !strings.Contains(body, `<td class="end act"><details class="menu-text">`) || strings.Contains(body, `class="end l-more"`) {
 		t.Fatalf("the secrets' actions:\n%s", body)
+	}
+}
+
+// Several secrets in one review, as variables: "Add a secret" without the
+// script keeps the draft and gives another row.
+func TestSeveralSecretsInOneReview(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	atlas, _ := cluster.Get(context.Background(), "atlas")
+	form := url.Values{"generation": {strconv.FormatInt(atlas.Generation, 10)}, "app": {"web"}, "secretrows": {"1"},
+		"secretname": {"ADMIN_PASSWORD", "SESSION_KEY"}, "secretkind": {"password", "hex"}, "secretbytes": {"20", "32"}, "secretown": {"ADMIN_PASSWORD"},
+		"secretnewname": {"API_TOKEN"}, "secretnewkind": {"base64"}, "secretnewbytes": {"48"}, "do": {"addsecret"}}
+	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	if strings.Count(body, `name="secretnewname"`) != 1 || !strings.Contains(body, `data-key="API_TOKEN" checked`) {
+		t.Fatalf("after adding a secret row:\n%s", body)
+	}
+	form["secretnewname"] = []string{"API_TOKEN", "WEBHOOK_KEY"}
+	form["secretnewkind"] = []string{"base64", "hex"}
+	form["secretnewbytes"] = []string{"48", ""}
+	form.Set("do", "review")
+	_, body = submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	for _, want := range []string{"Secret API_TOKEN", "Secret WEBHOOK_KEY", "made once, base64", "made once, hex"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("the review lacks %q:\n%s", want, body)
+		}
 	}
 }

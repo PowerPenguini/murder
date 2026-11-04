@@ -810,10 +810,12 @@ type settingsData struct {
 	Token    string
 	Restarts bool
 	// SecretFields are its secrets as edited, Kinds those a secret can be;
-	// Blank is how many empty rows to add variables in.
+	// Blank and BlankSecret are how many empty rows to add variables and
+	// secrets in.
 	SecretFields []secretField
 	Kinds        []string
 	Blank        int
+	BlankSecret  int
 	// Suggest says a value proposed by the link that led here; SuggestApp
 	// the app's limit, when it is likely the better fix.
 	Suggest    string
@@ -879,6 +881,7 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 	data.SecretFields = secretFields(appSpec, t.Overrides.Secrets, drafted.Secrets)
 	data.Kinds = secretKinds
 	data.Blank = max(1, atoi(r.FormValue("blank")))
+	data.BlankSecret = max(1, atoi(r.FormValue("blanksecret")))
 	if r.FormValue("do") == "review" {
 		data.Reviewing = true
 		data.Review = settingChanges(t, appSpec, form)
@@ -920,18 +923,28 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/tenants/"+url.PathEscape(name)+"/settings", http.StatusSeeOther)
 	}
 	switch r.FormValue("do") {
-	case "addrow":
-		// One more row to add a variable in, the draft kept: for a page
-		// without its script, which adds rows itself.
+	case "addrow", "addsecret":
+		// One more row to add a variable or a secret in, the draft kept:
+		// for a page without its script, which adds rows itself.
 		form := formFrom(r).withFlags(t)
-		r.Form.Set("do", "")
-		empty := 0
-		for _, name := range r.Form["envnewname"] {
-			if strings.TrimSpace(name) == "" {
-				empty++
+		blanks := func(field string) int {
+			empty := 0
+			for _, name := range r.Form[field] {
+				if strings.TrimSpace(name) == "" {
+					empty++
+				}
 			}
+			return empty
 		}
-		r.Form.Set("blank", strconv.Itoa(empty+1))
+		env, secrets := blanks("envnewname"), blanks("secretnewname")
+		if r.FormValue("do") == "addrow" {
+			env++
+		} else {
+			secrets++
+		}
+		r.Form.Set("do", "")
+		r.Form.Set("blank", strconv.Itoa(env))
+		r.Form.Set("blanksecret", strconv.Itoa(secrets))
 		s.settingsPage(w, r, t, form, "", http.StatusOK)
 	case "review", "edit":
 		// What the form changes, shown before it is saved; or back to it.

@@ -200,13 +200,16 @@
       if (!sending && !document.body.dataset.leaving && draft.value !== draft.defaultValue) event.preventDefault();
     });
   }
-  // "Add a variable" adds a row here, without sending the form; without
-  // this script it asks the server for one, keeping the draft. A row added
-  // is removed with its own button.
+  // "Add a variable" (or a secret) shows a row to add one in, and another
+  // each time, without sending the form; the empty row waits hidden until
+  // asked for. Without this script the server adds a row, the draft kept.
+  // A row added is removed with its own button.
   for (const button of document.querySelectorAll("[data-add-row]")) {
     const table = document.getElementById(button.dataset.addRow);
     const body = table && table.tBodies[0];
     if (!body) continue;
+    const rows = () => [...body.querySelectorAll("tr.add")];
+    const empty = (row) => [...row.querySelectorAll("input")].every((input) => input.value === "");
     const arm = (row) => {
       const remove = row.querySelector(".remove-row");
       if (!remove) return;
@@ -215,21 +218,31 @@
         // The form is found before the row leaves it: the draft kept for
         // the tab is saved again without the row.
         const form = row.closest("form") || table.closest("form");
-        const rows = body.querySelectorAll("tr.add");
-        if (rows.length > 1) row.remove();
-        else for (const input of row.querySelectorAll("input")) input.value = "";
+        if (rows().filter((r) => !r.hidden).length > 1) row.remove();
+        else {
+          for (const input of row.querySelectorAll("input")) input.value = "";
+          row.hidden = true;
+        }
         if (form) form.dispatchEvent(new Event("input", { bubbles: true }));
+        button.focus();
       });
     };
-    for (const row of body.querySelectorAll("tr.add")) arm(row);
+    for (const row of rows()) {
+      arm(row);
+      if (empty(row)) row.hidden = true;
+    }
     button.addEventListener("click", (event) => {
       event.preventDefault();
-      const rows = body.querySelectorAll("tr.add");
-      const copy = rows[rows.length - 1].cloneNode(true);
-      for (const input of copy.querySelectorAll("input")) input.value = "";
-      rows[rows.length - 1].after(copy);
-      arm(copy);
-      copy.querySelector("input").focus();
+      const all = rows();
+      let row = all.find((r) => r.hidden);
+      if (row) row.hidden = false;
+      else {
+        row = all[all.length - 1].cloneNode(true);
+        for (const input of row.querySelectorAll("input")) input.value = "";
+        all[all.length - 1].after(row);
+        arm(row);
+      }
+      row.querySelector("input").focus();
     });
   }
   // A draft, a tenant's settings or an app's spec, is kept in this tab as
@@ -274,9 +287,14 @@
     try { kept = JSON.parse(keep.getItem(key) || "null"); } catch {}
     if (resume === location.pathname && kept && Date.now() - kept.at < 12 * 3600 * 1000) {
       // New rows the draft had are added before it is put back.
-      const blanks = kept.fields.filter(([name, key]) => name === "envnewname" && key.startsWith("#")).length;
-      const addRow = document.querySelector('[data-add-row="env"]');
-      for (let n = form.querySelectorAll('input[name="envnewname"]').length; n < blanks && addRow; n++) addRow.click();
+      // Rows the draft added, named or not, come back as rows.
+      for (const [field, table] of [["envnewname", "env"], ["secretnewname", "secrets"]]) {
+        // Up to the last that holds something, so each comes back in its place.
+        const wanted = Math.max(0, ...kept.fields.filter(([name, key, value]) => name === field && key.startsWith("#") && value !== "").map(([, key]) => Number(key.slice(1)) + 1));
+        const add = document.querySelector('[data-add-row="' + table + '"]');
+        const shown = () => [...form.querySelectorAll('input[name="' + field + '"]')].filter((i) => !i.closest("tr").hidden).length;
+        while (add && shown() < wanted) add.click();
+      }
       const seen = {};
       const here = new Map();
       for (const el of form.elements) {
