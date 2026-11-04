@@ -389,7 +389,7 @@ func TestOperationIsFollowed(t *testing.T) {
 	_, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}, "confirm": {"acme-logistics"}}, server.URL)
 	// One line says it: no flash, no "It is starting" box beside it.
 	if !strings.Contains(body, "its new container is starting") || strings.Contains(body, "is restarting in a new container") || strings.Contains(body, "It is starting") ||
-		!strings.Contains(body, "no figures yet: they show once it reports") {
+		!strings.Contains(body, "no figures yet: they show once it reports") || !strings.Contains(body, "previous container, at ") || strings.Contains(body, `data-rest="now `) {
 		t.Fatalf("after a restart:\n%s", body)
 	}
 	// Settled, it says so.

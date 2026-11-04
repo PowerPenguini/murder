@@ -131,8 +131,8 @@ func (a *demoActor) change(name, action, detail string, change func(*api.Tenant)
 	t.Generation++
 	// A new container starts, and settles a few seconds later (settle).
 	if _, starts := operations[action]; starts && t.Status != nil && !t.Spec.Suspended {
-		restarts := t.Status.Restarts
-		t.Status = &reconcile.Status{Phase: "starting", Generation: t.Generation, Restarts: restarts, CheckedAt: time.Now()}
+		// A new container: its restarts are its own.
+		t.Status = &reconcile.Status{Phase: "starting", Generation: t.Generation, CheckedAt: time.Now()}
 	}
 	a.tenants[name] = t
 	a.record(action, name, detail)

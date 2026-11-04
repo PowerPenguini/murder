@@ -159,6 +159,10 @@ type lineChart struct {
 	Title string
 	// Now is the measure's last value, as text.
 	Now    string
+	// NowSaid says whose the last value is: "now", or while a new container
+	// starts, "previous container, at 18:31"; LastAt is its step.
+	NowSaid string
+	LastAt  time.Time
 	Series []lineSeries
 	// Limit draws the limit's level, when it is within the chart.
 	Limit *level
@@ -280,17 +284,30 @@ type lineSeries struct {
 }
 
 type level struct {
-	Y     float64
+	// Path draws it across the plot: a step where it changed.
+	Path  string
 	Label string
 	// Hot says the measure's last value is near it.
 	Hot bool
 }
 
-// sample is one step's value of each series, at a time.
+// sample is one step's value of each series, at a time; Low, if set, the
+// least of each in the step (a container killed and started again low),
+// and Limit the limit in effect then, 0 if not known.
 type sample struct {
 	At     time.Time
 	Values []float64
+	Low    []float64
+	Limit  float64
 }
+
+// dropShare is how far below its step's value a series' least must be
+// for the step to be drawn as a drop: a restart, not a wobble.
+const dropShare = 0.85
+
+// headroom is how much room the scale keeps above the highest value or
+// limit, so a line at its limit is not drawn on it.
+const headroom = 1.25
 
 // newLineChart draws samples over the day ending with the step now runs
 // in. limit is drawn as a level when positive; format says a value, for
@@ -298,7 +315,8 @@ type sample struct {
 // bytes, so the scale's top is a round number of their unit.
 func newLineChart(title string, labels []string, samples []sample, limit float64, now time.Time, step, span time.Duration, format func(float64) string, bytes bool) lineChart {
 	chart := lineChart{Title: title, Empty: len(samples) == 0}
-	end := now.Truncate(step).Add(step)
+	// The plot ends now, its lines reaching it.
+	end := now
 	start := end.Add(-span)
 	chart.Start, chart.End = start, end
 	// The axis's start says its date; the readout says each moment's.
@@ -315,10 +333,26 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 			peak, peakAt = s.Values[0], s.At
 		}
 	}
-	top := niceCeil(max(highest, limit), bytes)
+	// The limit as it was at each step: the one in effect now unless the
+	// samples say.
+	limits := make([]float64, len(samples))
+	highestLimit := limit
+	for i, s := range samples {
+		limits[i] = limit
+		if s.Limit > 0 {
+			limits[i] = s.Limit
+		}
+		if !s.At.Before(start) {
+			highestLimit = max(highestLimit, limits[i])
+		}
+	}
+	top := niceCeil(max(highest, highestLimit)*headroom, bytes)
 	chart.Top = format(top)
-	y := func(v float64) float64 { return plotHeight * (1 - v/top) }
-	x := func(t time.Time) float64 { return chartWidth * t.Sub(start).Seconds() / end.Sub(start).Seconds() }
+	// Inset a unit at each end: a line at 0 is not drawn below the axis.
+	y := func(v float64) float64 { return 1 + (plotHeight-2)*(1-max(0, v)/top) }
+	x := func(t time.Time) float64 {
+		return min(chartWidth, chartWidth*t.Sub(start).Seconds()/end.Sub(start).Seconds())
+	}
 	strokes := []string{ink2, ink1}
 	for i, label := range labels {
 		series := lineSeries{Label: label, Stroke: strokes[min(i, len(strokes)-1)], Dashed: i > 0}
@@ -353,19 +387,62 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 			if !previous.IsZero() && s.At.Sub(previous) > step {
 				flush()
 			}
-			// A point sits at the middle of its step.
-			run = append(run, pt{x(s.At.Add(step / 2)), y(s.Values[i])})
+			// A point sits at the middle of its step. A step whose least is
+			// well below it is a drop: the line falls to that least within
+			// the step, and climbs from there.
+			mid := x(s.At.Add(step / 2))
+			if i < len(s.Low) && s.Low[i] > 0 && s.Low[i] < dropShare*s.Values[i] {
+				q := (x(s.At.Add(step)) - x(s.At)) / 4
+				run = append(run, pt{mid - q, y(s.Values[i])}, pt{mid + q, y(s.Low[i])})
+			} else {
+				run = append(run, pt{mid, y(s.Values[i])})
+			}
 			previous = s.At
+		}
+		// The newest step's value holds to now, at the plot's edge.
+		if n := len(run); n > 0 && len(samples) > 0 && now.Sub(samples[len(samples)-1].At) <= 2*step {
+			run = append(run, pt{chartWidth, run[n-1].y})
 		}
 		flush()
 		series.Line, series.Area = line.String(), area.String()
 		chart.Series = append(chart.Series, series)
 	}
-	if limit > 0 {
-		chart.Limit = &level{Y: y(limit), Label: "limit " + format(limit)}
-		if len(samples) > 0 {
+	if highestLimit > 0 {
+		// A step where the limit changed; the label says each, the summary
+		// when.
+		current, path := limit, ""
+		var said []string
+		var changedAt time.Time
+		for i, s := range samples {
+			if s.At.Before(start) || limits[i] <= 0 {
+				continue
+			}
+			switch {
+			case path == "":
+				path = "M0," + f(y(limits[i]))
+				said = append(said, format(limits[i]))
+			case limits[i] != current:
+				path += "H" + f(x(s.At)) + "V" + f(y(limits[i]))
+				said = append(said, format(limits[i]))
+				changedAt = s.At
+			}
+			current = limits[i]
+		}
+		if path == "" {
+			path, current = "M0,"+f(y(limit)), limit
+			said = []string{format(limit)}
+		} else if limit > 0 && limit != current {
+			path += "H" + f(x(now.Add(-step))) + "V" + f(y(limit))
+			said, current = append(said, format(limit)), limit
+		}
+		path += "H" + f(chartWidth)
+		chart.Limit = &level{Path: path, Label: "limit " + strings.Join(said, ", then ")}
+		if len(said) > 1 && !changedAt.IsZero() {
+			chart.Limit.Label = "limit " + said[len(said)-2] + " until " + hourLabel(changedAt) + ", then " + said[len(said)-1]
+		}
+		if len(samples) > 0 && current > 0 {
 			for _, v := range samples[len(samples)-1].Values {
-				chart.Limit.Hot = chart.Limit.Hot || 100*v/limit >= memoryWarn
+				chart.Limit.Hot = chart.Limit.Hot || 100*v/current >= memoryWarn
 			}
 		}
 	}
@@ -384,7 +461,9 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 		points = append(points, append([]any{round1(x(s.At.Add(step / 2))), dateLabel(s.At)}, anyOf(say(s))...))
 	}
 	chart.Points = jsonOf(points)
+	chart.NowSaid = "now"
 	if len(samples) > 0 {
+		chart.LastAt = samples[len(samples)-1].At
 		chart.Now = strings.Join(say(samples[len(samples)-1]), " · ")
 		chart.Summary = fmt.Sprintf("%s, the last %s: now %s", title, spanText(span), chart.Now)
 		if !peakAt.IsZero() {

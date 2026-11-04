@@ -43,8 +43,14 @@ type Point struct {
 	At time.Time `json:"at"`
 	// CPU is the cores used, on average.
 	CPU float64 `json:"cpu"`
-	// Memory is the most it used, in bytes.
-	Memory int64 `json:"memory"`
+	// Memory is the most it used, in bytes; MemoryLow the least it was
+	// read using, which shows a restart within the step (a container
+	// killed for its memory starts again low); MemoryLimit its limit at
+	// the step's end, 0 if none or not known (an agent of an older
+	// release says neither).
+	Memory      int64 `json:"memory"`
+	MemoryLow   int64 `json:"memoryLow,omitempty"`
+	MemoryLimit int64 `json:"memoryLimit,omitempty"`
 	// Bytes received, sent, read and written.
 	NetRx     int64 `json:"netRx"`
 	NetTx     int64 `json:"netTx"`
@@ -244,6 +250,10 @@ func (r *Recorder) Sample(tenant string, raw Raw, cpuLimit float64) {
 		h.cur.DiskWrite += delta(h.last.DiskWrite, raw.DiskWrite)
 	}
 	h.cur.Memory = max(h.cur.Memory, raw.Memory)
+	if !h.read || raw.Memory < h.cur.MemoryLow {
+		h.cur.MemoryLow = raw.Memory
+	}
+	h.cur.MemoryLimit = raw.MemoryLimit
 	h.read = true
 	h.now.Memory, h.now.MemoryLimit = raw.Memory, raw.MemoryLimit
 	h.last = raw
@@ -491,7 +501,13 @@ func (r *Recorder) Series(tenant string, step time.Duration, at time.Time) (Seri
 		sum.Read += p.Read
 		sum.CPURead += p.CPURead
 		sum.CPU += p.CPU
+		if p.Read > 0 && (sum.Read == p.Read || p.MemoryLow < sum.MemoryLow) {
+			sum.MemoryLow = p.MemoryLow
+		}
 		sum.Memory = max(sum.Memory, p.Memory)
+		if p.MemoryLimit > 0 {
+			sum.MemoryLimit = p.MemoryLimit
+		}
 		sum.NetRx += p.NetRx
 		sum.NetTx += p.NetTx
 		sum.DiskRead += p.DiskRead

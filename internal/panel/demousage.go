@@ -123,8 +123,20 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	limits := t.Spec.Limits
 	series := usage.Series{Tenant: name, Node: t.Node, Step: int(step / time.Second)}
 	for at := end.Add(-24 * time.Hour).Add(step); at.Before(end); at = at.Add(step) {
-		limit := d.limitAt(name, limits.MemoryMB, at)
+		limit := d.limitAt(name, limits.MemoryMB, at.Add(step))
 		p := demoPoint(name, limit, limits.CPUs, at, step, d.demoMemory(name, limit, at.Add(step)))
+		// The step's least, read each minute: a kill within it shows.
+		if name == "baltic-freight" {
+			low := float64(p.Memory)
+			for m := at; m.Before(at.Add(step)); m = m.Add(time.Minute) {
+				if v := d.demoMemory(name, d.limitAt(name, limits.MemoryMB, m), m) * (1 << 20); v > 0 {
+					low = min(low, v)
+				}
+			}
+			p.Memory = max(p.Memory, int64(d.peakIn(name, d.limitAt(name, limits.MemoryMB, at), at, step)*(1<<20)))
+			p.MemoryLow = int64(low)
+		}
+		p.MemoryLimit = int64(limit) << 20
 		// Its memory as a share of the limit it ran under then, against
 		// the limit drawn: the one in effect now.
 		series.Points = append(series.Points, p)
@@ -206,4 +218,19 @@ func (d *DemoCluster) limitAt(name string, now int, t time.Time) int {
 type limitChange struct {
 	at   time.Time
 	from int
+}
+
+// peakIn is a tenant's most memory within the step from at, read each
+// minute: just under its limit in a step it was killed in.
+func (d *DemoCluster) peakIn(name string, limitMB int, at time.Time, step time.Duration) float64 {
+	peak := 0.0
+	for m := at; m.Before(at.Add(step)); m = m.Add(time.Minute) {
+		peak = max(peak, d.demoMemory(name, limitMB, m))
+		for _, kill := range d.killsOf(name) {
+			if !kill.Before(m) && kill.Before(m.Add(time.Minute)) {
+				peak = max(peak, 0.995*float64(limitMB))
+			}
+		}
+	}
+	return peak
 }

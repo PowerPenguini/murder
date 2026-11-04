@@ -370,3 +370,29 @@ func TestReportSaysBackups(t *testing.T) {
 		t.Fatalf("backups %+v", b)
 	}
 }
+
+// A step keeps the least memory it was read using, so a container killed
+// for its memory and started again low shows; and the limit it ran under.
+func TestAStepKeepsItsLowestMemoryAndItsLimit(t *testing.T) {
+	r := NewRecorder("n1")
+	readings := []struct {
+		container string
+		mb, limit int64
+	}{{"c1", 240, 256}, {"c1", 255, 256}, {"c2", 110, 256}, {"c2", 150, 256}, {"c3", 160, 512}, {"c3", 170, 512}}
+	for i, reading := range readings {
+		at := t0.Add(time.Duration(i) * 30 * time.Second)
+		r.Sample("web", Raw{At: at, Container: reading.container, Memory: reading.mb << 20, MemoryLimit: reading.limit << 20}, 0)
+	}
+	series, _ := r.Series("web", 5*time.Minute, t0.Add(6*time.Minute))
+	if len(series.Points) != 1 {
+		t.Fatalf("series: %+v", series)
+	}
+	p := series.Points[0]
+	if p.Memory != 255<<20 || p.MemoryLow != 110<<20 || p.MemoryLimit != 512<<20 {
+		t.Fatalf("step: memory %d, low %d, limit %d MB", p.Memory>>20, p.MemoryLow>>20, p.MemoryLimit>>20)
+	}
+	minutes, _ := r.Series("web", time.Minute, t0.Add(6*time.Minute))
+	if first := minutes.Points[0]; first.MemoryLow != 240<<20 || first.MemoryLimit != 256<<20 {
+		t.Fatalf("first minute: %+v", first)
+	}
+}

@@ -49,7 +49,7 @@
 {{with $d.Usage}}
 <section>
   <div class="head"><h2>Use, last {{.Span}}</h2>
-    {{with index .Charts 0}}{{if .Marks}}<span class="legend marks-legend"><span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><rect x="3" y="1" width="4" height="8" fill="#9a9a9a"/></svg>{{plural .Restarts "restart" "restarts"}}</span><span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><rect x="4" y="5" width="2" height="4" fill="#5c5c5c"/></svg>{{plural .Changes "change" "changes"}}</span><a href="/events?tenant={{$t.Spec.Name}}&amp;show=all" class="dim">their events</a></span>{{end}}{{end}}
+    {{with index .Charts 0}}{{if .Marks}}<span class="legend marks-legend"><span><svg class="glyph mark" viewBox="0 0 10 10" aria-hidden="true"><rect class="m-restart" x="3" y="0" width="4" height="10"/></svg>{{plural .Restarts "restart" "restarts"}}</span><span><svg class="glyph mark" viewBox="0 0 10 10" aria-hidden="true"><rect class="m-change" x="2.5" y="4.5" width="5" height="5"/></svg>{{plural .Changes "change" "changes"}}</span><a href="/events?tenant={{$t.Spec.Name}}&amp;show=all" class="dim">their events</a></span>{{end}}{{end}}
     <nav class="seg" aria-label="the charts' span">{{range $r := list "1h" "6h" "24h"}}<a href="?range={{$r}}#use"{{if eq $r $d.Usage.Range}} class="on" aria-current="true"{{end}}>{{$r}}</a>{{end}}</nav></div>
   <div class="charts" id="use">{{range .Charts}}{{template "line" .}}{{end}}</div>
 </section>

@@ -680,6 +680,14 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	}
 	if st := t.Status; st != nil && !t.Spec.Suspended && (st.Phase == "starting" || (st.Generation != 0 && st.Generation < t.Generation)) {
 		data.StartingNow = true
+		// The charts' last values are the old container's.
+		if use != nil {
+			for i := range use.Charts {
+				if !use.Charts[i].LastAt.IsZero() {
+					use.Charts[i].NowSaid = "previous container, at " + use.Charts[i].LastAt.UTC().Format("15:04") + ":"
+				}
+			}
+		}
 	}
 	data.Head = s.headOf(t, nodes, "overview")
 	p := s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data)

@@ -731,8 +731,14 @@ table#tenants td.l-main > a, table#tenants td.l-main > .dim { white-space: nowra
 .nrow .fixes a { color: var(--fg); font-weight: 600; }
 
 /* Restarts and changes: a lane under the plot, quiet, each a link. */
-svg.lane { grid-column: 2; display: block; width: 100%; height: 8px; margin-top: 4px; overflow: visible; }
-svg.lane a:hover rect, svg.lane a:focus rect { stroke: var(--fg); }
+/* The marks' own row under the plot, apart from the time labels: a
+   restart a full-height light bar, a change a short hollow square. */
+svg.lane { grid-column: 2; display: block; width: 100%; height: 10px; margin-top: 6px; overflow: visible; }
+rect.m-restart { fill: #a8a8a8; }
+rect.m-change { fill: var(--bg); stroke: #a8a8a8; stroke-width: 1px; vector-effect: non-scaling-stroke; }
+svg.lane a:hover rect.m-restart, svg.lane a:focus rect.m-restart { fill: var(--fg); }
+svg.lane a:hover rect.m-change, svg.lane a:focus rect.m-change { stroke: var(--fg); }
+svg.glyph.mark { width: 10px; height: 10px; }
 .marks-legend { margin: 0 var(--s4) 0 auto; }
 .rollout-head form { margin-left: var(--s3); }
 .red-text-inline { color: var(--bad); }
@@ -843,20 +849,28 @@ details.fullref > summary { min-height: 0; }
 td.empty a, p.calm a { text-decoration: underline; text-underline-offset: 3px; }
 .stats .stat.wide2 { grid-column: span 2; }
 
-/* Under each chart one row: its legend, and over it, while a moment near
-   a mark is read, that mark (its time a link to its event, then what it
-   was) and how many others are near, listed whole on asking. The row's
-   height never changes, so no plot moves and no band is left empty. */
-.legrow { position: relative; margin-top: var(--s2); min-height: 22px; }
-.legrow .legend { margin-top: 0; min-height: 22px; align-items: center; }
-.annot { position: absolute; inset: 0; display: flex; align-items: center; gap: 0; background: var(--bg); font-size: 12.5px; color: var(--soft); white-space: nowrap; }
-.annot:empty { display: none; }
+/* Under each chart one row: its legend at the left, and at the right,
+   while a moment near a mark is read, that mark (its time a link to its
+   event, then what it was) and how many others are near, listed whole on
+   asking. The row's height never changes, so no plot moves. */
+.legrow { display: flex; align-items: center; gap: var(--s2) var(--s4); margin-top: var(--s2); min-height: 22px; }
+.legrow .legend { margin-top: 0; flex: none; align-items: center; }
+.annot { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; justify-content: flex-end; font-size: 12.5px; color: var(--soft); white-space: nowrap; }
 .annot > a { color: var(--fg); flex: none; }
-.annot .desc { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.annot .desc { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .annot details.nearby { flex: none; position: relative; margin-left: var(--s3); }
 .annot details.nearby > summary { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
-.annot details.nearby ul { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; margin: 0; padding: var(--s2) var(--s3); list-style: none; width: max-content; max-width: min(420px, 86vw); background: var(--raised); border: 1px solid var(--frame); white-space: normal; display: grid; gap: 6px; }
+.annot details.nearby ul { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; margin: 0; padding: var(--s2) var(--s3); list-style: none; width: max-content; max-width: min(420px, 86vw); background: var(--raised); border: 1px solid var(--soft); box-shadow: 0 0 0 6px var(--bg); white-space: normal; display: grid; gap: 6px; text-align: left; }
 .annot details.nearby li a { color: var(--fg); }
+@media (max-width: 760px) {
+  /* On a phone the reading has a line of its own, held for it, under the
+     legend; the nearby list opens in place, pushing what is under it. */
+  .legrow { flex-wrap: wrap; }
+  .annot { flex-basis: 100%; justify-content: flex-start; height: 1.6em; }
+  .annot:has(details[open]) { height: auto; flex-wrap: wrap; }
+  .annot details.nearby[open] { flex-basis: 100%; margin: 6px 0 0; }
+  .annot details.nearby ul { position: static; max-width: none; width: auto; box-shadow: none; margin-top: 6px; }
+}
 
 /* Environment and secrets edited like the limits: a switch, and the
    input once it is on; rows added below. */
@@ -900,3 +914,5 @@ table.secrets td.l-main input, table.env td.l-main input { width: 100%; min-widt
 
 /* A row's own actions (a secret's "New value…"): a cell at every width. */
 table.settings td.act { width: 1%; white-space: nowrap; }
+/* A line over its limit keeps a gap of the plot's own black around it. */
+path.halo { stroke: var(--bg); }

@@ -118,12 +118,23 @@
     // A mark's touch area is 24 px wide, kept within the plot; a tap on the
     // lane reads the moment there, and says the marks near it.
     if (lane) {
+      // Sizes in pixels, whatever the plot's width: the touch area 24 px
+      // wide, a restart a 3 px bar, a change a 6 px square.
+      for (const mark of lane.querySelectorAll("rect.m-restart, rect.m-change")) {
+        mark.dataset.x = String(Number(mark.getAttribute("x")));
+        mark.removeAttribute("transform");
+      }
       const widen = () => {
         const w = units(24);
         for (const hit of lane.querySelectorAll("rect.hit")) {
-          const x = Number(hit.nextElementSibling.getAttribute("x"));
+          const x = Number(hit.nextElementSibling.dataset.x || hit.nextElementSibling.getAttribute("x"));
           hit.setAttribute("width", String(w));
           hit.setAttribute("x", String(Math.max(0, Math.min(1000 - w, x - w / 2))));
+        }
+        for (const mark of lane.querySelectorAll("rect.m-restart, rect.m-change")) {
+          const size = units(mark.classList.contains("m-restart") ? 3 : 6);
+          mark.setAttribute("width", String(size));
+          mark.setAttribute("x", String(Number(mark.dataset.x) - size / 2));
         }
       };
       widen();

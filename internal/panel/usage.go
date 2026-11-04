@@ -81,7 +81,7 @@ func (s *Server) tenantUsage(ctx context.Context, name, rangeName string) *tenan
 	perSecond := func(n int64, p usage.Point) float64 { return float64(n) / float64(p.CPURead*60) }
 	u := &tenantUsage{Charts: []lineChart{
 		newLineChart("CPU, cores", []string{"cores"}, pick(cpuRead, func(p usage.Point) []float64 { return []float64{p.CPU} }), series.Now.CPULimit, now, step, span, cores, false),
-		newLineChart("Memory", []string{"used"}, pick(read, func(p usage.Point) []float64 { return []float64{float64(p.Memory)} }), float64(series.Now.MemoryLimit), now, step, span, size, true),
+		newLineChart("Memory", []string{"used"}, memorySamples(series, read), float64(series.Now.MemoryLimit), now, step, span, size, true),
 		newLineChart("Requests, a minute", []string{"requests", "errors"}, pick(counted, func(p usage.Point) []float64 {
 			minutes := float64(p.Minutes)
 			return []float64{float64(p.Requests) / minutes, float64(p.Errors) / minutes}
@@ -367,4 +367,21 @@ func wait(v float64) string {
 		return "> 30 s"
 	}
 	return strconv.FormatFloat(math.Round(v*100)/100, 'f', -1, 64) + " s"
+}
+
+// memorySamples are a series' memory steps: the most used, the least (a
+// restart within the step shows as a drop) and the limit then.
+func memorySamples(series usage.Series, taken func(usage.Point) bool) []sample {
+	var out []sample
+	for _, p := range series.Points {
+		if !taken(p) {
+			continue
+		}
+		s := sample{At: p.At, Values: []float64{float64(p.Memory)}, Limit: float64(p.MemoryLimit)}
+		if p.MemoryLow > 0 {
+			s.Low = []float64{float64(p.MemoryLow)}
+		}
+		out = append(out, s)
+	}
+	return out
 }

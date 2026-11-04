@@ -60,7 +60,7 @@ or the arrow keys move along it), the plot, and its axes as HTML. */}}
 
 {{define "line"}}
 <figure class="chart" data-points="{{.Points}}" data-marks="{{marksJSON .Marks}}">
-  <figcaption><span class="ctitle">{{.Title}}</span>{{with .Now}}<span class="readout" aria-live="polite" data-rest="now {{.}}">now {{.}}</span>{{end}}</figcaption>
+  <figcaption><span class="ctitle">{{.Title}}</span>{{$said := .NowSaid}}{{with .Now}}<span class="readout" aria-live="polite" data-rest="{{$said}} {{.}}">{{$said}} {{.}}</span>{{end}}</figcaption>
   {{if .Empty}}<p class="empty">Not measured yet: the agent measures every 15 seconds, and keeps the day since it started.</p>{{else}}
   <p class="sr">{{.Summary}}</p>
   <div class="plotwrap">
@@ -69,13 +69,13 @@ or the arrow keys move along it), the plot, and its axes as HTML. */}}
       <svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
         <line x1="0" y1="0.5" x2="1000" y2="0.5" stroke="#1f1f1f" stroke-width="1" vector-effect="non-scaling-stroke"/>
         <line x1="0" y1="50" x2="1000" y2="50" stroke="#151515" stroke-width="1" vector-effect="non-scaling-stroke"/>
-        {{with .Limit}}<line x1="0" y1="{{.Y}}" x2="1000" y2="{{.Y}}" stroke="{{if .Hot}}#ff5147{{else}}#6a6a6a{{end}}" stroke-width="1" vector-effect="non-scaling-stroke" stroke-dasharray="5 4"/>{{end}}
-        {{range .Series}}<path d="{{.Area}}" fill="{{.Stroke}}" fill-opacity="0.07"/><path d="{{.Line}}" fill="none" stroke="{{.Stroke}}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"{{if .Dashed}} stroke-dasharray="5 3"{{end}}/>{{end}}
+        {{with .Limit}}<path d="{{.Path}}" fill="none" stroke="{{if .Hot}}#ff5147{{else}}#6a6a6a{{end}}" stroke-width="1" vector-effect="non-scaling-stroke" stroke-dasharray="5 4"/>{{end}}
+        {{$halo := .Limit}}{{range .Series}}<path d="{{.Area}}" fill="{{.Stroke}}" fill-opacity="0.07"/>{{if $halo}}<path class="halo" d="{{.Line}}" fill="none" stroke-width="5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>{{end}}<path d="{{.Line}}" fill="none" stroke="{{.Stroke}}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"{{if .Dashed}} stroke-dasharray="5 3"{{end}}/>{{end}}
         <line x1="0" y1="99.5" x2="1000" y2="99.5" stroke="#333" stroke-width="1" vector-effect="non-scaling-stroke"/>
         <line class="cursor" x1="0" x2="0" y1="0" y2="100" stroke="#ececec" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
       </svg>
     </div>
-    {{with .Marks}}<svg class="lane" viewBox="0 0 1000 8" preserveAspectRatio="none" role="group" aria-label="restarts and changes">{{range .}}<a href="{{.Href}}" aria-label="{{.Text}}"><title>{{.Text}}</title><rect class="hit" x="{{.HitX}}" y="-8" width="24" height="24" fill="transparent"/>{{if eq .Kind "restart"}}<rect x="{{.X}}" y="0" width="5" height="8" fill="#9a9a9a" transform="translate(-2.5 0)"/>{{else}}<rect x="{{.X}}" y="4" width="3" height="4" fill="#5c5c5c" transform="translate(-1.5 0)"/>{{end}}</a>{{end}}</svg>{{end}}
+    {{with .Marks}}<svg class="lane" viewBox="0 0 1000 10" preserveAspectRatio="none" role="group" aria-label="restarts and changes">{{range .}}<a href="{{.Href}}" aria-label="{{.Text}}"><title>{{.Text}}</title><rect class="hit" x="{{.HitX}}" y="-8" width="24" height="24" fill="transparent"/>{{if eq .Kind "restart"}}<rect class="m-restart" x="{{.X}}" y="0" width="4" height="10" transform="translate(-2 0)"/>{{else}}<rect class="m-change" x="{{.X}}" y="4" width="6" height="6" transform="translate(-3 0)"/>{{end}}</a>{{end}}</svg>{{end}}
     <div class="xaxis" aria-hidden="true"><span>{{.From}} UTC</span><span>{{.Mid}}</span><span>now</span></div>
   </div>
   <div class="legrow">{{if or (gt (len .Series) 1) .Limit}}<div class="legend">{{range .Series}}<span>{{template "swatch" .}}{{.Label}}</span>{{end}}{{with .Limit}}<span{{if .Hot}} class="bad"{{end}}><svg class="glyph" viewBox="0 0 16 10" aria-hidden="true"><line x1="0" y1="5" x2="16" y2="5" stroke="{{if .Hot}}#ff5147{{else}}#8f8f8f{{end}}" stroke-width="1.5" stroke-dasharray="4 3"/></svg>{{.Label}}</span>{{end}}</div>{{end}}{{if .Marks}}<div class="annot" aria-live="polite"></div>{{end}}</div>

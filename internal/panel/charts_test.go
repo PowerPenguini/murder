@@ -69,15 +69,17 @@ func TestLineChart(t *testing.T) {
 	if err := json.Unmarshal([]byte(chart.Points), &points); err != nil || len(points) != 8 {
 		t.Fatalf("points %q: %v", chart.Points, err)
 	}
-	if chart.Limit == nil || chart.Limit.Label != "limit 20" || chart.Top != "20" {
+	// The scale keeps room above the limit: the line at its limit is not
+	// drawn on it.
+	if chart.Limit == nil || chart.Limit.Label != "limit 20" || chart.Top != "25" {
 		t.Fatalf("chart: limit %+v, top %q", chart.Limit, chart.Top)
 	}
 	if last := points[7]; chart.Now != "1 used · 1 error" || last[1] != "Nov 2 17:15" || last[2] != "1 used" || last[3] != "1 error" {
 		t.Fatalf("now %q, last point %v", chart.Now, points[7])
 	}
-	// The limit at 20 is the highest value and a round one: the top.
-	if chart.Limit.Y != 0 {
-		t.Fatalf("the limit's level: %v", chart.Limit.Y)
+	// The limit at 20 of 25, all along.
+	if chart.Limit.Path != "M0,20.6H1000" {
+		t.Fatalf("the limit's level: %v", chart.Limit.Path)
 	}
 	if !strings.Contains(chart.Summary, "highest 10 used at 16:30 UTC") {
 		t.Fatalf("summary %q", chart.Summary)
@@ -143,11 +145,49 @@ func TestChartSpanAndMarks(t *testing.T) {
 	chart := newLineChart("CPU", []string{"cores"}, samples, 0, now, time.Minute, time.Hour, cores, false)
 	var points [][]any
 	_ = json.Unmarshal([]byte(chart.Points), &points)
-	if len(points) < 59 || len(points) > 61 || chart.From != "Nov 2 16:24" || !strings.Contains(chart.Summary, "the last hour") {
+	if len(points) < 59 || len(points) > 61 || chart.From != "Nov 2 16:23" || !strings.Contains(chart.Summary, "the last hour") {
 		t.Fatalf("%d points from %s: %s", len(points), chart.From, chart.Summary)
 	}
 	marks := chart.marksOf([]store.Event{{At: now.Add(-10 * time.Minute), Action: "tenant.restarted"}, {At: now.Add(-2 * time.Hour), Action: "tenant.rolled"}, {At: now.Add(-5 * time.Minute), Action: "tenant.rolled"}})
 	if len(marks) != 2 || marks[0].Kind != "restart" || marks[1].Kind != "change" {
 		t.Fatalf("marks %+v", marks)
+	}
+}
+
+// The limit is drawn as it was: a step where it changed, said in its
+// label; a step whose least is well below it is a drop, and climbs back;
+// the line reaches now, and nothing is drawn below 0.
+func TestLimitHistoryDropsAndNow(t *testing.T) {
+	now := time.Date(2026, 11, 2, 17, 23, 0, 0, time.UTC)
+	step := 15 * time.Minute
+	var samples []sample
+	for i := 8; i >= 1; i-- {
+		s := sample{At: now.Truncate(step).Add(-time.Duration(i-1) * step), Values: []float64{250}, Limit: 256}
+		if i <= 3 {
+			s.Values, s.Limit = []float64{260}, 512
+		}
+		if i == 6 {
+			s.Low = []float64{120}
+		}
+		samples = append(samples, s)
+	}
+	chart := newLineChart("Memory", []string{"used"}, samples, 512, now, step, 2*time.Hour, func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) + " MB" }, false)
+	if chart.Limit == nil || !strings.Contains(chart.Limit.Path, "V") || chart.Limit.Label != "limit 256 MB until 16:45, then 512 MB" {
+		t.Fatalf("the limit: %+v", chart.Limit)
+	}
+	if chart.Limit.Hot {
+		t.Fatal("260 of 512 MB is not near the limit")
+	}
+	line := chart.Series[0].Line
+	if !strings.HasSuffix(strings.Split(line, "L")[len(strings.Split(line, "L"))-1], "1000,"+strings.Split(strings.Split(line, "L")[len(strings.Split(line, "L"))-2], ",")[1]) {
+		t.Fatalf("the line does not reach now: %q", line)
+	}
+	// 120 of a top of 800: a point far below its neighbours.
+	if !strings.Contains(line, ","+f(1+98*(1-120.0/800))) {
+		t.Fatalf("no drop in %q (top %s)", line, chart.Top)
+	}
+	zero := newLineChart("Errors", []string{"errors"}, []sample{{At: now.Truncate(step), Values: []float64{0}}}, 0, now, step, time.Hour, cores, false)
+	if strings.Contains(zero.Series[0].Line, ",100") {
+		t.Fatalf("0 drawn on or below the axis: %q", zero.Series[0].Line)
 	}
 }
