@@ -120,7 +120,7 @@ func TestATenantsSettings(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/tenants/atlas/settings")
-	for _, want := range []string{`name="envname" value="FEATURE_PLANNER"><input type="text" name="envvalue" value="on"`, "ADMIN_PASSWORD password 20", `value="768"`, "SESSION_KEY", "Inherited from web"} {
+	for _, want := range []string{`name="envown" value="FEATURE_PLANNER" class="own-switch" data-key="FEATURE_PLANNER" checked>`, `name="secretown" value="ADMIN_PASSWORD" class="own-switch" data-key="ADMIN_PASSWORD" checked>`, `value="768"`, "SESSION_KEY", "Inherited from web"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the settings page lacks %q:\n%s", want, page)
 		}
@@ -131,7 +131,7 @@ func TestATenantsSettings(t *testing.T) {
 
 	// A form that does not read is shown again, as typed.
 	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
-	if !strings.Contains(body, "env line 2: NAME=value") || !strings.Contains(body, "API_TOKEN base64 48") {
+	if !strings.Contains(body, "env line 2: NAME=value") || !strings.Contains(body, `name="secretown" value="API_TOKEN" class="own-switch" data-key="API_TOKEN" checked>`) || !strings.Contains(body, `value="48"`) {
 		t.Fatalf("a bad env line:\n%s", body)
 	}
 	form.Set("env", "TZ=Europe/Warsaw\n\n# the planner is on for everyone now")

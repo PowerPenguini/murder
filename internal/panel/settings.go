@@ -34,7 +34,8 @@ type settingField struct {
 	Kind, Step, Min string
 }
 
-// envRow is one variable of the environment, as the tenant gets it.
+// envRow is one variable of the environment, as the tenant gets it, and
+// as the form being edited has it.
 type envRow struct {
 	Key, Value string
 	// Own says the tenant sets it; App the value its app gives, if any.
@@ -42,6 +43,66 @@ type envRow struct {
 	App string
 	// FromApp says the app sets it too.
 	FromApp bool
+	// DraftOwn says the form gives it a value of its own, Draft that
+	// value (as the editor shows it); New that only the form has it.
+	DraftOwn, New bool
+	Draft         string
+}
+
+// secretField is one of the tenant's secrets, as it has them and as the
+// form being edited has them.
+type secretField struct {
+	Name, Kind string
+	Bytes      int
+	// Own says the tenant keeps its own, FromApp that the app has it.
+	Own, FromApp bool
+	// DraftOwn says the form keeps one of its own, of DraftKind and
+	// DraftBytes; New that only the form has it.
+	DraftOwn, New bool
+	DraftKind     string
+	DraftBytes    int
+}
+
+// secretKinds are the kinds a secret can be made of.
+var secretKinds = []string{"hex", "base64", "password"}
+
+// secretFields are a tenant's secrets: its app's and its own, as saved,
+// and as the form has them.
+func secretFields(app spec.Tenant, stored, draft spec.Secrets) []secretField {
+	keys := map[string]bool{}
+	for k := range app.Secrets {
+		keys[k] = true
+	}
+	for k := range stored {
+		keys[k] = true
+	}
+	for k := range draft {
+		keys[k] = true
+	}
+	var out []secretField
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
+		f := secretField{Name: k}
+		appSecret, inApp := app.Secrets[k]
+		own, isOwn := stored[k]
+		f.FromApp, f.Own = inApp, isOwn
+		switch {
+		case isOwn:
+			f.Kind, f.Bytes = own.Kind, own.Bytes
+		case inApp:
+			f.Kind, f.Bytes = appSecret.Kind, appSecret.Bytes
+		}
+		if d, ok := draft[k]; ok {
+			f.DraftOwn, f.DraftKind, f.DraftBytes = true, d.Kind, d.Bytes
+		} else {
+			f.DraftKind, f.DraftBytes = f.Kind, f.Bytes
+		}
+		if f.DraftKind == "" {
+			f.DraftKind = "hex"
+		}
+		f.New = !inApp && !isOwn
+		out = append(out, f)
+	}
+	return out
 }
 
 // settingChange is one changed field of a review.
@@ -92,7 +153,7 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingFi
 
 // envRows is the environment the tenant gets: the app's, with its own
 // over it.
-func envRows(app spec.Tenant, own map[string]string) []envRow {
+func envRows(app spec.Tenant, own, draft map[string]string) []envRow {
 	rows := map[string]*envRow{}
 	for key, value := range app.Env {
 		rows[key] = &envRow{Key: key, Value: value, App: value, FromApp: true}
@@ -104,6 +165,19 @@ func envRows(app spec.Tenant, own map[string]string) []envRow {
 			rows[key] = row
 		}
 		row.Own, row.Value = true, value
+	}
+	for key, value := range draft {
+		row := rows[key]
+		if row == nil {
+			row = &envRow{Key: key, New: true}
+			rows[key] = row
+		}
+		row.DraftOwn, row.Draft = true, envValue(value)
+	}
+	for _, row := range rows {
+		if !row.DraftOwn {
+			row.Draft = envValue(row.Value)
+		}
 	}
 	var out []envRow
 	for _, key := range slices.Sorted(maps.Keys(rows)) {

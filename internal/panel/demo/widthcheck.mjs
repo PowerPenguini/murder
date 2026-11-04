@@ -22,7 +22,15 @@ const ws = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((r) => ws.addEventListener("open", r));
 let id = 0;
 const waiting = new Map();
-ws.addEventListener("message", (m) => { const x = JSON.parse(m.data); if (x.id) waiting.get(x.id)?.(x); });
+ws.addEventListener("message", (m) => {
+  const x = JSON.parse(m.data);
+  if (x.id) waiting.get(x.id)?.(x);
+  // A page asking before it is left would hold the check: said, and let go.
+  if (x.method === "Page.javascriptDialogOpening") {
+    console.log("a page asked before it was left:", x.params.message || x.params.type);
+    ws.send(JSON.stringify({ id: 999999, method: "Page.handleJavaScriptDialog", params: { accept: true } }));
+  }
+});
 const send = (method, params = {}) => new Promise((r) => { const n = ++id; waiting.set(n, r); ws.send(JSON.stringify({ id: n, method, params })); });
 // What sticks out: the document past the window, or a visible block in
 // main past main's content box.
@@ -36,13 +44,21 @@ const probe = `JSON.stringify((() => {
   }).slice(0, 3).map((e) => e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (e.className && typeof e.className === "string" ? "." + e.className.split(" ").join(".") : "") + " " + Math.round(e.getBoundingClientRect().right));
   return { doc: document.documentElement.scrollWidth, win: innerWidth, out };
 })())`;
+await send("Page.enable");
 let failed = 0;
 for (const width of widths) {
   await send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: width < 600 });
   for (const path of paths) {
     await send("Page.navigate", { url: base + path });
     await sleep(700);
-    const r = JSON.parse((await send("Runtime.evaluate", { expression: probe, returnByValue: true })).result.result.value);
+    let answer;
+    for (let tries = 0; tries < 15; tries++) {
+      answer = await send("Runtime.evaluate", { expression: probe, returnByValue: true });
+      if (answer.result && !answer.result.exceptionDetails && answer.result.result.value !== undefined) break;
+      await sleep(200);
+    }
+    if (!answer.result || answer.result.exceptionDetails || answer.result.result.value === undefined) { console.log(width, path, "probe failed:", JSON.stringify(answer).slice(0, 300)); failed++; continue; }
+    const r = JSON.parse(answer.result.result.value);
     if (r.doc > r.win || r.out.length) {
       failed++;
       console.log(`${width} ${path}: page ${r.doc} in ${r.win}${r.out.length ? "; sticks out: " + r.out.join(", ") : ""}`);

@@ -876,6 +876,7 @@ func (s *Server) funcs() template.FuncMap {
 		"lines":   func(text string) int { return strings.Count(text, "\n") + 1 },
 		"ago":     func(t time.Time) string { return ago(s.now(), t) },
 		"who":     who,
+		"repeat":  func(n int) []int { return make([]int, n) },
 		"envshow": envValue,
 		"causeOf": func(b interface{ Cause() (string, string) }) []string {
 			cause, fix := b.Cause()

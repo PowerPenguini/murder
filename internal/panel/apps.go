@@ -612,20 +612,14 @@ func formFrom(r *http.Request) settingsForm {
 	// and its own value, empty to take the app's; the last row adds one.
 	// Read as the NAME=value lines the review carries.
 	if r.FormValue("envrows") != "" {
-		names, values := r.Form["envname"], r.Form["envvalue"]
+		// A row's value is its own while its switch is on; off, the app's
+		// is used again. Rows added say a name and a value.
+		owned := map[string]bool{}
+		for _, name := range r.Form["envown"] {
+			owned[name] = true
+		}
 		var lines []string
-		for i, name := range names {
-			name = strings.TrimSpace(name)
-			value := ""
-			if i < len(values) {
-				value = values[i]
-			}
-			if name == "" && strings.TrimSpace(value) == "" {
-				continue
-			}
-			if value == "" {
-				continue
-			}
+		line := func(name, value string) {
 			// A value shown quoted, as one with a line break is, reads
 			// back as it was shown; any other as typed.
 			if !strings.HasPrefix(value, `"`) {
@@ -633,7 +627,48 @@ func formFrom(r *http.Request) settingsForm {
 			}
 			lines = append(lines, name+"="+value)
 		}
+		names, values := r.Form["envname"], r.Form["envvalue"]
+		for i, name := range names {
+			if i < len(values) && owned[name] {
+				line(name, values[i])
+			}
+		}
+		news, newValues := r.Form["envnewname"], r.Form["envnewvalue"]
+		for i, name := range news {
+			if name = strings.TrimSpace(name); name != "" && i < len(newValues) {
+				line(name, newValues[i])
+			}
+		}
 		form.Env = strings.Join(lines, "\n")
+	}
+	// The secrets as the page's table posts them: a switch, a kind and a
+	// length for each, and rows added; read as the lines the review carries.
+	if r.FormValue("secretrows") != "" {
+		owned := map[string]bool{}
+		for _, name := range r.Form["secretown"] {
+			owned[name] = true
+		}
+		var lines []string
+		line := func(name, kind, bytes string) {
+			text := name + " " + strings.TrimSpace(kind)
+			if b := strings.TrimSpace(bytes); b != "" && b != "0" {
+				text += " " + b
+			}
+			lines = append(lines, text)
+		}
+		names, kinds, sizes := r.Form["secretname"], r.Form["secretkind"], r.Form["secretbytes"]
+		for i, name := range names {
+			if owned[name] && i < len(kinds) && i < len(sizes) {
+				line(name, kinds[i], sizes[i])
+			}
+		}
+		news, newKinds, newSizes := r.Form["secretnewname"], r.Form["secretnewkind"], r.Form["secretnewbytes"]
+		for i, name := range news {
+			if name = strings.TrimSpace(name); name != "" && i < len(newKinds) && i < len(newSizes) {
+				line(name, newKinds[i], newSizes[i])
+			}
+		}
+		form.Secrets = strings.Join(lines, "\n")
 	}
 	// The page's form says, by a switch each, which values are the
 	// tenant's own: one switched off takes the app's again, whatever its
@@ -792,6 +827,11 @@ type settingsData struct {
 	// give it a new container, not only new rollout flags.
 	Token    string
 	Restarts bool
+	// SecretFields are its secrets as edited, Kinds those a secret can be;
+	// Blank is how many empty rows to add variables in.
+	SecretFields []secretField
+	Kinds        []string
+	Blank        int
 	// Suggest says a value proposed by the link that led here; SuggestApp
 	// the app's limit, when it is likely the better fix.
 	Suggest    string
@@ -851,7 +891,12 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 			}
 		}
 	}
-	data.Env = envRows(appSpec, t.Overrides.Env)
+	// The form's environment and secrets, as edited, beside what is saved.
+	drafted, _ := form.overrides()
+	data.Env = envRows(appSpec, t.Overrides.Env, drafted.Env)
+	data.SecretFields = secretFields(appSpec, t.Overrides.Secrets, drafted.Secrets)
+	data.Kinds = secretKinds
+	data.Blank = max(1, atoi(r.FormValue("blank")))
 	if r.FormValue("do") == "review" {
 		data.Reviewing = true
 		data.Review = settingChanges(t, appSpec, form)
@@ -893,6 +938,19 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/tenants/"+url.PathEscape(name)+"/settings", http.StatusSeeOther)
 	}
 	switch r.FormValue("do") {
+	case "addrow":
+		// One more row to add a variable in, the draft kept: for a page
+		// without its script, which adds rows itself.
+		form := formFrom(r).withFlags(t)
+		r.Form.Set("do", "")
+		empty := 0
+		for _, name := range r.Form["envnewname"] {
+			if strings.TrimSpace(name) == "" {
+				empty++
+			}
+		}
+		r.Form.Set("blank", strconv.Itoa(empty+1))
+		s.settingsPage(w, r, t, form, "", http.StatusOK)
 	case "review", "edit":
 		// What the form changes, shown before it is saved; or back to it.
 		form := formFrom(r).withFlags(t)

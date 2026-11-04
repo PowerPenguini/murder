@@ -10,7 +10,8 @@
   const confirmed = (input) => {
     const want = input.dataset.confirm;
     const ok = input.value.trim().toLowerCase() === want.toLowerCase();
-    const buttons = [...input.form.querySelectorAll("button[type=submit]")];
+    // A field may belong to a form elsewhere on the page (form="...").
+    const buttons = [...input.form.elements].filter((el) => el.matches("button[type=submit], button:not([type])"));
     for (const button of buttons) button.disabled = !ok;
     let hint = input.nextElementSibling;
     if (!hint || !hint.classList.contains("typed")) {
@@ -194,6 +195,35 @@
       if (!sending && draft.value !== draft.defaultValue) event.preventDefault();
     });
   }
+  // "Add a variable" adds a row here, without sending the form; without
+  // this script it asks the server for one, keeping the draft. A row added
+  // is removed with its own button.
+  for (const button of document.querySelectorAll("[data-add-row]")) {
+    const table = document.getElementById(button.dataset.addRow);
+    const body = table && table.tBodies[0];
+    if (!body) continue;
+    const arm = (row) => {
+      const remove = row.querySelector(".remove-row");
+      if (!remove) return;
+      remove.hidden = false;
+      remove.addEventListener("click", () => {
+        const rows = body.querySelectorAll("tr.add");
+        if (rows.length > 1) row.remove();
+        else for (const input of row.querySelectorAll("input")) input.value = "";
+        row.closest("form").dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    for (const row of body.querySelectorAll("tr.add")) arm(row);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      const rows = body.querySelectorAll("tr.add");
+      const copy = rows[rows.length - 1].cloneNode(true);
+      for (const input of copy.querySelectorAll("input")) input.value = "";
+      rows[rows.length - 1].after(copy);
+      arm(copy);
+      copy.querySelector("input").focus();
+    });
+  }
   // A draft, a tenant's settings or an app's spec, is kept in this tab as
   // it is typed: should the session end, it comes back once signed in
   // again, said so, and is reviewed again before it is saved. A secret's
@@ -206,13 +236,21 @@
     const form = drafted[0];
     const key = "murder-draft:" + location.pathname;
     const stamp = () => (form.elements.generation || form.elements.updated || {}).value || "";
+    // Each field is kept by its name and its key: a variable's or a
+    // secret's own name where it has one (rows are sorted by name, so a
+    // variable added meanwhile moves the others), else its place; with
+    // what the server said for it then, to tell a change made since.
+    const keyOf = (el, seen) => el.dataset.key || "#" + (seen[el.name] = (seen[el.name] ?? -1) + 1);
+    const valueOf = (el) => (el.type === "checkbox" || el.type === "radio" ? el.checked : el.value);
+    const baseOf = (el) => (el.type === "checkbox" || el.type === "radio" ? el.defaultChecked
+      : el.tagName === "SELECT" ? ([...el.options].find((o) => o.defaultSelected) || el.options[0] || {}).value : el.defaultValue);
     const fields = () => {
       const seen = {};
       const out = [];
       for (const el of form.elements) {
-        if (!el.name || skip.has(el.name) || el.type === "hidden" || el.type === "password" || el.type === "submit") continue;
-        const i = (seen[el.name] = (seen[el.name] ?? -1) + 1);
-        out.push([el.name, i, el.type === "checkbox" || el.type === "radio" ? el.checked : el.value]);
+        if (!el.name || skip.has(el.name) || el.type === "hidden" || el.type === "password" || el.type === "submit" || el.type === "button") continue;
+        if (el.form !== form) continue;
+        out.push([el.name, keyOf(el, seen), valueOf(el), baseOf(el)]);
       }
       return out;
     };
@@ -227,10 +265,28 @@
     let kept = null;
     try { kept = JSON.parse(keep.getItem(key) || "null"); } catch {}
     if (resume === location.pathname && kept && Date.now() - kept.at < 12 * 3600 * 1000) {
-      for (const [name, i, value] of kept.fields) {
-        const all = [...form.elements].filter((el) => el.name === name && el.type !== "hidden");
-        const el = all[i];
+      // New rows the draft had are added before it is put back.
+      const blanks = kept.fields.filter(([name, key]) => name === "envnewname" && key.startsWith("#")).length;
+      const addRow = document.querySelector('[data-add-row="env"]');
+      for (let n = form.querySelectorAll('input[name="envnewname"]').length; n < blanks && addRow; n++) addRow.click();
+      const seen = {};
+      const here = new Map();
+      for (const el of form.elements) {
+        if (!el.name || el.type === "hidden" || el.form !== form) continue;
+        here.set(el.name + "\u0000" + keyOf(el, seen), el);
+      }
+      let changedSince = 0;
+      for (const [name, key, value, base] of kept.fields) {
+        const el = here.get(name + "\u0000" + key);
         if (!el) continue;
+        if (base !== undefined && String(baseOf(el)) !== String(base)) {
+          // The server's value changed since the draft began: said beside it.
+          changedSince++;
+          const note = document.createElement("span");
+          note.className = "caption changed-since";
+          note.textContent = "Changed since your draft began: now " + (el.type === "checkbox" ? (baseOf(el) ? "on" : "off") : (baseOf(el) || "empty"));
+          (el.closest("td") || el.parentElement).append(note);
+        }
         if (el.type === "checkbox" || el.type === "radio") el.checked = !!value;
         else el.value = value;
       }
@@ -239,7 +295,7 @@
       note.className = "notice";
       note.setAttribute("role", "status");
       note.textContent = "Restored your draft from " + at + " UTC, kept in this tab while you signed in again. Review it again before saving." +
-        (kept.stamp !== stamp() ? " It changed since you began: the review shows what your draft changes now." : "") + " ";
+        (kept.stamp !== stamp() ? " It changed since you began" + (changedSince ? ": " + changedSince + " " + (changedSince === 1 ? "value is" : "values are") + " marked where they changed" : "") + "; the review shows what your draft changes now." : "") + " ";
       const discard = document.createElement("button");
       discard.type = "button";
       discard.className = "link";

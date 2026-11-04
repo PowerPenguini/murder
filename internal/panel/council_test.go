@@ -821,10 +821,12 @@ func TestSettingsAsOneForm(t *testing.T) {
 	}
 	// TZ cleared (Berlin to the app's Warsaw), FEATURE_PLANNER kept,
 	// LOG_LEVEL added with a space kept, the canary flag off.
+	// Two variables added in one review: LOG_LEVEL and API_URL.
 	form := page(url.Values{"do": {"review"}, "envrows": {"1"}, "flags": {"1"}, "hold": {""},
-		"envname": {"DATA_DIR", "FEATURE_PLANNER", "TZ", "LOG_LEVEL"}, "envvalue": {"", "on", "", " debug"}})
+		"envname": {"DATA_DIR", "FEATURE_PLANNER", "TZ"}, "envvalue": {"/data", "on", "Europe/Berlin"}, "envown": {"FEATURE_PLANNER"},
+		"envnewname": {"LOG_LEVEL", "API_URL", ""}, "envnewvalue": {" debug", "https://api.example.com", ""}})
 	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
-	for _, want := range []string{"Environment TZ", "Europe/Warsaw, inherited from web", "Environment LOG_LEVEL", "Canary", "no: with the others", "Save and restart atlas"} {
+	for _, want := range []string{"Environment TZ", "Europe/Warsaw, inherited from web", "Environment LOG_LEVEL", "Environment API_URL", "Canary", "no: with the others", "Save and restart atlas"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the review lacks %q:\n%s", want, body)
 		}
@@ -837,7 +839,7 @@ func TestSettingsAsOneForm(t *testing.T) {
 		t.Fatalf("after saving:\n%s", body)
 	}
 	after, _ := cluster.Get(ctx, "atlas")
-	if after.Overrides.Env["LOG_LEVEL"] != " debug" || after.Overrides.Env["TZ"] != "" || after.Overrides.Env["FEATURE_PLANNER"] != "on" || after.Canary {
+	if after.Overrides.Env["LOG_LEVEL"] != " debug" || after.Overrides.Env["API_URL"] != "https://api.example.com" || after.Overrides.Env["TZ"] != "" || after.Overrides.Env["FEATURE_PLANNER"] != "on" || after.Canary {
 		t.Fatalf("atlas after saving: %v, canary %v", after.Overrides.Env, after.Canary)
 	}
 	// The flag alone: no new container, a plain Save.
@@ -919,5 +921,46 @@ func TestDemoIncidentTimeline(t *testing.T) {
 	}
 	if other := d.demoMemory("atlas", 768, kill); other != 0 {
 		t.Fatal("atlas has no incident")
+	}
+}
+
+// Without the page's script, "Add a variable" asks the server for another
+// row and keeps the draft; secrets are one table in the same form: a
+// switch, a kind and a length, and a row to add one.
+func TestSettingsRowsWithoutScript(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	atlas, _ := cluster.Get(context.Background(), "atlas")
+	base := url.Values{"generation": {strconv.FormatInt(atlas.Generation, 10)}, "app": {"web"}, "owns": {"1"}, "own-memoryMB": {"on"}, "memoryMB": {"768"},
+		"envrows": {"1"}, "secretrows": {"1"}, "flags": {"1"}, "canary": {"on"},
+		"envname": {"DATA_DIR", "FEATURE_PLANNER", "TZ"}, "envvalue": {"/data", "on", "Europe/Berlin"}, "envown": {"FEATURE_PLANNER", "TZ"},
+		"envnewname": {"LOG_LEVEL"}, "envnewvalue": {"debug"},
+		"secretname": {"ADMIN_PASSWORD", "SESSION_KEY"}, "secretkind": {"password", "hex"}, "secretbytes": {"20", "32"}, "secretown": {"ADMIN_PASSWORD"},
+		"secretnewname": {"API_TOKEN"}, "secretnewkind": {"base64"}, "secretnewbytes": {"48"}}
+	form := url.Values{}
+	for k, v := range base {
+		form[k] = v
+	}
+	form.Set("do", "addrow")
+	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	// The draft is kept: LOG_LEVEL and API_TOKEN as rows of their own,
+	// and an empty row to add another.
+	for _, want := range []string{`name="envown" value="LOG_LEVEL" class="own-switch" data-key="LOG_LEVEL" checked>`, "Added in this draft",
+		`name="secretown" value="API_TOKEN" class="own-switch" data-key="API_TOKEN" checked>`, `name="envnewname"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("after adding a row, the page lacks %q:\n%s", want, body)
+		}
+	}
+	if strings.Count(body, `name="envnewname"`) != 1 || strings.Contains(body, "<textarea name=\"secrets\"") {
+		t.Fatalf("rows:\n%s", body)
+	}
+	form.Set("do", "review")
+	_, body = submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	for _, want := range []string{"Environment LOG_LEVEL", "Secret API_TOKEN", "made once, base64"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("the review lacks %q:\n%s", want, body)
+		}
+	}
+	if !strings.Contains(between(body, `name="secrets" value="`, `"`), "API_TOKEN base64 48") {
+		t.Fatalf("the reviewed secrets:\n%s", body)
 	}
 }

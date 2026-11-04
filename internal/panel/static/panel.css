@@ -857,3 +857,40 @@ td.empty a, p.calm a { text-decoration: underline; text-underline-offset: 3px; }
 .annot details.nearby > summary { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
 .annot details.nearby ul { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; margin: 0; padding: var(--s2) var(--s3); list-style: none; width: max-content; max-width: min(420px, 86vw); background: var(--raised); border: 1px solid var(--frame); white-space: normal; display: grid; gap: 6px; }
 .annot details.nearby li a { color: var(--fg); }
+
+/* Environment and secrets edited like the limits: a switch, and the
+   input once it is on; rows added below. */
+input.tiny { width: 6.5em; }
+table.env td.own .own-field, table.secrets td.own .own-field { display: inline-flex; width: calc(100% - 32px); }
+table.secrets td.own { width: 30%; }
+table.secrets td.own select, table.secrets tr.add select { width: auto; }
+.add-help { font-size: 12.5px; }
+.remove-row { margin-left: var(--s2); }
+.changed-since { color: var(--soft); }
+@media (max-width: 760px) {
+  /* A setting in two lines: its name and value in effect; its source and,
+     on the right, its switch; the input under them once it is on. */
+  table.settings.list tr.setting { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; }
+  table.settings.list tr.setting td.l-sub[data-label="Source"] { grid-column: 1; grid-row: 2; padding-left: 0; font-size: 12.5px; }
+  table.settings.list tr.setting td.l-sub[data-label="Source"]::before { content: none; }
+  table.settings.list tr.setting td.own { display: contents; }
+  table.settings.list tr.setting td.own .own-check { grid-column: 2; grid-row: 2; justify-self: end; margin: 0; }
+  table.settings.list tr.setting td.own .own-field { grid-column: 1 / -1; grid-row: 3; width: 100%; }
+  table.settings.list tr.setting td.own .caption { grid-column: 1 / -1; grid-row: 4; }
+  table.settings.list tr.setting td.l-more { grid-column: 1 / -1; grid-row: 5; }
+  table.settings.list tr.add { grid-template-columns: minmax(0, 1fr); }
+  table.settings.list tr.add td.l-sub[data-label] { padding-left: 0; }
+  table.settings.list tr.add td.l-sub[data-label]::before { content: none; }
+  table.list td.l-sub[data-label]::before { font-family: var(--sans); }
+}
+table.settings tr.add td.own { display: flex; align-items: center; gap: var(--s2); }
+table.settings tr.add td.own input[type=text] { flex: 1 1 auto; min-width: 0; width: auto; }
+table.settings tr.add .remove-row { margin-left: 0; flex: none; }
+@media (max-width: 760px) {
+  table.settings.list tr.add td.own { display: flex; }
+}
+table.secrets td.l-main input, table.env td.l-main input { width: 100%; min-width: 0; }
+@media (max-width: 1279px) {
+  table.secrets td.own { width: auto; }
+  table.secrets td.own .own-field, table.secrets tr.add td.own { flex-wrap: wrap; }
+}

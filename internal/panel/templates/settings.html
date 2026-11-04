@@ -45,21 +45,52 @@
     </table>
 
     <div class="head spaced"><h2>Environment</h2><span class="dim">what {{$t.Spec.Name}} gets; a value of its own replaces {{$t.App}}'s for it alone</span></div>
-    <table class="env list">
+    <input type="hidden" name="secretrows" value="1">
+    <table class="env settings list" id="env">
       <thead><tr><th>Variable</th><th>In effect</th><th>Source</th><th>Override</th></tr></thead>
       <tbody>
-      {{range $d.Env}}<tr><td class="mono l-main">{{.Key}}</td><td class="mono l-sub" data-label="In effect">{{.Value}}</td><td class="dim l-sub" data-label="Source">{{if .Own}}Tenant override{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}Inherited from {{$t.App}}{{end}}</td>
-        <td class="l-sub own" data-label="Override"><input type="hidden" name="envname" value="{{.Key}}"><input type="text" name="envvalue" value="{{if .Own}}{{envshow .Value}}{{end}}" placeholder="{{if .FromApp}}inherit{{else}}unset{{end}}" class="mono-input" aria-label="{{.Key}}: its own value; empty takes {{$t.App}}'s" autocomplete="off" spellcheck="false"></td></tr>{{end}}
-      <tr class="add"><td class="l-main"><input type="text" name="envname" placeholder="NEW_NAME" class="mono-input" aria-label="a variable to add: its name" autocomplete="off" autocapitalize="characters" spellcheck="false"></td><td class="dim l-sub" colspan="2">Add a variable: its name, and its value under Override</td>
-        <td class="l-sub own" data-label="Override"><input type="text" name="envvalue" placeholder="value" class="mono-input" aria-label="a variable to add: its value" autocomplete="off" spellcheck="false"></td></tr>
+      {{range $d.Env}}<tr class="setting">
+        <td class="mono l-main">{{.Key}}</td>
+        <td class="mono l-side">{{if or .Own .FromApp}}{{.Value}}{{else}}<span class="dim">not set yet</span>{{end}}</td>
+        <td class="dim l-sub" data-label="Source">{{if .New}}Added in this draft{{else if .Own}}Tenant override{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}Inherited from {{$t.App}}{{end}}</td>
+        <td class="l-sub own" data-label="Override"><input type="hidden" name="envname" value="{{.Key}}">
+          <label class="check own-check"><input type="checkbox" name="envown" value="{{.Key}}" class="own-switch" data-key="{{.Key}}"{{if .DraftOwn}} checked{{end}}><span class="sr">Override {{.Key}}{{if .New}}; off removes it{{end}}</span></label>
+          <span class="own-field"><input type="text" name="envvalue" value="{{.Draft}}" class="mono-input" data-key="{{.Key}}" aria-label="{{.Key}}: its own value" autocomplete="off" spellcheck="false"></span></td></tr>{{end}}
+      {{range $i, $_ := (repeat $d.Blank)}}<tr class="add">
+        <td class="l-main"><input type="text" name="envnewname" placeholder="NEW_NAME" class="mono-input" aria-label="a variable to add: its name" autocomplete="off" autocapitalize="characters" spellcheck="false"></td>
+        <td class="dim l-sub add-help" colspan="2">A new variable: its name, and its value</td>
+        <td class="l-sub own" data-label="Value"><input type="text" name="envnewvalue" placeholder="value" class="mono-input" aria-label="a variable to add: its value" autocomplete="off" spellcheck="false"><button type="button" class="link remove-row" hidden>Remove</button></td></tr>{{end}}
       </tbody>
     </table>
-    <p class="hint">Empty takes the app's value again. Spaces around a value are kept; for a line break, or a value that begins with a quote, quote it as "a\nb".</p>
-    <details class="howto"{{if $f.Secrets}} open{{end}}><summary>{{if $f.Secrets}}Secret overrides{{else}}Add a secret{{end}}</summary>
-      <label class="field spaced"><span class="sr">Secret overrides</span>
-        <textarea name="secrets" rows="{{add1 (lines $f.Secrets)}}" spellcheck="false" aria-label="secret overrides">{{$f.Secrets}}</textarea>
-        <span class="hint">NAME [kind [length]], a line each; kind is hex, base64 or password. Made once, kept encrypted, never shown. They add to the app's.</span></label>
-    </details>
+    <div class="row"><button type="submit" name="do" value="addrow" class="small" data-add-row="env">Add a variable</button><span class="hint">Off takes the app's value again. Spaces around a value are kept; for a line break, or a value that begins with a quote, quote it as "a\nb".</span></div>
+
+    <div class="head spaced"><h2>Secrets</h2><span class="dim">made once, kept encrypted, never shown; one of its own replaces {{$t.App}}'s</span></div>
+    <table class="secrets settings list" id="secrets">
+      <thead><tr><th>Name</th><th>Kind</th><th>Source</th><th>Override</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
+      <tbody>
+      {{range $d.SecretFields}}<tr class="setting">
+        <td class="mono l-main">{{.Name}}</td>
+        <td class="l-side">{{if or .Own .FromApp}}{{.Kind}}{{if .Bytes}}, {{.Bytes}} bytes{{end}}{{else}}<span class="dim">not made yet</span>{{end}}</td>
+        <td class="dim l-sub" data-label="Source">{{if .New}}Added in this draft{{else if .Own}}Tenant override{{else}}Inherited from {{$t.App}}{{end}}</td>
+        <td class="l-sub own" data-label="Override"><input type="hidden" name="secretname" value="{{.Name}}">
+          <label class="check own-check"><input type="checkbox" name="secretown" value="{{.Name}}" class="own-switch" data-key="{{.Name}}"{{if .DraftOwn}} checked{{end}}><span class="sr">A secret of its own for {{.Name}}</span></label>
+          <span class="own-field"><select name="secretkind" data-key="{{.Name}}" aria-label="{{.Name}}: its kind">{{$k := .DraftKind}}{{range $d.Kinds}}<option{{if eq . $k}} selected{{end}}>{{.}}</option>{{end}}</select> <input type="number" name="secretbytes" value="{{if .DraftBytes}}{{.DraftBytes}}{{end}}" min="1" placeholder="length" class="tiny" data-key="{{.Name}}" aria-label="{{.Name}}: its length"></span></td>
+        <td class="end l-more">{{if and (not $t.Archived) (or .Own .FromApp)}}<details class="menu-text">
+            <summary class="button small">New value…</summary>
+            <div class="pop">
+              <div class="stack">
+                <p class="hint">A new value restarts {{$t.Spec.Name}}; what it signed or set with the old one (sessions, a password) stops working. It is not part of the review above. Type its name.</p>
+                <input type="text" name="confirm" form="rotate-{{.Name}}" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+                <div><button type="submit" form="rotate-{{.Name}}" class="danger">Give it a new value</button></div>
+              </div>
+            </div>
+          </details>{{end}}</td></tr>{{end}}
+      <tr class="add">
+        <td class="l-main"><input type="text" name="secretnewname" placeholder="NEW_SECRET" class="mono-input" aria-label="a secret to add: its name" autocomplete="off" autocapitalize="characters" spellcheck="false"></td>
+        <td class="dim l-sub add-help" colspan="2">Add a secret: its name, kind and length</td>
+        <td class="l-sub own" data-label="Kind"><select name="secretnewkind" aria-label="a secret to add: its kind">{{range $d.Kinds}}<option>{{.}}</option>{{end}}</select> <input type="number" name="secretnewbytes" min="1" placeholder="length" class="tiny" aria-label="a secret to add: its length"></td><td></td></tr>
+      </tbody>
+    </table>
     <label class="field">App <select name="app">{{range $d.Apps}}<option {{if eq . $f.App}}selected{{end}}>{{.}}</option>{{end}}</select>
       <span class="hint">Another app changes its whole spec: image, environment and limits. Its data stays.</span></label>
     <div class="head spaced"><h2>Rollouts</h2></div>
@@ -71,36 +102,5 @@
 
 {{end}}
 
-<section>
-  <div class="head"><h2>Secrets</h2><span class="dim">inherited and overridden</span></div>
-  <table class="list">
-    <thead><tr><th>Name</th><th>Kind</th><th>Source</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
-    <tbody>
-    {{range $d.Secrets}}
-      <tr>
-        <td class="mono l-main">{{.Name}}</td>
-        <td class="dim l-sub" data-label="Kind">{{.Kind}}{{if .Bytes}}, {{.Bytes}} bytes{{end}}</td>
-        <td class="dim l-sub" data-label="Source">{{if .Own}}Tenant override{{else}}Inherited from {{$t.App}}{{end}}</td>
-        <td class="end l-side">
-          {{if not $t.Archived}}
-          <details class="menu-text">
-            <summary class="button small">New value…</summary>
-            <div class="pop">
-              <form method="post" class="stack"><input type="hidden" name="do" value="rotate"><input type="hidden" name="key" value="{{.Name}}">
-                <p class="hint">A new value restarts {{$t.Spec.Name}}; what it signed or set with the old one (sessions, a password) stops working. Save the settings above first. Type its name.</p>
-                <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
-                <div><button type="submit" class="danger">Give it a new value</button></div>
-              </form>
-            </div>
-          </details>
-          {{end}}
-        </td>
-      </tr>
-    {{else}}
-      <tr><td colspan="4" class="empty l-main">None.</td></tr>
-    {{end}}
-    </tbody>
-  </table>
-  <p class="hint spaced">Made once by murder and kept encrypted; the panel never shows them.{{if $t.Archived}} An archived tenant's are kept as they are.{{end}}</p>
-</section>
+{{if not $t.Archived}}{{range $d.SecretFields}}{{if or .Own .FromApp}}<form method="post" id="rotate-{{.Name}}" hidden><input type="hidden" name="do" value="rotate"><input type="hidden" name="key" value="{{.Name}}"></form>{{end}}{{end}}{{end}}
 {{end}}
