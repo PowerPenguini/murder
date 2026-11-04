@@ -98,8 +98,7 @@
       </tbody>
     </table>
     <div class="row"><button type="submit" name="do" value="addsecret" class="small" data-add-row="secrets" aria-controls="secrets">Add a secret</button><span class="hint">Made once by murder when saved; its value is never shown. A new value for one is "New value…" in its row, apart from the review.</span></div>
-    <label class="field">App <select name="app">{{range $d.Apps}}<option {{if eq . $f.App}}selected{{end}}>{{.}}</option>{{end}}</select>
-      <span class="hint">Another app changes its whole spec: image, environment and limits. Its data stays.</span></label>
+    <input type="hidden" name="app" value="{{$f.App}}">
     <div class="head spaced"><h2>Rollouts</h2></div>
     <label class="check"><input type="checkbox" name="canary"{{if eq $f.Canary "on"}} checked{{end}}> <span>Canary: takes {{$t.App}}'s changes first, before the other tenants</span></label>
     <label class="check"><input type="checkbox" name="hold"{{if eq $f.Hold "on"}} checked{{end}}> <span>Held: stays on the revision it runs{{if $t.AppRevision}} ({{$t.AppRevision}}){{end}}; released, it follows {{$t.App}} again</span></label>

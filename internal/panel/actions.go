@@ -260,6 +260,21 @@ func (d logsData) PreviousSaid() string {
 	return "replaced " + ago(d.ReadAt, p.At) + " ago"
 }
 
+// PreviousShort says it in a phone's switch: "137, 4m".
+func (d logsData) PreviousShort() string {
+	p := d.Previous
+	if p == nil {
+		return ""
+	}
+	switch {
+	case p.Why == "exited" || p.ExitKnown:
+		return strconv.Itoa(p.ExitCode) + ", " + ago(d.ReadAt, p.ExitedAt)
+	case p.Why == "stopped":
+		return "stopped, " + ago(d.ReadAt, p.At)
+	}
+	return "replaced, " + ago(d.ReadAt, p.At)
+}
+
 // PreviousWhy says in a sentence how the previous container ended.
 func (d logsData) PreviousWhy() string {
 	p := d.Previous
@@ -317,7 +332,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		data = data[len(data)-logBytes:]
 	}
 	q := r.URL.Query()
-	logs := logsData{Tenant: name, Tail: tail, Head: s.headOf(t, nodes, "logs"), Level: q.Get("level"), Query: strings.TrimSpace(q.Get("q")),
+	logs := logsData{Tenant: name, Tail: tail, Head: s.withApps(ctx, r, s.headOf(t, nodes, "logs")), Level: q.Get("level"), Query: strings.TrimSpace(q.Get("q")),
 		Follow: q.Get("follow") != "", ReadAt: s.now()}
 	if logs.Level != "warn" && logs.Level != "error" {
 		logs.Level = "all"

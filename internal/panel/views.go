@@ -689,7 +689,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	data.Head = s.headOf(t, nodes, "overview")
+	data.Head = s.withApps(ctx, r, s.headOf(t, nodes, "overview"))
 	p := s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data)
 	// What the action did is said by the operation line, not twice.
 	if data.Operation != nil && s.now().Sub(data.Operation.Event.At) < time.Minute {
@@ -1025,6 +1025,26 @@ type tenantHead struct {
 	// tenant may move to.
 	Acts, Edits bool
 	Targets     []string
+	// Apps are the other apps it could run, for "Change its app".
+	Apps []string
+}
+
+// withApps adds the apps the tenant could change to, for its menu.
+func (s *Server) withApps(ctx context.Context, r *http.Request, h tenantHead) tenantHead {
+	if s.Apps == nil || h.Tenant.Archived() {
+		return h
+	}
+	apps, err := s.Apps(s.actor(userOf(r))).Apps(ctx)
+	if err != nil {
+		return h
+	}
+	for _, app := range apps {
+		if app.Name != h.Tenant.App {
+			h.Apps = append(h.Apps, app.Name)
+		}
+	}
+	slices.Sort(h.Apps)
+	return h
 }
 
 func (s *Server) headOf(t api.Tenant, nodes api.Nodes, on string) tenantHead {

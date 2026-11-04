@@ -348,7 +348,8 @@ func rate(v float64) string {
 	case v == 0:
 		return "0"
 	case v < 1:
-		return strconv.FormatFloat(math.Round(v*10)/10, 'f', -1, 64)
+		// A count a minute: "under 1 error", not "0.4 errors".
+		return "under 1"
 	case v < 1000:
 		return strconv.FormatFloat(math.Round(v), 'f', -1, 64)
 	}

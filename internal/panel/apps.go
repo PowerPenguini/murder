@@ -795,7 +795,6 @@ type settingsData struct {
 	Head    tenantHead
 	Tenant  api.Tenant
 	Form    settingsForm
-	Apps    []string
 	Secrets []secretRow
 	// Fields are its settings that may be its own, with the values in
 	// effect; Env the environment it gets.
@@ -835,6 +834,10 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	// fills it in as an override, to be reviewed.
 	if mb, err := strconv.Atoi(r.URL.Query().Get("memoryMB")); err == nil && mb > 0 && mb <= 1<<20 {
 		form.MemoryMB = strconv.Itoa(mb)
+	}
+	// "Change its app" in the tenant's menu: another app, to review.
+	if app := r.URL.Query().Get("app"); app != "" {
+		form.App = app
 	}
 	s.settingsPage(w, r, t, form, "", http.StatusOK)
 }
@@ -894,9 +897,11 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 		data.Head = s.headOf(t, api.Nodes{}, "settings")
 	}
 	for _, app := range apps {
-		data.Apps = append(data.Apps, app.Name)
+		if app.Name != t.App && !t.Archived() {
+			data.Head.Apps = append(data.Head.Apps, app.Name)
+		}
 	}
-	slices.Sort(data.Apps)
+	slices.Sort(data.Head.Apps)
 	for _, key := range slices.Sorted(maps.Keys(t.Spec.Secrets)) {
 		_, own := t.Overrides.Secrets[key]
 		secret := t.Spec.Secrets[key]

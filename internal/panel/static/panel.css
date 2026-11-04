@@ -110,6 +110,9 @@ button.link:hover { color: var(--fg); background: none; border: 0; }
 .livestate .live { flex: none; width: 6px; height: 6px; background: var(--fg); }
 .livestate.on .live { animation: pulse 2.4s ease-in-out infinite; }
 .livestate.paused .live { background: transparent; box-shadow: inset 0 0 0 1.5px var(--dim); }
+.livestate .why { display: block; color: var(--faint); }
+.livestate.paused:has(.why) { align-items: flex-start; }
+.livestate.paused:has(.why) .live { margin-top: 6px; }
 .livestate.lost { color: var(--bad); font-weight: 600; }
 .livestate.lost .live { background: var(--bad); }
 .livestate.off .live { background: transparent; box-shadow: inset 0 0 0 1px var(--faint); }
@@ -428,7 +431,9 @@ details.event dl.pairs { margin-top: var(--s3); padding: var(--s3) var(--pad-x);
   }
   .navmenu > summary::after { content: ""; width: 5px; height: 5px; margin: -3px 0 0 2px; border-right: 1.5px solid var(--dim); border-bottom: 1.5px solid var(--dim); transform: rotate(45deg); }
   .navmenu[open] > summary { border-color: var(--fg); }
-  .navlist { position: absolute; left: 0; right: 0; top: 100%; display: grid; padding: var(--s2) 0; background: var(--bg); border-bottom: 1px solid var(--frame); box-shadow: 0 24px 48px rgba(0, 0, 0, 0.8); }
+  .navlist { position: absolute; left: 0; right: 0; top: 100%; display: grid; padding: var(--s2) 0; background: var(--bg); border-bottom: 1px solid var(--frame);
+    /* The page under the open menu is dimmed, as under a sheet; the bar above stays. */
+    box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.7); clip-path: inset(0 -100vmax -100vmax -100vmax); }
   .navlist a { min-height: 48px; padding: 0 var(--s4); font-size: 16px; }
   .who { order: 3; margin: 0 0 0 auto; padding: 0; display: flex; align-items: center; gap: var(--s3); }
   .who .node, .who .user span { display: none; }
@@ -565,6 +570,8 @@ ol.waves.plan li { box-shadow: none; }
   ol.waves li.done { box-shadow: inset 3px 0 0 var(--soft); }
   ol.waves li.now { box-shadow: inset 3px 0 0 var(--fg); }
   ol.waves li.paused { box-shadow: inset 3px 0 0 var(--bad); }
+  /* A plan's wave a line: its name, then its tenants. */
+  ol.waves.plan li { grid-template-columns: 9.5em minmax(0, 1fr); column-gap: var(--s3); align-items: baseline; padding-top: 10px; padding-bottom: 10px; }
   .diff > div { grid-template-columns: 28px 28px 16px minmax(0, 1fr); }
   .diff .gap { padding-left: 72px; }
 }
@@ -891,7 +898,10 @@ table.secrets td.own select, table.secrets tr.add select { width: auto; }
   table.settings.list tr.setting td.own .own-check { grid-column: 2; grid-row: 2; justify-self: end; margin: 0; }
   table.settings.list tr.setting td.own .own-field { grid-column: 1 / -1; grid-row: 3; width: 100%; }
   table.settings.list tr.setting td.own .caption { grid-column: 1 / -1; grid-row: 4; }
-  table.settings.list tr.setting td.act { display: block; grid-column: 1 / -1; grid-row: 5; }
+  /* The row's action under what shows: no empty rows above it while the
+     value is hidden. */
+  table.settings.list tr.setting td.act { display: block; grid-column: 1 / -1; grid-row: 3; }
+  table.settings.list tr.setting:has(.own-switch:checked) td.act { grid-row: 5; }
   table.settings.list tr.setting td.act:empty { display: none; }
   table.settings.list tr.add { grid-template-columns: minmax(0, 1fr); }
   table.settings.list tr.add td.l-sub[data-label] { padding-left: 0; }
@@ -965,7 +975,9 @@ body.stale .elsewhere { background: transparent; box-shadow: inset 0 0 0 1px #7c
    with the reason beside it. */
 button.unproposed { background: transparent; color: var(--fg); border-color: var(--fg); }
 /* A review's change and reach in a line, before the rest. */
-p.summary-line { margin: calc(-1 * var(--s2)) 0 var(--s4); font-weight: 600; }
+/* A review's one line: what changes and whom it restarts, before the rest. */
+p.summary-line { margin: var(--s2) 0 0; font-weight: 600; max-width: 78ch; }
+p.summary-line + .lead { margin-top: var(--s1); }
 @media (max-width: 760px) {
   /* What a change does to each group of tenants: full width under their
      names. */

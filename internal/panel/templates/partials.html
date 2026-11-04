@@ -69,8 +69,8 @@ or the arrow keys move along it), the plot, and its axes as HTML. */}}
       <svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
         <line x1="0" y1="0.5" x2="1000" y2="0.5" stroke="#1f1f1f" stroke-width="1" vector-effect="non-scaling-stroke"/>
         <line x1="0" y1="50" x2="1000" y2="50" stroke="#151515" stroke-width="1" vector-effect="non-scaling-stroke"/>
-        {{with .Limit}}<path d="{{.Path}}" fill="none" stroke="{{if .Hot}}#ff5147{{else}}#6a6a6a{{end}}" stroke-width="1" vector-effect="non-scaling-stroke" stroke-dasharray="5 4"/>{{end}}
         {{$halo := .Limit}}{{range .Series}}<path d="{{.Area}}" fill="{{.Stroke}}" fill-opacity="0.07"/>{{if $halo}}<path class="halo" d="{{.Line}}" fill="none" stroke-width="5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>{{end}}<path d="{{.Line}}" fill="none" stroke="{{.Stroke}}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"{{if .Dashed}} stroke-dasharray="5 3"{{end}}/>{{end}}
+        {{/* The limit last: where the use reaches it, it shows over the line. */}}{{with .Limit}}<path d="{{.Path}}" fill="none" stroke="{{if .Hot}}#ff5147{{else}}#6a6a6a{{end}}" stroke-width="{{if .Hot}}1.5{{else}}1{{end}}" vector-effect="non-scaling-stroke" stroke-dasharray="5 4"/>{{end}}
         <line x1="0" y1="99.5" x2="1000" y2="99.5" stroke="#333" stroke-width="1" vector-effect="non-scaling-stroke"/>
         <line class="cursor" x1="0" x2="0" y1="0" y2="100" stroke="#ececec" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
       </svg>
@@ -85,7 +85,7 @@ or the arrow keys move along it), the plot, and its axes as HTML. */}}
 
 {{define "bar"}}<svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.Width}}" height="6" fill="{{if ge .Width 90.0}}#ff5147{{else}}#b0b0b0{{end}}"/></svg>{{end}}
 
-{{define "copy"}}{{if .Archived}}<span class="faint">none, archived</span>{{else if not .Tenant.Replica}}{{if eq .Replica.Kind "bad"}}<span class="st bad">none</span>{{else}}<span class="faint">none</span>{{end}}{{else if .ReplicaNext}}<span class="st warn">{{.Tenant.Replica}}</span> <span class="dim">moving to {{.ReplicaNext}}</span>{{else if .ReplicaReady}}{{.Tenant.Replica}}{{else}}<span class="st warn">{{.Tenant.Replica}}</span> <span class="dim">catching up</span>{{end}}{{end}}
+{{define "copy"}}{{if .Archived}}<span class="faint nowrap">none, archived</span>{{else if not .Tenant.Replica}}{{if eq .Replica.Kind "bad"}}<span class="st bad">none</span>{{else}}<span class="faint">none</span>{{end}}{{else if .ReplicaNext}}<span class="st warn">{{.Tenant.Replica}}</span> <span class="dim nowrap">moving to {{.ReplicaNext}}</span>{{else if .ReplicaReady}}{{.Tenant.Replica}}{{else}}<span class="st warn">{{.Tenant.Replica}}</span> <span class="dim nowrap">catching up</span>{{end}}{{end}}
 
 {{/* A tenant's head, the same on each of its pages: its name and state,
 its pages beside it, what can be done to it, and where it runs. */}}
@@ -144,6 +144,13 @@ its pages beside it, what can be done to it, and where it runs. */}}
           <p class="hint">Suspending stops its container: <span class="nowrap">{{$t.Host}}</span> answers no request until it is resumed. Its data stays. Type its name to suspend it.</p>
           <input type="text" name="confirm" placeholder="type {{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
           <div><button type="submit" class="danger">Suspend {{$t.Spec.Name}}</button></div>
+        </form>
+        {{end}}
+        {{if .Apps}}
+        <form method="get" action="/tenants/{{$t.Spec.Name}}/settings#review" class="stack"><input type="hidden" name="do" value="review">
+          <label class="field">Change its app <select name="app">{{range .Apps}}<option>{{.}}</option>{{end}}</select></label>
+          <p class="hint">It takes that app's whole spec: image, environment and limits; its overrides and data stay. You review it before anything changes.</p>
+          <div><button type="submit">Review the change</button></div>
         </form>
         {{end}}
         <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="archive">

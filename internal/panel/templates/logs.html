@@ -3,7 +3,7 @@
 <section data-still class="near logview">
   {{if $d.Previous}}<nav class="seg which" aria-label="which container's lines">
     <a href="{{$d.Link "container" ""}}"{{if not $d.Showing}} class="on" aria-current="true"{{end}}>Current<span class="desktop-inline"> container</span></a>
-    <a href="{{$d.Link "container" "previous" "follow" ""}}"{{if $d.Showing}} class="on" aria-current="true"{{end}}>Previous<span class="desktop-inline"> container</span> <span class="n">{{$d.PreviousSaid}}</span></a>
+    <a href="{{$d.Link "container" "previous" "follow" ""}}"{{if $d.Showing}} class="on" aria-current="true"{{end}}>Previous<span class="desktop-inline"> container <span class="n">{{$d.PreviousSaid}}</span></span><span class="phone-inline"> · <span class="n">{{$d.PreviousShort}}</span></span></a>
   </nav>{{end}}
   <form method="get" class="filters" role="search">
     <nav class="seg" aria-label="how loud">
@@ -29,7 +29,7 @@
     {{end}}{{else}}
     <p class="count-line dim" id="log-lines-count">{{if or $d.Query (ne $d.Level "all")}}{{len $d.Lines}} of {{plural $d.All "line" "lines"}} match{{else}}{{plural $d.All "line" "lines"}}{{end}}, the last {{$d.Tail}} of its current container{{if lt $d.Tail 2000}} (<a href="{{$d.Link "tail" "2000"}}">read 2000</a>){{end}} · read at {{$d.ReadAt.UTC.Format "15:04:05"}} UTC ·
       {{if $d.Follow}}<span class="st busy">following</span> <a href="{{$d.Link "follow" ""}}">Pause</a>{{else}}<a href="{{$d.Link "follow" "1"}}">Follow new lines</a> · <a href="">Read again</a>{{end}}</p>
-    {{if $d.Previous}}<p class="hint">Its current run's lines. Those before it {{if eq $d.Previous.Why "exited"}}exited{{else if eq $d.Previous.Why "stopped"}}was stopped{{else}}was replaced{{end}} ({{$d.PreviousSaid}}) are kept apart: <a href="{{$d.Link "container" "previous" "follow" ""}}">Previous container</a>.</p>
+    {{if $d.Previous}}<p class="hint">Its current run's lines. Those before it {{if eq $d.Previous.Why "exited"}}exited{{else if eq $d.Previous.Why "stopped"}}was stopped{{else}}was replaced{{end}} ({{$d.PreviousSaid}}) are kept apart: <a href="{{$d.Link "container" "previous" "follow" ""}}" class="nowrap">Previous container</a>.</p>
     {{else if $d.PreviousProblem}}<p class="hint">Its previous container's lines could not be read: {{$d.PreviousProblem}}</p>
     {{else if $d.Restarted}}<p class="hint">Only its current container's lines: its node kept none of the one before{{with $d.LastExit}}, {{exitsaid .}}{{end}}. A node keeps them as a container exits or is replaced, not when the node itself stopped, nor for a tenant that moved here.</p>{{end}}
     {{end}}

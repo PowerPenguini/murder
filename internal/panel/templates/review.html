@@ -1,8 +1,8 @@
 {{define "content"}}{{$d := .Data}}{{$a := $d.App}}
 <nav class="crumbs" aria-label="where this is"><a href="/apps">Apps</a><span>/</span><a href="/apps/{{$a.Name}}">{{$a.Name}}</a><span>/</span><span>Review</span></nav>
 <h1>{{$d.Title}}</h1>
-<p class="lead">Nothing has changed yet. Look it over; rolling it out stores revision {{next $a.Revision}} of {{$a.Name}}.</p>
 {{with $d.Summary}}<p class="summary-line">{{.}}.</p>{{end}}
+<p class="lead">Nothing has changed yet. Look it over; rolling it out stores revision {{next $a.Revision}} of {{$a.Name}}.</p>
 <div data-still hidden></div>
 {{if and $d.Changed $d.Restart}}
 <section class="near" id="pace">
@@ -38,9 +38,11 @@
     </details>
   </div>{{end}}
   {{if and $d.NewImage (eq $d.Added 1) (eq $d.Removed 1)}}<details class="howto spaced"><summary>Show YAML diff</summary>{{end}}
-  <div class="diff" role="table" aria-label="the change, line by line">
-    {{range $d.Diff}}{{if eq .Op ""}}<div class="gap" role="row"><span role="cell">…</span></div>{{else}}<div class="{{if eq .Op "+"}}in{{else if eq .Op "-"}}out{{end}}" role="row"><span class="ln" role="cell">{{if .Old}}{{.Old}}{{end}}</span><span class="ln" role="cell">{{if .New}}{{.New}}{{end}}</span><span class="op" role="cell" aria-label="{{if eq .Op "+"}}added{{else if eq .Op "-"}}removed{{else}}kept{{end}}">{{.Op}}</span><span class="tx" role="cell"{{if .Short}} title="{{.Text}}"{{end}}>{{if .Short}}{{.Short}}{{else}}{{.Text}}{{end}}</span></div>{{end}}{{end}}
-  </div>
+  {{if and $d.Summary (not (and $d.NewImage (eq $d.Added 1) (eq $d.Removed 1)))}}
+  {{/* On a phone the summary above says it; the YAML is a tap away. */}}
+  <details class="howto phone-only"><summary>Show the YAML diff</summary>{{template "review-diff" $d}}</details>
+  <div class="desktop-only">{{template "review-diff" $d}}</div>
+  {{else}}{{template "review-diff" $d}}{{end}}
   {{if and $d.NewImage (eq $d.Added 1) (eq $d.Removed 1)}}</details>{{end}}
   {{else}}
   <p class="calm">Nothing changes: the spec is the one {{$a.Name}} runs.</p>
@@ -57,7 +59,7 @@
     {{range $d.Groups}}
       <tr class="{{.Kind}}">
         <td class="l-main">{{range $i, $t := .Tenants}}{{if $i}}, {{end}}<a href="/tenants/{{$t.Name}}">{{$t.Name}}</a>{{if $t.Canary}} <span class="dim">canary</span>{{end}}{{if eq $t.State.Kind "bad"}} <span class="st bad">{{$t.State.Label}}</span>{{end}}{{end}}</td>
-        <td class="l-sub" data-label="Result">{{if eq .Kind "restart"}}<span class="strong">New container</span>{{range (index .Tenants 0).Scope.Lines}}<span class="scope-line">{{.}}</span>{{end}}{{else}}{{.Result}}{{end}}</td>
+        <td class="l-sub" data-label="Result">{{if eq .Kind "restart"}}<span class="strong">New container</span>{{range (index .Tenants 0).Scope.Lines}}<span class="scope-line">{{if .To}}{{.Key}} <span class="nowrap">{{.From}}</span> <span class="nowrap">→ {{.To}}</span>{{else}}{{.Text}}{{end}}</span>{{end}}{{else}}{{.Result}}{{end}}</td>
       </tr>
     {{end}}
     </tbody>
@@ -76,7 +78,7 @@
     <p class="flat spaced">No health gate: nothing waits to see one healthy before the next, so a change that breaks them breaks them all.</p></div>
   {{else}}
   <ol class="waves plan">
-    {{range $i, $w := $d.Waves}}<li class="next"><span class="wn">{{add1 $i}}. {{$w.Name}}</span><span class="wc">{{range $j, $n := $w.Tenants}}{{if $j}}, {{end}}{{$n}}{{if joins $d $n}} <span class="faint">(no restart)</span>{{end}}{{end}}</span></li>{{end}}
+    {{range $i, $w := $d.Waves}}<li class="next"><span class="wn">{{add1 $i}}. {{$w.Name}}</span>{{$all := true}}{{range $w.Tenants}}{{if not (joins $d .)}}{{$all = false}}{{end}}{{end}}<span class="wc">{{if $all}}{{range $j, $n := $w.Tenants}}{{if $j}}, {{end}}{{$n}}{{end}}: <span class="faint">no restart, {{if eq (len $w.Tenants) 1}}takes{{else}}take{{end}} revision {{if eq $d.Do "restore"}}{{$d.Revision}}{{else}}{{next $d.App.Revision}}{{end}} in place</span>{{else}}{{range $j, $n := $w.Tenants}}{{if $j}}, {{end}}{{$n}}{{if joins $d $n}} <span class="faint">(no restart)</span>{{end}}{{end}}{{end}}</span></li>{{end}}
   </ol>
   <p class="hint spaced">{{if eq $d.Pace "first"}}{{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} move{{if eq (len $d.Broken) 1}}s{{end}} as you roll it out. Each wave after moves once the one before has stayed healthy: two minutes for the first, a minute after.{{else}}Each wave moves once the one before has stayed healthy: two minutes for canaries, a minute after.{{end}} A tenant not healthy within 5 minutes of its move pauses the rollout; you can then resume, abort, or restore their data.</p>
   {{end}}
@@ -101,3 +103,7 @@
   </form>
 </section>
 {{end}}
+
+{{define "review-diff"}}<div class="diff" role="table" aria-label="the change, line by line">
+    {{range .Diff}}{{if eq .Op ""}}<div class="gap" role="row"><span role="cell">…</span></div>{{else}}<div class="{{if eq .Op "+"}}in{{else if eq .Op "-"}}out{{end}}" role="row"><span class="ln" role="cell">{{if .Old}}{{.Old}}{{end}}</span><span class="ln" role="cell">{{if .New}}{{.New}}{{end}}</span><span class="op" role="cell" aria-label="{{if eq .Op "+"}}added{{else if eq .Op "-"}}removed{{else}}kept{{end}}">{{.Op}}</span><span class="tx" role="cell"{{if .Short}} title="{{.Text}}"{{end}}>{{if .Short}}{{.Short}}{{else}}{{.Text}}{{end}}</span></div>{{end}}{{end}}
+  </div>{{end}}

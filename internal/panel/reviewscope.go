@@ -192,17 +192,25 @@ func secretText(s spec.Secret) string {
 	return text
 }
 
+// scopeLine is a line of a tenant's result: a setting going From one
+// value To another, or Text alone.
+type scopeLine struct{ Key, From, To, Text string }
+
 // Lines says it a line each: a changed setting a line, then what stays.
-func (s scope) Lines() []string {
+func (s scope) Lines() []scopeLine {
 	if !s.Restarts {
-		return []string{s.Result()}
+		return []scopeLine{{Text: s.Result()}}
 	}
-	var lines []string
+	var lines []scopeLine
 	for _, d := range s.Changes {
-		lines = append(lines, capital(d.Text()))
+		if d.From != "" && d.To != "" {
+			lines = append(lines, scopeLine{Key: capital(d.Key), From: d.From, To: d.To})
+		} else {
+			lines = append(lines, scopeLine{Text: capital(d.Text())})
+		}
 	}
 	for _, d := range s.Stays {
-		lines = append(lines, capital(d.Key)+" stays "+d.To)
+		lines = append(lines, scopeLine{Text: capital(d.Key) + " stays " + d.To})
 	}
 	return lines
 }

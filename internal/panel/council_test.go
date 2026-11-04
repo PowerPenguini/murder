@@ -37,7 +37,7 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked in its wave \"a tenth\" by baltic-freight",
 		// Only the tenants whose spec changes restart, and are counted:
 		// atlas keeps its own memory, so the change leaves it.
-		"5 restart · 1 unchanged · 1 held, left out", "Memory 256 MB → 512 MB", "Unchanged: memory stays 768 MB",
+		"5 restart · 1 unchanged · 1 held, left out", `Memory <span class="nowrap">256 MB</span> <span class="nowrap">→ 512 MB</span>`, "Unchanged: memory stays 768 MB",
 		// A memory fix for the broken baltic-freight, whose own change is
 		// memory only: it now, the rest in waves, is proposed; three
 		// tenants on revision 2 take revision 3's image with it, named.
@@ -85,7 +85,7 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	}
 	// The three that run revision 2 already keep their containers; the
 	// three the blocked rollout moved return, and Abort is said beside it.
-	for _, want := range []string{"Return 3 tenants to revision 2", "3 restart · 3 keep their container", "Runs it already: keeps its container",
+	for _, want := range []string{"Return 3 tenants to revision 2", "3 restart · 3 keep their container", "Runs it already: keeps its container", `nordwind, vistula-cargo: <span class="faint">no restart, take revision 2 in place</span>`,
 		"Or abort that rollout instead: it takes the 3 tenants it moved (acme-logistics, atlas, baltic-freight) back", `name="pace" value="waves" checked`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("going back's review lacks %q:\n%s", want, body)
@@ -245,7 +245,7 @@ func TestLogsFilter(t *testing.T) {
 	// The container the kernel killed: its lines up to the kill, kept by
 	// its node, with the same filters and their own counts.
 	_, page = get(t, server.URL+"/tenants/baltic-freight/logs?level=error&container=previous")
-	if !strings.Contains(page, "1 of 19 lines match") || !strings.Contains(page, "cannot allocate memory") || !strings.Contains(page, "Previous<span class=\"desktop-inline\"> container</span> <span class=\"n\">exit 137, 4m ago</span>") ||
+	if !strings.Contains(page, "1 of 19 lines match") || !strings.Contains(page, "cannot allocate memory") || !strings.Contains(page, "Previous<span class=\"desktop-inline\"> container <span class=\"n\">exit 137, 4m ago</span></span><span class=\"phone-inline\"> · <span class=\"n\">137, 4m</span></span>") ||
 		!strings.Contains(page, "was killed (exit 137), most likely for using more than its 256 MB of memory 4m ago") || strings.Contains(page, "Follow new lines") {
 		t.Fatalf("errors only, of the previous container:\n%s", page)
 	}
@@ -1057,5 +1057,34 @@ func TestSeveralSecretsInOneReview(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the review lacks %q:\n%s", want, body)
 		}
+	}
+}
+
+// Another app is chosen from the tenant's menu and reviewed on its own;
+// the settings page holds only overrides.
+func TestChangingATenantsApp(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	ctx := context.Background()
+	_, body := get(t, server.URL+"/tenants/atlas")
+	if !strings.Contains(body, `action="/tenants/atlas/settings#review"`) || !strings.Contains(body, "Change its app <select name=\"app\"><option>testapp</option>") {
+		t.Fatalf("the menu's app change:\n%s", body)
+	}
+	_, body = get(t, server.URL+"/tenants/atlas/settings")
+	if strings.Contains(body, `<label class="field">App <select`) {
+		t.Fatalf("the settings page still chooses the app:\n%s", body)
+	}
+	_, body = get(t, server.URL+"/tenants/atlas/settings?do=review&app=testapp")
+	for _, want := range []string{"Review 1 change to atlas", "testapp: its whole spec changes", "Save and restart atlas"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("the app change's review lacks %q:\n%s", want, body)
+		}
+	}
+	form := url.Values{"do": {"save"}}
+	for _, name := range []string{"generation", "reviewed", "app", "image", "memoryMB", "cpus", "pids", "diskGB", "env", "secrets", "flags", "canary", "hold"} {
+		form.Set(name, html.UnescapeString(between(body, `name="`+name+`" value="`, `"`)))
+	}
+	submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	if after, _ := cluster.Get(ctx, "atlas"); after.App != "testapp" {
+		t.Fatalf("atlas runs app %q", after.App)
 	}
 }

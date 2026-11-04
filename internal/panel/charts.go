@@ -348,6 +348,10 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 	}
 	top := niceCeil(max(highest, highestLimit)*headroom, bytes)
 	chart.Top = format(top)
+	if top > 0 && top < 1 {
+		// A scale's top is a number, even where a reading says "under 1".
+		chart.Top = strconv.FormatFloat(round1(top), 'f', -1, 64)
+	}
 	// Inset a unit at each end: a line at 0 is not drawn below the axis.
 	y := func(v float64) float64 { return 1 + (plotHeight-2)*(1-max(0, v)/top) }
 	x := func(t time.Time) float64 {
@@ -527,7 +531,7 @@ func f(v float64) string { return strconv.FormatFloat(math.Round(v*10)/10, 'f', 
 // unit says a value and its label, the label singular for one: "1
 // error", "2 errors".
 func unit(value, label string) string {
-	if value == "1" && strings.HasSuffix(label, "s") {
+	if (value == "1" || value == "under 1") && strings.HasSuffix(label, "s") {
 		return value + " " + strings.TrimSuffix(label, "s")
 	}
 	return value + " " + label

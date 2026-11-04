@@ -113,7 +113,7 @@ func TestUnits(t *testing.T) {
 			t.Errorf("cores(%v) = %q, want %q", v, got, want)
 		}
 	}
-	for v, want := range map[float64]string{0: "0", 0.25: "0.3", 97.4: "97", 1530: "1.5k"} {
+	for v, want := range map[float64]string{0: "0", 0.25: "under 1", 97.4: "97", 1530: "1.5k"} {
 		if got := rate(v); got != want {
 			t.Errorf("rate(%v) = %q, want %q", v, got, want)
 		}

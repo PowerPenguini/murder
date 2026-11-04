@@ -142,11 +142,15 @@
       text.append(retry);
       return;
     }
-    // Short, so it keeps to one line; the whole sentence on hover.
+    // Paused says why where it is seen: what holds the page still.
     const paused = pausedBy();
     if (paused) {
       state.classList.add("paused");
-      text.textContent = "Paused · " + age(Date.now() - readAt);
+      // Two lines: "Paused · 3s", then why, quieter.
+      const why = document.createElement("span");
+      why.className = "why";
+      why.textContent = paused.replace(/^Paused /, "");
+      text.append("Paused · " + age(Date.now() - readAt), why);
       state.title = paused + ", read " + age(Date.now() - readAt) + " ago";
       return;
     }
