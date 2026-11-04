@@ -219,13 +219,24 @@ func (c *Cluster) voterAddress(name string) (string, bool) {
 }
 
 // configuration is the latest configuration of the voters, and the index
-// of the log entry that made it, both from that entry: Raft passed an
-// index changes the voters only if the configuration is still the one
-// the index names. Raft's GetConfiguration does not say its index (as of
-// v1.8.0); the latest configuration is that of the last configuration
-// entry in the log, or, once the log no longer holds one, that of the
-// newest snapshot.
+// of the log entry that made it, as one pair: Raft passed an index changes
+// the voters only if the configuration is still the one the index names.
+// Raft's GetConfiguration does not say its index (as of v1.8.0). Raft
+// builds its own as it does here: the newest snapshot's configuration,
+// replaced by the last configuration entry in the log after that snapshot,
+// if there is one. Entries the log keeps from before the snapshot do not
+// count: an installed snapshot may have replaced the history they belong
+// to.
 func (c *Cluster) configuration() (raft.Configuration, uint64, error) {
+	snapshots, err := c.snapshots.List()
+	if err != nil {
+		return raft.Configuration{}, 0, err
+	}
+	var configuration raft.Configuration
+	var index, after uint64
+	if len(snapshots) > 0 {
+		configuration, index, after = snapshots[0].Configuration, snapshots[0].ConfigurationIndex, snapshots[0].Index
+	}
 	last, err := c.logs.LastIndex()
 	if err != nil {
 		return raft.Configuration{}, 0, err
@@ -235,27 +246,23 @@ func (c *Cluster) configuration() (raft.Configuration, uint64, error) {
 		return raft.Configuration{}, 0, err
 	}
 	c.joinStage(joinReading, "")
-	for index := last; index >= first && index > 0; index-- {
+	for at := last; at > after && at >= first && at > 0; at-- {
 		var entry raft.Log
-		if err := c.logs.GetLog(index, &entry); errors.Is(err, raft.ErrLogNotFound) {
-			// Compacted meanwhile, into a snapshot that holds the
-			// configuration as of then.
+		if err := c.logs.GetLog(at, &entry); errors.Is(err, raft.ErrLogNotFound) {
+			// Compacted meanwhile, into a newer snapshot: the pair read
+			// is older than Raft's, and Raft refuses a change to it.
 			break
 		} else if err != nil {
 			return raft.Configuration{}, 0, err
 		}
 		if entry.Type == raft.LogConfiguration {
-			return raft.DecodeConfiguration(entry.Data), index, nil
+			return raft.DecodeConfiguration(entry.Data), at, nil
 		}
-	}
-	snapshots, err := c.snapshots.List()
-	if err != nil {
-		return raft.Configuration{}, 0, err
 	}
 	if len(snapshots) == 0 {
 		return raft.Configuration{}, 0, errors.New("neither the log nor a snapshot holds a configuration")
 	}
-	return snapshots[0].Configuration, snapshots[0].ConfigurationIndex, nil
+	return configuration, index, nil
 }
 
 // serverAddress is where configuration has node name.
@@ -443,13 +450,24 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 // one queued behind a join that stalled, is not made later, from checks
 // its sender no longer stands behind.
 func (c *Cluster) lockMembership(w http.ResponseWriter, r *http.Request) bool {
-	select {
-	case c.membership <- struct{}{}:
-		return true
-	case <-r.Context().Done():
-		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("another change of the members is under way: %w", r.Context().Err()))
+	refuse := func() bool {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("the change of the members was given up: %w", r.Context().Err()))
 		return false
 	}
+	if r.Context().Err() != nil {
+		return refuse()
+	}
+	select {
+	case c.membership <- struct{}{}:
+	case <-r.Context().Done():
+		return refuse()
+	}
+	// A select between a free lock and a sender that gave up takes either.
+	if r.Context().Err() != nil {
+		c.unlockMembership()
+		return refuse()
+	}
+	return true
 }
 
 func (c *Cluster) unlockMembership() { <-c.membership }

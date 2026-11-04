@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
+	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/spec"
@@ -1415,5 +1417,207 @@ func TestAChangeWhoseSenderGaveUpIsNotMade(t *testing.T) {
 		if n.cluster.isVoter("y-1") {
 			t.Fatalf("y-1, whose join gave up, is a voter on %s", n.name)
 		}
+	}
+}
+
+// A request whose sender gave up does not take the lock on the members,
+// however the lock's select falls.
+func TestAGivenUpChangeDoesNotTakeTheMembers(t *testing.T) {
+	c := &Cluster{membership: make(chan struct{}, 1)}
+	given, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 100 {
+		r := httptest.NewRequest(http.MethodPost, "/cluster/v1/nodes", nil).WithContext(given)
+		if c.lockMembership(httptest.NewRecorder(), r) {
+			t.Fatal("a request whose sender gave up took the members")
+		}
+		if len(c.membership) != 0 {
+			t.Fatal("a refused request left the members taken")
+		}
+	}
+	r := httptest.NewRequest(http.MethodPost, "/cluster/v1/nodes", nil)
+	if !c.lockMembership(httptest.NewRecorder(), r) {
+		t.Fatal("a request whose sender waits did not take the members")
+	}
+	c.unlockMembership()
+}
+
+// discardFSM applies nothing, for a Raft whose configuration alone counts.
+type discardFSM struct{}
+
+func (discardFSM) Apply(*raft.Log) any                 { return nil }
+func (discardFSM) Snapshot() (raft.FSMSnapshot, error) { return nil, errors.New("no snapshots") }
+func (discardFSM) Restore(r io.ReadCloser) error       { return r.Close() }
+
+// fastRaft is a Raft config for a lone voter that elects itself quickly.
+func fastRaft(id string) *raft.Config {
+	config := raft.DefaultConfig()
+	config.LocalID = raft.ServerID(id)
+	config.LogOutput = io.Discard
+	config.HeartbeatTimeout = 50 * time.Millisecond
+	config.ElectionTimeout = 50 * time.Millisecond
+	config.LeaderLeaseTimeout = 50 * time.Millisecond
+	return config
+}
+
+// leading waits for r to lead.
+func leading(t *testing.T, r *raft.Raft) {
+	t.Helper()
+	eventually(t, "the lone voter leads", func() bool { return r.State() == raft.Leader })
+}
+
+// logOf is a log of entries 1 to last, those at the indexes of
+// configurations making them, the others no-ops.
+func logOf(last uint64, configurations map[uint64]raft.Configuration) []*raft.Log {
+	var log []*raft.Log
+	for index := uint64(1); index <= last; index++ {
+		entry := &raft.Log{Index: index, Term: 1, Type: raft.LogNoop}
+		if configuration, ok := configurations[index]; ok {
+			entry = configurationEntry(index, configuration)
+		}
+		log = append(log, entry)
+	}
+	return log
+}
+
+// configurationEntry is a log entry that makes configuration.
+func configurationEntry(index uint64, configuration raft.Configuration) *raft.Log {
+	return &raft.Log{Index: index, Term: 1, Type: raft.LogConfiguration, Data: raft.EncodeConfiguration(configuration)}
+}
+
+// The voters and their index are what Raft has, however the log and the
+// snapshot lie: Raft changes the voters given that index. In every case
+// only a, alone, is the latest configuration, so a Raft that went by a
+// stale one could not elect itself.
+func TestTheVotersAreReadAsRaftHasThem(t *testing.T) {
+	alone := raft.Configuration{Servers: []raft.Server{{ID: "a", Address: "a", Suffrage: raft.Voter}}}
+	withB := raft.Configuration{Servers: []raft.Server{{ID: "a", Address: "a", Suffrage: raft.Voter}, {ID: "b", Address: "b", Suffrage: raft.Voter}}}
+	type snapshot struct {
+		index, configurationIndex uint64
+		configuration             raft.Configuration
+	}
+	for _, test := range []struct {
+		name     string
+		log      []*raft.Log
+		snapshot *snapshot
+		index    uint64
+	}{{
+		name:  "the log alone",
+		log:   logOf(4, map[uint64]raft.Configuration{1: withB, 3: alone}),
+		index: 3,
+	}, {
+		name:     "a snapshot with no log after it, the log kept from before it",
+		log:      logOf(10, map[uint64]raft.Configuration{1: withB}),
+		snapshot: &snapshot{index: 10, configurationIndex: 5, configuration: alone},
+		index:    5,
+	}, {
+		name:     "a snapshot with log after it, none of it configuration",
+		log:      logOf(12, map[uint64]raft.Configuration{1: withB}),
+		snapshot: &snapshot{index: 10, configurationIndex: 5, configuration: alone},
+		index:    5,
+	}, {
+		name:     "a snapshot with a configuration in the log after it",
+		log:      logOf(13, map[uint64]raft.Configuration{1: withB, 12: alone}),
+		snapshot: &snapshot{index: 10, configurationIndex: 5, configuration: withB},
+		index:    12,
+	}} {
+		t.Run(test.name, func(t *testing.T) {
+			logs, err := raftboltdb.NewBoltStore(filepath.Join(t.TempDir(), "raft.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer logs.Close()
+			for _, entry := range test.log {
+				if err := logs.StoreLog(entry); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snapshots := raft.NewInmemSnapshotStore()
+			_, transport := raft.NewInmemTransport("a")
+			if test.snapshot != nil {
+				sink, err := snapshots.Create(raft.SnapshotVersionMax, test.snapshot.index, 1, test.snapshot.configuration, test.snapshot.configurationIndex, transport)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sink.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r, err := raft.NewRaft(fastRaft("a"), discardFSM{}, logs, logs, snapshots, transport)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = r.Shutdown().Error() }()
+			c := &Cluster{logs: logs, snapshots: snapshots}
+			configuration, index, err := c.configuration()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := r.GetConfiguration().Configuration(); !reflect.DeepEqual(configuration, want) || index != test.index {
+				t.Fatalf("read %+v at %d, Raft has %+v at %d", configuration, index, want, test.index)
+			}
+			leading(t, r)
+			if err := r.AddVoter("c", "c", index, time.Second).Error(); err != nil {
+				t.Fatalf("Raft refused a change to the voters as read: %v", err)
+			}
+		})
+	}
+}
+
+// After a snapshot from the leader replaced the history of the log it
+// kept, the voters are read from the snapshot, not from that log: a node
+// that leads then still changes them.
+func TestAnInstalledSnapshotReplacesTheLogsVoters(t *testing.T) {
+	logs, err := raftboltdb.NewBoltStore(filepath.Join(t.TempDir(), "raft.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	withB := raft.Configuration{Servers: []raft.Server{{ID: "a", Address: "a", Suffrage: raft.Voter}, {ID: "b", Address: "b", Suffrage: raft.Voter}}}
+	alone := raft.Configuration{Servers: []raft.Server{{ID: "a", Address: "a", Suffrage: raft.Voter}}}
+	entries := make([]*raft.Log, 0, 20000)
+	for index := uint64(1); index <= 20000; index++ {
+		entry := &raft.Log{Index: index, Term: 1, Type: raft.LogNoop}
+		if index == 1 || index == 10000 {
+			entry = configurationEntry(index, withB)
+		}
+		entries = append(entries, entry)
+	}
+	if err := logs.StoreLogs(entries); err != nil {
+		t.Fatal(err)
+	}
+	snapshots := raft.NewInmemSnapshotStore()
+	_, transport := raft.NewInmemTransport("a")
+	_, sender := raft.NewInmemTransport("b")
+	sender.Connect("a", transport)
+	r, err := raft.NewRaft(fastRaft("a"), discardFSM{}, logs, logs, snapshots, transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown().Error() }()
+	// b, leading in term 2, sends a snapshot whose voters are a alone.
+	request := &raft.InstallSnapshotRequest{
+		RPCHeader:       raft.RPCHeader{ProtocolVersion: raft.ProtocolVersionMax, ID: []byte("b"), Addr: []byte("b")},
+		SnapshotVersion: raft.SnapshotVersionMax, Term: 2, LastLogIndex: 20000, LastLogTerm: 2,
+		Configuration: raft.EncodeConfiguration(alone), ConfigurationIndex: 15000,
+	}
+	var response raft.InstallSnapshotResponse
+	if err := sender.InstallSnapshot("a", "a", request, &response, bytes.NewReader(nil)); err != nil || !response.Success {
+		t.Fatalf("install the snapshot: %+v, %v", response, err)
+	}
+	leading(t, r)
+	if err := r.Barrier(time.Second).Error(); err != nil {
+		t.Fatal(err)
+	}
+	c := &Cluster{logs: logs, snapshots: snapshots}
+	configuration, index, err := c.configuration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(configuration, alone) || index != 15000 {
+		t.Fatalf("read %+v at %d, want a alone at 15000", configuration, index)
+	}
+	if err := r.AddVoter("c", "c", index, time.Second).Error(); err != nil {
+		t.Fatalf("Raft refused a change to the voters as read: %v", err)
 	}
 }
