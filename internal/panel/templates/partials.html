@@ -85,7 +85,7 @@ or the arrow keys move along it), the plot, and its axes as HTML. */}}
 
 {{define "bar"}}<svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.Width}}" height="6" fill="{{if ge .Width 90.0}}#ff5147{{else}}#b0b0b0{{end}}"/></svg>{{end}}
 
-{{define "copy"}}{{if .Archived}}<span class="faint nowrap">none, archived</span>{{else if not .Tenant.Replica}}{{if eq .Replica.Kind "bad"}}<span class="st bad">none</span>{{else}}<span class="faint">none</span>{{end}}{{else if .ReplicaNext}}<span class="st warn">{{.Tenant.Replica}}</span> <span class="dim nowrap">moving to {{.ReplicaNext}}</span>{{else if .ReplicaReady}}{{.Tenant.Replica}}{{else}}<span class="st warn">{{.Tenant.Replica}}</span> <span class="dim nowrap">catching up</span>{{end}}{{end}}
+{{define "copy"}}{{if .Archived}}<span class="faint">none, archived</span>{{else if not .Tenant.Replica}}{{if eq .Replica.Kind "bad"}}<span class="st bad">none</span>{{else}}<span class="faint">none</span>{{end}}{{else if .ReplicaNext}}<span class="st warn">{{.Tenant.Replica}}</span> <span class="dim">moving to {{.ReplicaNext}}</span>{{else if .ReplicaReady}}{{.Tenant.Replica}}{{else}}<span class="st warn">{{.Tenant.Replica}}</span> <span class="dim">catching up</span>{{end}}{{end}}
 
 {{/* A tenant's head, the same on each of its pages: its name and state,
 its pages beside it, what can be done to it, and where it runs. */}}

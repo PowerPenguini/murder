@@ -74,6 +74,15 @@ func TestLineChart(t *testing.T) {
 	if chart.Limit == nil || chart.Limit.Label != "limit 20" || chart.Top != "25" {
 		t.Fatalf("chart: limit %+v, top %q", chart.Limit, chart.Top)
 	}
+	// A scale under one keeps its unit: response times in seconds read in
+	// ms; a count under one a minute reads as a number, not "under 1".
+	quick := []sample{{At: now.Add(-time.Hour), Values: []float64{0.2}}, {At: now, Values: []float64{0.24}}}
+	if top := newLineChart("Response", []string{"p95"}, quick, 0, now, step, 24*time.Hour, wait, false).Top; !strings.HasSuffix(top, " ms") {
+		t.Fatalf("a response time's scale tops at %q", top)
+	}
+	if top := newLineChart("Requests", []string{"errors"}, quick, 0, now, step, 24*time.Hour, rate, false).Top; top == "under 1" || top == "" {
+		t.Fatalf("a count's scale tops at %q", top)
+	}
 	if last := points[7]; chart.Now != "1 used · 1 error" || last[1] != "Nov 2 17:15" || last[2] != "1 used" || last[3] != "1 error" {
 		t.Fatalf("now %q, last point %v", chart.Now, points[7])
 	}
@@ -151,6 +160,10 @@ func TestChartSpanAndMarks(t *testing.T) {
 	marks := chart.marksOf([]store.Event{{At: now.Add(-10 * time.Minute), Action: "tenant.restarted"}, {At: now.Add(-2 * time.Hour), Action: "tenant.rolled"}, {At: now.Add(-5 * time.Minute), Action: "tenant.rolled"}})
 	if len(marks) != 2 || marks[0].Kind != "restart" || marks[1].Kind != "change" {
 		t.Fatalf("marks %+v", marks)
+	}
+	// A mark at now is drawn whole, inside the lane.
+	if edge := chart.marksOf([]store.Event{{At: now.Add(-10 * time.Second), Action: "tenant.restarted"}}); len(edge) != 1 || edge[0].X > 997 {
+		t.Fatalf("a mark at now: %+v", edge)
 	}
 }
 

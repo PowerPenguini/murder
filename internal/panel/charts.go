@@ -251,6 +251,8 @@ func (c lineChart) marksOf(events []store.Event) []mark {
 		}
 	}
 	for i := range out {
+		// A mark at "now" or at the start is drawn whole, inside the lane.
+		out[i].X = round1(math.Max(3, math.Min(chartWidth-3, out[i].X)))
 		out[i].HitX = round1(math.Max(0, math.Min(chartWidth-markHit, out[i].X-markHit/2)))
 	}
 	return out
@@ -348,7 +350,7 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 	}
 	top := niceCeil(max(highest, highestLimit)*headroom, bytes)
 	chart.Top = format(top)
-	if top > 0 && top < 1 {
+	if chart.Top == "under 1" {
 		// A scale's top is a number, even where a reading says "under 1".
 		chart.Top = strconv.FormatFloat(round1(top), 'f', -1, 64)
 	}

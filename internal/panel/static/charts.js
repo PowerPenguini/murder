@@ -134,7 +134,8 @@
         for (const mark of lane.querySelectorAll("rect.m-restart, rect.m-change")) {
           const size = units(mark.classList.contains("m-restart") ? 3 : 6);
           mark.setAttribute("width", String(size));
-          mark.setAttribute("x", String(Number(mark.dataset.x) - size / 2));
+          // Whole, inside the lane, even at its ends.
+          mark.setAttribute("x", String(Math.max(0, Math.min(1000 - size, Number(mark.dataset.x) - size / 2))));
         }
       };
       widen();
