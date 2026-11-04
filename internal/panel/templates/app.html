@@ -124,7 +124,7 @@
 </section>
 
 {{if or (not $d.Rollout) $d.Archived}}<section id="tenants" data-live>
-  <div class="head"><h2>Tenants</h2></div>
+  <div class="head"><h2>{{if $d.Rollout}}Archived tenants{{else}}Tenants{{end}}</h2></div>
   <table class="list rows">
     <thead><tr><th>Tenant</th><th>State</th><th>Runs on</th><th>Revision</th><th>Rollouts</th></tr></thead>
     <tbody>

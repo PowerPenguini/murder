@@ -162,7 +162,14 @@ func (d *DemoCluster) note(actor, action, tenant, app, detail string) {
 // the caller holds d.mu.
 func (d *DemoCluster) current() {
 	for name, t := range d.tenants {
-		d.tenants[name] = d.settle(t)
+		t = d.settle(t)
+		// The agent checks a running tenant's health every pass.
+		if s := t.Status; s != nil && s.Phase == "running" && time.Since(s.CheckedAt) > 15*time.Second {
+			status := *s
+			status.CheckedAt = time.Now().Add(-4 * time.Second)
+			t.Status = &status
+		}
+		d.tenants[name] = t
 	}
 	d.drive()
 }
