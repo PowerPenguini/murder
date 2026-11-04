@@ -3,7 +3,7 @@
   <h1>Tenants</h1>
   {{if and .Acts $d.Apps}}
   <details class="drop end">
-    <summary class="button primary">New tenant</summary>
+    <summary class="button{{if not $.Alerts.Tenants}} primary{{end}}">New tenant</summary>
     <div class="pop">
       <form method="post" action="/tenants" class="stack">
         <label class="field">Name <input type="text" name="name" placeholder="acme" required maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end" autocomplete="off" spellcheck="false"></label>

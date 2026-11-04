@@ -62,6 +62,23 @@ func (m appMemory) Text() string {
 	return text
 }
 
+// Cause says it in one line, under the tenant it breaks: "Likely web's
+// 256 MB limit: 5 of its 6 tenants on it ran out of memory in 24 h."
+func (m appMemory) Cause() string {
+	return "Likely " + m.App + "'s " + memory(m.LimitMB) + " limit: " + strconv.Itoa(len(m.Hit)) + " of the " + plural(m.Inherit, "tenant", "tenants") + " on it ran out of memory in 24 h."
+}
+
+// Evidence says it whole: who ran out of memory, who its fix reaches, who
+// it does not.
+func (m appMemory) Evidence() string {
+	text := m.App + "'s limit is likely too low" + m.Text() + ": " + strings.Join(m.HitNames(), ", ") + ". Exit 137 is a likely memory kill, not a proof."
+	text += " Raising it to " + memory(m.ProposeMB) + " reaches " + plural(len(m.Reaches), "tenant", "tenants") + " now and may stop these restarts."
+	if ex := m.Exceptions(); ex != "" {
+		text += " Not every tenant: " + ex + "."
+	}
+	return text
+}
+
 // Exceptions says the tenants a change of the app's limit does not reach,
 // or not now: "atlas keeps its own 768 MB; test-staging is held".
 func (m appMemory) Exceptions() string {
@@ -88,8 +105,8 @@ func (m appMemory) Href() string {
 }
 
 // appMemoryOf is the app's tenants that ran out of memory since now
-// less oomSpan, if enough of those on the app's limit did to say the limit
-// is likely too low. Exit 137 is a likely memory kill, not a proof: the
+// less oomSpan at the limit in effect, if enough of those on the app's
+// limit did to say the limit is likely too low. Exit 137 is a likely memory kill, not a proof: the
 // panel proposes, it does not promise.
 func appMemoryOf(app api.App, tenants []api.Tenant, events []store.Event, now time.Time) *appMemory {
 	m := appMemory{App: app.Name, Hit: map[string]int{}, Own: map[string]int{}, LimitMB: app.Spec.Limits.MemoryMB}
@@ -126,10 +143,14 @@ func appMemoryOf(app api.App, tenants []api.Tenant, events []store.Event, now ti
 		if !e.At.After(now.Add(-oomSpan)) || !outOfMemory(e) || (e.App != "" && e.App != app.Name) {
 			continue
 		}
+		// Only kills at the limit in effect count: once it is raised,
+		// those at the old one say nothing of the new. An exit that does
+		// not say its limit counts.
+		ran, _ := parseExit(e.Detail)
 		switch {
-		case inherits[e.Tenant]:
+		case inherits[e.Tenant] && (ran.LimitMB == 0 || ran.LimitMB == m.LimitMB):
 			m.Hit[e.Tenant]++
-		case owns[e.Tenant] && !slices.Contains(m.OwnHit, e.Tenant):
+		case owns[e.Tenant] && (ran.LimitMB == 0 || ran.LimitMB == m.Own[e.Tenant]) && !slices.Contains(m.OwnHit, e.Tenant):
 			m.OwnHit = append(m.OwnHit, e.Tenant)
 		}
 	}
@@ -219,8 +240,11 @@ func operationOf(t api.Tenant, events []store.Event, now time.Time) *operation {
 			op.State, op.Kind = "done: it runs healthy", "ok"
 		case status.Phase == "running":
 			op.State, op.Kind = "it runs, but is not healthy", "bad"
-			if status.LastExit != "" {
-				op.State += "; last exit: " + status.LastExit
+			// The same kill after the restart: restarting did not help.
+			if e, ok := parseExit(status.LastExit); ok && e.Memory && e.At.After(op.Event.At) {
+				op.State = "restarting did not help: it ran out of memory again" + e.when(now)
+			} else if ok {
+				op.State += "; its last " + e.Reason(now)
 			}
 		case status.Phase == "failed":
 			op.State, op.Kind = "it failed", "bad"

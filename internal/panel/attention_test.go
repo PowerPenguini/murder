@@ -27,7 +27,8 @@ func TestAttention(t *testing.T) {
 		return tenantRow{Tenant: t, State: tenantState(t), Replica: replicaState(t, true)}
 	}
 	healthy := &reconcile.Status{Phase: "running", Healthy: true}
-	sick := tenant("sick", &reconcile.Status{Phase: "running", LastExit: "exit 137 (most likely out of memory) 4m ago"}, true)
+	// The agent's own words for a kill (reconcile.lastExit).
+	sick := tenant("sick", &reconcile.Status{Phase: "running", LastExit: "killed (SIGKILL) at " + now.Add(-4*time.Minute).UTC().Format(time.RFC3339) + ", most likely for using more than its 256 MB of memory"}, true)
 	full := tenant("full", healthy, true)
 	full.Use = &tenantUse{MemoryText: "240 MB", MemoryLimit: "256 MB", Memory: meterOf(240, 256)}
 	alone := tenant("alone", healthy, false)
@@ -43,7 +44,7 @@ func TestAttention(t *testing.T) {
 	text := strings.Join(said, "\n")
 	want := []string{
 		"n3 failed 6m ago: its tenants run from their copies, and it keeps none",
-		"sick is unhealthy: it does not answer its health check; last exit: exit 137 (most likely out of memory) 4m ago",
+		"sick is unhealthy: it does not answer its health check; it was last killed (exit 137) at 11:56:00 UTC, most likely for using more than its 256 MB of memory",
 		"full uses 240 MB of its 256 MB of memory",
 		"alone has no copy: if n1 fails, it stops",
 	}
@@ -58,6 +59,24 @@ func TestAttention(t *testing.T) {
 	if !got[0].Bad || !got[1].Bad || got[2].Bad {
 		t.Fatalf("the broken are not first: %+v", got)
 	}
+	// Each leads with a headline of 12 words at most, then its fix; the
+	// rest is evidence. Never "exit: exit".
+	heads := map[string]string{}
+	for _, n := range got {
+		heads[n.Subject] = n.Subject + n.Head
+		if words := len(strings.Fields(n.Subject + n.Head)); words > 12 {
+			t.Errorf("%q has %d words", n.Subject+n.Head, words)
+		}
+		if strings.Contains(n.Head+n.Text+strings.Join(n.Evidence, " "), "exit: exit") {
+			t.Errorf("exit: exit in %+v", n)
+		}
+	}
+	if heads["sick"] != "sick is unhealthy: out of memory 4m ago" || heads["full"] != "full uses 240 of 256 MB of memory" {
+		t.Fatalf("headlines: %q", heads)
+	}
+	if e := strings.Join(got[1].Evidence, " "); !strings.Contains(e, "It does not answer its health check.") || !strings.Contains(e, "most likely for using more than its 256 MB of memory") {
+		t.Fatalf("sick's evidence: %q", e)
+	}
 	// A tenant with several things wrong is one notice, saying them all,
 	// with a way to fix each; a copy still catching up is a risk too.
 	both := tenant("both", &reconcile.Status{Phase: "running"}, false)
@@ -66,8 +85,11 @@ func TestAttention(t *testing.T) {
 	if len(got) != 1 || !got[0].Bad || !strings.Contains(got[0].Text, "is unhealthy") || !strings.Contains(got[0].Text, "; it uses 240 MB of its 256 MB") || !strings.Contains(got[0].Text, "still catching up") {
 		t.Fatalf("one tenant, several causes: %+v", got)
 	}
-	if len(got[0].Fixes) != 2 || got[0].Fixes[0].Href != "/tenants/both/logs" || got[0].Fixes[1].Href != "/tenants/both/settings#memory" {
-		t.Fatalf("fixes: %+v", got[0].Fixes)
+	if len(got[0].Fixes) != 1 || got[0].Fixes[0].Href != "/tenants/both/logs" || got[0].Primary == nil || got[0].Primary.Href != "/tenants/both/settings#memory" {
+		t.Fatalf("fixes: %+v, primary %+v", got[0].Fixes, got[0].Primary)
+	}
+	if got[0].Head != " is unhealthy: it fails its health check, 240 of 256 MB" || len(got[0].Evidence) != 2 || !strings.Contains(got[0].Evidence[1], "Its copy on n2 is still catching up") {
+		t.Fatalf("several causes, the worst first: %q, %q", got[0].Head, got[0].Evidence)
 	}
 }
 
@@ -87,7 +109,9 @@ func TestAttentionOnThePages(t *testing.T) {
 		t.Fatalf("the overview does not say what needs attention:\n%s", page)
 	}
 	_, page = get(t, server.URL+"/tenants/baltic-freight")
-	if !strings.Contains(page, `class="nrow bad"`) || !strings.Contains(page, "It is unhealthy") || !strings.Contains(page, "Raise web's memory limit (review)") || !strings.Contains(page, "Only this tenant: raise its limit") {
+	if !strings.Contains(page, `class="nrow bad"`) || !strings.Contains(page, "<strong>It is unhealthy: out of memory 4m ago,") || !strings.Contains(page, `class="button primary">Raise web's memory limit</a>`) ||
+		!strings.Contains(page, "Only this tenant: raise its limit") || !strings.Contains(page, `href="/tenants/baltic-freight/logs?container=previous">Its last lines before the exit`) ||
+		!strings.Contains(page, "Likely web&#39;s 256 MB limit: 5 of the 6 tenants on it ran out of memory in 24 h.") || !strings.Contains(page, "<summary>Evidence and affected tenants</summary>") {
 		t.Fatalf("the tenant's page does not say what is wrong:\n%s", page)
 	}
 	// A dangerous action's button waits for the name typed.

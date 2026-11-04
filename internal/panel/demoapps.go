@@ -13,7 +13,7 @@ import (
 )
 
 // AsApps is the cluster's apps and tenants' settings, edited by actor.
-func (d *DemoCluster) AsApps(actor string) AppAgent { return &demoActor{d, actor} }
+func (d *DemoCluster) AsApps(actor string) AppAgent { return &demoActor{DemoCluster: d, actor: actor} }
 
 // demoApps makes the demo's apps from its tenants, and gives one tenant
 // settings of its own.
@@ -82,8 +82,25 @@ func (d *DemoCluster) demoApps() {
 		CreatedAt: created, UpdatedAt: created}
 	t := d.tenants["atlas"]
 	t.Overrides = spec.Overrides{Env: map[string]string{"TZ": "Europe/Berlin", "FEATURE_PLANNER": "on"}, Secrets: spec.Secrets{"ADMIN_PASSWORD": {Kind: "password", Bytes: 20}}, Limits: spec.Limits{MemoryMB: 768}}
-	t.Spec = spec.Compose(d.apps[t.App].Spec, t.Spec.Name, t.Overrides)
 	d.tenants["atlas"] = t
+	// Each tenant runs its app's spec, of the revision it is on, with its
+	// overrides, composed as the store composes it.
+	for name, t := range d.tenants {
+		app, ok := d.apps[t.App]
+		if !ok {
+			continue
+		}
+		from := app.Spec
+		if t.AppRevision != 0 {
+			if kept, ok := d.revisionSpec(t.App, t.AppRevision); ok {
+				from = kept
+			}
+		}
+		suspended := t.Spec.Suspended
+		t.Spec = spec.Compose(from, name, t.Overrides)
+		t.Spec.Suspended = suspended
+		d.tenants[name] = t
+	}
 }
 
 // liveTenantsOf lists the live tenants of app; the caller holds d.mu.
@@ -163,15 +180,7 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 			stored.Latest, stored.LatestAt = old.Latest, old.LatestAt
 		}
 	}
-	a.apps[name] = stored
 	a.revisions[name] = append(a.revisions[name], store.Revision{Revision: stored.Revision, Spec: app, Tag: tag, CreatedAt: now, Actor: a.actor})
-	for _, tenant := range a.liveTenantsOf(name) {
-		t := a.tenants[tenant]
-		t.Spec = spec.Compose(app, tenant, t.Overrides)
-		t.Generation++
-		a.tenants[tenant] = t
-		applied.Tenants = append(applied.Tenants, t)
-	}
 	action := "app.updated"
 	if !existed {
 		action = "app.created"
@@ -180,6 +189,42 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 	if detail != "" {
 		a.events[0].Detail = detail
 	}
+	// As the store does: a tenant whose spec does not change, on the
+	// newest revision, is left as it is; a held one keeps its revision; in
+	// waves, the others wait for the rollout, which keeps the revision
+	// each runs until it moves them; at once, each moves now.
+	waves := existed && !a.atOnce
+	for _, tenant := range a.liveTenantsOf(name) {
+		t := a.tenants[tenant]
+		composed := spec.Compose(app, tenant, t.Overrides)
+		composed.Suspended = t.Spec.Suspended
+		if composed.Equal(t.Spec) && t.AppRevision == 0 {
+			continue
+		}
+		if t.Hold {
+			if t.AppRevision == 0 {
+				t.AppRevision = old.Revision
+			}
+			a.tenants[tenant] = t
+			continue
+		}
+		applied.Tenants = append(applied.Tenants, t)
+		if waves {
+			if t.AppRevision == 0 {
+				t.AppRevision, t.BeforeRevision = old.Revision, 0
+			}
+			a.tenants[tenant] = t
+			continue
+		}
+		t.AppRevision, t.BeforeRevision = 0, 0
+		a.moveTenant(&t, composed, "app changed")
+		a.tenants[tenant] = t
+	}
+	if waves && len(applied.Tenants) > 0 {
+		applied.Rollout = true
+		stored.Rollout = &store.Rollout{App: name, ToRevision: stored.Revision, State: store.RolloutRunning, WaveStarted: now, StartedAt: now, UpdatedAt: now, Actor: a.actor}
+	}
+	a.apps[name] = stored
 	stored.Tenants = a.liveTenantsOf(name)
 	applied.App = stored
 	return applied, nil
@@ -324,6 +369,23 @@ func (a *demoActor) RolloutAction(_ context.Context, name, action string) (api.A
 		rollout.State, rollout.Reason, rollout.WaveStarted = store.RolloutRunning, "", time.Now()
 	case "abort":
 		rollout.State, rollout.Reason = store.RolloutAborted, "aborted by "+a.actor
+		// Every tenant it moved goes back to the revision it ran before.
+		for _, tenant := range a.liveTenantsOf(name) {
+			t := a.tenants[tenant]
+			if t.BeforeRevision == 0 || t.Hold {
+				continue
+			}
+			before, ok := a.revisionSpec(name, t.BeforeRevision)
+			if !ok {
+				continue
+			}
+			composed := spec.Compose(before, tenant, t.Overrides)
+			composed.Suspended = t.Spec.Suspended
+			back := t.BeforeRevision
+			t.AppRevision, t.BeforeRevision = back, 0
+			a.moveTenant(&t, composed, "aborted: back to revision "+strconv.FormatInt(back, 10))
+			a.tenants[tenant] = t
+		}
 	case "promote":
 		if rollout.State != store.RolloutRunning {
 			return api.App{}, &api.Error{Status: 409, Message: "the rollout of app " + name + " is " + rollout.State + ": resume it first"}

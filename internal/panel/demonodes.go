@@ -28,7 +28,9 @@ type demoNodes struct {
 const demoBinary = "9f2c4be1a07d3355e0c1d7a8b6f4e2d1c0b9a8f7e6d5c4b3a2918070605040302"
 
 // AsCluster is the cluster acted on by actor, for the cluster page.
-func (d *DemoCluster) AsCluster(actor string) ClusterAgent { return &demoActor{d, actor} }
+func (d *DemoCluster) AsCluster(actor string) ClusterAgent {
+	return &demoActor{DemoCluster: d, actor: actor}
+}
 
 func (d *DemoCluster) Nodes(ctx context.Context) (api.Nodes, error) {
 	nodes, err := d.Demo.Nodes(ctx)

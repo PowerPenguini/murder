@@ -238,9 +238,16 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 					exits.at = state.ExitedAt
 					exits.last = lastExit(state, tenant.Limits.Or(r.config.DefaultLimits).MemoryMB)
 					// Its lines up to the exit, before the new run's.
+					memoryMB := tenant.Limits.Or(r.config.DefaultLimits).MemoryMB
 					r.keepPrevious(ctx, tenant.Name, *current, Previous{Why: "exited", Image: tenant.Image,
 						ExitedAt: state.ExitedAt.UTC(), ExitKnown: state.ExitKnown, ExitCode: state.ExitCode, OOMKilled: state.OOMKilled,
-						MemoryMB: tenant.Limits.Or(r.config.DefaultLimits).MemoryMB})
+						MemoryMB: memoryMB})
+					// Said in the audit log, once per exit, with the limit
+					// it ran under: whether a limit is too low is judged
+					// from the kills at the limit in effect.
+					if err := r.store.AppExited(tenant.Name, ExitDetail(state, memoryMB)); err != nil {
+						r.log.Warn("record the app's exit", "tenant", tenant.Name, "error", err)
+					}
 				}
 				restarted = true
 			}
@@ -268,6 +275,21 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		return status, nil
 	}
 	return Status{Phase: PhaseRunning, ContainerID: current.ID}, nil
+}
+
+// ExitDetail is how an app exit is said in the audit log: its code first,
+// then, for a kill, the memory limit it ran under, which the panel reads:
+// "exit 137: killed for using more than its 256 MB of memory".
+func ExitDetail(state runtime.ContainerState, memoryMB int) string {
+	switch {
+	case !state.ExitKnown:
+		return "exited; its code is not known"
+	case state.OOMKilled:
+		return fmt.Sprintf("exit %d: killed for using more than its %d MB of memory", state.ExitCode, memoryMB)
+	case state.ExitCode == 137 && memoryMB > 0:
+		return fmt.Sprintf("exit 137: killed (SIGKILL), most likely for using more than its %d MB of memory", memoryMB)
+	}
+	return fmt.Sprintf("exit %d", state.ExitCode)
 }
 
 // lastExit describes the last exit of a container's process.

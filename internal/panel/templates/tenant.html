@@ -3,9 +3,10 @@
 {{if or $d.Problem $d.Operation $d.Place}}
 <div class="notices" aria-label="what is wrong with {{$t.Spec.Name}}, and what is happening">
   {{with $d.Problem}}<div class="nrow{{if $d.Broken}} bad{{end}}" role="{{if $d.Broken}}alert{{else}}status{{end}}">
-    <p class="flat">{{.}}</p>
-    {{with $d.AppMemory}}<p class="flat spaced">The likely cause is {{.App}}'s limit: {{len .Hit}} of the {{plural .Inherit "tenant" "tenants"}} on its {{mem .LimitMB}} limit ran out of memory in the last 24 hours, {{$t.Spec.Name}} among them. Raising it to {{mem .ProposeMB}} reaches {{plural (len .Reaches) "tenant" "tenants"}} now and may stop these restarts.{{with .Exceptions}} Not every tenant: {{.}}.{{end}}</p>{{end}}
-    {{if or $d.Broken (and $d.MemoryHigh $.Edits)}}<span class="fixes">{{with $d.AppMemory}}{{if $.Edits}}<a href="{{.Href}}">Raise {{.App}}'s memory limit (review)</a>{{end}}{{end}}{{if $.Acts}}<a href="/tenants/{{$t.Spec.Name}}/logs">Read its logs</a>{{end}}{{if and $d.MemoryHigh $.Edits}}<a href="{{raise $t}}">{{if $d.AppMemory}}Only this tenant: raise its limit{{else}}Raise its memory limit{{end}}</a>{{end}}</span>{{end}}
+    <p class="nhead"><strong>{{.}}</strong></p>
+    {{with $d.AppMemory}}<p class="cause bad">{{.Cause}}</p>{{end}}
+    {{if or $d.Broken (and $d.MemoryHigh $.Edits)}}<div class="nacts">{{if and $d.AppMemory $.Edits}}<a href="{{$d.AppMemory.Href}}" class="button primary">Raise {{$t.App}}'s memory limit</a>{{else if and $d.MemoryHigh $.Edits}}<a href="{{raise $t}}" class="button{{if $d.Broken}} primary{{end}}">Raise its memory limit</a>{{end}}{{if $.Acts}}{{if $d.Exited}}<a href="/tenants/{{$t.Spec.Name}}/logs?container=previous">Its last lines before the exit</a>{{else}}<a href="/tenants/{{$t.Spec.Name}}/logs">Read its logs</a>{{end}}{{end}}</div>{{end}}
+    {{if or $d.Evidence $d.AppMemory}}<details class="evidence"><summary>Evidence{{if $d.AppMemory}} and affected tenants{{end}}</summary><div class="evbody">{{range $d.Evidence}}<p>{{.}}</p>{{end}}{{with $d.AppMemory}}<p>{{.Evidence}}</p>{{if and $d.MemoryHigh $.Edits}}<p class="fixes"><a href="{{raise $t}}">Only this tenant: raise its limit</a></p>{{end}}{{end}}</div></details>{{end}}
   </div>{{end}}
   {{with $d.Place}}{{$r := $d.Rollout}}<div class="nrow{{if .Blocks}} bad{{end}}">{{if .Blocks}}<span class="lead-in">It blocks {{$t.App}}'s rollout</span> of revision {{.To}}: it moved in {{lower (wavename (sub .Wave 1))}} and is not healthy on it, so the next wave ({{lower (wavename $r.Wave)}}) waits.{{else if .Moved}}Rolling out: it moved from revision {{.From}} to {{.To}} in {{lower (wavename (sub .Wave 1))}}.{{else if .Held}}Held on revision {{.From}} while {{$t.App}} rolls out revision {{.To}}.{{else if ne .From .To}}Rolling out: it runs revision {{.From}} and moves to {{.To}} in {{lower (wavename (sub .Wave 1))}}.{{end}} <a href="/apps/{{$t.App}}#r-{{.Name}}">Its place in the rollout</a></div>{{end}}
   {{with $d.Operation}}<div class="nrow{{if eq .Kind "bad"}} bad{{end}}" role="status"><span class="lead-in">{{.Said}}</span> by {{if eq .Event.Actor $d.Me}}you{{else}}{{.Event.Actor}}{{end}} {{ago .Event.At}} ago: {{.State}}. <a href="/events?tenant={{$t.Spec.Name}}&amp;show=all">Its events</a>{{if eq .Kind "busy"}} · <a href="/tenants/{{$t.Spec.Name}}/logs?follow=1">Follow its logs</a>{{end}}</div>{{end}}
@@ -63,7 +64,7 @@
     <div><dt>Phase</dt><dd>{{.Phase}}{{if and (eq .Phase "running") (not .Healthy)}}, not healthy{{end}}</dd></div>
     <div><dt>Restarts of this container</dt><dd class="num{{if and .Restarts $d.Broken}} red{{end}}">{{.Restarts}}</dd></div>
     <div><dt>Checked</dt><dd>{{ago .CheckedAt}} ago</dd></div>
-    {{if and .LastExit (not $d.Broken)}}<div><dt>Last exit</dt><dd>{{.LastExit}}</dd></div>{{end}}
+    {{if and .LastExit (not $d.Broken)}}<div><dt>Last exit</dt><dd>{{exitsaid .LastExit}}</dd></div>{{end}}
     {{else}}
     <div><dt>Phase</dt><dd class="dim">{{if $t.Archived}}archived, runs nowhere{{else}}not known: its node did not answer{{end}}</dd></div>
     <div><dt>Restarts</dt><dd class="dim">not known</dd></div>

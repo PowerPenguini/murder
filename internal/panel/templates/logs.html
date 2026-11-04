@@ -31,7 +31,7 @@
       {{if $d.Follow}}<span class="st busy">following</span> <a href="{{$d.Link "follow" ""}}">Pause</a>{{else}}<a href="{{$d.Link "follow" "1"}}">Follow new lines</a> · <a href="">Read again</a>{{end}}</p>
     {{if $d.Previous}}<p class="hint">Its current run's lines. Those before it {{if eq $d.Previous.Why "exited"}}exited{{else if eq $d.Previous.Why "stopped"}}was stopped{{else}}was replaced{{end}} ({{$d.PreviousSaid}}) are kept apart: <a href="{{$d.Link "container" "previous" "follow" ""}}">Previous container</a>.</p>
     {{else if $d.PreviousProblem}}<p class="hint">Its previous container's lines could not be read: {{$d.PreviousProblem}}</p>
-    {{else if $d.Restarted}}<p class="hint">Only its current container's lines: its node kept none of the one before{{with $d.LastExit}} ({{.}}){{end}}. A node keeps them as a container exits or is replaced, not when the node itself stopped, nor for a tenant that moved here.</p>{{end}}
+    {{else if $d.Restarted}}<p class="hint">Only its current container's lines: its node kept none of the one before{{with $d.LastExit}}, {{exitsaid .}}{{end}}. A node keeps them as a container exits or is replaced, not when the node itself stopped, nor for a tenant that moved here.</p>{{end}}
     {{end}}
     {{if $d.Lines}}
     <div class="logs" id="log-lines"{{if $d.Follow}} data-follow{{end}} tabindex="0" aria-label="{{$n}}'s log lines{{if $d.Showing}}, previous container{{end}}">{{range $d.Lines}}<div{{with .Level}} class="{{.}}"{{end}}>{{if .Stamp}}<time class="ts" datetime="{{.Stamp}}"><span class="t-short">{{.Short}}</span><span class="t-full">{{.Stamp}}</span></time> {{end}}{{.Text}}</div>{{end}}</div>

@@ -2,6 +2,7 @@ package panel
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,10 +31,18 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	file := between(page, `aria-label="the app's spec">`, "</textarea>")
 	changed := strings.Replace(file, "memoryMB: 256", "memoryMB: 512", 1)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review"}, "file": {changed}, "updated": {updated}}, server.URL)
-	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", "Canaries", "atlas", "FEATURE_PLANNER", `name="do" value="save"`, "Roll out to 6 tenants", "Held, and left out until released", "A rollout of revision 3 is blocked at A tenth by baltic-freight"} {
+	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", "Canaries", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked at A tenth by baltic-freight",
+		// Only the tenants whose spec changes restart, and are counted:
+		// atlas keeps its own memory, so the change leaves it.
+		"5 restart · 1 unchanged · 1 held, left out", "Roll out to 5 tenants", "Memory 256 MB → 512 MB", "Unchanged: memory stays 768 MB",
+		// A settings change to a broken tenant: at once is proposed.
+		`name="pace" value="now" checked`, "the 5 restart at once"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the review lacks %q:\n%s", want, body)
 		}
+	}
+	if strings.Contains(between(body, "How it rolls out", "Its data"), "atlas") {
+		t.Fatalf("atlas, which the change leaves, is in its waves:\n%s", body)
 	}
 	if app, _ := agent.App(ctx, "web"); app.Revision != 3 {
 		t.Fatalf("a review stored the change: revision %d", app.Revision)
@@ -51,6 +60,18 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"review-restore"}, "revision": {"2"}, "updated": {updated}}, server.URL)
 	if !strings.Contains(body, "Going back to revision 2") || !strings.Contains(body, strings.Repeat("a1", 32)) || !strings.Contains(body, `name="revision" value="2"`) || !strings.Contains(body, `value="restore"`) {
 		t.Fatalf("going back's review:\n%s", body)
+	}
+	// The three that run revision 2 already keep their containers; the
+	// three the blocked rollout moved return, and Abort is said beside it.
+	for _, want := range []string{"Return 3 tenants to revision 2", "3 restart · 3 keep their container", "Runs it already: keeps its container",
+		"Or abort that rollout instead: it takes the 3 tenants it moved (acme-logistics, atlas, baltic-freight) back", `name="pace" value="waves" checked`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("going back's review lacks %q:\n%s", want, body)
+		}
+	}
+	// Only what differs is said to change: the image, not the secrets.
+	if strings.Contains(between(body, "Affected tenants", "How it rolls out"), "(secret)") {
+		t.Fatalf("a secret said to change:\n%s", body)
 	}
 	// Rolled out from the review, it is stored.
 	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"save"}, "file": {changed}, "updated": {updated}}, server.URL)
@@ -241,7 +262,8 @@ func TestCauseTenantAndRolloutJoin(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, page := get(t, server.URL+"/")
 	for _, want := range []string{"It blocks web&#39;s rollout of revision 3: the next wave (half) waits for it.", "web&#39;s limit is likely too low: 5 of the 6 tenants on its 256 MB limit ran out of memory",
-		"atlas keeps its own 768 MB", "test-staging is held on its revision", "Raise web&#39;s memory limit (review)", "/apps/web?memoryMB=512#spec", "Only this tenant: raise its limit"} {
+		"atlas keeps its own 768 MB", "test-staging is held on its revision", `class="button primary">Raise web&#39;s memory limit</a>`, "/apps/web?memoryMB=512#spec", "Only this tenant: raise its limit",
+		"baltic-freight</a> is unhealthy: out of memory 4m ago,", "Likely web&#39;s 256 MB limit: 5 of the 6 tenants on it ran out of memory in 24 h."} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the overview lacks %q:\n%s", want, page)
 		}
@@ -291,8 +313,17 @@ func TestAppMemoryAdvice(t *testing.T) {
 		return t
 	}
 	tenants := []api.Tenant{mk("a", 0, false, false), mk("b", 0, false, false), mk("c", 0, false, false), mk("d", 768, false, false), mk("e", 0, true, false), mk("f", 0, false, true)}
+	// As the agent records a kill: at the limit the container ran under.
+	killAt := func(name string, ago time.Duration, mb int) store.Event {
+		return store.Event{At: now.Add(-ago), Actor: "murder", Action: "tenant.restarted", Tenant: name, App: "web",
+			Detail: fmt.Sprintf("exit 137: killed (SIGKILL), most likely for using more than its %d MB of memory", mb)}
+	}
 	oom := func(name string, ago time.Duration) store.Event {
-		return store.Event{At: now.Add(-ago), Action: "tenant.restarted", Tenant: name, App: "web", Detail: "exit 137 (most likely out of memory)"}
+		mb := 256
+		if name == "d" {
+			mb = 768
+		}
+		return killAt(name, ago, mb)
 	}
 	events := []store.Event{oom("a", time.Hour), oom("b", 2*time.Hour), oom("d", 3*time.Hour), oom("c", 30*time.Hour)}
 	if m := appMemoryOf(app, tenants, events, now); m != nil {
@@ -308,6 +339,21 @@ func TestAppMemoryAdvice(t *testing.T) {
 	}
 	if m.Text() != ": 4 of the 5 tenants on its 256 MB limit ran out of memory in the last 24 hours" || !strings.Contains(m.Exceptions(), "d keeps its own 768 MB (and ran out of it too)") {
 		t.Fatalf("%q / %q", m.Text(), m.Exceptions())
+	}
+	// The fix applied: the app's limit is 512 MB. The kills at 256 MB say
+	// nothing of it, so the advice is gone...
+	app.Spec.Limits.MemoryMB = 512
+	if m := appMemoryOf(app, tenants, events, now); m != nil {
+		t.Fatalf("advice from kills at the old limit: %+v", m)
+	}
+	// ...until it happens again, to three tenants, at 512 MB.
+	events = append(events, killAt("a", time.Minute, 512), killAt("b", time.Minute, 512))
+	if m := appMemoryOf(app, tenants, events, now); m != nil {
+		t.Fatalf("two at the new limit: %+v", m)
+	}
+	events = append(events, killAt("c", time.Minute, 512))
+	if m := appMemoryOf(app, tenants, events, now); m == nil || len(m.Hit) != 3 || m.LimitMB != 512 || m.ProposeMB != 1024 || len(m.OwnHit) != 1 {
+		t.Fatalf("at the new limit: %+v", m)
 	}
 }
 
@@ -497,5 +543,44 @@ func TestRestoreAtAChosenTimeAndImageReferences(t *testing.T) {
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review-update"}, "updated": {updated}}, server.URL)
 	if !strings.Contains(body, "Full image reference") || !strings.Contains(body, strings.Repeat("5e", 32)) || !strings.Contains(body, "is blocked at A tenth by baltic-freight") {
 		t.Fatalf("the image review:\n%s", body)
+	}
+}
+
+// The 3 a.m. path, followed through: the panel's own fix, raising web's
+// limit at once, is applied; baltic-freight comes back on 512 MB; and the
+// advice is not given again against the new limit for kills at the old.
+func TestTheFixIsAppliedAndTheAdviceGoes(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	_, page := get(t, server.URL+"/apps/web?memoryMB=512")
+	updated := between(page, `name="updated" value="`, `"`)
+	file := between(page, `aria-label="the app's spec">`, "</textarea>")
+	if !strings.Contains(file, "memoryMB: 512") {
+		t.Fatalf("the proposal is not in the editor:\n%s", file)
+	}
+	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"save"}, "file": {file}, "updated": {updated}, "pace": {"now"}}, server.URL)
+	if !strings.Contains(body, "app web is changed; it rolls out to 5 tenants") {
+		t.Fatalf("after the fix:\n%s", body)
+	}
+	// The new containers start, and settle.
+	cluster.mu.Lock()
+	for name, tenant := range cluster.tenants {
+		if tenant.Status != nil && tenant.Status.Phase == "starting" {
+			status := *tenant.Status
+			status.CheckedAt = status.CheckedAt.Add(-time.Minute)
+			tenant.Status = &status
+			cluster.tenants[name] = tenant
+		}
+	}
+	cluster.mu.Unlock()
+	baltic, _ := cluster.Get(context.Background(), "baltic-freight")
+	if baltic.Spec.Limits.MemoryMB != 512 || baltic.Status == nil || !baltic.Status.Healthy {
+		t.Fatalf("baltic-freight after the fix: %+v", baltic.Status)
+	}
+	_, page = get(t, server.URL+"/")
+	if strings.Contains(page, "limit is likely too low") || strings.Contains(page, "Likely web") || strings.Contains(page, "baltic-freight</a> is unhealthy") {
+		t.Fatalf("the advice after the fix:\n%s", page)
+	}
+	if _, page = get(t, server.URL+"/apps/web"); strings.Contains(page, "Its memory limit is likely too low") {
+		t.Fatalf("the app's advice after the fix:\n%s", page)
 	}
 }

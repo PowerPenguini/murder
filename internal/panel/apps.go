@@ -39,6 +39,21 @@ type AppAgent interface {
 	SetFlags(ctx context.Context, name string, flags api.TenantFlags) (api.Tenant, error)
 }
 
+// paced is the agent an app change asked for goes through: one that moves
+// every tenant at once when the review chose "now", else in waves.
+func paced(agent AppAgent, r *http.Request) AppAgent {
+	if r.FormValue("pace") != "now" {
+		return agent
+	}
+	switch a := agent.(type) {
+	case interface{ AtOnce() *api.Client }:
+		return a.AtOnce()
+	case interface{ AppsAtOnce() AppAgent }:
+		return a.AppsAtOnce()
+	}
+	return agent
+}
+
 // formLimit bounds an app's or settings' form.
 const formLimit = 256 << 10
 
@@ -198,6 +213,13 @@ type appData struct {
 	// holds a proposed change, from a link.
 	Memory   *appMemory
 	Proposed string
+}
+
+// Red says something on the app's page is wrong: a blocked rollout, a
+// limit that breaks a tenant. Its fix is then the page's filled button,
+// not the newer image's review.
+func (d appData) Red() bool {
+	return (d.Rollout != nil && len(d.Rollout.Blockers) > 0) || (d.Memory != nil && d.Memory.Bad)
 }
 
 func (s *Server) app(w http.ResponseWriter, r *http.Request) {
@@ -383,7 +405,7 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Checked again as it is stored, after the image is pulled.
-		applied, err := agent.PutAppIf(ctx, name, app, store.AppIf{UpdatedAt: current.UpdatedAt})
+		applied, err := paced(agent, r).PutAppIf(ctx, name, app, store.AppIf{UpdatedAt: current.UpdatedAt})
 		if err != nil {
 			refuse(err.Error())
 			return
@@ -434,14 +456,14 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 		}
 		var applied api.AppApplied
 		if r.FormValue("do") == "update" {
-			applied, err = agent.UpdateApp(ctx, name, current.UpdatedAt)
+			applied, err = paced(agent, r).UpdateApp(ctx, name, current.UpdatedAt)
 		} else {
 			revision, parseErr := strconv.ParseInt(r.FormValue("revision"), 10, 64)
 			if parseErr != nil {
 				back("problem", "no such revision")
 				return
 			}
-			applied, err = agent.RestoreRevision(ctx, name, revision, current.UpdatedAt)
+			applied, err = paced(agent, r).RestoreRevision(ctx, name, revision, current.UpdatedAt)
 		}
 		if err != nil {
 			back("problem", err.Error())

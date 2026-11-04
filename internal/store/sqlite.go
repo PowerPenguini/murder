@@ -1483,6 +1483,20 @@ func (s *SQLite) Observe(name, dataImage string) error {
 	return err
 }
 
+// AppExited records, for the node that runs a tenant, that its app exited
+// and its container was started again, with how: frozen or not, since an
+// exit during an upgrade happened all the same. Every release applies it.
+func (s *SQLite) AppExited(name, detail string) error {
+	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[name]
+		if !ok {
+			return fmt.Errorf("tenant %s: %w", name, ErrNotFound)
+		}
+		return event(tx, now, "murder", "tenant.restarted", name, record.App, detail)
+	})
+	return err
+}
+
 // notMoving refuses a change that would pull a tenant from under its move:
 // the move finishes or is undone first.
 func notMoving(record Record) error {

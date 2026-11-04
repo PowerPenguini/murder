@@ -31,6 +31,9 @@ type State interface {
 	// Restored records that a tenant's data went back to image, as its
 	// Restore asked.
 	Restored(name, image string) error
+	// AppExited records in the audit log that a tenant's app exited and
+	// was started again, and how.
+	AppExited(name, detail string) error
 }
 
 // The agent passes its store.

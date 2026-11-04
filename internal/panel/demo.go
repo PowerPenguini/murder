@@ -59,7 +59,7 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 		}
 	}
 	moving := tenant("kowalski-trans", "web", "nbg-1", "fsn-1", true, running(0))
-	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 1, LastExit: "exit 137 (most likely out of memory) 4m ago", Generation: 3, CheckedAt: now.Add(-3 * time.Second)})
+	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 1, LastExit: "killed (SIGKILL) at " + now.Add(-4*time.Minute).UTC().Format(time.RFC3339) + ", most likely for using more than its 256 MB of memory", Generation: 3, CheckedAt: now.Add(-3 * time.Second)})
 	syncing := tenant("nordwind", "web", "fsn-1", "nbg-1", false, running(0))
 	suspended := tenant("test-staging", "web", "fsn-1", "nbg-1", true, &reconcile.Status{Phase: "stopped", Generation: 5, CheckedAt: now.Add(-6 * time.Second)})
 	suspended.Spec.Suspended = true
@@ -83,11 +83,15 @@ func (d Demo) Get(ctx context.Context, name string) (api.Tenant, error) {
 	return api.Tenant{}, &api.Error{Status: 404, Message: fmt.Sprintf("tenant %s: not found", name)}
 }
 
+// demoKill is how the agent records a memory kill in the audit log
+// (reconcile.ExitDetail), at the app's limit.
+const demoKill = "exit 137: killed (SIGKILL), most likely for using more than its 256 MB of memory"
+
 func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, error) {
 	now := d.now()
 	all := []store.Event{
 		// Its last exit, which the tenant's status says.
-		{At: now.Add(-4 * time.Minute), Actor: "murder", Action: "tenant.restarted", Tenant: "baltic-freight", App: "web", Detail: "exit 137 (most likely out of memory)"},
+		{At: now.Add(-4 * time.Minute), Actor: "murder", Action: "tenant.restarted", Tenant: "baltic-freight", App: "web", Detail: demoKill},
 		{ID: 214, At: now.Add(-50 * time.Second), Actor: "murder", Action: "tenant.replica", Tenant: "vistula-cargo", App: "web", Detail: "a new copy on fsn-1, as hel-1 failed"},
 		{ID: 213, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "node.failed-over", Detail: "hel-1: 2 tenants run from their copies"},
 		{ID: 212, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "vistula-cargo", App: "web", Detail: "hel-1 → nbg-1"},
@@ -122,7 +126,7 @@ func withHistory(events []store.Event, now time.Time) []store.Event {
 		{"tenant.replica-ready", "the copy holds the whole data"},
 		{"tenant.rolled", ""},
 		{"tenant.replica", "copy kept"},
-		{"tenant.restarted", "exit 137 (most likely out of memory)"},
+		{"tenant.restarted", demoKill},
 	}
 	seed := uint32(7)
 	next := func(n int) int {

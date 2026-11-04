@@ -3,11 +3,13 @@ package panel
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -39,15 +41,15 @@ func NewDemoCluster() *DemoCluster {
 }
 
 // As is the cluster acted on by actor, as the agent's client is.
-func (d *DemoCluster) As(actor string) ActionAgent { return &demoActor{d, actor} }
+func (d *DemoCluster) As(actor string) ActionAgent { return &demoActor{DemoCluster: d, actor: actor} }
 
 func (d *DemoCluster) List(context.Context) ([]api.Tenant, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.current()
 	var out []api.Tenant
-	for name, t := range d.tenants {
-		d.tenants[name] = settle(t)
-		out = append(out, d.tenants[name])
+	for _, t := range d.tenants {
+		out = append(out, t)
 	}
 	return out, nil
 }
@@ -55,12 +57,12 @@ func (d *DemoCluster) List(context.Context) ([]api.Tenant, error) {
 func (d *DemoCluster) Get(_ context.Context, name string) (api.Tenant, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.current()
 	t, ok := d.tenants[name]
 	if !ok {
 		return t, &api.Error{Status: 404, Message: fmt.Sprintf("tenant %s: not found", name)}
 	}
-	d.tenants[name] = settle(t)
-	return d.tenants[name], nil
+	return t, nil
 }
 
 func (d *DemoCluster) Events(_ context.Context, query store.EventQuery) ([]store.Event, error) {
@@ -81,6 +83,16 @@ func (d *DemoCluster) Events(_ context.Context, query store.EventQuery) ([]store
 type demoActor struct {
 	*DemoCluster
 	actor string
+	// atOnce has an app change move every tenant now, not in waves.
+	atOnce bool
+}
+
+// AppsAtOnce is the actor, but an app change it makes moves every tenant
+// at once, as the agent's client's AtOnce.
+func (a *demoActor) AppsAtOnce() AppAgent {
+	copied := *a
+	copied.atOnce = true
+	return &copied
 }
 
 func (a *demoActor) record(action, tenant, detail string) {
@@ -116,19 +128,41 @@ func (a *demoActor) change(name, action, detail string, change func(*api.Tenant)
 const demoStart = 6 * time.Second
 
 // settle has a demo tenant's starting container run, a few seconds after
-// it started: healthy, but for baltic-freight, which runs out of memory
-// again.
-func settle(t api.Tenant) api.Tenant {
+// it started: healthy, but for baltic-freight on 256 MB, which runs out of
+// memory again, as the agent records it. The caller holds d.mu.
+func (d *DemoCluster) settle(t api.Tenant) api.Tenant {
 	if t.Status == nil || t.Status.Phase != "starting" || time.Since(t.Status.CheckedAt) < demoStart {
 		return t
 	}
 	status := *t.Status
 	status.Phase, status.Healthy, status.CheckedAt = "running", true, time.Now()
-	if t.Spec.Name == "baltic-freight" {
-		status.Healthy, status.Restarts, status.LastExit = false, status.Restarts+1, "exit 137 (most likely out of memory) just now"
+	// On the app's 256 MB its export runs out of memory again; given more,
+	// it stays up.
+	if limit := t.Spec.Limits.Or(spec.Limits{MemoryMB: 256}).MemoryMB; t.Spec.Name == "baltic-freight" && limit <= 256 {
+		status.Healthy, status.Restarts = false, status.Restarts+1
+		status.LastExit = "killed (SIGKILL) at " + time.Now().UTC().Format(time.RFC3339) + ", most likely for using more than its " + strconv.Itoa(limit) + " MB of memory"
+		d.note("murder", "tenant.restarted", t.Spec.Name, t.App, "exit 137: killed (SIGKILL), most likely for using more than its "+strconv.Itoa(limit)+" MB of memory")
 	}
 	t.Status = &status
 	return t
+}
+
+// note records an event, as the cluster does; the caller holds d.mu.
+func (d *DemoCluster) note(actor, action, tenant, app, detail string) {
+	id := int64(1)
+	if len(d.events) > 0 {
+		id = d.events[0].ID + 1
+	}
+	d.events = append([]store.Event{{ID: id, At: time.Now(), Actor: actor, Action: action, Tenant: tenant, App: app, Detail: detail}}, d.events...)
+}
+
+// current settles the tenants and moves the rollouts on, as time passes;
+// the caller holds d.mu.
+func (d *DemoCluster) current() {
+	for name, t := range d.tenants {
+		d.tenants[name] = d.settle(t)
+	}
+	d.drive()
 }
 
 func (a *demoActor) Create(ctx context.Context, request api.TenantRequest) (api.Applied, error) {

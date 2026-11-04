@@ -11,7 +11,12 @@
   <h2 id="attention-h" class="sr">Needs attention</h2>
   {{with $d.Attention}}
   <ul class="attention">
-    {{range .}}<li{{if .Bad}} class="broken"{{end}}><span class="st {{if .Bad}}bad{{else}}warn{{end}}" aria-label="{{if .Bad}}broken{{else}}at risk{{end}}"></span><div><a href="{{.Href}}" class="subject">{{.Subject}}</a>{{.Text}}.{{range .Subs}}<div class="subline{{if .Bad}} bad{{end}}">{{.Text}}{{with .Fixes}}<span class="fixes">{{range .}}<a href="{{.Href}}">{{.Label}}</a>{{end}}</span>{{end}}</div>{{end}}{{with .Fixes}}<span class="fixes">{{range .}}<a href="{{.Href}}">{{.Label}}</a>{{end}}</span>{{end}}</div></li>{{end}}
+    {{range .}}<li{{if .Bad}} class="broken"{{end}}><span class="st {{if .Bad}}bad{{else}}warn{{end}}" aria-label="{{if .Bad}}broken{{else}}at risk{{end}}"></span><div>
+      <p class="nhead"><a href="{{.Href}}" class="subject">{{.Subject}}</a>{{if .Head}}{{.Head}}{{else}}{{.Text}}{{end}}.</p>
+      {{range .Subs}}<p class="cause{{if .Bad}} bad{{end}}">{{.Short}}{{range .Fixes}} <a href="{{.Href}}">{{.Label}}</a>{{end}}</p>{{end}}
+      {{if or .Primary .Fixes}}<div class="nacts">{{with .Primary}}<a href="{{.Href}}" class="button primary">{{.Label}}</a>{{end}}{{range .Fixes}}<a href="{{.Href}}">{{.Label}}</a>{{end}}</div>{{end}}
+      {{if .HasEvidence}}<details class="evidence"><summary>{{.EvidenceLabel}}</summary><div class="evbody">{{range .Evidence}}<p>{{.}}</p>{{end}}{{range .Subs}}{{if ne .Text .Short}}<p>{{.Text}}</p>{{end}}{{end}}{{with .More}}<p class="fixes">{{range .}}<a href="{{.Href}}">{{.Label}}</a>{{end}}</p>{{end}}</div></details>{{end}}
+    </div></li>{{end}}
   </ul>
   {{else}}
   <p class="calm"><span class="st ok"></span>Every node answers, every tenant runs healthy, and every one has a ready copy.</p>

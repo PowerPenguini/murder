@@ -13,6 +13,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/spec"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // What is kept is the last lines, at most PreviousLines of them within
@@ -91,6 +92,20 @@ func TestAnExitKeepsTheContainersLastLines(t *testing.T) {
 	f.reconcile(t)
 	if again, _ := f.reconciler.Previous("acme"); !again.At.Equal(kept.At) {
 		t.Fatalf("kept again for one exit: %+v", again)
+	}
+	// The exit is in the audit log once, with the limit it ran under.
+	events, err := f.store.Events(store.EventQuery{Tenant: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exits []string
+	for _, e := range events {
+		if e.Action == "tenant.restarted" {
+			exits = append(exits, e.Actor+": "+e.Detail)
+		}
+	}
+	if !slices.Equal(exits, []string{"murder: exit 137: killed for using more than its 256 MB of memory"}) {
+		t.Fatalf("the audit log's exits: %q", exits)
 	}
 }
 
@@ -171,5 +186,22 @@ func TestKeepingTheLinesNeverHoldsUpTheContainer(t *testing.T) {
 	f.reconciler.config.PreviousDir = ""
 	if _, err := f.reconciler.Previous("acme"); !errors.Is(err, ErrNoPrevious) {
 		t.Fatalf("kept with nowhere to keep it: %v", err)
+	}
+}
+
+// An exit is said by its code, and a kill with the limit it ran under.
+func TestExitDetail(t *testing.T) {
+	for _, c := range []struct {
+		state runtime.ContainerState
+		want  string
+	}{
+		{runtime.ContainerState{ExitKnown: true, ExitCode: 137, OOMKilled: true}, "exit 137: killed for using more than its 256 MB of memory"},
+		{runtime.ContainerState{ExitKnown: true, ExitCode: 137}, "exit 137: killed (SIGKILL), most likely for using more than its 256 MB of memory"},
+		{runtime.ContainerState{ExitKnown: true, ExitCode: 2}, "exit 2"},
+		{runtime.ContainerState{}, "exited; its code is not known"},
+	} {
+		if got := ExitDetail(c.state, 256); got != c.want {
+			t.Errorf("ExitDetail(%+v) = %q, want %q", c.state, got, c.want)
+		}
 	}
 }

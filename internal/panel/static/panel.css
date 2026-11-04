@@ -735,3 +735,30 @@ form.stack > .head { margin-bottom: calc(var(--s3) - var(--s4)); }
 .stat .v.figure-like, .stat .v.figure-like .red-text-inline { font-size: 20px; font-weight: 500; }
 .logview .toggles { align-self: center; }
 .logview .filters .row a.dim { min-width: 3em; }
+
+/* Headline first (round 4): a red entry says what is wrong in a line, its
+   likely cause in another, then its fix as the one filled button; the
+   evidence is behind a disclosure. */
+.nhead { margin: 0; }
+p.cause { margin: 6px 0 0; color: var(--soft); }
+p.cause.bad { color: var(--fg); }
+p.cause a { color: var(--soft); margin-left: var(--s2); }
+.nacts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); margin-top: var(--s3); font-size: 13px; }
+.nacts a:not(.button) { color: var(--soft); }
+.nacts a:not(.button):hover { color: var(--fg); }
+.nacts .button { min-height: 30px; padding: 4px 12px; }
+details.evidence { margin-top: var(--s3); font-size: 13px; }
+details.evidence > summary { display: inline-flex; align-items: center; gap: var(--s2); color: var(--soft); }
+details.evidence > summary::before { content: ""; width: 5px; height: 5px; border-right: 1.5px solid var(--dim); border-bottom: 1.5px solid var(--dim); transform: rotate(-45deg); }
+details.evidence[open] > summary::before { transform: rotate(45deg); }
+.evbody { margin-top: var(--s2); padding-left: var(--s3); box-shadow: inset 2px 0 0 var(--frame); color: var(--soft); }
+.evbody p { margin: 0 0 6px; }
+.evbody p:last-child { margin-bottom: 0; }
+.evbody .fixes { margin-top: var(--s2); }
+
+/* A review's scope: what the change does to each tenant, and its pace. */
+table.scope tr.unchanged td, table.scope tr.join td { color: var(--soft); }
+table.scope td .strong { font-weight: 600; }
+fieldset.pace { border: 1px solid var(--frame); padding: var(--pad-y) var(--pad-x); margin: 0 0 var(--s4); display: grid; gap: var(--s3); flex-basis: 100%; }
+fieldset.pace legend { padding: 0 var(--s2); color: var(--soft); font-size: 13px; }
+fieldset.pace label.check { align-items: flex-start; line-height: 1.45; }

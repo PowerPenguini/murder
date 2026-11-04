@@ -15,6 +15,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/rollout"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
 // An app's change is reviewed before it rolls out: what changes in its
@@ -115,8 +116,18 @@ type reviewTenant struct {
 	// Overrides name the settings it keeps over the app's.
 	Overrides []string
 	Canary    bool
-	// Wave is the wave it moves in, from 1.
+	// Wave is the wave it moves in, from 1; 0 when the change leaves it.
 	Wave int
+	// Scope is what the change does to it.
+	Scope scope
+}
+
+// reviewGroup is the tenants a change does the same to, said once.
+type reviewGroup struct {
+	Tenants []reviewTenant
+	Result  string
+	// Kind is restart, join or unchanged.
+	Kind string
 }
 
 // wave is one wave of a rollout's plan.
@@ -152,9 +163,21 @@ type reviewData struct {
 	// change is of the image.
 	OldImage, NewImage string
 	// Blocked names the tenants that block the rollout this change would
-	// replace, and the wave it is at.
+	// replace, and the wave it is at; Moved the tenants that rollout moved,
+	// which its Abort takes back.
 	Blocked []string
 	AtWave  string
+	Moved   []string
+	// Restart are the tenants that get a new container; Join those that
+	// run it already, which the rollout moves on paper; Unchanged those it
+	// leaves; Groups all of them, by what it does to them.
+	Restart, Join, Unchanged []reviewTenant
+	Groups                   []reviewGroup
+	// Broken are the restarting tenants broken now, BrokenWave the wave
+	// the first moves in; Pace is the pace proposed: now or waves.
+	Broken     []string
+	BrokenWave string
+	Pace       string
 }
 
 // imageOf is the image a spec's file names.
@@ -273,8 +296,21 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 	if ro := app.Rollout; ro != nil && ro.Active() {
 		if v := rolloutOf(app, tenants, nil, s.now()); v != nil {
 			data.Blocked, data.AtWave = v.Blockers, waveName(max(ro.Wave-1, 0))
+			for _, row := range v.Rows {
+				if row.Moved {
+					data.Moved = append(data.Moved, row.Name)
+				}
+			}
 		}
 	}
+	// The spec as the store will keep it: its defaults, and the tag the app
+	// follows kept at the image it pinned.
+	var next spec.Tenant
+	_ = strictyaml.Decode([]byte(to), &next)
+	if !spec.Pinned(next.Image) && next.Image == app.Tag {
+		next.Image = app.Spec.Image
+	}
+	next = next.WithDefaults()
 	for i := range data.Diff {
 		if short := digest.ReplaceAllStringFunc(data.Diff[i].Text, func(d string) string { return d[:len("sha256:")+12] + "…" }); short != data.Diff[i].Text {
 			data.Diff[i].Short = short
@@ -293,21 +329,66 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 			live = append(live, t)
 		}
 	}
-	data.Waves = planWaves(live)
+	// The rollout moves the tenants whose spec changes, and those it runs
+	// already but on another revision; the others it leaves.
+	var moving []api.Tenant
+	scopes := map[string]scope{}
+	for _, t := range live {
+		sc := scopeOf(t, app.Spec, next)
+		scopes[t.Spec.Name] = sc
+		if sc.Restarts || sc.Joins {
+			moving = append(moving, t)
+		}
+	}
+	data.Waves = planWaves(moving)
 	waveOf := map[string]int{}
 	for i, w := range data.Waves {
 		for _, name := range w.Tenants {
 			waveOf[name] = i + 1
 		}
 	}
+	groups := map[string]int{}
 	for _, t := range live {
-		rt := reviewTenant{Name: t.Spec.Name, State: tenantState(t), Overrides: overridesOf(t.Overrides), Canary: t.Canary, Wave: waveOf[t.Spec.Name]}
+		sc := scopes[t.Spec.Name]
+		rt := reviewTenant{Name: t.Spec.Name, State: tenantState(t), Overrides: overridesOf(t.Overrides), Canary: t.Canary, Wave: waveOf[t.Spec.Name], Scope: sc}
 		if len(rt.Overrides) > 0 {
 			data.Overridden++
 		} else {
 			data.Whole = append(data.Whole, rt)
 		}
 		data.Tenants = append(data.Tenants, rt)
+		kind := "unchanged"
+		switch {
+		case sc.Restarts:
+			kind = "restart"
+			data.Restart = append(data.Restart, rt)
+			if rt.State.Kind == "bad" {
+				data.Broken = append(data.Broken, rt.Name)
+				if data.BrokenWave == "" {
+					data.BrokenWave = waveName(rt.Wave - 1)
+				}
+			}
+		case sc.Joins:
+			kind = "join"
+			data.Join = append(data.Join, rt)
+		default:
+			data.Unchanged = append(data.Unchanged, rt)
+		}
+		key := kind + "\x00" + sc.Result()
+		if i, ok := groups[key]; ok {
+			data.Groups[i].Tenants = append(data.Groups[i].Tenants, rt)
+			continue
+		}
+		groups[key] = len(data.Groups)
+		data.Groups = append(data.Groups, reviewGroup{Tenants: []reviewTenant{rt}, Result: sc.Result(), Kind: kind})
+	}
+	order := map[string]int{"restart": 0, "join": 1, "unchanged": 2}
+	slices.SortStableFunc(data.Groups, func(a, b reviewGroup) int { return order[a.Kind] - order[b.Kind] })
+	// A change of settings, not of the image, to a tenant broken now: at
+	// once is proposed, so the fix reaches it without waiting for waves.
+	data.Pace = "waves"
+	if data.NewImage == "" && len(data.Broken) > 0 {
+		data.Pace = "now"
 	}
 	s.render(w, r, "review", "Review "+app.Name, "apps", data)
 }

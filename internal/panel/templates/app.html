@@ -6,7 +6,8 @@
 <section class="near" id="rollout" data-live>
   <div class="head rollout-head"><h2>Rollout of revision {{.ToRevision}}</h2><span class="dim">{{.Moved}} of {{.Total}} moved{{with .Blockers}}, <span class="red-text-inline">blocked by {{range $i, $b := .}}{{if $i}}, {{end}}{{$b}}{{end}}</span>{{end}}{{if eq .State "paused"}}, paused{{end}}</span>
     {{if eq .State "running"}}<form method="post" class="row"><input type="hidden" name="do" value="pause"><button type="submit">Pause</button></form>{{else}}<form method="post" class="row"><input type="hidden" name="do" value="resume"><button type="submit" class="primary">Resume</button></form>{{end}}</div>
-  <div class="notices"><div class="nrow{{if or .Blockers (eq .State "paused")}} bad{{end}}">{{if .Blockers}}<span class="lead-in">Blocked by {{range $i, $b := .Blockers}}{{if $i}}, {{end}}<a href="/tenants/{{$b}}">{{$b}}</a>{{end}}.</span> {{end}}{{.Waits}}</div></div>
+  <div class="notices"><div class="nrow{{if or .Blockers (eq .State "paused")}} bad{{end}}">{{if .Blockers}}<span class="lead-in">Blocked by {{range $i, $b := .Blockers}}{{if $i}}, {{end}}<a href="/tenants/{{$b}}">{{$b}}</a>{{end}}.</span> {{end}}{{.Waits}}</div>
+    {{if and $d.Memory .Blockers}}{{template "app-memory" $}}{{end}}</div>
   {{if eq .State "running"}}
   <div class="actions spaced rollout-actions">
     <details class="drop">
@@ -28,7 +29,7 @@
   <details class="howto phone-only spaced"><summary>Its waves: {{range $i, $w := .Steps}}{{if $i}}, {{end}}{{$w.Name}}{{if eq $w.State "now"}} (now){{end}}{{end}}</summary>
     <ol class="waves spaced">{{range .Steps}}<li class="{{.State}}"><span class="wn">{{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{if eq .State "done"}}moved{{else if eq .State "now"}}moving, watched{{else if eq .State "paused"}}paused{{else}}waits{{end}}</span></li>{{end}}</ol>
   </details>
-  {{with .Before}}<details class="howto spaced"><summary>Why the new revision is likely not the cause</summary><div class="panel spaced"><p class="flat">{{.}} Fix the cause and the rollout continues; or roll back to put every tenant on the revision before.</p>{{with $d.Memory}}{{if $.Edits}}<span class="fixes"><a href="{{.Href}}">Raise {{$a.Name}}'s memory limit (review)</a></span>{{end}}{{end}}</div></details>{{end}}
+  {{with .Before}}<details class="howto spaced"><summary>Why the new revision is likely not the cause</summary><div class="panel spaced"><p class="flat">{{.}} Fix the cause and the rollout continues; or roll back to put every tenant on the revision before.</p>{{with $d.Memory}}{{if $.Edits}}<span class="fixes"><a href="{{.Href}}">Raise {{$a.Name}}'s memory limit</a></span>{{end}}{{end}}</div></details>{{end}}
   <input type="checkbox" id="allrows" class="sr phone-toggle"><label for="allrows" class="phone-only showall">Show all {{len .Rows}} tenants, not only those to look at</label>
   <table class="list rows rollout-table">
     <thead><tr><th>Tenant</th><th>Health</th><th>Runs revision</th><th class="hide-mid">Wave</th><th>Result</th></tr></thead>
@@ -87,9 +88,7 @@
   </div>
 </section>
 {{end}}{{end}}
-{{with $d.Memory}}<section class="near"><div class="problem{{if .Bad}} bad{{end}}" role="{{if .Bad}}alert{{else}}status{{end}}"><span class="lead-in">Its memory limit is likely too low</span>{{.Text}}: {{range $i, $n := .HitNames}}{{if $i}}, {{end}}<a href="/tenants/{{$n}}">{{$n}}</a>{{end}}. Exit 137 is a likely memory kill.
-  <p class="flat spaced">Raising {{$a.Name}}'s limit to {{mem .ProposeMB}} reaches {{plural (len .Reaches) "tenant" "tenants"}} now{{with .Reaches}} ({{range $i, $n := .}}{{if $i}}, {{end}}{{$n}}{{end}}){{end}} and may stop these restarts.{{with .Exceptions}} It does not reach every tenant: {{.}}.{{end}}</p>
-  {{if not $d.Proposed}}<span class="fixes"><a href="{{.Href}}">Raise {{$a.Name}}'s memory limit (review)</a></span>{{end}}</div></section>{{end}}
+{{if and $d.Memory (not (and $d.Rollout $d.Rollout.Blockers))}}<section class="near"><div class="notices">{{template "app-memory" $}}</div></section>{{end}}
 
 <section{{if not $d.Rollout}} class="near"{{end}}>
   <div class="head"><h2>Image</h2>
@@ -99,7 +98,7 @@
   <div class="notice">
     <p class="flat"><span class="st warn"></span> A newer image of <span class="mono">{{$a.Tag}}</span> is in its registry: <span class="mono" title="{{$a.Latest}}">{{short $a.Latest}}</span>, found {{ago $a.LatestAt}} ago.</p>
     <form method="post" class="row spaced"><input type="hidden" name="do" value="review-update"><input type="hidden" name="updated" value="{{$d.Updated}}">
-      <button type="submit" class="primary">Review the update</button>
+      <button type="submit"{{if not $d.Red}} class="primary"{{end}}>Review the update</button>
       <span class="hint">{{if $a.Tenants}}to {{plural (len $a.Tenants) "live tenant" "live tenants"}}, in waves{{with $d.Rollout}}; it replaces the rollout that runs now{{end}}{{else}}no live tenant runs it{{end}}</span></form>
   </div>
   {{end}}
@@ -179,3 +178,13 @@
 </section>
 {{end}}
 {{end}}
+
+{{define "app-memory"}}{{$d := .Data}}{{$a := $d.App}}{{with $d.Memory}}<div class="nrow{{if .Bad}} bad{{end}}" role="{{if .Bad}}alert{{else}}status{{end}}" id="memory">
+  <p class="nhead"><strong>Its memory limit is likely too low.</strong></p>
+  <p class="cause{{if .Bad}} bad{{end}}">{{len .Hit}} of the {{plural .Inherit "tenant" "tenants"}} on its {{mem .LimitMB}} ran out of memory in 24 h.</p>
+  {{if and (not $d.Proposed) $.Edits}}<div class="nacts"><a href="{{.Href}}" class="button primary">Raise {{$a.Name}}'s memory limit</a><span class="dim">to {{mem .ProposeMB}}, reviewed before it rolls out</span></div>{{end}}
+  <details class="evidence"><summary>Evidence and affected tenants</summary><div class="evbody">
+    <p>Ran out of memory in the last 24 hours, on its {{mem .LimitMB}}: {{range $i, $n := .HitNames}}{{if $i}}, {{end}}<a href="/tenants/{{$n}}">{{$n}}</a>{{end}}. Exit 137 is a likely memory kill, not a proof.</p>
+    <p>Raising it to {{mem .ProposeMB}} reaches {{plural (len .Reaches) "tenant" "tenants"}} now{{with .Reaches}} ({{range $i, $n := .}}{{if $i}}, {{end}}{{$n}}{{end}}){{end}} and may stop these restarts.{{with .Exceptions}} Not every tenant: {{.}}.{{end}}</p>
+  </div></details>
+</div>{{end}}{{end}}

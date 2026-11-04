@@ -3,7 +3,8 @@
 <h1>{{$d.Title}}</h1>
 <p class="lead">Nothing has changed yet. Look it over; rolling it out stores revision {{next $a.Revision}} of {{$a.Name}}.</p>
 <div data-still hidden></div>
-{{with $a.Rollout}}{{if .Active}}<div class="notice spaced">{{if $d.Blocked}}<span class="lead-in">A rollout of revision {{.ToRevision}} is blocked at {{$d.AtWave}} by {{range $i, $b := $d.Blocked}}{{if $i}}, {{end}}{{$b}}{{end}}.</span>{{else}}<span class="lead-in">A rollout of revision {{.ToRevision}} runs, at {{$d.AtWave}}.</span>{{end}} This change replaces it: the new one starts again with the canaries, and tenants it moved stay on revision {{.ToRevision}} until their wave.</div>{{end}}{{end}}
+{{with $a.Rollout}}{{if .Active}}<div class="notice spaced">{{if $d.Blocked}}<span class="lead-in">A rollout of revision {{.ToRevision}} is blocked at {{$d.AtWave}} by {{range $i, $b := $d.Blocked}}{{if $i}}, {{end}}{{$b}}{{end}}.</span>{{else}}<span class="lead-in">A rollout of revision {{.ToRevision}} runs, at {{$d.AtWave}}.</span>{{end}} This change replaces it: the new one starts again with the canaries, and tenants it moved stay on revision {{.ToRevision}} until their wave.
+  {{if and (eq $d.Do "restore") $d.Moved}}<p class="flat spaced">Or abort that rollout instead: it takes the {{plural (len $d.Moved) "tenant" "tenants"}} it moved ({{range $i, $m := $d.Moved}}{{if $i}}, {{end}}{{$m}}{{end}}) back to the revision each ran before, now, and stores no new revision. <a href="/apps/{{$a.Name}}#rollout">Abort, on {{$a.Name}}'s page</a></p>{{end}}</div>{{end}}{{end}}
 
 <section class="near">
   <div class="head"><h2>What changes</h2>{{if $d.Changed}}<span class="dim num">{{plural $d.Removed "line" "lines"}} out, {{plural $d.Added "line" "lines"}} in</span>{{end}}</div>
@@ -25,26 +26,23 @@
 
 {{if $d.Changed}}
 <section>
-  <div class="head"><h2>Affected tenants</h2><span class="dim">{{plural (len $d.Tenants) "live tenant" "live tenants"}}{{with $d.Held}}, {{len .}} held{{end}}</span></div>
+  <div class="head"><h2>Affected tenants</h2><span class="dim">{{len $d.Restart}} restart{{with $d.Join}} · {{len .}} keep their container{{end}}{{with $d.Unchanged}} · {{len .}} unchanged{{end}}{{with $d.Held}} · {{len .}} held, left out{{end}}</span></div>
   {{if $d.Tenants}}
-  <table class="list">
-    <thead><tr><th>Tenant</th><th>State</th><th>Wave</th><th>Overrides</th></tr></thead>
+  <table class="list scope">
+    <thead><tr><th>Tenants</th><th>What this change does to them</th></tr></thead>
     <tbody>
-    {{range $d.Tenants}}{{if .Overrides}}
-      <tr>
-        <td class="l-main"><a href="/tenants/{{.Name}}">{{.Name}}</a>{{if .Canary}} <span class="dim">canary</span>{{end}}</td>
-        <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
-        <td class="l-sub" data-label="Wave">{{wavename (sub .Wave 1)}}</td>
-        <td class="l-sub" data-label="Overrides">{{range $i, $o := .Overrides}}{{if $i}}, {{end}}<span class="mono">{{$o}}</span>{{end}}</td>
+    {{range $d.Groups}}
+      <tr class="{{.Kind}}">
+        <td class="l-main">{{range $i, $t := .Tenants}}{{if $i}}, {{end}}<a href="/tenants/{{$t.Name}}">{{$t.Name}}</a>{{if $t.Canary}} <span class="dim">canary</span>{{end}}{{if eq $t.State.Kind "bad"}} <span class="st bad">{{$t.State.Label}}</span>{{end}}{{end}}</td>
+        <td class="l-sub" data-label="Result">{{if eq .Kind "restart"}}<span class="strong">New container:</span> {{end}}{{.Result}}</td>
       </tr>
-    {{end}}{{end}}
-    {{with $d.Whole}}<tr><td class="l-main" colspan="3">{{plural (len .) "tenant" "tenants"}} with no overrides: {{range $i, $w := .}}{{if $i}}, {{end}}<a href="/tenants/{{$w.Name}}">{{$w.Name}}</a>{{if $w.Canary}} <span class="dim">canary</span>{{end}}{{if ne $w.State.Kind "ok"}} <span class="st {{$w.State.Kind}}">{{$w.State.Label}}</span>{{end}}{{end}}</td><td class="l-sub" data-label="Overrides"><span class="dim">none</span></td></tr>{{end}}
+    {{end}}
     </tbody>
   </table>
-  {{if $d.Overridden}}<p class="hint spaced">A tenant's override wins over the app's spec: a change to an overridden field does not reach that tenant. Each tenant's wave is in the plan below.</p>{{end}}
+  {{if $d.Unchanged}}<p class="hint spaced">A tenant's override wins over the app's spec: a change only to fields it overrides leaves it as it runs, with no new container.</p>{{end}}
   {{else}}<p class="calm">No live tenant runs it: the change is stored, and new tenants take it.</p>{{end}}
   {{with $d.Held}}<p class="hint spaced">Held, and left out until released: {{range $i, $h := .}}{{if $i}}, {{end}}<a href="/tenants/{{$h}}">{{$h}}</a>{{end}}.</p>{{end}}
-  {{with $d.Archived}}<p class="hint spaced">Archived, and run it once restored: {{range $i, $h := .}}{{if $i}}, {{end}}{{$h}}{{end}}.</p>{{end}}
+  {{with $d.Archived}}<p class="hint spaced">Left out while archived: {{range $i, $h := .}}{{if $i}}, {{end}}{{$h}}{{end}}.</p>{{end}}
 </section>
 
 {{if $d.Waves}}
@@ -68,7 +66,12 @@
     <input type="hidden" name="updated" value="{{$d.Updated}}">
     {{if eq $d.Do "save"}}<input type="hidden" name="file" value="{{$d.File}}">{{end}}
     {{if eq $d.Do "restore"}}<input type="hidden" name="revision" value="{{$d.Revision}}">{{end}}
-    {{if $d.Changed}}<button type="submit" name="do" value="{{$d.Do}}" class="primary">{{if $d.Tenants}}Roll out to {{plural (len $d.Tenants) "tenant" "tenants"}}{{else}}Store the change{{end}}</button>{{end}}
+    {{if and $d.Changed $d.Restart}}<fieldset class="pace">
+      <legend>How it reaches them</legend>
+      <label class="check"><input type="radio" name="pace" value="waves"{{if eq $d.Pace "waves"}} checked{{end}}> In waves, the canaries first: each wave moves once the one before has stayed healthy.{{with $d.BrokenWave}} {{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}}, broken now, moves with {{lower .}}.{{end}}</label>
+      <label class="check"><input type="radio" name="pace" value="now"{{if eq $d.Pace "now"}} checked{{end}}> To every tenant now: {{if eq (len $d.Restart) 1}}it restarts{{else}}the {{len $d.Restart}} restart at once{{end}}, for a few seconds each. No wave waits to see one healthy before the next: a change that breaks them breaks them all.</label>
+    </fieldset>{{end}}
+    {{if $d.Changed}}<button type="submit" name="do" value="{{$d.Do}}" class="primary">{{if not $d.Tenants}}Store the change{{else if not $d.Restart}}Store revision {{next $a.Revision}}: no tenant restarts{{else if eq $d.Do "restore"}}Return {{plural (len $d.Restart) "tenant" "tenants"}} to revision {{$d.Revision}}{{else}}Roll out to {{plural (len $d.Restart) "tenant" "tenants"}}{{end}}</button>{{end}}
     {{if eq $d.Do "save"}}<button type="submit" name="do" value="edit">Back to editing</button>{{else}}<a href="/apps/{{$a.Name}}" class="button">Back to {{$a.Name}}</a>{{end}}
   </form>
 </section>

@@ -361,19 +361,21 @@ func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []s
 		appHref := "/apps/" + url.PathEscape(app.Name)
 		if m := appMemoryOf(app, tenants, events, now); m != nil {
 			state.Memory = m
-			sub := sub{Bad: m.Bad, Text: app.Name + "'s limit is likely too low" + m.Text() + ".", Fixes: []fix{{"Raise " + app.Name + "'s memory limit (review)", m.Href()}}}
-			if ex := m.Exceptions(); ex != "" {
-				sub.Text += " Its change would not reach every tenant: " + ex + "."
-			}
+			raise := fix{"Raise " + app.Name + "'s memory limit", m.Href()}
+			cause := sub{Bad: m.Bad, Short: m.Cause(), Text: m.Evidence()}
 			placed := false
 			for _, name := range m.HitNames() {
 				if n := find(name); n != nil && n.Bad && !placed {
-					n.Subs = append(n.Subs, sub)
+					n.Subs = append(n.Subs, cause)
+					// The app's fix is the fix; the tenant's own the last
+					// resort, in its evidence.
+					n.Primary = &raise
 					placed = true
 				}
 			}
 			if !placed {
-				notices = append(notices, notice{App: true, Subject: app.Name, Href: appHref, Text: m.Text(), Fixes: sub.Fixes})
+				notices = append(notices, notice{App: true, Subject: app.Name, Href: appHref, Text: m.Text(), Head: "'s memory limit is likely too low", Primary: &raise,
+					Subs: []sub{{Short: m.Cause(), Text: m.Evidence()}}})
 			}
 		}
 		if ro := app.Rollout; ro != nil && ro.Active() {
@@ -382,8 +384,8 @@ func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []s
 				state.Blockers, state.ToRevision = view.Blockers, ro.ToRevision
 				for _, name := range view.Blockers {
 					if n := find(name); n != nil {
-						n.Subs = append(n.Subs, sub{Bad: true, Text: fmt.Sprintf("It blocks %s's rollout of revision %d: the next wave (%s) waits for it.", app.Name, ro.ToRevision, strings.ToLower(waveName(ro.Wave))),
-							Fixes: []fix{{"The rollout", appHref + "#rollout"}}})
+						text := fmt.Sprintf("It blocks %s's rollout of revision %d: the next wave (%s) waits for it.", app.Name, ro.ToRevision, strings.ToLower(waveName(ro.Wave)))
+						n.Subs = append(n.Subs, sub{Bad: true, Short: text, Text: text, Fixes: []fix{{"The rollout", appHref + "#rollout"}}})
 					}
 				}
 			} else {
@@ -406,11 +408,9 @@ func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []s
 	// its own limit is the last resort.
 	for i := range notices {
 		n := &notices[i]
-		for _, s := range n.Subs {
-			if len(s.Fixes) > 0 && strings.Contains(s.Fixes[0].Label, "memory limit (review)") {
-				n.Fixes = slices.DeleteFunc(n.Fixes, func(f fix) bool { return f.Label == "Raise its memory limit" })
-				n.Fixes = append(n.Fixes, fix{"Only this tenant: raise its limit", raiseMemory(tenantNamed(tenants, n.Subject))})
-			}
+		if n.Primary != nil && strings.HasSuffix(n.Primary.Label, "'s memory limit") && !n.App {
+			n.Fixes = slices.DeleteFunc(n.Fixes, func(f fix) bool { return f.Label == "Raise its memory limit" })
+			n.More = append(n.More, fix{"Only this tenant: raise its limit", raiseMemory(tenantNamed(tenants, n.Subject))})
 		}
 	}
 	return notices, notes, states
@@ -562,6 +562,10 @@ type tenantData struct {
 	Activity activity
 	// Usage is its last day, drawn; nil if it was not measured.
 	Usage *tenantUsage
+	// Evidence says the problem whole, sentence by sentence; Exited that
+	// its last exit is known, and with it maybe its last lines.
+	Evidence []string
+	Exited   bool
 	// Problem says what is wrong with it, if anything; Broken whether it
 	// does not serve; MemoryHigh whether it nears its memory limit.
 	Problem    string
@@ -618,13 +622,23 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	}
 	data.BackupsKnown = cluster.Measured
 	if !t.Archived() && !t.Spec.Suspended {
-		data.Problem, data.Broken = tenantProblem(t, data.State)
-		if data.Problem != "" {
-			data.Problem = "It " + data.Problem + "."
-		}
+		var problem string
+		problem, data.Broken = tenantProblem(t, data.State)
+		var used, limit string
 		if use != nil && use.Memory.MemoryLimit != "" && use.Memory.Memory.Width >= memoryWarn {
 			data.MemoryHigh = true
-			data.Problem = strings.TrimSpace(data.Problem + " It uses " + use.Memory.MemoryText + " of its " + use.Memory.MemoryLimit + " of memory: the kernel kills it at the limit.")
+			used, limit = use.Memory.MemoryText, use.Memory.MemoryLimit
+		}
+		switch {
+		case problem != "":
+			head, whole := tenantHeadline(t, data.State, used, limit, s.now())
+			data.Problem, data.Evidence = "It"+head+".", whole
+		case data.MemoryHigh:
+			data.Problem = "It uses " + usedOf(used, limit) + " of memory."
+			data.Evidence = []string{"The kernel kills it at the limit: it would restart, and lose what it held in memory."}
+		}
+		if _, ok := parseExit(statusExit(t)); ok && data.Broken {
+			data.Exited = true
 		}
 	}
 	for key, value := range t.Spec.Env {
@@ -645,7 +659,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	// While the new container a person asked for starts, the operation
 	// line says it all: what was wrong was of the old one.
 	if op := data.Operation; op != nil && op.Kind == "busy" {
-		data.Problem, data.Broken, data.AppMemory = "", false, nil
+		data.Problem, data.Broken, data.AppMemory, data.Evidence = "", false, nil, nil
 	}
 	data.Head = s.headOf(t, nodes, "overview")
 	p := s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data)
@@ -830,6 +844,13 @@ func (s *Server) funcs() template.FuncMap {
 		"mem":   memory,
 		"lines": func(text string) int { return strings.Count(text, "\n") + 1 },
 		"ago":   func(t time.Time) string { return ago(s.now(), t) },
+		// exitsaid says the agent's words for an exit as people do.
+		"exitsaid": func(text string) string {
+			if e, ok := parseExit(text); ok {
+				return e.Said(s.now())
+			}
+			return text
+		},
 		"stamp": func(t time.Time) string {
 			if t.IsZero() {
 				return "never"

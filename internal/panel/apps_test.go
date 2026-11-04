@@ -88,7 +88,9 @@ func TestEditingAnApp(t *testing.T) {
 		t.Fatalf("a stale save:\n%s", body)
 	}
 	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"save"}, "updated": {updated}, "file": {changed}}, server.URL)
-	if !strings.Contains(body, "app web is changed; it rolls out to 7 tenants") {
+	// atlas keeps its own TZ, test-staging is held, old-demo archived: the
+	// change rolls out to the five whose spec it changes, in waves.
+	if !strings.Contains(body, "app web is changed; it rolls out in waves to 5 tenants") {
 		t.Fatalf("after saving:\n%s", body)
 	}
 	if tenant, _ := cluster.Get(ctx, "acme-logistics"); tenant.Spec.Env["TZ"] != "Europe/Paris" || tenant.Spec.Image != before.Spec.Image {
@@ -247,7 +249,7 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 		t.Fatalf("a stale update:\n%s", body)
 	}
 	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"update"}, "updated": {updated}}, server.URL)
-	if !strings.Contains(body, "app web is changed; it rolls out to 7 tenants") || strings.Contains(body, "A newer image of") {
+	if !strings.Contains(body, "app web is changed; it rolls out in waves to 6 tenants") || strings.Contains(body, "A newer image of") {
 		t.Fatalf("after updating:\n%s", body)
 	}
 	after, _ := agent.App(ctx, "web")
@@ -259,9 +261,13 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 	}
 	// Back to revision 2.
 	updated = between(body, `name="updated" value="`, `"`)
-	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"restore"}, "revision": {"2"}, "updated": {updated}}, server.URL)
-	if !strings.Contains(body, "it rolls out to 7 tenants") {
+	// At once, as the review may choose: every tenant moves now.
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"restore"}, "revision": {"2"}, "updated": {updated}, "pace": {"now"}}, server.URL)
+	if !strings.Contains(body, "app web is changed; it rolls out to 6 tenants") {
 		t.Fatalf("after going back:\n%s", body)
+	}
+	if tenant, _ := cluster.Get(ctx, "baltic-freight"); tenant.AppRevision != 0 || !strings.HasSuffix(tenant.Spec.Image, strings.Repeat("a1", 32)) {
+		t.Fatalf("baltic-freight after going back at once: revision %d, %s", tenant.AppRevision, tenant.Spec.Image)
 	}
 	if back, _ := agent.App(ctx, "web"); back.Revision != 5 || !strings.HasSuffix(back.Spec.Image, strings.Repeat("a1", 32)) {
 		t.Fatalf("app after going back %+v", back)
