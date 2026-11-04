@@ -233,6 +233,9 @@ type appData struct {
 	// UpdateRestarts and UpdateHeld count, for the newer image, the live
 	// tenants it restarts and those held and left out, as its review does.
 	UpdateRestarts, UpdateHeld int
+	// Outcome is what a person's change of it did, lately; Me who reads.
+	Outcome *outcome
+	Me      string
 }
 
 // Red says something on the app's page is wrong: a blocked rollout, a
@@ -334,6 +337,8 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, p
 		s.fail(w, r, err)
 		return
 	}
+	data.Outcome = outcomeOf(data.App, data.Revisions, tenants, events, s.now())
+	data.Me = s.actor(userOf(r))
 	// What is wrong with the spec is said beside the editor, in plain
 	// words, with its line.
 	if data.File != "" && problem != "" {

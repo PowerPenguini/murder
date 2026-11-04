@@ -1,6 +1,6 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}
 {{template "tenant-head" $d.Head}}
-{{if or $d.Problem $d.Operation $d.Place}}
+{{if or $d.Problem $d.Operation $d.Place $d.Outcome}}
 <div class="notices" aria-label="what is wrong with {{$t.Spec.Name}}, and what is happening">
   {{with $d.Problem}}<div class="nrow{{if $d.Broken}} bad{{end}}" role="{{if $d.Broken}}alert{{else}}status{{end}}">
     <p class="nhead"><strong>{{.}}</strong></p>
@@ -9,6 +9,7 @@
     {{if or $d.Evidence $d.AppMemory}}<details class="evidence"><summary>Evidence{{if $d.AppMemory}} and affected tenants{{end}}</summary><div class="evbody">{{range $d.Evidence}}<p>{{.}}</p>{{end}}{{with $d.AppMemory}}<p>{{.Evidence}}</p>{{if and $d.MemoryHigh $.Edits}}<p class="fixes"><a href="{{raise $t}}">Only this tenant: raise its limit</a></p>{{end}}{{end}}</div></details>{{end}}
   </div>{{end}}
   {{with $d.Place}}{{$r := $d.Rollout}}<div class="nrow{{if .Blocks}} bad{{end}}">{{if .Blocks}}<span class="lead-in">It blocks {{$t.App}}'s rollout</span> of revision {{.To}}: it moved in {{lower (wavename (sub .Wave 1))}} and is not healthy on it, so the next wave ({{lower (wavename $r.Wave)}}) waits.{{else if .Moved}}Rolling out: it moved from revision {{.From}} to {{.To}} in {{lower (wavename (sub .Wave 1))}}.{{else if .Held}}Held on revision {{.From}} while {{$t.App}} rolls out revision {{.To}}.{{else if ne .From .To}}Rolling out: it runs revision {{.From}} and moves to {{.To}} in {{lower (wavename (sub .Wave 1))}}.{{end}} <a href="/apps/{{$t.App}}#r-{{.Name}}">Its place in the rollout</a></div>{{end}}
+  {{with $d.Outcome}}<div class="nrow{{if eq (.KindFor $t.Spec.Name) "bad"}} bad{{end}}" role="status"><span class="lead-in">{{$t.App}}'s revision {{.Revision}}{{with .Change}} ({{.}}){{end}}</span> reached it, by {{if same .Event.Actor $d.Me}}you{{else}}{{who .Event.Actor}}{{end}} {{ago .Event.At}} ago: {{.For $t.Spec.Name}}. <a href="/apps/{{$t.App}}#outcome">On {{$t.App}}: {{len .Reached}} reached</a></div>{{end}}
   {{with $d.Operation}}<div class="nrow{{if eq .Kind "bad"}} bad{{end}}" role="status"><span class="lead-in">{{.Said}}</span> by {{if same .Event.Actor $d.Me}}you{{else}}{{who .Event.Actor}}{{end}} {{ago .Event.At}} ago: {{.State}}. <a href="/events?tenant={{$t.Spec.Name}}&amp;show=all">Its events</a>{{if eq .Kind "busy"}} · <a href="/tenants/{{$t.Spec.Name}}/logs?follow=1">Follow its logs</a>{{end}}</div>{{end}}
 </div>
 {{end}}
@@ -17,7 +18,11 @@
   <div class="statgroup use">
   <h2 class="caps">Use now</h2>
   <div class="stats">
-    {{with $d.Usage}}{{with .Memory}}
+    {{if $d.StartingNow}}
+    <div class="stat"><div class="caps">Memory</div><div class="v dim">starting</div></div>
+    <div class="stat"><div class="caps">CPU</div><div class="v dim">starting</div></div>
+    <div class="stat wide2"><div class="caps">Its new container</div><div class="v small dim">no figures yet: they show once it reports</div></div>
+    {{else}}{{with $d.Usage}}{{with .Memory}}
     <div class="stat{{if ge .Memory.Width 90.0}} hot{{end}}"><div class="caps">Memory</div><div class="v">{{.MemoryText}}{{with .MemoryLimit}} <small>of {{.}}</small>{{end}}</div>{{if .MemoryLimit}}{{template "bar" .Memory}}{{end}}</div>
     <div class="stat{{if ge .CPU.Width 90.0}} hot{{end}}"><div class="caps">CPU</div><div class="v">{{.CPUText}}{{with $d.Usage.CPULimit}} <small>of {{.}} {{if eq . "1"}}core{{else}}cores{{end}}</small>{{end}}</div>{{if $d.Usage.CPULimit}}{{template "bar" .CPU}}{{end}}</div>
     {{end}}
@@ -27,7 +32,7 @@
     {{else}}
     <div class="stat"><div class="caps">Memory limit</div><div class="v">{{if $t.Spec.Limits.MemoryMB}}{{mem $t.Spec.Limits.MemoryMB}}{{else}}<span class="dim">node default</span>{{end}}</div></div>
     <div class="stat"><div class="caps">CPU limit</div><div class="v">{{if $t.Spec.Limits.CPUs}}{{limit $t.Spec.Limits.CPUs}} <small>cores</small>{{else}}<span class="dim">node default</span>{{end}}</div></div>
-    {{end}}
+    {{end}}{{end}}
   </div>
   </div>
   <div class="statgroup protect">
@@ -44,7 +49,7 @@
 {{with $d.Usage}}
 <section>
   <div class="head"><h2>Use, last {{.Span}}</h2>
-    {{with index .Charts 0}}{{if .Marks}}<span class="legend marks-legend"><span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><rect x="2" y="1" width="6" height="8" fill="#8f8f8f"/></svg>{{plural .Restarts "restart" "restarts"}}</span><span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><rect x="2.5" y="1.5" width="5" height="7" fill="none" stroke="#8f8f8f"/></svg>{{plural .Changes "change" "changes"}}</span><a href="/events?tenant={{$t.Spec.Name}}&amp;show=all" class="dim">their events</a></span>{{end}}{{end}}
+    {{with index .Charts 0}}{{if .Marks}}<span class="legend marks-legend"><span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><rect x="3" y="1" width="4" height="8" fill="#9a9a9a"/></svg>{{plural .Restarts "restart" "restarts"}}</span><span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><rect x="4" y="5" width="2" height="4" fill="#5c5c5c"/></svg>{{plural .Changes "change" "changes"}}</span><a href="/events?tenant={{$t.Spec.Name}}&amp;show=all" class="dim">their events</a></span>{{end}}{{end}}
     <nav class="seg" aria-label="the charts' span">{{range $r := list "1h" "6h" "24h"}}<a href="?range={{$r}}#use"{{if eq $r $d.Usage.Range}} class="on" aria-current="true"{{end}}>{{$r}}</a>{{end}}</nav></div>
   <div class="charts" id="use">{{range .Charts}}{{template "line" .}}{{end}}</div>
 </section>

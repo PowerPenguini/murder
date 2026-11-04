@@ -23,6 +23,13 @@ const (
 // which starts and settles a few seconds later; the caller holds d.mu.
 func (d *DemoCluster) moveTenant(t *api.Tenant, composed spec.Tenant, detail string) {
 	changed := !composed.Equal(t.Spec)
+	before, after := t.Spec.Limits.Or(spec.Limits{MemoryMB: 256}).MemoryMB, composed.Limits.Or(spec.Limits{MemoryMB: 256}).MemoryMB
+	if before != after {
+		if d.limitChanges == nil {
+			d.limitChanges = map[string][]limitChange{}
+		}
+		d.limitChanges[t.Spec.Name] = append(d.limitChanges[t.Spec.Name], limitChange{at: time.Now(), from: before})
+	}
 	t.Spec = composed
 	t.Generation++
 	if changed && !t.Spec.Suspended && t.Status != nil {

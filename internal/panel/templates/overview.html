@@ -36,7 +36,7 @@
     {{range $d.Nodes}}
       <tr>
         <td class="l-main"><a class="row-link" href="{{node .Name}}">{{.Name}}</a>{{if .Leader}} <span class="dim">leader</span>{{end}}</td>
-        <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
+        <td class="l-side"><span class="st {{.State.Kind}}" data-node-state="{{.Name}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
         <td class="barcell l-sub" data-label="CPU">{{with .Use}}<div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div>{{else}}<span class="faint">not measured</span>{{end}}</td>
         <td class="barcell l-sub" data-label="Memory">{{with .Use}}<div class="barline">{{template "bar" .Memory}}<span class="num">{{.MemoryText}}</span></div>{{else}}<span class="faint">not measured</span>{{end}}
           {{if .MemoryMB}}<div class="small dim">{{mem .MemoryMB}} reserved by limits</div>{{end}}</td>

@@ -179,9 +179,12 @@ type mark struct {
 	// Href is its event's record.
 	Href string
 	// When is its time, as the readout says it; HitX where its touch area,
-	// HitWidth wide, begins, kept within the plot.
-	When string
-	HitX float64
+	// HitWidth wide, begins, kept within the plot. Label and Desc say it
+	// short, for the line under the plot: "Restart 17:07 UTC", "out of
+	// memory (exit 137)".
+	When        string
+	HitX        float64
+	Label, Desc string
 }
 
 // markHit is how wide a mark's touch area is without the script, in the
@@ -215,12 +218,43 @@ func (c lineChart) marksOf(events []store.Event) []mark {
 				said += ", out of memory"
 			}
 		}
-		out = append(out, mark{X: round1(x), Kind: kind, Text: dateLabel(e.At) + " UTC: " + capital(said), When: dateLabel(e.At),
-			HitX: round1(math.Max(0, math.Min(chartWidth-markHit, x-markHit/2))),
-			Href: "/events?tenant=" + url.QueryEscape(e.Tenant) + "&show=all#ev-" + strconv.FormatInt(e.ID, 10)})
+		m := mark{X: round1(x), Kind: kind, Text: dateLabel(e.At) + " UTC: " + capital(said), When: dateLabel(e.At),
+			Href: "/events?tenant=" + url.QueryEscape(e.Tenant) + "&show=all#ev-" + strconv.FormatInt(e.ID, 10)}
+		m.Label, m.Desc = "Change "+e.At.UTC().Format("15:04")+" UTC", said
+		if kind == "restart" {
+			m.Label = "Restart " + e.At.UTC().Format("15:04") + " UTC"
+			m.Desc = actionText(e.Action)
+			if ex, ok := parseExit(e.Detail); ok && e.Action == "tenant.restarted" {
+				m.Desc = ex.Short(time.Time{}) + " (" + ex.Reason(time.Time{}) + ")"
+			}
+		}
+		out = append(out, m)
+	}
+	// A change at the moment of a restart is drawn beside it, not over it:
+	// the two never make one glyph.
+	for i := range out {
+		if out[i].Kind != "change" {
+			continue
+		}
+		for _, r := range out {
+			if r.Kind == "restart" && math.Abs(r.X-out[i].X) < markApart {
+				if r.X+markApart <= chartWidth-3 {
+					out[i].X = round1(r.X + markApart)
+				} else {
+					out[i].X = round1(r.X - markApart)
+				}
+			}
+		}
+	}
+	for i := range out {
+		out[i].HitX = round1(math.Max(0, math.Min(chartWidth-markHit, out[i].X-markHit/2)))
 	}
 	return out
 }
+
+// markApart is how far apart a change and a restart are drawn, at least,
+// in the plot's thousandths.
+const markApart = 12.0
 
 // Restarts and Changes count its marks of each kind.
 func (c lineChart) Restarts() int { return c.count("restart") }

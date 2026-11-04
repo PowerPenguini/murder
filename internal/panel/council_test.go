@@ -388,7 +388,8 @@ func TestOperationIsFollowed(t *testing.T) {
 	}
 	_, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}, "confirm": {"acme-logistics"}}, server.URL)
 	// One line says it: no flash, no "It is starting" box beside it.
-	if !strings.Contains(body, "its new container is starting") || strings.Contains(body, "is restarting in a new container") || strings.Contains(body, "It is starting") {
+	if !strings.Contains(body, "its new container is starting") || strings.Contains(body, "is restarting in a new container") || strings.Contains(body, "It is starting") ||
+		!strings.Contains(body, "no figures yet: they show once it reports") {
 		t.Fatalf("after a restart:\n%s", body)
 	}
 	// Settled, it says so.
@@ -604,6 +605,13 @@ func TestTheFixIsAppliedAndTheAdviceGoes(t *testing.T) {
 	if _, page = get(t, server.URL+"/apps/web"); strings.Contains(page, "Its memory limit is likely too low") {
 		t.Fatalf("the app's advice after the fix:\n%s", page)
 	}
+	// It says the fix held: on the app, and on a tenant it reached.
+	if !strings.Contains(page, "Revision 4 (memory 256 MB → 512 MB)</span>, by you") || !strings.Contains(page, "reached 5 tenants: 5 healthy; no memory kill since") {
+		t.Fatalf("the outcome on the app:\n%s", page)
+	}
+	if _, page = get(t, server.URL+"/tenants/baltic-freight"); !strings.Contains(page, "web's revision 4 (memory 256 MB → 512 MB)</span> reached it, by you") || !strings.Contains(page, "healthy, no memory kill since") {
+		t.Fatalf("the outcome on the tenant:\n%s", page)
+	}
 }
 
 // A moved tenant is said healthy only for a check that passes now; one
@@ -785,7 +793,7 @@ func TestEventAnchorsAndMarks(t *testing.T) {
 		t.Fatalf("%d anchors", len(seen))
 	}
 	_, page = get(t, server.URL+"/tenants/baltic-freight")
-	if !strings.Contains(page, "UTC: Restarted after it exited: exit 137, out of memory") || !strings.Contains(page, `class="hit"`) || !strings.Contains(page, `<p class="annot" aria-live="polite"></p>`) {
+	if !strings.Contains(page, "UTC: Restarted after it exited: exit 137, out of memory") || !strings.Contains(page, `class="hit"`) || !strings.Contains(page, `<div class="annot" aria-live="polite"></div>`) {
 		t.Fatalf("the marks:\n%s", page)
 	}
 	for _, m := range regexp.MustCompile(`class="hit" x="([-0-9.]+)"`).FindAllStringSubmatch(page, -1) {
@@ -889,5 +897,27 @@ func TestTheBrokenFirstPace(t *testing.T) {
 	}
 	if app, _ := cluster.AsApps("t").App(ctx, "web"); app.Rollout == nil || app.Rollout.Wave != 1 || app.Rollout.ToRevision != 4 {
 		t.Fatalf("the rollout: %+v", app.Rollout)
+	}
+}
+
+// The demo tells its incident in its figures: baltic-freight's memory
+// climbs to its limit, drops at each kill, and settles well under 512 MB
+// once it has them.
+func TestDemoIncidentTimeline(t *testing.T) {
+	d := NewDemoCluster()
+	kills := d.killsOf("baltic-freight")
+	if len(kills) == 0 {
+		t.Fatal("no kill")
+	}
+	kill := kills[0]
+	before, after, later := d.demoMemory("baltic-freight", 256, kill.Add(-time.Second)), d.demoMemory("baltic-freight", 256, kill.Add(20*time.Second)), d.demoMemory("baltic-freight", 256, kill.Add(10*time.Minute))
+	if before < 240 || after > 150 || later < 240 {
+		t.Fatalf("at 256 MB: %.0f before the kill, %.0f after, %.0f later", before, after, later)
+	}
+	if fixed := d.demoMemory("baltic-freight", 512, kill.Add(10*time.Minute)); fixed > 300 || fixed < 200 {
+		t.Fatalf("at 512 MB: %.0f", fixed)
+	}
+	if other := d.demoMemory("atlas", 768, kill); other != 0 {
+		t.Fatal("atlas has no incident")
 	}
 }

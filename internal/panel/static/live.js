@@ -35,7 +35,9 @@
   const pausedBy = () => {
     if (document.querySelector(".once")) return "Paused while a secret shows";
     if (document.querySelector("button[data-label]")) return "Paused while your action runs";
-    if (document.querySelector("#main details[open]:not(.event), .side details[open]")) return "Paused while a menu is open";
+    // A menu (a disclosure that pops over the page) holds the page still;
+    // an open disclosure of text does not: its part is not replaced.
+    if (document.querySelector("#main details[open]:has(> .pop), #main details[open].drop, #main details[open].menu-text, #main details[open].rowmore, .side details[open]")) return "Paused while a menu is open";
     if (document.querySelector("details.event[open]")) return "Paused while an event is open";
     if (document.querySelector(".readout.at")) return "Paused while you read a chart";
     if (partial()) return "";
@@ -71,6 +73,13 @@
       return;
     }
     document.body.classList.add("stale");
+    // The node it cannot reach is not said to be up: no one knows.
+    if (lostWhy) {
+      for (const cell of document.querySelectorAll('[data-node-state="' + CSS.escape(node) + '"]')) {
+        cell.className = "st mute";
+        cell.textContent = "not known since " + clock(readAt).slice(0, 5) + " UTC";
+      }
+    }
     if (!bar && main) {
       bar = document.createElement("div");
       bar.id = "stale-banner";
@@ -122,7 +131,8 @@
     }
     if (lostWhy) {
       state.classList.add("lost");
-      text.textContent = (matchMedia("(max-width: 760px)").matches ? "Offline, " : "Can't reach " + node + ", ") + age(Date.now() - readAt) + " old ";
+      text.textContent = "Offline since " + clock(readAt).slice(0, 5) + " · ";
+      state.title = "Can't reach " + node + " since " + clock(readAt);
       const retry = document.createElement("button");
       retry.type = "button";
       retry.className = "link";
@@ -131,14 +141,22 @@
       text.append(retry);
       return;
     }
+    // Short, so it keeps to one line; the whole sentence on hover.
     const paused = pausedBy();
     if (paused) {
       state.classList.add("paused");
-      text.textContent = (matchMedia("(max-width: 760px)").matches ? "Updates paused" : paused) + ", " + age(Date.now() - readAt) + " old";
+      text.textContent = "Paused · " + age(Date.now() - readAt);
+      state.title = paused + ", read " + age(Date.now() - readAt) + " ago";
       return;
     }
     state.classList.add("on");
-    text.textContent = (partial() && !document.querySelector("[data-live]") ? "Automatic updates paused, read " : "Live, updated ") + age(Date.now() - readAt) + " ago";
+    if (partial() && !document.querySelector("[data-live]")) {
+      text.textContent = "Paused · " + age(Date.now() - readAt);
+      state.title = "Automatic updates paused on this page: it holds a form; read " + age(Date.now() - readAt) + " ago";
+      return;
+    }
+    text.textContent = "Live · " + age(Date.now() - readAt);
+    state.title = "Live: updated " + age(Date.now() - readAt) + " ago";
   };
 
   const stop = (why) => {

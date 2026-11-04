@@ -469,6 +469,15 @@ func (s *Server) appContext(ctx context.Context, r *http.Request, t api.Tenant, 
 	if m := appMemoryOf(apps[i], tenants, events, now); m != nil && m.Hit[t.Spec.Name] > 0 && data.Broken {
 		data.AppMemory = m
 	}
+	// A person's change of its app that reached it: whether it held.
+	if o := outcomeOf(apps[i], nil, tenants, events, now); o != nil && slices.Contains(o.Reached, t.Spec.Name) {
+		if s.Apps != nil {
+			if revisions, err := s.Apps(s.actor(userOf(r))).AppRevisions(ctx, t.App); err == nil {
+				o = outcomeOf(apps[i], revisions, tenants, events, now)
+			}
+		}
+		data.Outcome = o
+	}
 }
 
 // tenantFilters are the tenants' page's filters, in order.
@@ -565,6 +574,11 @@ type tenantData struct {
 	Activity activity
 	// Usage is its last day, drawn; nil if it was not measured.
 	Usage *tenantUsage
+	// StartingNow says its new container starts: the old one's figures
+	// are not shown as its own.
+	StartingNow bool
+	// Outcome is a person's change of its app that reached it, lately.
+	Outcome *outcome
 	// Evidence says the problem whole, sentence by sentence; Exited that
 	// its last exit is known, and with it maybe its last lines.
 	Evidence []string
@@ -663,6 +677,9 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	// line says it all: what was wrong was of the old one.
 	if op := data.Operation; op != nil && op.Kind == "busy" {
 		data.Problem, data.Broken, data.AppMemory, data.Evidence = "", false, nil, nil
+	}
+	if st := t.Status; st != nil && !t.Spec.Suspended && (st.Phase == "starting" || (st.Generation != 0 && st.Generation < t.Generation)) {
+		data.StartingNow = true
 	}
 	data.Head = s.headOf(t, nodes, "overview")
 	p := s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data)

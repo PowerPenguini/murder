@@ -39,22 +39,40 @@
       const box = plot.getBoundingClientRect();
       return box.width > 0 ? (px * 1000) / box.width : px;
     };
-    // The marks within 12 px of x are said under the plot, each with a link
-    // to its event, in a line of its own that never moves the plot.
+    // The mark nearest x, within 12 px, is said under the plot in one
+    // line of fixed height: its time as a link to its event, then what it
+    // was. Others near it are counted, and listed whole on asking.
     const say = (x) => {
       if (!annot) return;
-      const near = marks.filter((m) => Math.abs(m.X - x) <= units(12));
+      const near = marks.filter((m) => Math.abs(m.X - x) <= units(12)).sort((a, b) => Math.abs(a.X - x) - Math.abs(b.X - x));
       annot.textContent = "";
-      near.slice(0, 2).forEach((m, i) => {
-        if (i) annot.append(" · ");
+      if (near.length === 0) return;
+      const item = (m) => {
         const link = document.createElement("a");
         link.href = m.Href;
-        link.textContent = "Open event";
+        link.textContent = m.Label;
         link.title = m.Text;
-        annot.append(link, " " + m.Text);
-        annot.title = near.map((n) => n.Text).join("; ");
-      });
-      if (near.length > 2) annot.append(" · " + (near.length - 2) + " more near");
+        return link;
+      };
+      const desc = document.createElement("span");
+      desc.className = "desc";
+      desc.textContent = ": " + near[0].Desc;
+      desc.title = near[0].Text;
+      annot.append(item(near[0]), desc);
+      if (near.length > 1) {
+        const more = document.createElement("details");
+        more.className = "nearby";
+        const summary = document.createElement("summary");
+        summary.textContent = (near.length - 1) + " nearby";
+        const list = document.createElement("ul");
+        for (const m of near) {
+          const li = document.createElement("li");
+          li.append(item(m), ": " + m.Desc);
+          list.append(li);
+        }
+        more.append(summary, list);
+        annot.append(more);
+      }
     };
     const show = (i, quiet) => {
       at = Math.max(0, Math.min(points.length - 1, i));
@@ -111,7 +129,9 @@
       widen();
       new ResizeObserver(widen).observe(plot);
       lane.addEventListener("click", (event) => {
-        if (event.pointerType === "mouse" && event.target.closest("a")) return;
+        // A mouse, or the keyboard (Enter: no pointer), opens the event; a
+        // touch reads the moment and says the events near it.
+        if (event.target.closest("a") && (event.pointerType === "mouse" || event.detail === 0)) return;
         event.preventDefault();
         fromEvent(event);
       });
@@ -124,7 +144,11 @@
     plot.addEventListener("pointermove", fromEvent);
     plot.addEventListener("pointerdown", fromEvent);
     plot.addEventListener("pointerleave", (event) => { if (event.pointerType === "mouse" && document.activeElement !== plot) rest(); });
-    plot.addEventListener("blur", () => rest());
+    // Focus moving to the chart's own links keeps what is read.
+    plot.addEventListener("blur", (event) => { if (!figure.contains(event.relatedTarget)) rest(); });
+    figure.addEventListener("focusout", (event) => {
+      if (event.target !== plot && at >= 0 && !figure.contains(event.relatedTarget)) rest();
+    });
     plot.addEventListener("keydown", (event) => {
       const step = { ArrowLeft: -1, ArrowRight: 1, PageUp: -12, PageDown: 12 }[event.key];
       if (step) {

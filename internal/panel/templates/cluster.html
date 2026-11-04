@@ -18,7 +18,7 @@
     {{range $d.Nodes}}{{$n := .}}
       <tr id="node-{{.Name}}">
         <td class="l-main"><a href="{{node .Name}}" class="strong">{{.Name}}</a>{{if .Leader}} <span class="dim">leader</span>{{end}}{{if eq .Name $d.Self}} <span class="dim">· this panel asks it</span>{{end}}</td>
-        <td class="l-sub"><span class="st {{.State.Kind}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
+        <td class="l-sub"><span class="st {{.State.Kind}}" data-node-state="{{.Name}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
         <td class="mono dim hide-narrow">{{if .Version}}{{.Version}} · schema {{.Schema}}{{else}}not known{{end}}</td>
         <td class="dim hide-narrow">{{if .Started.IsZero}}not known{{else}}{{ago .Started}}{{end}}</td>
         <td class="mono dim hide-narrow">{{with .Tunnel}}{{.Address}}{{else}}none{{end}}</td>

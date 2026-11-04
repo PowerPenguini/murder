@@ -116,9 +116,15 @@ button.link:hover { color: var(--fg); background: none; border: 0; }
 .livestate button.link, .livestate a { color: inherit; font-size: inherit; font-weight: 600; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .livestate.on .live { animation: none; } }
-/* What it shows may be old: values grey, what is wrong still red. */
-body.stale main { --fg: #7c7c7c; --soft: #6f6f6f; color: var(--fg); }
-body.stale main .stale-banner { --fg: #ededed; }
+/* What it shows may be old: values grey, and what was wrong grey too
+   (it may not be so now); only the banner says, in red, that the page is
+   old. Filled buttons are outlined: they still work, through another
+   node. */
+body.stale main { --fg: #7c7c7c; --soft: #6f6f6f; --bad: #7c7c7c; --bad-wash: #101010; color: var(--fg); }
+body.stale main svg, body.stale main .bar { filter: grayscale(1) brightness(0.8); }
+body.stale main .stale-banner { --fg: #ededed; --soft: #b0b0b0; --bad: #ff5147; --bad-wash: #1d0807; }
+body.stale main .button.primary, body.stale main button.primary { background: transparent; color: var(--fg); border-color: var(--frame); }
+body.stale main li.broken { background: transparent; }
 
 .page { flex: 1; min-width: 0; }
 main { max-width: 1160px; margin: 0 auto; padding: 40px var(--s6) var(--s8); }
@@ -793,8 +799,6 @@ p.typed.ok { color: var(--soft); }
 
 /* A chart's marks: the one read is said under the plot, with a link to
    its event, in a line of fixed height; nothing moves. */
-p.annot { grid-column: 2; height: 1.6em; margin: 2px 0 0; font-size: 12.5px; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-p.annot a { color: var(--fg); margin-right: 2px; }
 svg.lane rect.hit { cursor: pointer; }
 
 /* An event a link points to: below the sticky bar, opened, and marked
@@ -802,7 +806,6 @@ svg.lane rect.hit { cursor: pointer; }
 details.event, details.event li { scroll-margin-top: 80px; }
 details.event:target > summary, details.event li:target, details.event.target > summary, details.event li.target { background: #191919; box-shadow: inset 2px 0 0 var(--soft); }
 @media (max-width: 760px) {
-  p.annot { height: 3.2em; white-space: normal; line-height: 1.6em; }
 }
 
 /* Settings as one form: the Override column's switch alone (its header
@@ -838,3 +841,19 @@ details.fullref { margin-top: var(--s1); font-size: 12.5px; }
 details.fullref > summary { min-height: 0; }
 .pop.app-new textarea { white-space: pre; overflow-x: auto; }
 td.empty a, p.calm a { text-decoration: underline; text-underline-offset: 3px; }
+.stats .stat.wide2 { grid-column: span 2; }
+
+/* Under each chart one row: its legend, and over it, while a moment near
+   a mark is read, that mark (its time a link to its event, then what it
+   was) and how many others are near, listed whole on asking. The row's
+   height never changes, so no plot moves and no band is left empty. */
+.legrow { position: relative; margin-top: var(--s2); min-height: 22px; }
+.legrow .legend { margin-top: 0; min-height: 22px; align-items: center; }
+.annot { position: absolute; inset: 0; display: flex; align-items: center; gap: 0; background: var(--bg); font-size: 12.5px; color: var(--soft); white-space: nowrap; }
+.annot:empty { display: none; }
+.annot > a { color: var(--fg); flex: none; }
+.annot .desc { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.annot details.nearby { flex: none; position: relative; margin-left: var(--s3); }
+.annot details.nearby > summary { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
+.annot details.nearby ul { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; margin: 0; padding: var(--s2) var(--s3); list-style: none; width: max-content; max-width: min(420px, 86vw); background: var(--raised); border: 1px solid var(--frame); white-space: normal; display: grid; gap: 6px; }
+.annot details.nearby li a { color: var(--fg); }

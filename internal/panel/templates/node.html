@@ -1,7 +1,7 @@
 {{define "content"}}{{$d := .Data}}{{$n := $d.Node}}
 <nav class="crumbs" aria-label="where this is"><a href="/cluster">Cluster</a><span>/</span><span>{{$n.Name}}</span></nav>
 <header class="pagehead">
-  <div class="title"><h1>{{$n.Name}}</h1><span class="st {{$d.State.Kind}}">{{$d.State.Label}}{{if not $n.FailedAt.IsZero}} {{ago $n.FailedAt}} ago{{end}}</span></div>
+  <div class="title"><h1>{{$n.Name}}</h1><span class="st {{$d.State.Kind}}" data-node-state="{{$n.Name}}">{{$d.State.Label}}{{if not $n.FailedAt.IsZero}} {{ago $n.FailedAt}} ago{{end}}</span></div>
   {{if and $d.Acts (or (and $n.Answers $d.Targets) (not $n.Answers) (not $d.Self))}}
   <div class="actions">
     <details class="drop end">

@@ -2,6 +2,7 @@
 <nav class="crumbs" aria-label="where this is"><a href="/apps">Apps</a><span>/</span><span>{{$a.Name}}</span></nav>
 <div class="title"><h1>{{$a.Name}}</h1>{{with $d.Rollout}}{{if .Blockers}}<span class="st bad">rollout blocked</span>{{else if eq .State "paused"}}<span class="st warn">rollout paused</span>{{else}}<span class="st busy">rolling out</span>{{end}}{{end}}</div>
 <p class="lead">{{plural (len $a.Tenants) "live tenant" "live tenants"}} · {{if $a.Revision}}revision {{$a.Revision}} · {{end}}changed {{ago $a.UpdatedAt}} ago · <a href="#spec">App spec</a> · <a href="/events?app={{$a.Name}}&amp;all=1">Its events</a></p>
+{{with $d.Outcome}}<div class="notices near" data-live id="outcome"><div class="nrow{{if eq .Kind "bad"}} bad{{end}}" role="status"><span class="lead-in">Revision {{.Revision}}{{with .Change}} ({{.}}){{end}}</span>, by {{if same .Event.Actor $d.Me}}you{{else}}{{who .Event.Actor}}{{end}} {{ago .Event.At}} ago, reached {{plural (len .Reached) "tenant" "tenants"}}: {{.State}}. <a href="/events?app={{$a.Name}}&amp;show=all">Its events</a></div></div>{{end}}
 {{with $d.Rollout}}{{$r := .}}
 <section class="near" id="rollout" data-live>
   <div class="head rollout-head"><h2>Rollout of revision {{.ToRevision}}</h2><span class="dim">{{.Moved}} of {{.Total}} moved{{with .Blockers}}, <span class="red-text-inline">blocked by {{range $i, $b := .}}{{if $i}}, {{end}}{{$b}}{{end}}</span>{{end}}{{if eq .State "paused"}}, paused{{end}}</span>

@@ -24,6 +24,9 @@ type DemoCluster struct {
 	apps    map[string]api.App
 	// revisions are each app's revisions, oldest first.
 	revisions map[string][]store.Revision
+	// limitChanges are the changes of each tenant's memory limit, oldest
+	// first: its use before one is measured against the limit then.
+	limitChanges map[string][]limitChange
 	// Pace is how long the demo's slow work takes, as an upgrade's install
 	// or a backup: for watching jobs; none in tests.
 	Pace time.Duration
