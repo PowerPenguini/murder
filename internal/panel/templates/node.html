@@ -6,7 +6,7 @@
   <div class="actions">
     <details class="drop end">
       <summary class="button">Act on {{$n.Name}}</summary>
-      <div class="pop">{{template "node-actions" (nodeActs $n $d.Self $d.Targets "node")}}</div>
+      <div class="pop">{{template "node-actions" (nodeActs $n $d.Self $d.Targets $d.RunNames "node")}}</div>
     </details>
   </div>
   {{end}}

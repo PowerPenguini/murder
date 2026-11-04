@@ -16,7 +16,7 @@
         <td class="end l-side">
           <details class="menu">
             <summary aria-label="what to do with {{.Name}}">⋯</summary>
-            <div class="pop">{{template "node-actions" (nodeActs .NodeState (eq .Name $d.Self) .Targets "")}}            </div>
+            <div class="pop">{{template "node-actions" (nodeActs .NodeState (eq .Name $d.Self) .Targets .Runs "")}}            </div>
           </details>
         </td>
       </tr>

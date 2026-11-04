@@ -1,6 +1,6 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}
 {{template "tenant-head" $d.Head}}
-{{with $d.Problem}}<div class="problem{{if $d.Broken}} bad{{end}}" role="alert">{{.}}{{if or $d.Broken (and $d.MemoryHigh $.Edits)}}<span class="fixes">{{if $.Acts}}<a href="/tenants/{{$t.Spec.Name}}/logs">Read its logs</a>{{end}}{{if and $d.MemoryHigh $.Edits}}<a href="/tenants/{{$t.Spec.Name}}/settings#memory">Raise its memory limit</a>{{end}}</span>{{end}}</div>{{end}}
+{{with $d.Problem}}<div class="problem{{if $d.Broken}} bad{{end}}" role="alert">{{.}}{{if or $d.Broken (and $d.MemoryHigh $.Edits)}}<span class="fixes">{{if $.Acts}}<a href="/tenants/{{$t.Spec.Name}}/logs">Read its logs</a>{{end}}{{if and $d.MemoryHigh $.Edits}}<a href="{{raise $t}}">Raise its memory limit</a>{{end}}</span>{{end}}</div>{{end}}
 
 <section class="near">
   <div class="stats">

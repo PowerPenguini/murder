@@ -66,7 +66,7 @@ func TestActingOnTheCluster(t *testing.T) {
 		}
 	}
 	// hel-1 failed over already, and this node is not removed from itself.
-	if strings.Contains(page, "it is off") || strings.Contains(page, `placeholder="fsn-1"`) {
+	if strings.Contains(page, "It is off") || strings.Contains(page, `value="remove"><input type="hidden" name="node" value="fsn-1"`) {
 		t.Fatalf("the cluster page offers what does not apply:\n%s", page)
 	}
 
@@ -88,8 +88,12 @@ func TestActingOnTheCluster(t *testing.T) {
 		t.Fatalf("nodes after the removal: %+v", nodes.Nodes)
 	}
 
+	// Draining moves every tenant of a node: its name is typed.
+	if _, body := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}}, server.URL); !strings.Contains(body, "type the node&#39;s name to drain it") {
+		t.Fatalf("drained without the name:\n%s", body)
+	}
 	// A drain is a job: its page tells each move.
-	response, _ := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}}, server.URL)
+	response, _ := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}, "confirm": {"nbg-1"}}, server.URL)
 	body = waitForJob(t, s, client, response)
 	if !strings.Contains(body, "drain nbg-1 to fsn-1") || !strings.Contains(body, ">done<") || !strings.Contains(body, "moved") {
 		t.Fatalf("the drain's page:\n%s", body)
@@ -312,7 +316,7 @@ func TestOneChangeOfTheClusterAtATime(t *testing.T) {
 	defer close(release)
 	_ = cluster.AsCluster("test").Freeze(context.Background(), "an upgrade runs")
 
-	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}}, server.URL)
+	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}, "confirm": {"nbg-1"}}, server.URL)
 	if !strings.Contains(body, "one change of the cluster at a time") {
 		t.Fatalf("a drain began during an upgrade:\n%s", body)
 	}

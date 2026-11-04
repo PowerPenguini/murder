@@ -496,8 +496,17 @@ details.event dl.pairs { margin-top: var(--s3); padding: var(--s3) var(--pad-x);
 .scroll { overflow-x: auto; }
 a.tag { display: inline-block; margin-left: var(--s2); padding: 1px 7px; border: 1px solid var(--frame); color: var(--fg); font-family: var(--sans); font-size: 12px; text-decoration: none; }
 a.tag:hover { border-color: var(--fg); }
-@media (min-width: 761px) {
-  table#tenants td { white-space: nowrap; }
+/* Tables fit their column at every width: low-value columns go first. */
+td.barcell { min-width: 0; }
+td svg.bar { width: 64px; }
+table#tenants td.l-main, table#tenants td.l-side { white-space: nowrap; }
+.scroll { overflow-x: auto; }
+@media (max-width: 1439px) { .hide-wide { display: none; } }
+@media (max-width: 1279px) {
+  .hide-mid { display: none; }
+}
+@media (min-width: 761px) and (max-width: 1279px) {
+  table#tenants .of { display: block; font-size: 12.5px; }
 }
 
 ol.steps { margin: var(--s3) 0 0; padding-left: 20px; display: grid; gap: var(--s1); }
@@ -567,3 +576,8 @@ details.howto[open] > summary::before { transform: rotate(45deg); }
 details.howto .panel { margin-top: var(--s3); display: grid; gap: var(--s3); }
 .stat .v .dim, .stat .v .st { font-size: 13px; font-weight: 400; letter-spacing: 0; }
 .stat .v .st.bad { font-weight: 600; }
+
+.elsewhere { display: inline-block; width: 8px; height: 8px; background: var(--bad); margin-left: 2px; }
+.livestate { flex-wrap: nowrap; align-items: baseline; }
+.livestate .live { align-self: flex-start; margin-top: 6px; }
+.nowrap { white-space: nowrap; }

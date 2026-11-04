@@ -38,14 +38,14 @@ func TestAttention(t *testing.T) {
 	got := attentionOf([]nodeView{up, failed}, []tenantRow{tenant("fine", healthy, true), full, sick, alone, suspended}, true, now)
 	var said []string
 	for _, n := range got {
-		said = append(said, n.Subject+" "+n.Text)
+		said = append(said, n.Subject+n.Text)
 	}
 	text := strings.Join(said, "\n")
 	want := []string{
 		"n3 failed 6m ago: its tenants run from their copies, and it keeps none",
 		"sick is unhealthy: it does not answer its health check; last exit: exit 137 (most likely out of memory) 4m ago",
 		"full uses 240 MB of its 256 MB of memory",
-		"alone has no copy: should n1 fail, it stops",
+		"alone has no copy: if n1 fails, it stops",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("attention:\n%s", text)
@@ -63,7 +63,7 @@ func TestAttention(t *testing.T) {
 	both := tenant("both", &reconcile.Status{Phase: "running"}, false)
 	both.Use = full.Use
 	got = attentionOf(nil, []tenantRow{both}, true, now)
-	if len(got) != 1 || !got[0].Bad || !strings.Contains(got[0].Text, "is unhealthy") || !strings.Contains(got[0].Text, "; uses 240 MB of its 256 MB") || !strings.Contains(got[0].Text, "still catching up") {
+	if len(got) != 1 || !got[0].Bad || !strings.Contains(got[0].Text, "is unhealthy") || !strings.Contains(got[0].Text, "; it uses 240 MB of its 256 MB") || !strings.Contains(got[0].Text, "still catching up") {
 		t.Fatalf("one tenant, several causes: %+v", got)
 	}
 	if len(got[0].Fixes) != 2 || got[0].Fixes[0].Href != "/tenants/both/logs" || got[0].Fixes[1].Href != "/tenants/both/settings#memory" {

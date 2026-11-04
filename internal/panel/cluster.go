@@ -234,6 +234,8 @@ func (j *Jobs) all() []*Job {
 
 type nodeRow struct {
 	api.NodeState
+	// Runs are the live tenants it runs.
+	Runs []string
 	// Targets are the nodes it could be drained to: they answer.
 	Targets []string
 	State   tag
@@ -326,8 +328,14 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 	data.Release, data.Mixed = releaseOf(data.Nodes)
 	archived := map[string]bool{}
 	if tenants, err := s.backend.List(ctx); err == nil {
+		slices.SortFunc(tenants, func(a, b api.Tenant) int { return strings.Compare(a.Spec.Name, b.Spec.Name) })
 		for _, t := range tenants {
 			archived[t.Spec.Name] = t.Archived()
+			for i := range data.Nodes {
+				if data.Nodes[i].Name == t.Node && !t.Archived() {
+					data.Nodes[i].Runs = append(data.Nodes[i].Runs, t.Spec.Name)
+				}
+			}
 		}
 	}
 	use := s.usageNow(ctx, archived)
@@ -388,6 +396,10 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			return clusterops.Balance(ctx, agent, false, out)
 		}))
 	case "drain":
+		if confirmed != node {
+			back("problem", "type the node's name to drain it")
+			return
+		}
 		to := r.FormValue("to")
 		if to == "" || to == node {
 			back("problem", "pick the node to move the tenants to")

@@ -115,6 +115,8 @@ type overviewData struct {
 	Broken    int
 	// Rollouts are the apps' rollouts under way.
 	Rollouts []rolloutNote
+	// FailingBackups counts the nodes whose backups fail.
+	FailingBackups int
 	// Clustered says there is more than one node.
 	Clustered bool
 	// The tenants' page's filter: Show is all, attention, unprotected,
@@ -234,6 +236,7 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 	}
 	data.Clustered = clustered
 	data.Attention = attentionOf(data.Nodes, data.Tenants, clustered, now)
+	data.FailingBackups = failingNodes(use)
 	for _, n := range data.Attention {
 		if n.Bad {
 			data.Broken++
@@ -260,8 +263,49 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 		}
 	}
 	data.Show, data.Query, data.ByName = tenantFilter(r)
-	data.Shown, data.Counts = filterTenants(data.Tenants, data.Show, data.Query, data.ByName, clustered)
+	attention := map[string]int{}
+	for _, n := range data.Attention {
+		if !n.Node {
+			attention[n.Subject] = map[bool]int{true: 0, false: 1}[n.Bad]
+		}
+	}
+	data.Shown, data.Counts = filterTenants(data.Tenants, data.Show, data.Query, data.ByName, clustered, attention)
 	return nodes, data, nil
+}
+
+// triage is what needs attention in the cluster, as the overview says it,
+// and how many nodes' backups fail: for the side bar's counts on any page.
+func (s *Server) triage(nodes api.Nodes, tenants []api.Tenant, use clusterUse) ([]notice, int) {
+	now := s.now()
+	clustered := len(nodes.Nodes) > 1
+	var views []nodeView
+	for _, n := range nodes.Nodes {
+		views = append(views, nodeView{NodeState: n, State: nodeState(n, now)})
+	}
+	var rows []tenantRow
+	for _, t := range tenants {
+		row := tenantRow{Tenant: t, State: tenantState(t), Replica: replicaState(t, clustered)}
+		if u, ok := use.Tenants[t.Spec.Name]; ok && !t.Archived() {
+			row.Use = &u
+		}
+		if b, ok := use.Backups[t.Spec.Name]; ok {
+			b.Stale = b.Stale && !t.Archived()
+			row.Backup = &b
+		}
+		rows = append(rows, row)
+	}
+	return attentionOf(views, rows, clustered, now), failingNodes(use)
+}
+
+// failingNodes counts the nodes whose backups fail.
+func failingNodes(use clusterUse) int {
+	n := 0
+	for _, b := range use.NodeBackups {
+		if b.Failing > 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // rolloutWaves is how many waves a rollout moves in: canaries, a tenth,
@@ -308,14 +352,15 @@ func (row tenantRow) Unprotected(clustered bool) bool {
 
 // filterTenants is the tenants a filter lets through, problems first
 // unless byName, and how many each filter lets through.
-func filterTenants(rows []tenantRow, show, query string, byName, clustered bool) ([]tenantRow, map[string]int) {
+// attention ranks the tenants the overview lists: 0 broken, 1 at risk.
+func filterTenants(rows []tenantRow, show, query string, byName, clustered bool, attention map[string]int) ([]tenantRow, map[string]int) {
 	query = strings.ToLower(query)
 	counts := map[string]int{}
 	var out []tenantRow
 	for _, row := range rows {
 		in := map[string]bool{
 			"all":         true,
-			"attention":   row.rank(clustered) < 2,
+			"attention":   hasKey2(attention, row.Spec.Name),
 			"unprotected": row.Unprotected(clustered) && !row.Spec.Suspended,
 			"suspended":   row.Spec.Suspended && !row.Archived(),
 			"archived":    row.Archived(),
@@ -331,7 +376,13 @@ func filterTenants(rows []tenantRow, show, query string, byName, clustered bool)
 		}
 	}
 	if !byName {
-		slices.SortStableFunc(out, func(a, b tenantRow) int { return a.rank(clustered) - b.rank(clustered) })
+		rank := func(row tenantRow) int {
+			if r, ok := attention[row.Spec.Name]; ok {
+				return r
+			}
+			return max(2, row.rank(clustered))
+		}
+		slices.SortStableFunc(out, func(a, b tenantRow) int { return rank(a) - rank(b) })
 	}
 	return out, counts
 }
@@ -540,10 +591,25 @@ func (s *Server) funcs() template.FuncMap {
 		"action":   actionText,
 		"loglines": logLines,
 		"failure":  failureEvent,
-		"nodeActs": func(n api.NodeState, self bool, targets []string, from string) nodeActs {
-			return nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, From: from}
+		"nodeActs": func(n api.NodeState, self bool, targets, tenants []string, from string) nodeActs {
+			return nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, Tenants: tenants, From: from}
 		},
-		"every":       every,
+		"every": every,
+		"sub":   func(a, b int) int { return a - b },
+		"others": func(n api.Nodes) string {
+			var out []string
+			for _, node := range n.Nodes {
+				if node.Name != n.Self && node.Answers && !node.Failed() {
+					text := node.Name
+					if node.Tunnel != nil {
+						text += " (" + node.Tunnel.Address.String() + ")"
+					}
+					out = append(out, text)
+				}
+			}
+			return strings.Join(out, ", ")
+		},
+		"raise":       raiseMemory,
 		"add":         func(a, b int) int { return a + b },
 		"next":        func(n int64) int64 { return n + 1 },
 		"list":        func(items ...string) []string { return items },
@@ -669,8 +735,9 @@ func (s *Server) headOf(t api.Tenant, nodes api.Nodes, on string) tenantHead {
 type nodeActs struct {
 	Name                  string
 	Answers, Failed, Self bool
-	Targets               []string
-	From                  string
+	// Targets are the nodes to drain it to; Tenants those it runs.
+	Targets, Tenants []string
+	From             string
 }
 
 // tenantsQuery is the tenants' page's address with a filter: pairs of a
@@ -686,4 +753,9 @@ func tenantsQuery(pairs ...string) template.URL {
 		return "/tenants"
 	}
 	return template.URL("/tenants?" + values.Encode())
+}
+
+func hasKey2(m map[string]int, key string) bool {
+	_, ok := m[key]
+	return ok
 }

@@ -1,30 +1,33 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}{{$f := $d.Form}}
 {{template "tenant-head" $d.Head}}
 
+{{if and $d.Reviewing $d.Review}}
+<section data-still class="near">
+  <form method="post" class="review-box" id="review">
+    <input type="hidden" name="generation" value="{{$f.Generation}}"><input type="hidden" name="reviewed" value="{{$d.Token}}">
+    <input type="hidden" name="app" value="{{$f.App}}"><input type="hidden" name="image" value="{{$f.Image}}">
+    <input type="hidden" name="memoryMB" value="{{$f.MemoryMB}}"><input type="hidden" name="cpus" value="{{$f.CPUs}}"><input type="hidden" name="pids" value="{{$f.PIDs}}"><input type="hidden" name="diskGB" value="{{$f.DiskGB}}">
+    <input type="hidden" name="env" value="{{$f.Env}}"><input type="hidden" name="secrets" value="{{$f.Secrets}}">
+    <h2>Review {{plural (len $d.Review) "change" "changes"}} to {{$t.Spec.Name}}</h2>
+    <table class="list changes">
+      <thead><tr><th>Setting</th><th>Current</th><th>Proposed</th></tr></thead>
+      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Current">{{.From}}</td><td class="l-sub" data-label="Proposed">{{.To}}</td></tr>{{end}}</tbody>
+    </table>
+    <p class="hint">Saving gives {{$t.Spec.Name}} a new container{{if $t.Archived}} once it is restored{{else}}: it answers no request for the few seconds it starts{{end}}. Its data stays. Exactly these values are saved; to change them, keep editing.</p>
+    <div class="actions"><button type="submit" name="do" value="save" class="primary">Save and restart {{$t.Spec.Name}}</button><button type="submit" name="do" value="edit">Keep editing</button></div>
+  </form>
+</section>
+{{else}}
 <section data-still class="near">
   <form method="post" class="stack" id="settings">
     <input type="hidden" name="generation" value="{{$f.Generation}}">
     <input type="hidden" name="owns" value="1">
     <button type="submit" name="do" value="review" class="sr" tabindex="-1" aria-hidden="true">Review changes</button>
-    {{if $d.Reviewing}}
-    <div class="review-box" role="status" id="review">
-      <h2>{{if $d.Review}}Review: {{plural (len $d.Review) "change" "changes"}}{{else}}Nothing changes{{end}}</h2>
-      {{if $d.Review}}
-      <table class="list changes">
-        <thead><tr><th>Setting</th><th>Now</th><th>Then</th></tr></thead>
-        <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="Then">{{.To}}</td></tr>{{end}}</tbody>
-      </table>
-      <p class="hint">Saving gives {{$t.Spec.Name}} a new container{{if $t.Archived}} once it is restored{{else}}: it answers no request for the few seconds it starts{{end}}. Its data stays.</p>
-      <div class="actions"><button type="submit" name="do" value="save" class="primary">Save and restart {{$t.Spec.Name}}</button><button type="submit" name="do" value="edit">Keep editing</button></div>
-      {{else}}
-      <p class="hint">The form holds what {{$t.Spec.Name}} has now.</p>
-      {{end}}
-    </div>
-    {{end}}
-
-    <div class="head"><h2>Tenant overrides</h2><span class="dim">over app <a href="/apps/{{$t.App}}">{{$t.App}}</a>; a value switched off takes the app's</span></div>
+    {{if $d.Reviewing}}<div class="notice" role="status">Nothing changes: the form holds what {{$t.Spec.Name}} has now.</div>{{end}}
+    {{with $d.Suggest}}<div class="notice" role="status">{{.}}</div>{{end}}
+    <div class="head"><h2>Tenant overrides</h2><span class="dim">over app <a href="/apps/{{$t.App}}">{{$t.App}}</a>; without an override, a setting is inherited</span></div>
     <table class="settings list">
-      <thead><tr><th>Setting</th><th>In effect</th><th>Source</th><th>Its own value</th></tr></thead>
+      <thead><tr><th>Setting</th><th>In effect</th><th>Source</th><th>Override</th></tr></thead>
       <tbody>
       {{range $d.Fields}}
         <tr class="setting" id="{{if eq .Name "memoryMB"}}memory{{else}}{{.Name}}{{end}}">
@@ -32,7 +35,7 @@
           <td class="l-side{{if .Mono}} mono{{end}}">{{.Effective}}</td>
           <td class="l-sub dim" data-label="Source">{{.Source}}</td>
           <td class="l-sub own">
-            <label class="check"><input type="checkbox" name="own-{{.Name}}" value="on" class="own-switch"{{if .Own}} checked{{end}}> Its own</label>
+            <label class="check"><input type="checkbox" name="own-{{.Name}}" value="on" class="own-switch"{{if .Own}} checked{{end}}> Override app value</label>
             <span class="own-field"><input type="{{.Kind}}" id="f-{{.Name}}" name="{{.Name}}" value="{{.Value}}"{{if eq .Kind "number"}} min="{{.Min}}" step="{{.Step}}" class="short"{{else}} class="mono-input"{{end}} autocomplete="off" spellcheck="false">{{if eq .Kind "number"}} <span class="dim small">{{.Unit}}</span>{{end}}</span>
           </td>
         </tr>
@@ -57,6 +60,8 @@
     <div class="row"><button type="submit" name="do" value="review" class="primary">Review changes</button><span class="hint">You see what changes before it is saved{{if $t.Archived}}; it runs them once it is restored{{else}} and {{$t.Spec.Name}} restarts{{end}}.</span></div>
   </form>
 </section>
+
+{{end}}
 
 <section>
   <div class="head"><h2>Rollouts</h2></div>

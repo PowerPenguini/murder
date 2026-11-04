@@ -142,6 +142,11 @@ func TestATenantsSettings(t *testing.T) {
 		t.Fatalf("a stale save:\n%s", body)
 	}
 
+	// A save is only of what was reviewed.
+	if _, body = submit(t, client, server, "/tenants/atlas/settings", form, server.URL); !strings.Contains(body, "these are not the values you reviewed") {
+		t.Fatalf("saved without a review:\n%s", body)
+	}
+	form = reviewed(t, client, server, "/tenants/atlas/settings", form)
 	_, body = submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
 	if !strings.Contains(body, "atlas&#39;s settings are changed") {
 		t.Fatalf("after saving:\n%s", body)
@@ -332,4 +337,27 @@ func TestATenantWaitingForItsDataCanBeStartedAsItIs(t *testing.T) {
 	if !strings.Contains(page, "atlas waits for their data from before the rollout") || !strings.Contains(page, `value="abort"`) || strings.Contains(page, `value="pause"`) {
 		t.Fatalf("the app's page:\n%s", page)
 	}
+}
+
+// reviewed reviews a settings form and returns it as its review's Save
+// sends it: with the token that binds it to the values reviewed.
+func reviewed(t *testing.T, client *http.Client, server *httptest.Server, path string, form url.Values) url.Values {
+	t.Helper()
+	review := url.Values{}
+	for key, values := range form {
+		review[key] = values
+	}
+	review.Set("do", "review")
+	_, body := submit(t, client, server, path, review, server.URL)
+	token := between(body, `name="reviewed" value="`, `"`)
+	if token == "" {
+		t.Fatalf("no review:\n%s", body)
+	}
+	saved := url.Values{}
+	for key, values := range form {
+		saved[key] = values
+	}
+	saved.Set("do", "save")
+	saved.Set("reviewed", token)
+	return saved
 }

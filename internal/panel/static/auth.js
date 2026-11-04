@@ -52,7 +52,9 @@
         say("checking…");
         const answer = await post("/auth/login/finish", credentialJSON(credential));
         say("signed in as " + answer.user);
-        location.replace("/");
+        // Back to the page that sent here, on this panel only.
+        const next = new URLSearchParams(location.search).get("next") || "/";
+        location.replace(/^\/(?![\/\\])/.test(next) ? next : "/");
       } catch (error) {
         say(error.name === "NotAllowedError" ? "cancelled, or no passkey here" : error.message, true);
         signin.disabled = false;

@@ -1,6 +1,8 @@
 package panel
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"maps"
 	"slices"
 	"strconv"
@@ -48,9 +50,9 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingFi
 	source := func(own bool, appValue bool) string {
 		switch {
 		case own:
-			return "its own"
+			return "Tenant override"
 		case appValue:
-			return "from app " + t.App
+			return "Inherited from " + t.App
 		}
 		return "the node's default"
 	}
@@ -74,7 +76,7 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingFi
 		memoryText = memory(l.MemoryMB)
 	}
 	return []settingField{
-		{Name: "image", Label: "Image", Kind: "text", Own: form.Image != "", Value: form.Image, Mono: true,
+		{Name: "image", Label: "Image", Kind: "text", Own: form.Image != "", Value: form.Image, Mono: true, Unit: "",
 			Effective: shortImage(t.Spec.Image), Source: source(form.Image != "", true)},
 		field("memoryMB", "Memory", "MB", "number", "1", form.MemoryMB, memoryText, a.MemoryMB != 0),
 		field("cpus", "CPUs", "cores", "number", "0.05", form.CPUs, cpus, a.CPUs != 0),
@@ -117,9 +119,9 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 			if appValue == "" || appValue == "0" {
 				return "the node's default"
 			}
-			return appValue + unit + ", app " + t.App + "'s"
+			return appValue + unit + ", inherited from " + t.App
 		}
-		return own + unit + ", its own"
+		return own + unit + ", tenant override"
 	}
 	appImage := shortImage(app.Image)
 	pairs := []struct {
@@ -153,15 +155,15 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 		case had && !has:
 			to := "unset"
 			if appHas {
-				to = appValue + ", app " + t.App + "'s"
+				to = appValue + ", inherited from " + t.App
 			}
-			out = append(out, settingChange{"Environment " + key, old + ", its own", to})
+			out = append(out, settingChange{"Environment " + key, old + ", tenant override", to})
 		case !had && has:
 			from := "unset"
 			if appHas {
-				from = appValue + ", app " + t.App + "'s"
+				from = appValue + ", inherited from " + t.App
 			}
-			out = append(out, settingChange{"Environment " + key, from, next + ", its own"})
+			out = append(out, settingChange{"Environment " + key, from, next + ", tenant override"})
 		case had && has && old != next:
 			out = append(out, settingChange{"Environment " + key, old, next})
 		}
@@ -173,8 +175,20 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 	}
 	for _, key := range slices.Sorted(maps.Keys(before.Secrets)) {
 		if _, has := after.Secrets[key]; !has {
-			out = append(out, settingChange{"Secret " + key, "its own", "dropped: " + strings.TrimSpace("the app's, if it has one")})
+			out = append(out, settingChange{"Secret " + key, "tenant override", "dropped: the app's, if it has one"})
 		}
 	}
 	return out
+}
+
+// reviewToken binds a save to the values reviewed: the save carries it,
+// and is refused when its values are not those it was made of. Line breaks
+// are taken as browsers send them, either way.
+func reviewToken(tenant string, form settingsForm) string {
+	hash := sha256.New()
+	for _, part := range []string{tenant, strconv.FormatInt(form.Generation, 10), form.App, form.Image, form.Env, form.Secrets, form.MemoryMB, form.CPUs, form.PIDs, form.DiskGB} {
+		hash.Write([]byte(strings.ReplaceAll(part, "\r\n", "\n")))
+		hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil))[:32]
 }

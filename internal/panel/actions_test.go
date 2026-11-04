@@ -50,7 +50,11 @@ func submit(t *testing.T, client *http.Client, server *httptest.Server, path str
 func TestActingOnTenants(t *testing.T) {
 	cluster, server, client := newActingPanel(t)
 	ctx := context.Background()
-	_, body := submit(t, client, server, "/tenants/atlas", url.Values{"do": {"suspend"}}, server.URL)
+	// Suspending stops it serving: the name is typed.
+	if _, body := submit(t, client, server, "/tenants/atlas", url.Values{"do": {"suspend"}}, server.URL); !strings.Contains(body, "type the tenant&#39;s name to suspend it") {
+		t.Fatalf("suspended without the name:\n%s", body)
+	}
+	_, body := submit(t, client, server, "/tenants/atlas", url.Values{"do": {"suspend"}, "confirm": {"atlas"}}, server.URL)
 	if !strings.Contains(body, "atlas is suspended") || !strings.Contains(body, ">suspended<") {
 		t.Fatalf("after suspending:\n%s", body)
 	}

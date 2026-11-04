@@ -1,17 +1,17 @@
 {{define "content"}}{{$d := .Data}}
 <h1 class="sr">Overview</h1>
 <div class="figures">
-  <a class="figure{{if $d.Broken}} alarm{{end}}" href="#attention"><div class="n">{{len $d.Attention}}</div><div class="l">{{if eq (len $d.Attention) 1}}needs{{else}}need{{end}} attention{{if $d.Broken}}, {{$d.Broken}} broken{{end}}</div></a>
+  <a class="figure{{if $d.Broken}} alarm{{end}}" href="#attention"><div class="n">{{$d.Broken}}</div><div class="l">broken</div></a>
+  <a class="figure" href="#attention"><div class="n">{{sub (len $d.Attention) $d.Broken}}</div><div class="l">at risk</div></a>
   <a class="figure" href="/cluster"><div class="n">{{template "upcount" $d.Nodes}}<small> / {{len $d.Nodes}}</small></div><div class="l">nodes up</div></a>
   <a class="figure" href="{{if lt $d.Healthy $d.Serving}}{{query "show" "attention"}}{{else}}/tenants{{end}}"><div class="n">{{$d.Healthy}}<small> / {{$d.Serving}}</small></div><div class="l">tenants healthy</div></a>
-  {{if $d.Clustered}}<a class="figure" href="{{query "show" "unprotected"}}"><div class="n">{{$d.Unprotected}}</div><div class="l">without a ready copy</div></a>{{end}}
 </div>
 
 <section class="near" id="attention" aria-labelledby="attention-h">
   <h2 id="attention-h" class="sr">Needs attention</h2>
   {{with $d.Attention}}
   <ul class="attention">
-    {{range .}}<li{{if .Bad}} class="broken"{{end}}><span class="st {{if .Bad}}bad{{else}}warn{{end}}" aria-label="{{if .Bad}}broken{{else}}at risk{{end}}"></span><div><a href="{{.Href}}" class="subject">{{.Subject}}</a> {{.Text}}{{with .Fixes}}<span class="fixes">{{range .}}<a href="{{.Href}}">{{.Label}}</a>{{end}}</span>{{end}}</div></li>{{end}}
+    {{range .}}<li{{if .Bad}} class="broken"{{end}}><span class="st {{if .Bad}}bad{{else}}warn{{end}}" aria-label="{{if .Bad}}broken{{else}}at risk{{end}}"></span><div><a href="{{.Href}}" class="subject">{{.Subject}}</a>{{.Text}}.{{with .Fixes}}<span class="fixes">{{range .}}<a href="{{.Href}}">{{.Label}}</a>{{end}}</span>{{end}}</div></li>{{end}}
   </ul>
   {{else}}
   <p class="calm"><span class="st ok"></span>Every node answers, every tenant runs healthy, and every one has a ready copy.</p>
@@ -26,7 +26,7 @@
 <section>
   <div class="head"><h2>Nodes</h2><a href="/cluster" class="dim">Cluster</a></div>
   <table class="list rows">
-    <thead><tr><th>Node</th><th>State</th><th>CPU, cores</th><th>Memory</th><th class="num">Tenants</th><th class="hide-narrow">Address</th></tr></thead>
+    <thead><tr><th>Node</th><th>State</th><th>CPU, cores</th><th>Memory</th><th class="num">Tenants</th><th class="hide-narrow hide-mid">Address</th></tr></thead>
     <tbody>
     {{range $d.Nodes}}
       <tr>
@@ -36,7 +36,7 @@
         <td class="barcell l-sub" data-label="Memory">{{with .Use}}<div class="barline">{{template "bar" .Memory}}<span class="num">{{.MemoryText}}</span></div>{{else}}<span class="faint">not measured</span>{{end}}
           {{if .MemoryMB}}<div class="small dim">{{mem .MemoryMB}} reserved by limits</div>{{end}}</td>
         <td class="num">{{.Tenants}} <span class="dim">· {{plural .Copies "copy" "copies"}}</span></td>
-        <td class="mono dim hide-narrow">{{addrs .NodeState}}</td>
+        <td class="mono dim hide-narrow hide-mid">{{addrs .NodeState}}</td>
       </tr>
     {{end}}
     </tbody>

@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -241,7 +242,8 @@ func (s *Server) signedIn(next http.Handler) http.Handler {
 		user, ok := s.Auth.User(r)
 		if !ok {
 			if r.Method == http.MethodGet {
-				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				// Signed in, the person comes back here.
+				http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 				return
 			}
 			http.Error(w, "sign in first", http.StatusUnauthorized)
@@ -426,17 +428,19 @@ func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section 
 // alertsFor counts what is broken in the cluster, for the side bar: from
 // the tenants a page read already, or asked for.
 func (s *Server) alertsFor(r *http.Request, nodes api.Nodes, data any) navAlerts {
-	var tenants []api.Tenant
 	if d, ok := data.(overviewData); ok {
-		for _, row := range d.Tenants {
-			tenants = append(tenants, row.Tenant)
-		}
-	} else {
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-		tenants, _ = s.backend.List(ctx)
+		return alertsOf(d.Attention, d.FailingBackups)
 	}
-	return alertsOf(nodes.Nodes, tenants, s.now())
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	var tenants []api.Tenant
+	var use clusterUse
+	_ = all(
+		func() (err error) { tenants, err = s.backend.List(ctx); return },
+		func() error { use = s.usageNow(ctx); return nil },
+	)
+	notices, failing := s.triage(nodes, tenants, use)
+	return alertsOf(notices, failing)
 }
 
 func (s *Server) write(w http.ResponseWriter, name string, p page, status int) {

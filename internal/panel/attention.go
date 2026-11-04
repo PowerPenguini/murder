@@ -17,10 +17,13 @@ type notice struct {
 	Bad bool
 	// Subject is the node or tenant it is about; Href its page.
 	Subject, Href string
-	// Text is what is wrong, every cause in one sentence, the worst first.
+	// Text is what is wrong, every cause in one sentence, the worst first,
+	// as it follows the subject's name: " is unhealthy...", "'s copy...".
 	Text string
 	// Fixes are where to act on it.
 	Fixes []fix
+	// Node says it is about a node, not a tenant.
+	Node bool
 }
 
 // fix is a way to act on what needs attention.
@@ -40,13 +43,13 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 		switch {
 		case n.Failed():
 			failed[n.Name] = true
-			out = append(out, notice{Bad: true, Subject: n.Name, Href: href, Text: "failed " + ago(now, n.FailedAt) + " ago: its tenants run from their copies, and it keeps none",
+			out = append(out, notice{Bad: true, Node: true, Subject: n.Name, Href: href, Text: " failed " + ago(now, n.FailedAt) + " ago: its tenants run from their copies, and it keeps none",
 				Fixes: []fix{{"What to do", href}}})
 		case n.State.Kind == "bad":
-			out = append(out, notice{Bad: true, Subject: n.Name, Href: href, Text: "does not answer: its tenants stop until it is failed over",
+			out = append(out, notice{Bad: true, Node: true, Subject: n.Name, Href: href, Text: " does not answer: its tenants stop until it is failed over",
 				Fixes: []fix{{"Fail it over", href}}})
 		case n.State.Kind == "warn":
-			out = append(out, notice{Subject: n.Name, Href: href, Text: "is " + n.State.Label})
+			out = append(out, notice{Node: true, Subject: n.Name, Href: href, Text: " is " + n.State.Label})
 		}
 	}
 	for _, row := range rows {
@@ -64,21 +67,27 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 		}
 		if row.Use != nil && row.Use.MemoryLimit != "" && row.Use.Memory.Width >= memoryWarn {
 			causes = append(causes, "uses "+row.Use.MemoryText+" of its "+row.Use.MemoryLimit+" of memory")
-			n.Fixes = append(n.Fixes, fix{"Raise its memory limit", href + "/settings#memory"})
+			n.Fixes = append(n.Fixes, fix{"Raise its memory limit", raiseMemory(row.Tenant)})
 		}
 		if clustered {
 			switch {
 			case row.Replica.Kind == "bad":
-				causes = append(causes, "has no copy: should "+row.Node+" fail, it stops")
+				causes = append(causes, "has no copy: if "+row.Node+" fails, it stops")
 			case row.Tenant.Replica != "" && !row.ReplicaReady && row.ReplicaNext == "":
-				causes = append(causes, "its copy on "+row.Tenant.Replica+" is still catching up: should "+row.Node+" fail now, it stops")
+				causes = append(causes, "its copy on "+row.Tenant.Replica+" is still catching up: if "+row.Node+" fails now, it stops")
 			case row.ReplicaNext != "" && failed[row.ReplicaNext]:
 				causes = append(causes, "its copy moves to "+row.ReplicaNext+", which failed")
 			}
 		}
 		if b := row.Backup; b != nil && b.Bad() {
 			if b.Failing {
-				causes = append(causes, "its last backup failed")
+				// A tenant without a fresh backup is wrong, not in progress.
+				n.Bad = true
+				text := "its last backup failed"
+				if !b.None {
+					text += "; the newest is " + ago(now, b.Last) + " old"
+				}
+				causes = append(causes, text)
 			} else {
 				causes = append(causes, "its newest backup is "+ago(now, b.Last)+" old, though they run every "+every(b.Every))
 			}
@@ -87,7 +96,7 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 		if len(causes) == 0 {
 			continue
 		}
-		n.Text = strings.Join(causes, "; ")
+		n.Text = sentence(causes)
 		out = append(out, n)
 	}
 	slices.SortStableFunc(out, func(a, b notice) int {
@@ -103,31 +112,49 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 }
 
 // navAlerts are the counts of what is broken, beside the side bar's pages,
-// so that a failure is seen from any page.
+// so that a failure is seen from any page. They are counted from the same
+// notices as the overview's: one definition of broken everywhere.
 type navAlerts struct {
-	// Tenants that do not serve as they should, nodes that failed or do not
-	// answer, and both, as the overview counts them.
-	Tenants, Nodes, Overview int
+	// Overview counts the broken things, nodes and tenants; Tenants the
+	// broken tenants; Cluster the broken nodes and the nodes whose backups
+	// fail.
+	Overview, Tenants, Cluster int
 }
 
-// alertsOf counts what is broken among nodes and tenants.
-func alertsOf(nodes []api.NodeState, tenants []api.Tenant, now time.Time) navAlerts {
-	var a navAlerts
-	for _, n := range nodes {
-		if nodeState(n, now).Kind == "bad" {
-			a.Nodes++
-		}
-	}
-	for _, t := range tenants {
-		if t.Archived() || t.Spec.Suspended {
+// alertsOf counts what is broken among notices; failing are the nodes
+// whose backups fail.
+func alertsOf(notices []notice, failing int) navAlerts {
+	a := navAlerts{Cluster: failing}
+	for _, n := range notices {
+		if !n.Bad {
 			continue
 		}
-		if _, bad := tenantProblem(t, tenantState(t)); bad {
+		a.Overview++
+		if n.Node {
+			a.Cluster++
+		} else {
 			a.Tenants++
 		}
 	}
-	a.Overview = a.Nodes + a.Tenants
 	return a
+}
+
+// Of is a section's own count.
+func (a navAlerts) Of(section string) int {
+	switch section {
+	case "overview":
+		return a.Overview
+	case "tenants":
+		return a.Tenants
+	case "cluster":
+		return a.Cluster
+	}
+	return 0
+}
+
+// Elsewhere says another section than section has something broken.
+func (a navAlerts) Elsewhere(section string) bool {
+	return a.Overview > 0 && a.Of(section) == 0
 }
 
 // Title is the count a page's title begins with, as "(2) ".
@@ -172,6 +199,28 @@ func tenantProblem(t api.Tenant, state tag) (string, bool) {
 // nodeHref is where a node is shown.
 func nodeHref(name string) string { return "/nodes/" + url.PathEscape(name) }
 
+// sentence joins what is wrong with a tenant into one sentence that
+// follows its name: the first cause speaks of it by name, the others as
+// "it".
+func sentence(causes []string) string {
+	var b strings.Builder
+	for i, c := range causes {
+		switch {
+		case i > 0:
+			b.WriteString("; ")
+			if !strings.HasPrefix(c, "its ") {
+				b.WriteString("it ")
+			}
+			b.WriteString(c)
+		case strings.HasPrefix(c, "its "):
+			b.WriteString("'s " + c[len("its "):])
+		default:
+			b.WriteString(" " + c)
+		}
+	}
+	return b.String()
+}
+
 // every says how often something runs: 6h, 30m, a day.
 func every(d time.Duration) string {
 	switch {
@@ -183,4 +232,14 @@ func every(d time.Duration) string {
 		return strconv.Itoa(int(d/time.Hour)) + "h"
 	}
 	return strconv.Itoa(int(d/time.Minute)) + "m"
+}
+
+// raiseMemory is where a tenant's memory limit is raised: its settings,
+// proposing twice the limit it has, as an override to review.
+func raiseMemory(t api.Tenant) string {
+	href := "/tenants/" + url.PathEscape(t.Spec.Name) + "/settings"
+	if mb := t.Spec.Limits.MemoryMB; mb > 0 {
+		href += "?memoryMB=" + strconv.Itoa(2*mb)
+	}
+	return href + "#memory"
 }

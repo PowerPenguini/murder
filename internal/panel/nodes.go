@@ -26,6 +26,8 @@ type nodeData struct {
 	Acts      bool
 	// Runs are the tenants it runs, Keeps those it keeps a copy of.
 	Runs, Keeps []tenantRow
+	// RunNames are the live tenants it runs, by name.
+	RunNames []string
 	// Moved are the tenants that failed over from it, and where each runs
 	// now, as the audit log says.
 	Moved []movedTenant
@@ -101,6 +103,9 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case t.Node == name:
 			data.Runs = append(data.Runs, row)
+			if !t.Archived() {
+				data.RunNames = append(data.RunNames, t.Spec.Name)
+			}
 		case t.Replica == name || t.ReplicaNext == name:
 			data.Keeps = append(data.Keeps, row)
 		}

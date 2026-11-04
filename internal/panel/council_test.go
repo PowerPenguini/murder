@@ -54,11 +54,18 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	}
 }
 
-// A rollout's page shows its waves, each tenant's place and what blocks it.
+// A rollout's page shows its waves, each tenant's place and what blocks it;
+// moving the next wave past its health gate needs the app's name.
 func TestRolloutProgress(t *testing.T) {
-	_, server, _ := newAppsPanel(t)
+	cluster, server, client := newAppsPanel(t)
+	if _, body := submit(t, client, server, "/apps/web", url.Values{"do": {"promote"}}, server.URL); !strings.Contains(body, "type the app&#39;s name to move the next wave") {
+		t.Fatalf("moved a wave without the name:\n%s", body)
+	}
+	if app, _ := cluster.AsApps("t").App(context.Background(), "web"); app.Rollout.Wave != 2 {
+		t.Fatalf("moved a wave without the name: wave %d", app.Rollout.Wave)
+	}
 	_, page := get(t, server.URL+"/apps/web")
-	for _, want := range []string{`<li class="done"><span class="wn">Canaries</span>`, `<li class="now"><span class="wn">A tenth</span>`, "moved, not healthy: blocks the next wave", "waits for wave 3", "stays: it is held", "Half (kowalski-trans) moves once baltic-freight is healthy", "Roll out to the rest now", "Restore data snapshot"} {
+	for _, want := range []string{`<li class="done"><span class="wn">Canaries</span>`, `<li class="now"><span class="wn">A tenth</span>`, "moved, not healthy: blocks the next wave", "waits for wave 3", "stays: it is held", "Half (kowalski-trans) moves once baltic-freight is healthy", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, page)
 		}
@@ -85,31 +92,68 @@ func TestPlanWaves(t *testing.T) {
 }
 
 // A tenant's settings say each value in effect and its source; a value
-// switched off takes the app's; a save is reviewed first.
+// not overridden is inherited; a save is reviewed first, and saves exactly
+// what was reviewed.
 func TestSettingsSayTheirSource(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/tenants/atlas/settings")
-	for _, want := range []string{"768 MB", "its own", "from app web", "FEATURE_PLANNER", "over the app's", "Review changes", "Save rollout flags"} {
+	for _, want := range []string{"768 MB", "Tenant override", "Inherited from web", "FEATURE_PLANNER", "over the app's", "Override app value", "Review changes", "Save rollout flags"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the settings lack %q:\n%s", want, page)
 		}
 	}
 	generation := between(page, `name="generation" value="`, `"`)
-	form := url.Values{"owns": {"1"}, "generation": {generation}, "app": {"web"}, "memoryMB": {"768"}, "env": {"TZ=Europe/Berlin\nFEATURE_PLANNER=on"}, "secrets": {"ADMIN_PASSWORD password 20"}}
+	form := url.Values{"owns": {"1"}, "generation": {generation}, "app": {"web"}, "own-memoryMB": {"on"}, "memoryMB": {"1100"}, "env": {"TZ=Europe/Berlin\nFEATURE_PLANNER=on"}, "secrets": {"ADMIN_PASSWORD password 20"}}
 	form.Set("do", "review")
 	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
-	if !strings.Contains(body, "Review: 1 change") || !strings.Contains(body, "768 MB, its own") || !strings.Contains(body, "256 MB, app web&#39;s") || !strings.Contains(body, "Save and restart atlas") {
+	if !strings.Contains(body, "Review 1 change to atlas") || !strings.Contains(body, "768 MB, tenant override") || !strings.Contains(body, "1100 MB, tenant override") || !strings.Contains(body, "Save and restart atlas") {
 		t.Fatalf("the review:\n%s", body)
 	}
+	// The review is not the editor: the values it shows are what it sends.
+	if strings.Contains(body, `id="f-memoryMB"`) || !strings.Contains(body, `name="memoryMB" value="1100"`) {
+		t.Fatalf("the review holds an editable form:\n%s", body)
+	}
+	token := between(body, `name="reviewed" value="`, `"`)
 	if tenant, _ := cluster.Get(ctx, "atlas"); tenant.Overrides.Limits.MemoryMB != 768 {
 		t.Fatal("a review saved")
 	}
-	form.Set("do", "save")
-	submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
-	if tenant, _ := cluster.Get(ctx, "atlas"); tenant.Overrides.Limits.MemoryMB != 0 || tenant.Spec.Limits.MemoryMB != 256 {
-		t.Fatalf("switched off, memory is still its own: %+v", tenant.Overrides.Limits)
+	// A save of other values than reviewed is refused.
+	saved := url.Values{"generation": {generation}, "app": {"web"}, "memoryMB": {"1200"}, "env": {"TZ=Europe/Berlin\nFEATURE_PLANNER=on"}, "secrets": {"ADMIN_PASSWORD password 20"}, "do": {"save"}, "reviewed": {token}}
+	if _, body = submit(t, client, server, "/tenants/atlas/settings", saved, server.URL); !strings.Contains(body, "these are not the values you reviewed") {
+		t.Fatalf("saved other values than reviewed:\n%s", body)
 	}
+	if tenant, _ := cluster.Get(ctx, "atlas"); tenant.Overrides.Limits.MemoryMB != 768 {
+		t.Fatalf("saved other values than reviewed: %d", tenant.Overrides.Limits.MemoryMB)
+	}
+	// Keep editing goes back to the editor, the values kept.
+	saved.Set("memoryMB", "1100")
+	saved.Set("do", "edit")
+	if _, body = submit(t, client, server, "/tenants/atlas/settings", saved, server.URL); !strings.Contains(body, `id="f-memoryMB" name="memoryMB" value="1100"`) {
+		t.Fatalf("keep editing:\n%s", body)
+	}
+	saved.Set("do", "save")
+	submit(t, client, server, "/tenants/atlas/settings", saved, server.URL)
+	if tenant, _ := cluster.Get(ctx, "atlas"); tenant.Overrides.Limits.MemoryMB != 1100 {
+		t.Fatalf("the reviewed values were not saved: %d", tenant.Overrides.Limits.MemoryMB)
+	}
+	// A value no longer overridden is inherited again.
+	page = get2(t, server.URL+"/tenants/atlas/settings")
+	generation = between(page, `name="generation" value="`, `"`)
+	off := url.Values{"owns": {"1"}, "generation": {generation}, "app": {"web"}, "memoryMB": {"1100"}, "env": {"TZ=Europe/Berlin\nFEATURE_PLANNER=on"}, "secrets": {"ADMIN_PASSWORD password 20"}}
+	submit(t, client, server, "/tenants/atlas/settings", reviewed(t, client, server, "/tenants/atlas/settings", off), server.URL)
+	if tenant, _ := cluster.Get(ctx, "atlas"); tenant.Overrides.Limits.MemoryMB != 0 || tenant.Spec.Limits.MemoryMB != 256 {
+		t.Fatalf("switched off, memory is still overridden: %+v", tenant.Overrides.Limits)
+	}
+	// "Raise its memory limit" proposes twice the limit, to review.
+	if _, page = get(t, server.URL+"/tenants/baltic-freight/settings?memoryMB=512"); !strings.Contains(page, `name="memoryMB" value="512"`) || !strings.Contains(page, "Proposed: memory 512 MB") {
+		t.Fatalf("the proposed limit:\n%s", page)
+	}
+}
+
+func get2(t *testing.T, url string) string {
+	_, page := get(t, url)
+	return page
 }
 
 // A failed node's page says what failed over from it and where it runs
@@ -127,7 +171,7 @@ func TestNodePageAndBackups(t *testing.T) {
 		t.Fatalf("an unknown node: %d", response.StatusCode)
 	}
 	_, page = get(t, server.URL+"/cluster")
-	for _, want := range []string{`id="backups"`, "every 1h", "1 failing", "kowalski-trans</a> its last backup failed", "sudo murder backups restore"} {
+	for _, want := range []string{`id="backups"`, "every 1h", "1 failing", "sudo murder backups restore"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the cluster page lacks %q:\n%s", want, page)
 		}
@@ -136,7 +180,7 @@ func TestNodePageAndBackups(t *testing.T) {
 	if !strings.Contains(page, "Newest backup") || !strings.Contains(page, "last try failed") {
 		t.Fatalf("the tenant's backup:\n%s", page)
 	}
-	if _, page = get(t, server.URL+"/"); !strings.Contains(page, "kowalski-trans</a> its last backup failed") {
+	if _, page = get(t, server.URL+"/"); !strings.Contains(page, "kowalski-trans</a>&#39;s last backup failed; the newest is 3h old") {
 		t.Fatal("the overview does not say a backup fails")
 	}
 }

@@ -349,11 +349,16 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", "type the app's name to take every tenant back")
 			return
 		}
+		// Moving the next wave skips its health gate: the name is typed.
+		if action == "promote" && strings.TrimSpace(r.FormValue("confirm")) != name {
+			back("problem", "type the app's name to move the next wave without waiting for its health check")
+			return
+		}
 		if _, err := agent.RolloutAction(ctx, name, action); err != nil {
 			back("problem", err.Error())
 			return
 		}
-		back("done", map[string]string{"pause": "the rollout is paused", "resume": "the rollout goes on", "abort": "the rollout is aborted: its tenants go back, their data as it is", "promote": "every waiting tenant moves now"}[action])
+		back("done", map[string]string{"pause": "the rollout is paused", "resume": "the rollout goes on", "abort": "the rollout is aborted: its tenants go back, their data as it is", "promote": "the next wave moves now, without waiting for the one before to stay healthy"}[action])
 	case "restore-data":
 		if strings.TrimSpace(r.FormValue("confirm")) != name {
 			back("problem", "type the app's name to take its tenants back with their data")
@@ -610,6 +615,10 @@ type settingsData struct {
 	// Reviewing says it was.
 	Review    []settingChange
 	Reviewing bool
+	// Token binds the save to the values reviewed.
+	Token string
+	// Suggest says a value proposed by the link that led here.
+	Suggest string
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -620,7 +629,13 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.settingsPage(w, r, t, formOf(t), "", http.StatusOK)
+	form := formOf(t)
+	// A link that proposes a memory limit ("Raise its memory limit")
+	// fills it in as an override, to be reviewed.
+	if mb, err := strconv.Atoi(r.URL.Query().Get("memoryMB")); err == nil && mb > 0 && mb <= 1<<20 {
+		form.MemoryMB = strconv.Itoa(mb)
+	}
+	s.settingsPage(w, r, t, form, "", http.StatusOK)
 }
 
 func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tenant, form settingsForm, problem string, status int) {
@@ -639,10 +654,14 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 		}
 	}
 	data.Fields = settingFields(t, appSpec, form)
+	if r.Method == http.MethodGet && form.MemoryMB != formOf(t).MemoryMB {
+		data.Suggest = "Proposed: memory " + memory(atoi(form.MemoryMB)) + " as a tenant override, up from " + memory(t.Spec.Limits.MemoryMB) + ". Nothing changes until you review and save it."
+	}
 	data.Env = envRows(appSpec, t.Overrides.Env)
 	if r.FormValue("do") == "review" {
 		data.Reviewing = true
 		data.Review = settingChanges(t, appSpec, form)
+		data.Token = reviewToken(t.Spec.Name, form)
 	}
 	if nodes, err := s.backend.Nodes(ctx); err == nil {
 		data.Head = s.headOf(t, nodes, "settings")
@@ -702,6 +721,11 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 			refuse("someone changed " + name + " since you opened this page: your settings are below; reload the page for theirs")
 			return
 		}
+		// Only what was reviewed is saved.
+		if r.FormValue("reviewed") != reviewToken(name, form) {
+			refuse("these are not the values you reviewed: review them again before saving")
+			return
+		}
 		applied, err := agent.Configure(ctx, name, api.TenantRequest{App: form.App, Overrides: overrides, Generation: form.Generation})
 		if err != nil {
 			refuse(err.Error())
@@ -736,4 +760,9 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		back("problem", "unknown action")
 	}
+}
+
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }

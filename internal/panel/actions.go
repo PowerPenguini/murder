@@ -74,6 +74,11 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 	var done string
 	switch r.FormValue("do") {
 	case "suspend":
+		// It stops serving: the name is typed, as for archiving.
+		if !confirmed {
+			err = errors.New("type the tenant's name to suspend it")
+			break
+		}
 		_, err = agent.Suspend(ctx, name, true)
 		done = name + " is suspended: its container stopped, its data kept"
 	case "resume":

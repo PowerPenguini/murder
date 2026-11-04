@@ -27,11 +27,13 @@
   <div class="actions spaced">
     {{if eq .State "running"}}<form method="post" class="row"><input type="hidden" name="do" value="pause"><button type="submit">Pause</button></form>
     <details class="drop">
-      <summary class="button">Roll out to the rest now</summary>
+      <summary class="button">Move the next wave now</summary>
       <div class="pop">
         <form method="post" class="stack"><input type="hidden" name="do" value="promote">
-          <p class="hint">Moves {{if .Next}}the next wave ({{range $i, $n := .Next}}{{if $i}}, {{end}}{{$n}}{{end}}){{else}}every waiting tenant{{end}} now, without waiting for the wave before to stay healthy. Each still has to come up healthy.</p>
-          <div><button type="submit">Roll out now</button></div>
+          {{if .Blockers}}<p class="hint red">{{range $i, $b := .Blockers}}{{if $i}}, {{end}}{{$b}}{{end}} {{if eq (len .Blockers) 1}}is{{else}}are{{end}} not healthy on revision {{.ToRevision}}. Moving the next wave now risks the same for {{if .Next}}{{range $i, $n := .Next}}{{if $i}}, {{end}}{{$n}}{{end}}{{else}}the tenants left{{end}}.</p>{{end}}
+          <p class="hint">Moves {{if .Next}}{{range $i, $n := .Next}}{{if $i}}, {{end}}{{$n}}{{end}}{{else}}every waiting tenant{{end}} to revision {{.ToRevision}} now, without waiting for the wave before to stay healthy. Each still has to come up healthy. Type the app's name.</p>
+          <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <div><button type="submit" class="danger">Move {{if .Next}}{{range $i, $n := .Next}}{{if $i}}, {{end}}{{$n}}{{end}}{{else}}them{{end}} now</button></div>
         </form>
       </div>
     </details>

@@ -33,17 +33,17 @@
   </form>
   <p class="count-line dim" id="tenants-count">{{if or $d.Query (ne $d.Show "all")}}{{len $d.Shown}} of {{len $d.Tenants}} match{{else}}{{len $d.Tenants}} tenants{{end}}, {{if $d.ByName}}by name · <a href="{{query "show" $d.Show "q" $d.Query}}">problems first</a>{{else}}problems first · <a href="{{query "show" $d.Show "q" $d.Query "sort" "name"}}">by name</a>{{end}}</p>
   <table id="tenants" class="list rows">
-    <thead><tr><th>Tenant</th><th>State</th><th>Memory, used of limit</th><th>CPU, cores</th><th class="num">Requests a minute</th><th>Runs on</th><th>Copy</th></tr></thead>
+    <thead><tr><th>Tenant</th><th>State</th><th>Memory, used of limit</th><th class="hide-mid">CPU, cores</th><th class="num hide-wide">Requests/min</th><th>Runs on</th><th>Copy</th></tr></thead>
     <tbody>
     {{range $d.Shown}}
       <tr>
         <td class="l-main"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a> <span class="dim small">{{.App}}</span></td>
         <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         {{with .Use}}
-        <td class="barcell l-sub" data-label="Memory"><div class="barline">{{template "bar" .Memory}}<span class="num{{if ge .Memory.Width 90.0}} red{{end}}">{{.MemoryText}}{{with .MemoryLimit}} <span class="dim">of {{.}}</span>{{end}}</span></div></td>
-        <td class="barcell hide-narrow"><div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div></td>
-        <td class="num hide-narrow">{{.Requests}}</td>
-        {{else}}<td class="faint l-sub" data-label="Memory">{{if .Archived}}not running{{else}}not measured{{end}}</td><td class="faint hide-narrow">none</td><td class="num faint hide-narrow">none</td>{{end}}
+        <td class="barcell l-sub" data-label="Memory"><div class="barline">{{template "bar" .Memory}}<span class="num{{if ge .Memory.Width 90.0}} red{{end}}">{{.MemoryText}}{{with .MemoryLimit}} <span class="dim of">of {{.}}</span>{{end}}</span></div></td>
+        <td class="barcell hide-narrow hide-mid"><div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div></td>
+        <td class="num hide-narrow hide-wide">{{.Requests}}</td>
+        {{else}}<td class="faint l-sub" data-label="Memory">{{if .Archived}}not running{{else}}not measured{{end}}</td><td class="faint hide-narrow hide-mid">none</td><td class="num faint hide-narrow hide-wide">none</td>{{end}}
         <td class="hide-narrow">{{if .Archived}}<span class="faint">{{.Node}}</span>{{else}}{{.Node}}{{end}}</td>
         <td class="l-sub{{if not (or (eq .Replica.Kind "warn") (eq .Replica.Kind "bad"))}} hide-narrow{{end}}" data-label="Copy">{{template "copy" .}}</td>
       </tr>

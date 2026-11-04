@@ -21,11 +21,11 @@
   <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt="murder, the overview"></a>
   <nav class="menu" aria-label="the panel" id="menu">{{template "nav" .}}</nav>
   <details class="navmenu" id="navmenu">
-    <summary aria-label="the panel's pages">{{template "section" .}}{{with .Alerts.Overview}}<span class="count">{{.}}</span>{{end}}</summary>
+    <summary><span class="sr">Page: </span>{{template "section" .}}{{with .Alerts.Of .Section}}<span class="count" title="{{.}} broken here">{{.}}</span><span class="sr"> broken here</span>{{end}}{{if .Alerts.Elsewhere .Section}}<span class="elsewhere" title="something is broken on another page"></span><span class="sr">, something is broken on another page</span>{{end}}</summary>
     <nav class="navlist" aria-label="the panel">{{template "nav" .}}</nav>
   </details>
   <div class="who">
-    <div class="livestate" id="livestate" data-at="{{.Now.UnixMilli}}" data-node="{{.Cluster.Self}}" role="status">
+    <div class="livestate" id="livestate" data-at="{{.Now.UnixMilli}}" data-node="{{.Cluster.Self}}" data-others="{{others .Cluster}}" role="status">
       <span class="live" aria-hidden="true"></span><span class="livetext">As of {{.Now.UTC.Format "15:04:05"}} UTC</span>
     </div>
     <div class="node" title="the node this panel asks{{with .Cluster.Leader}}; {{.}} leads{{end}}"><span class="dim">via</span> <span class="mono">{{.Cluster.Self}}</span></div>
@@ -48,11 +48,11 @@
 </body>
 </html>
 {{define "nav"}}
-    <a href="/" {{if eq .Section "overview"}}class="on" aria-current="page"{{end}}>Overview{{with .Alerts.Overview}}<span class="count" title="{{.}} broken">{{.}}</span>{{end}}</a>
-    <a href="/tenants" {{if eq .Section "tenants"}}class="on" aria-current="page"{{end}}>Tenants{{with .Alerts.Tenants}}<span class="count" title="{{.}} broken">{{.}}</span>{{end}}</a>
+    <a href="/" {{if eq .Section "overview"}}class="on" aria-current="page"{{end}}>Overview{{with .Alerts.Overview}}<span class="count" title="{{plural . "thing" "things"}} broken">{{.}}</span>{{end}}</a>
+    <a href="/tenants" {{if eq .Section "tenants"}}class="on" aria-current="page"{{end}}>Tenants{{with .Alerts.Tenants}}<span class="count" title="{{plural . "tenant" "tenants"}} broken">{{.}}</span>{{end}}</a>
     {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on" aria-current="page"{{end}}>Apps</a>{{end}}
     <a href="/events" {{if eq .Section "events"}}class="on" aria-current="page"{{end}}>Events</a>
-    <a href="/cluster" {{if eq .Section "cluster"}}class="on" aria-current="page"{{end}}>Cluster{{with .Alerts.Nodes}}<span class="count" title="{{.}} broken">{{.}}</span>{{end}}</a>
+    <a href="/cluster" {{if eq .Section "cluster"}}class="on" aria-current="page"{{end}}>Cluster{{with .Alerts.Cluster}}<span class="count" title="{{.}} broken: nodes down or backups failing">{{.}}</span>{{end}}</a>
     <a href="/access" {{if eq .Section "access"}}class="on" aria-current="page"{{end}}>Access</a>
 {{end}}
 {{define "section"}}{{if eq .Section "overview"}}Overview{{else if eq .Section "tenants"}}Tenants{{else if eq .Section "apps"}}Apps{{else if eq .Section "events"}}Events{{else if eq .Section "cluster"}}Cluster{{else if eq .Section "access"}}Access{{else}}Menu{{end}}{{end}}

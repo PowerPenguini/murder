@@ -53,10 +53,19 @@
   const clock = (at) => new Date(at).toISOString().slice(11, 19) + " UTC";
 
   // The banner that says the page shows old data, at the top of the page.
+  const others = (state && state.dataset.others) || "";
+  const signIn = () => {
+    const link = document.createElement("a");
+    link.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+    link.textContent = "Sign in again";
+    return link;
+  };
+  // The banner that says the page shows old data, at the top of the page:
+  // the node is lost, the session ended, or the page is gone.
   const banner = () => {
     let bar = document.getElementById("stale-banner");
     const main = document.getElementById("main");
-    if (!lostWhy) {
+    if (!lostWhy && !stopped) {
       if (bar) bar.remove();
       document.body.classList.remove("stale");
       return;
@@ -73,8 +82,23 @@
     bar.replaceChildren();
     const lead = document.createElement("span");
     lead.className = "lead-in";
+    const since = " This page shows what it said at " + clock(readAt) + ", " + age(Date.now() - readAt) + " ago: greyed values may be out of date. ";
+    if (stopped === "signed out") {
+      lead.textContent = "You are signed out. ";
+      bar.append(lead, document.createTextNode("Your session ended, so the page no longer follows the cluster, and its buttons do nothing until you sign in." + since), signIn());
+      return;
+    }
+    if (stopped) {
+      lead.textContent = "This page is gone. ";
+      bar.append(lead, document.createTextNode("What it showed was purged, renamed or ended." + since));
+      const home = document.createElement("a");
+      home.href = "/";
+      home.textContent = "Open the overview";
+      bar.append(home);
+      return;
+    }
     lead.textContent = "Can't reach " + node + ". ";
-    bar.append(lead, document.createTextNode(lostWhy + " This page shows what it said at " + clock(readAt) + ", " + age(Date.now() - readAt) + " ago: greyed values may be out of date. "));
+    bar.append(lead, document.createTextNode(lostWhy + since + (others ? "Other nodes answered: " + others + ". The panel's name leads to the nodes that answer: reload in a moment to reach one. " : "")));
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "link";
@@ -90,11 +114,7 @@
     if (stopped) {
       state.classList.add("off");
       if (stopped === "signed out") {
-        text.append("Signed out. ");
-        const link = document.createElement("a");
-        link.href = "/login";
-        link.textContent = "Sign in";
-        text.append(link);
+        text.append("Signed out. ", signIn());
       } else {
         text.textContent = stopped;
       }
@@ -124,6 +144,14 @@
   const stop = (why) => {
     stopped = why;
     clearInterval(timer);
+    // Signed out, what the page offers would fail: its buttons wait.
+    if (why === "signed out") {
+      for (const button of document.querySelectorAll("#main form[method=post] button, .pagehead form button")) {
+        button.disabled = true;
+        button.title = "Sign in again first";
+      }
+    }
+    banner();
     say();
   };
 
@@ -175,7 +203,7 @@
     try {
       const response = await fetch(location.href, { credentials: "same-origin", headers: { "X-Murder-Live": "1" }, signal: abort.signal, cache: "no-store" });
       if (response.redirected || response.status === 401) return stop("signed out");
-      if (response.status === 404) return stop("This page is gone: it was purged, renamed or ended");
+      if (response.status === 404) return stop("This page is gone");
       const page = new DOMParser().parseFromString(await response.text(), "text/html");
       if (!response.ok) {
         const said = page.querySelector("h1");

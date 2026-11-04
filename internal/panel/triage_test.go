@@ -36,7 +36,7 @@ func TestTenantFilters(t *testing.T) {
 		t.Fatalf("unprotected: %s", names)
 	}
 	_, page = get(t, server.URL+"/tenants?show=attention")
-	if names := strings.Join(rows(page), " "); names != "baltic-freight nordwind vistula-cargo" {
+	if names := strings.Join(rows(page), " "); names != "baltic-freight kowalski-trans nordwind vistula-cargo" {
 		t.Fatalf("needs attention: %s", names)
 	}
 	_, page = get(t, server.URL+"/tenants?q=NORD")
@@ -55,7 +55,7 @@ func TestSideBarCountsWhatIsBroken(t *testing.T) {
 	server := newTestServer(t, NewDemoCluster())
 	for _, path := range []string{"/", "/events", "/tenants/atlas"} {
 		_, page := get(t, server.URL+path)
-		if !strings.Contains(page, "<title>(2) ") || !strings.Contains(page, `Cluster<span class="count" title="1 broken">1</span>`) || !strings.Contains(page, `Tenants<span class="count" title="1 broken">1</span>`) {
+		if !strings.Contains(page, "<title>(3) ") || !strings.Contains(page, `Cluster<span class="count" title="2 broken: nodes down or backups failing">2</span>`) || !strings.Contains(page, `Tenants<span class="count" title="2 tenants broken">2</span>`) {
 			t.Fatalf("%s does not count what is broken:\n%s", path, page[:min(len(page), 3000)])
 		}
 	}
@@ -103,5 +103,22 @@ func TestRemovingAccessNeedsTheName(t *testing.T) {
 		if _, body := submit(t, client, server, "/access", form, server.URL); !c.gone() {
 			t.Fatalf("%s with the name: not removed:\n%s", c.form, body)
 		}
+	}
+}
+
+// The phone's page menu shows the page's own count, and a mark when
+// another page has something broken.
+func TestPhoneMenuCountsItsOwnPage(t *testing.T) {
+	cluster := NewDemoCluster()
+	server := newServerOf(t, cluster)
+	_, page := get(t, server.URL+"/apps")
+	summary := between(page, `<details class="navmenu" id="navmenu">`, "</summary>")
+	if strings.Contains(summary, `class="count"`) || !strings.Contains(summary, `class="elsewhere"`) {
+		t.Fatalf("apps' menu: %s", summary)
+	}
+	_, page = get(t, server.URL+"/tenants")
+	summary = between(page, `<details class="navmenu" id="navmenu">`, "</summary>")
+	if !strings.Contains(summary, `<span class="count" title="2 broken here">2</span>`) || strings.Contains(summary, "elsewhere") {
+		t.Fatalf("tenants' menu: %s", summary)
 	}
 }
