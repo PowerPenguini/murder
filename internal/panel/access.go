@@ -128,7 +128,7 @@ func (s *Server) accessAction(ctx context.Context, r *http.Request, agent Access
 			fail(errors.New("you cannot remove yourself: ask another person"))
 			return
 		}
-		if confirmed != name {
+		if !typed(confirmed, name) {
 			fail(errors.New("type the person's name to remove them"))
 			return
 		}
@@ -152,7 +152,7 @@ func (s *Server) accessAction(ctx context.Context, r *http.Request, agent Access
 				}
 			}
 		}
-		if owner == "" || confirmed != passkeyName(label, owner) {
+		if owner == "" || !typed(confirmed, passkeyName(label, owner)) {
 			fail(errors.New("type the passkey's name to remove it"))
 			return
 		}
@@ -186,7 +186,7 @@ func (s *Server) accessAction(ctx context.Context, r *http.Request, agent Access
 		data.Device = shown
 		data.Done = "device " + name + " may reach the panel"
 	case "remove-device":
-		if confirmed != name {
+		if !typed(confirmed, name) {
 			fail(errors.New("type the device's name to remove it"))
 			return
 		}

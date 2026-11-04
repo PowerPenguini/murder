@@ -721,7 +721,7 @@ svg.lane a:hover rect, svg.lane a:focus rect { stroke: var(--fg); }
   /* A chart's title on its line, its value under it at a fixed height:
      nothing moves while a point is read. */
   figure.chart figcaption { display: grid; gap: 2px; }
-  figure.chart .readout { text-align: left; min-height: 2.8em; }
+  figure.chart .readout { text-align: left; height: 2.8em; overflow: hidden; }
   .marks-legend { flex-basis: 100%; margin: 0; }
 }
 /* A heading inside a form keeps the same 12 px to its content. */
@@ -770,4 +770,41 @@ fieldset.pace label.check { align-items: flex-start; line-height: 1.45; }
 .rollout-actions { margin-bottom: var(--s3); }
 @media (max-width: 760px) {
   .rollout-head form { margin-left: 0; }
+}
+
+/* Under a typed confirmation: why its button waits, or that it matches. */
+p.typed { margin: calc(-1 * var(--s2)) 0 0; font-size: 12.5px; color: var(--dim); }
+p.typed.ok { color: var(--soft); }
+
+/* A chart's marks: the one read is said under the plot, with a link to
+   its event, in a line of fixed height; nothing moves. */
+p.annot { grid-column: 2; height: 1.6em; margin: 2px 0 0; font-size: 12.5px; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+p.annot a { color: var(--fg); margin-right: 2px; }
+svg.lane rect.hit { cursor: pointer; }
+
+/* An event a link points to: below the sticky bar, opened, and marked
+   in grey. */
+details.event, details.event li { scroll-margin-top: 80px; }
+details.event:target > summary, details.event li:target, details.event.target > summary, details.event li.target { background: #191919; box-shadow: inset 2px 0 0 var(--soft); }
+@media (max-width: 760px) {
+  p.annot { height: 3.2em; white-space: normal; line-height: 1.6em; }
+}
+
+/* Settings as one form: the Override column's switch alone (its header
+   says it), a proposal as its input's caption, the environment edited in
+   its table. */
+table.settings td.own .own-check { margin-right: var(--s3); }
+.caption { display: block; margin-top: 4px; font-size: 12px; color: var(--soft); }
+table.env td.own { width: 34%; }
+table.env td.own input, table.env tr.add input { width: 100%; min-width: 0; }
+table.env tr.add td { background: var(--raised); }
+@media (max-width: 760px) {
+  table.env td.own { width: auto; }
+  table.env tr.add td.l-main input { width: 100%; }
+}
+@media (max-width: 760px) {
+  /* In-page links land below the sticky bar. */
+  html { scroll-padding-top: 64px; }
+  table.env tr.add td { background: none; }
+  table.env tr.add td[colspan] { color: var(--dim); font-size: 12.5px; }
 }

@@ -32,11 +32,38 @@
     let at = -1;
     const group = figure.closest(".charts");
     const peers = () => (group && groups.get(group)) || [];
+    const annot = figure.querySelector(".annot");
+    const lane = figure.querySelector("svg.lane");
+    // The plot's thousandths a width in pixels takes.
+    const units = (px) => {
+      const box = plot.getBoundingClientRect();
+      return box.width > 0 ? (px * 1000) / box.width : px;
+    };
+    // The marks within 12 px of x are said under the plot, each with a link
+    // to its event, in a line of its own that never moves the plot.
+    const say = (x) => {
+      if (!annot) return;
+      const near = marks.filter((m) => Math.abs(m.X - x) <= units(12));
+      annot.textContent = "";
+      near.slice(0, 2).forEach((m, i) => {
+        if (i) annot.append(" · ");
+        const link = document.createElement("a");
+        link.href = m.Href;
+        link.textContent = "Open event";
+        link.title = m.Text;
+        annot.append(link, " " + m.Text);
+        annot.title = near.map((n) => n.Text).join("; ");
+      });
+      if (near.length > 2) annot.append(" · " + (near.length - 2) + " more near");
+    };
     const show = (i, quiet) => {
       at = Math.max(0, Math.min(points.length - 1, i));
       const [x, when, ...values] = points[at];
-      const near = marks.filter((m) => Math.abs(m.X - x) <= 12).map((m) => m.Text);
-      readout.textContent = when + " UTC · " + values.join(" · ") + (near.length ? " · " + near.join(", ") : "");
+      readout.textContent = when + " UTC · " + values.join(" · ");
+      // The chart read says its marks; those following it, none.
+      if (quiet) {
+        if (annot) annot.textContent = "";
+      } else say(x);
       readout.classList.add("at");
       plot.setAttribute("aria-valuenow", String(at));
       plot.setAttribute("aria-valuetext", readout.textContent);
@@ -49,6 +76,7 @@
     };
     const rest = (quiet) => {
       at = -1;
+      if (annot) annot.textContent = "";
       readout.textContent = readout.dataset.rest || "";
       readout.classList.remove("at");
       if (cursor) cursor.setAttribute("visibility", "hidden");
@@ -68,6 +96,30 @@
     if (group) {
       if (!groups.has(group)) groups.set(group, []);
       groups.get(group).push({ figure, atX: (x) => show(nearest(x), true), rest: (quiet) => rest(quiet) });
+    }
+    // A mark's touch area is 24 px wide, kept within the plot; a tap on the
+    // lane reads the moment there, and says the marks near it.
+    if (lane) {
+      const widen = () => {
+        const w = units(24);
+        for (const hit of lane.querySelectorAll("rect.hit")) {
+          const x = Number(hit.nextElementSibling.getAttribute("x"));
+          hit.setAttribute("width", String(w));
+          hit.setAttribute("x", String(Math.max(0, Math.min(1000 - w, x - w / 2))));
+        }
+      };
+      widen();
+      new ResizeObserver(widen).observe(plot);
+      lane.addEventListener("click", (event) => {
+        if (event.pointerType === "mouse" && event.target.closest("a")) return;
+        event.preventDefault();
+        fromEvent(event);
+      });
+      // One lane in a group is reached by the keyboard: the others repeat it.
+      if (group && peers().length > 0 && peers()[0].figure !== figure) {
+        lane.setAttribute("aria-hidden", "true");
+        for (const link of lane.querySelectorAll("a")) link.setAttribute("tabindex", "-1");
+      }
     }
     plot.addEventListener("pointermove", fromEvent);
     plot.addEventListener("pointerdown", fromEvent);

@@ -70,7 +70,7 @@
   <p class="lead">{{$d.Frozen}}.</p>
   <p>Taking changes again here is only for an upgrade that stopped, once every node runs one release. Never use it while an upgrade runs from another node's panel or command line: this panel sees only the jobs it began, and nodes of two releases would then take changes.</p>
   <form method="post" class="row spaced"><input type="hidden" name="do" value="thaw"><input type="hidden" name="frozen" value="{{$d.Frozen}}">
-    <input type="text" name="confirm" placeholder="type thaw" data-confirm="thaw" aria-label="type thaw" autocomplete="off" required class="short">
+    <input type="text" name="confirm" placeholder="type thaw" data-confirm="thaw" aria-label="type thaw" required class="short" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
     <button type="submit" class="danger">Take changes again</button></form>
   {{end}}{{end}}
 </section>
@@ -145,7 +145,7 @@
       <div class="pop wide">
         <form method="post" action="/cluster/upgrade" enctype="multipart/form-data" class="stack">
           <p class="hint">A new murder binary, installed on every node one after the other, this one last. Tenants keep serving; changes wait meanwhile. It runs as root on every node. Type upgrade.</p>
-          <input type="text" name="confirm" placeholder="type upgrade" data-confirm="upgrade" aria-label="type upgrade to confirm" autocomplete="off" required>
+          <input type="text" name="confirm" placeholder="type upgrade" data-confirm="upgrade" aria-label="type upgrade to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
           <input type="file" name="binary" required aria-label="the murder binary">
           <div><button type="submit" class="primary">Upgrade the cluster</button></div>
         </form>

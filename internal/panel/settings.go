@@ -183,6 +183,18 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 			out = append(out, settingChange{"Secret " + key, "tenant override", "dropped: the app's, if it has one"})
 		}
 	}
+	flag := func(on string, yes, no string) string {
+		if on == "on" {
+			return yes
+		}
+		return no
+	}
+	if form.Flags && form.Canary != was.Canary {
+		out = append(out, settingChange{"Canary", flag(was.Canary, "yes", "no"), flag(form.Canary, "yes: takes "+t.App+"'s changes first", "no: with the others")})
+	}
+	if form.Flags && form.Hold != was.Hold {
+		out = append(out, settingChange{"Held", flag(was.Hold, "yes", "no"), flag(form.Hold, "yes: stays on the revision it runs", "no: follows "+t.App+" again")})
+	}
 	return out
 }
 
@@ -191,7 +203,7 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 // are taken as browsers send them, either way.
 func reviewToken(tenant string, form settingsForm) string {
 	hash := sha256.New()
-	for _, part := range []string{tenant, strconv.FormatInt(form.Generation, 10), form.App, form.Image, form.Env, form.Secrets, form.MemoryMB, form.CPUs, form.PIDs, form.DiskGB} {
+	for _, part := range []string{tenant, strconv.FormatInt(form.Generation, 10), form.App, form.Image, form.Env, form.Secrets, form.MemoryMB, form.CPUs, form.PIDs, form.DiskGB, form.Canary, form.Hold} {
 		hash.Write([]byte(strings.ReplaceAll(part, "\r\n", "\n")))
 		hash.Write([]byte{0})
 	}

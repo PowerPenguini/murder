@@ -31,6 +31,14 @@ type ActionAgent interface {
 	PreviousLogs(ctx context.Context, name string) (api.PreviousLogs, error)
 }
 
+// typed says the name typed to confirm an action is the one asked for:
+// spaces around it and the case of its letters aside, as a phone's
+// keyboard may capitalise the first letter or add a space. The names asked
+// for are lowercase by rule, or a secret's, which no two differ by case.
+func typed(given, name string) bool {
+	return name != "" && strings.EqualFold(strings.TrimSpace(given), name)
+}
+
 // flashCookie is __Host-, so only the panel's own name sets it, not a
 // tenant's site under the same base domain (browsers take Secure cookies
 // on localhost too, for the socket's panel).
@@ -72,7 +80,7 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
 	back := "/tenants/" + url.PathEscape(name)
-	confirmed := strings.TrimSpace(r.FormValue("confirm")) == name
+	confirmed := typed(r.FormValue("confirm"), name)
 	var err error
 	var done string
 	switch r.FormValue("do") {

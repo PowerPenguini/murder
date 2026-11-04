@@ -853,12 +853,13 @@ func (s *Server) funcs() template.FuncMap {
 			}
 			return t.UTC().Format("2006-01-02 15:04:05") + " UTC"
 		},
-		"iso":   func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
-		"query": func(args ...string) template.URL { return tenantsQuery(args...) },
-		"mem":   memory,
-		"lines": func(text string) int { return strings.Count(text, "\n") + 1 },
-		"ago":   func(t time.Time) string { return ago(s.now(), t) },
-		"who":   who,
+		"iso":     func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
+		"query":   func(args ...string) template.URL { return tenantsQuery(args...) },
+		"mem":     memory,
+		"lines":   func(text string) int { return strings.Count(text, "\n") + 1 },
+		"ago":     func(t time.Time) string { return ago(s.now(), t) },
+		"who":     who,
+		"envshow": envValue,
 		"causeOf": func(b interface{ Cause() (string, string) }) []string {
 			cause, fix := b.Cause()
 			return []string{cause, fix}

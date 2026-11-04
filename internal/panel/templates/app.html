@@ -16,7 +16,7 @@
         <form method="post" class="stack"><input type="hidden" name="do" value="promote">
           {{if .Blockers}}<p class="hint red">{{range $i, $b := .Blockers}}{{if $i}}, {{end}}{{$b}}{{end}} {{if eq (len .Blockers) 1}}is{{else}}are{{end}} not healthy on revision {{.ToRevision}}. Moving the next wave now risks the same for {{if .Next}}{{range $i, $n := .Next}}{{if $i}}, {{end}}{{$n}}{{end}}{{else}}the tenants left{{end}}.</p>{{end}}
           <p class="hint">Moves {{if .Next}}{{range $i, $n := .Next}}{{if $i}}, {{end}}{{$n}}{{end}}{{else}}every waiting tenant{{end}} to revision {{.ToRevision}} now, without waiting for the wave before to stay healthy. Each still has to come up healthy. Type the app's name.</p>
-          <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
           <div><button type="submit" class="danger">Move {{if .Next}}{{range $i, $n := .Next}}{{if $i}}, {{end}}{{$n}}{{end}}{{else}}them{{end}} now</button></div>
         </form>
       </div>
@@ -52,7 +52,7 @@
       <div class="pop">
         <form method="post" class="stack"><input type="hidden" name="do" value="abort">
           <p class="hint">Every tenant it moved goes back to the revision it ran before; their data stays as it is now. Type the app's name.</p>
-          <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
           <div><button type="submit" class="danger">Abort the rollout</button></div>
         </form>
       </div>
@@ -62,7 +62,7 @@
       <div class="pop">
         <form method="post" class="stack"><input type="hidden" name="do" value="restore-data">
           <p class="hint">Every tenant it moved goes back to the revision before, and its data to the snapshot taken as it moved: what it wrote since is lost. Type the app's name.</p>
-          <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
           <div><button type="submit" class="danger">Restore their data</button></div>
         </form>
       </div>
@@ -80,7 +80,7 @@
       <div class="pop">
         <form method="post" class="stack"><input type="hidden" name="do" value="abort">
           <p class="hint">They start on their data as it is, on the revision before. Type the app's name.</p>
-          <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
           <div><button type="submit" class="danger">Start them as they are</button></div>
         </form>
       </div>
@@ -170,7 +170,7 @@
     <div class="pop">
       <form method="post" class="stack"><input type="hidden" name="do" value="delete">
         <p class="hint">No tenant runs it. Its revisions go with it. Type its name.</p>
-        <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+        <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
         <div><button type="submit" class="danger">Delete the app</button></div>
       </form>
     </div>

@@ -120,7 +120,7 @@ func TestATenantsSettings(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/tenants/atlas/settings")
-	for _, want := range []string{"FEATURE_PLANNER=on", "ADMIN_PASSWORD password 20", `value="768"`, "SESSION_KEY", "Inherited from web"} {
+	for _, want := range []string{`name="envname" value="FEATURE_PLANNER"><input type="text" name="envvalue" value="on"`, "ADMIN_PASSWORD password 20", `value="768"`, "SESSION_KEY", "Inherited from web"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the settings page lacks %q:\n%s", want, page)
 		}

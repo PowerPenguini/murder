@@ -178,7 +178,15 @@ type mark struct {
 	Kind, Text string
 	// Href is its event's record.
 	Href string
+	// When is its time, as the readout says it; HitX where its touch area,
+	// HitWidth wide, begins, kept within the plot.
+	When string
+	HitX float64
 }
+
+// markHit is how wide a mark's touch area is without the script, in the
+// plot's thousandths; with it, the script makes it 24 px wide.
+const markHit = 24.0
 
 // marksOf places events on a chart: restarts, and changes of what runs.
 func (c lineChart) marksOf(events []store.Event) []mark {
@@ -197,7 +205,18 @@ func (c lineChart) marksOf(events []store.Event) []mark {
 			continue
 		}
 		x := chartWidth * e.At.Sub(c.Start).Seconds() / c.End.Sub(c.Start).Seconds()
-		out = append(out, mark{X: round1(x), Kind: kind, Text: dateLabel(e.At) + " " + actionText(e.Action),
+		said := eventRow{Event: e}.Predicate()
+		if said == "" {
+			said = actionText(e.Action)
+		}
+		if ex, ok := parseExit(e.Detail); ok && e.Action == "tenant.restarted" {
+			said += ": " + ex.Reason(time.Time{})
+			if ex.Memory {
+				said += ", out of memory"
+			}
+		}
+		out = append(out, mark{X: round1(x), Kind: kind, Text: dateLabel(e.At) + " UTC: " + capital(said), When: dateLabel(e.At),
+			HitX: round1(math.Max(0, math.Min(chartWidth-markHit, x-markHit/2))),
 			Href: "/events?tenant=" + url.QueryEscape(e.Tenant) + "&show=all#ev-" + strconv.FormatInt(e.ID, 10)})
 	}
 	return out

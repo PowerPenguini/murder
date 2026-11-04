@@ -652,7 +652,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			return clusterops.Balance(ctx, agent, false, out)
 		}))
 	case "drain":
-		if confirmed != node {
+		if !typed(confirmed, node) {
 			back("problem", "type the node's name to drain it")
 			return
 		}
@@ -665,7 +665,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			return clusterops.Drain(ctx, agent, node, to, out)
 		}))
 	case "remove":
-		if confirmed != node {
+		if !typed(confirmed, node) {
 			back("problem", "type the node's name to remove it")
 			return
 		}
@@ -675,7 +675,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 		}
 		back("done", "node "+node+" left the cluster: switch it off")
 	case "failover":
-		if confirmed != node {
+		if !typed(confirmed, node) {
 			back("problem", "type the node's name to say it is powered off")
 			return
 		}
@@ -686,7 +686,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 		}
 		back("done", fmt.Sprintf("%d tenants of %s run from their replicas; %d had none and stay", len(outcome.Promoted), node, len(outcome.Stranded)))
 	case "thaw":
-		if confirmed != "thaw" {
+		if !typed(confirmed, "thaw") {
 			back("problem", "type thaw to take changes again")
 			return
 		}
@@ -823,7 +823,7 @@ func (s *Server) receiveBinary(r *http.Request) (string, error) {
 		switch part.FormName() {
 		case "confirm":
 			value, _ := io.ReadAll(io.LimitReader(part, 64))
-			confirmed = strings.TrimSpace(string(value)) == "upgrade"
+			confirmed = typed(string(value), "upgrade")
 		case "binary":
 			if !confirmed {
 				return "", errors.New("type upgrade, before the file: the binary runs as root on every node")

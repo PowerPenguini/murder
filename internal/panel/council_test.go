@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -125,7 +127,7 @@ func TestSettingsSayTheirSource(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/tenants/atlas/settings")
-	for _, want := range []string{"768 MB", "Tenant override", "Inherited from web", "FEATURE_PLANNER", "over the app's", "Override app value", "Review changes", "Save rollout flags"} {
+	for _, want := range []string{"768 MB", "Tenant override", "Inherited from web", "FEATURE_PLANNER", "over the app's", `<span class="sr">Override Memory</span>`, "Review changes", "One review for the whole page", "Add a variable"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the settings lack %q:\n%s", want, page)
 		}
@@ -432,7 +434,7 @@ func TestSettingsProposalIsNotInEffect(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, page := get(t, server.URL+"/tenants/baltic-freight/settings?memoryMB=512")
 	row := between(page, `<tr class="setting" id="memory">`, "</tr>")
-	if !strings.Contains(row, "Inherited from web") || strings.Contains(row, "Tenant override") || !strings.Contains(row, "512 MB, proposed") {
+	if !strings.Contains(row, "Inherited from web") || strings.Contains(row, "Tenant override") || !strings.Contains(row, `<span class="caption" id="p-memoryMB">proposed; 256 MB now</span>`) || strings.Contains(row, `class="proposed"`) {
 		t.Fatalf("the memory row: %s", row)
 	}
 	if !strings.Contains(page, `data-proposed`) || !strings.Contains(page, "proposed-notice") || !strings.Contains(page, "raising web's limit may be the better fix") {
@@ -723,5 +725,105 @@ func TestAnInterruptedDrainIsFinished(t *testing.T) {
 	_, events := get(t, server.URL+"/events?show=all&since="+strings.ReplaceAll(link, "&", "&"))
 	if !strings.Contains(events, "atlas</a> was moved") || strings.Contains(events, "baltic-freight</a> restarted") || !strings.Contains(events, "Only the events from") {
 		t.Fatalf("the audit log while it ran:\n%s", events)
+	}
+}
+
+// A name typed on a phone, its first letter capitalised and a space after
+// it, confirms as it does on a desktop; another name does not. Every
+// confirmation's field asks the phone not to change what is typed.
+func TestTypedNamesOnPhones(t *testing.T) {
+	if !typed(" Baltic-freight ", "baltic-freight") || typed("baltic-fr", "baltic-freight") || typed("", "") {
+		t.Fatal("typed")
+	}
+	cluster := NewDemoCluster()
+	server := newServerOf(t, cluster)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	submit(t, client, server, "/tenants/atlas", url.Values{"do": {"suspend"}, "confirm": {"Atlas "}}, server.URL)
+	if tenant, _ := cluster.Get(context.Background(), "atlas"); !tenant.Spec.Suspended {
+		t.Fatal("a capitalised name did not confirm")
+	}
+	for _, path := range []string{"/tenants/baltic-freight", "/apps/web", "/nodes/nbg-1", "/cluster"} {
+		_, page := get(t, server.URL+path)
+		if n, safe := strings.Count(page, "data-confirm="), strings.Count(page, `autocapitalize="none" autocorrect="off" spellcheck="false"`); n == 0 && path != "/cluster" || safe < n {
+			t.Fatalf("%s: %d confirmations, %d safe on a phone", path, n, safe)
+		}
+	}
+}
+
+// Every event's anchor is its own, a run's wrapper apart from its first
+// event; a chart's mark says its event and has a touch area within the
+// plot.
+func TestEventAnchorsAndMarks(t *testing.T) {
+	server := newServerOf(t, NewDemoCluster())
+	_, page := get(t, server.URL+"/events?show=all")
+	seen := map[string]bool{}
+	for _, m := range regexp.MustCompile(`id="(ev-\d+)"`).FindAllStringSubmatch(page, -1) {
+		if seen[m[1]] {
+			t.Fatalf("%s twice", m[1])
+		}
+		seen[m[1]] = true
+	}
+	if len(seen) < 20 || !strings.Contains(page, `id="evs-`) {
+		t.Fatalf("%d anchors", len(seen))
+	}
+	_, page = get(t, server.URL+"/tenants/baltic-freight")
+	if !strings.Contains(page, "UTC: Restarted after it exited: exit 137, out of memory") || !strings.Contains(page, `class="hit"`) || !strings.Contains(page, `<p class="annot" aria-live="polite"></p>`) {
+		t.Fatalf("the marks:\n%s", page)
+	}
+	for _, m := range regexp.MustCompile(`class="hit" x="([-0-9.]+)"`).FindAllStringSubmatch(page, -1) {
+		if x, _ := strconv.ParseFloat(m[1], 64); x < 0 || x > 1000-markHit {
+			t.Fatalf("a touch area at %s, outside the plot", m[1])
+		}
+	}
+}
+
+// Settings are one form with one review: the environment edited in its
+// table, a variable added in its last row, the rollout flags beside them.
+// Flags alone change no container.
+func TestSettingsAsOneForm(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	ctx := context.Background()
+	before, _ := cluster.Get(ctx, "atlas")
+	page := func(form url.Values) url.Values {
+		form.Set("generation", strconv.FormatInt(before.Generation, 10))
+		form.Set("app", "web")
+		form.Set("owns", "1")
+		form.Set("own-memoryMB", "on")
+		form.Set("memoryMB", "768")
+		form.Set("secrets", "ADMIN_PASSWORD password 20")
+		return form
+	}
+	// TZ cleared (Berlin to the app's Warsaw), FEATURE_PLANNER kept,
+	// LOG_LEVEL added with a space kept, the canary flag off.
+	form := page(url.Values{"do": {"review"}, "envrows": {"1"}, "flags": {"1"}, "hold": {""},
+		"envname": {"DATA_DIR", "FEATURE_PLANNER", "TZ", "LOG_LEVEL"}, "envvalue": {"", "on", "", " debug"}})
+	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	for _, want := range []string{"Environment TZ", "Europe/Warsaw, inherited from web", "Environment LOG_LEVEL", "Canary", "no: with the others", "Save and restart atlas"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("the review lacks %q:\n%s", want, body)
+		}
+	}
+	token := between(body, `name="reviewed" value="`, `"`)
+	env := html.UnescapeString(between(body, `<input type="hidden" name="env" value="`, `"`))
+	save := page(url.Values{"do": {"save"}, "reviewed": {token}, "env": {env}, "flags": {"1"}, "canary": {""}, "hold": {""}})
+	_, body = submit(t, client, server, "/tenants/atlas/settings", save, server.URL)
+	if !strings.Contains(body, "it gets a new container; it takes rollouts with the others") {
+		t.Fatalf("after saving:\n%s", body)
+	}
+	after, _ := cluster.Get(ctx, "atlas")
+	if after.Overrides.Env["LOG_LEVEL"] != " debug" || after.Overrides.Env["TZ"] != "" || after.Overrides.Env["FEATURE_PLANNER"] != "on" || after.Canary {
+		t.Fatalf("atlas after saving: %v, canary %v", after.Overrides.Env, after.Canary)
+	}
+	// The flag alone: no new container, a plain Save.
+	_, body = submit(t, client, server, "/tenants/acme-logistics/settings", url.Values{"do": {"review"}, "generation": {"3"}, "app": {"web"}, "flags": {"1"}, "hold": {"on"}, "canary": {"on"}}, server.URL)
+	acme, _ := cluster.Get(ctx, "acme-logistics")
+	if !strings.Contains(body, "Rollout flags change no container") || strings.Contains(body, "Save and restart") {
+		t.Fatalf("a flag's review:\n%s", body)
+	}
+	token = between(body, `name="reviewed" value="`, `"`)
+	_, body = submit(t, client, server, "/tenants/acme-logistics/settings", url.Values{"do": {"save"}, "reviewed": {token}, "generation": {strconv.FormatInt(acme.Generation, 10)}, "app": {"web"}, "flags": {"1"}, "hold": {"on"}, "canary": {"on"}}, server.URL)
+	if now, _ := cluster.Get(ctx, "acme-logistics"); !now.Hold || now.Status == nil || now.Status.Phase == "starting" || strings.Contains(body, "new container") {
+		t.Fatalf("after holding: hold %v, %+v:\n%s", now.Hold, now.Status, body)
 	}
 }

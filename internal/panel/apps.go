@@ -432,12 +432,12 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 		back("done", appOutcome(name, applied))
 	case "pause", "resume", "abort", "promote":
 		action := r.FormValue("do")
-		if action == "abort" && strings.TrimSpace(r.FormValue("confirm")) != name {
+		if action == "abort" && !typed(r.FormValue("confirm"), name) {
 			back("problem", "type the app's name to take every tenant back")
 			return
 		}
 		// Moving the next wave skips its health gate: the name is typed.
-		if action == "promote" && strings.TrimSpace(r.FormValue("confirm")) != name {
+		if action == "promote" && !typed(r.FormValue("confirm"), name) {
 			back("problem", "type the app's name to move the next wave without waiting for its health check")
 			return
 		}
@@ -447,7 +447,7 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 		}
 		back("done", map[string]string{"pause": "the rollout is paused", "resume": "the rollout goes on", "abort": "the rollout is aborted: its tenants go back, their data as it is", "promote": "the next wave moves now, without waiting for the one before to stay healthy"}[action])
 	case "restore-data":
-		if strings.TrimSpace(r.FormValue("confirm")) != name {
+		if !typed(r.FormValue("confirm"), name) {
 			back("problem", "type the app's name to take its tenants back with their data")
 			return
 		}
@@ -490,7 +490,7 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 		}
 		back("done", appOutcome(name, applied))
 	case "delete":
-		if strings.TrimSpace(r.FormValue("confirm")) != name {
+		if !typed(r.FormValue("confirm"), name) {
 			back("problem", "type the app's name to delete it")
 			return
 		}
@@ -510,11 +510,44 @@ type settingsForm struct {
 	App, Image, Env, Secrets     string
 	MemoryMB, CPUs, PIDs, DiskGB string
 	Generation                   int64
+	// Canary and Hold are its rollout flags, "on" or not; Flags says the
+	// form said them.
+	Canary, Hold string
+	Flags        bool
+}
+
+// onOff is a flag as a form says it.
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return ""
+}
+
+// withFlags is the form with the tenant's flags, when it did not say them.
+func (f settingsForm) withFlags(t api.Tenant) settingsForm {
+	if !f.Flags {
+		f.Canary, f.Hold, f.Flags = onOff(t.Canary), onOff(t.Hold), true
+	}
+	return f
+}
+
+// flagsChanged says the form changes the tenant's rollout flags.
+func (f settingsForm) flagsChanged(t api.Tenant) bool {
+	return f.Canary != onOff(t.Canary) || f.Hold != onOff(t.Hold)
+}
+
+// containerChanged says the form changes what the tenant's container is
+// made from: its app or overrides, not its rollout flags.
+func (f settingsForm) containerChanged(t api.Tenant) bool {
+	was := formOf(t)
+	f.Canary, f.Hold, f.Flags = was.Canary, was.Hold, was.Flags
+	return f != was
 }
 
 func formOf(t api.Tenant) settingsForm {
 	o := t.Overrides
-	form := settingsForm{App: t.App, Image: o.Image, Generation: t.Generation}
+	form := settingsForm{App: t.App, Image: o.Image, Generation: t.Generation, Canary: onOff(t.Canary), Hold: onOff(t.Hold), Flags: true}
 	var lines []string
 	for _, key := range slices.Sorted(maps.Keys(o.Env)) {
 		lines = append(lines, key+"="+envValue(o.Env[key]))
@@ -548,6 +581,37 @@ func formFrom(r *http.Request) settingsForm {
 		App: r.FormValue("app"), Image: strings.TrimSpace(r.FormValue("image")), Env: r.FormValue("env"), Secrets: r.FormValue("secrets"),
 		MemoryMB: strings.TrimSpace(r.FormValue("memoryMB")), CPUs: strings.TrimSpace(r.FormValue("cpus")),
 		PIDs: strings.TrimSpace(r.FormValue("pids")), DiskGB: strings.TrimSpace(r.FormValue("diskGB")), Generation: generation,
+	}
+	// Its rollout flags, when the form says them.
+	if r.FormValue("flags") != "" {
+		form.Canary, form.Hold, form.Flags = onOff(r.FormValue("canary") == "on"), onOff(r.FormValue("hold") == "on"), true
+	}
+	// The environment as the page's table posts it, a row each: a name
+	// and its own value, empty to take the app's; the last row adds one.
+	// Read as the NAME=value lines the review carries.
+	if r.FormValue("envrows") != "" {
+		names, values := r.Form["envname"], r.Form["envvalue"]
+		var lines []string
+		for i, name := range names {
+			name = strings.TrimSpace(name)
+			value := ""
+			if i < len(values) {
+				value = values[i]
+			}
+			if name == "" && strings.TrimSpace(value) == "" {
+				continue
+			}
+			if value == "" {
+				continue
+			}
+			// A value shown quoted, as one with a line break is, reads
+			// back as it was shown; any other as typed.
+			if !strings.HasPrefix(value, `"`) {
+				value = envValue(value)
+			}
+			lines = append(lines, name+"="+value)
+		}
+		form.Env = strings.Join(lines, "\n")
 	}
 	// The page's form says, by a switch each, which values are the
 	// tenant's own: one switched off takes the app's again, whatever its
@@ -702,8 +766,10 @@ type settingsData struct {
 	// Reviewing says it was.
 	Review    []settingChange
 	Reviewing bool
-	// Token binds the save to the values reviewed.
-	Token string
+	// Token binds the save to the values reviewed; Restarts says they
+	// give it a new container, not only new rollout flags.
+	Token    string
+	Restarts bool
 	// Suggest says a value proposed by the link that led here; SuggestApp
 	// the app's limit, when it is likely the better fix.
 	Suggest    string
@@ -768,6 +834,7 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 		data.Reviewing = true
 		data.Review = settingChanges(t, appSpec, form)
 		data.Token = reviewToken(t.Spec.Name, form)
+		data.Restarts = form.containerChanged(t)
 	}
 	if nodes, err := s.backend.Nodes(ctx); err == nil {
 		data.Head = s.headOf(t, nodes, "settings")
@@ -806,7 +873,7 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 	switch r.FormValue("do") {
 	case "review", "edit":
 		// What the form changes, shown before it is saved; or back to it.
-		form := formFrom(r)
+		form := formFrom(r).withFlags(t)
 		if _, err := form.overrides(); err != nil {
 			s.settingsPage(w, r, t, form, err.Error(), http.StatusUnprocessableEntity)
 			return
@@ -816,7 +883,7 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		}
 		s.settingsPage(w, r, t, form, "", http.StatusOK)
 	case "save":
-		form := formFrom(r)
+		form := formFrom(r).withFlags(t)
 		refuse := func(problem string) { s.settingsPage(w, r, t, form, problem, http.StatusUnprocessableEntity) }
 		overrides, err := form.overrides()
 		if err != nil {
@@ -832,19 +899,36 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 			refuse("these are not the values you reviewed: review them again before saving")
 			return
 		}
-		applied, err := agent.Configure(ctx, name, api.TenantRequest{App: form.App, Overrides: overrides, Generation: form.Generation})
-		if err != nil {
-			refuse(err.Error())
-			return
+		// Its container's settings, then its rollout flags, which change
+		// no container.
+		var said []string
+		if form.containerChanged(t) {
+			applied, err := agent.Configure(ctx, name, api.TenantRequest{App: form.App, Overrides: overrides, Generation: form.Generation})
+			if err != nil {
+				refuse(err.Error())
+				return
+			}
+			switch {
+			case !applied.Changed:
+				said = append(said, name+"'s settings are unchanged")
+			case applied.Tenant.Archived():
+				said = append(said, name+"'s settings are changed; it runs them once restored")
+			default:
+				said = append(said, name+"'s settings are changed: it gets a new container")
+			}
 		}
-		switch {
-		case !applied.Changed:
-			back("done", name+"'s settings are unchanged")
-		case applied.Tenant.Archived():
-			back("done", name+"'s settings are changed; it runs them once restored")
-		default:
-			back("done", name+"'s settings are changed: it gets a new container")
+		if form.flagsChanged(t) {
+			canary, hold := form.Canary == "on", form.Hold == "on"
+			if _, err := agent.SetFlags(ctx, name, api.TenantFlags{Canary: &canary, Hold: &hold}); err != nil {
+				refuse(err.Error())
+				return
+			}
+			said = append(said, "it takes rollouts "+map[bool]string{true: "never: it is held", false: map[bool]string{true: "first: it is a canary", false: "with the others"}[canary]}[hold])
 		}
+		if len(said) == 0 {
+			said = append(said, name+"'s settings are unchanged")
+		}
+		back("done", strings.Join(said, "; "))
 	case "flags":
 		canary, hold := r.FormValue("canary") == "on", r.FormValue("hold") == "on"
 		if _, err := agent.SetFlags(ctx, name, api.TenantFlags{Canary: &canary, Hold: &hold}); err != nil {
@@ -854,7 +938,7 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		back("done", fmt.Sprintf("rollout flags saved: %s takes rollouts %s", name, map[bool]string{true: "never: it is held", false: map[bool]string{true: "first: it is a canary", false: "with the others"}[canary]}[hold]))
 	case "rotate":
 		key := r.FormValue("key")
-		if strings.TrimSpace(r.FormValue("confirm")) != key {
+		if !typed(r.FormValue("confirm"), key) {
 			back("problem", "type the secret's name to give it a new value")
 			return
 		}

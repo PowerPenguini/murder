@@ -8,20 +8,21 @@
     <input type="hidden" name="app" value="{{$f.App}}"><input type="hidden" name="image" value="{{$f.Image}}">
     <input type="hidden" name="memoryMB" value="{{$f.MemoryMB}}"><input type="hidden" name="cpus" value="{{$f.CPUs}}"><input type="hidden" name="pids" value="{{$f.PIDs}}"><input type="hidden" name="diskGB" value="{{$f.DiskGB}}">
     <input type="hidden" name="env" value="{{$f.Env}}"><input type="hidden" name="secrets" value="{{$f.Secrets}}">
+    <input type="hidden" name="flags" value="1"><input type="hidden" name="canary" value="{{$f.Canary}}"><input type="hidden" name="hold" value="{{$f.Hold}}">
     <h2>Review {{plural (len $d.Review) "change" "changes"}} to {{$t.Spec.Name}}</h2>
     <table class="list changes">
       <thead><tr><th>Setting</th><th>Current</th><th>Proposed</th></tr></thead>
       <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Current">{{.From}}</td><td class="l-sub" data-label="Proposed">{{.To}}</td></tr>{{end}}</tbody>
     </table>
-    <p class="hint">Saving gives {{$t.Spec.Name}} a new container{{if $t.Archived}} once it is restored{{else}}: it answers no request for the few seconds it starts{{end}}. Its data stays. Exactly these values are saved; to change them, keep editing.</p>
-    <div class="actions"><button type="submit" name="do" value="save" class="primary">Save and restart {{$t.Spec.Name}}</button><button type="submit" name="do" value="edit">Keep editing</button></div>
+    <p class="hint">{{if $d.Restarts}}Saving gives {{$t.Spec.Name}} a new container{{if $t.Archived}} once it is restored{{else}}: it answers no request for the few seconds it starts{{end}}. Its data stays.{{else}}Rollout flags change no container: they count from {{$t.App}}'s next rollout.{{end}} Exactly these values are saved; to change them, keep editing.</p>
+    <div class="actions"><button type="submit" name="do" value="save" class="primary">{{if $d.Restarts}}Save and restart {{$t.Spec.Name}}{{else}}Save{{end}}</button><button type="submit" name="do" value="edit">Keep editing</button></div>
   </form>
 </section>
 {{else}}
 <section data-still class="near">
   <form method="post" class="stack" id="settings" data-draft-form{{if $d.Suggest}} data-proposed{{end}}>
     <input type="hidden" name="generation" value="{{$f.Generation}}">
-    <input type="hidden" name="owns" value="1">
+    <input type="hidden" name="owns" value="1"><input type="hidden" name="flags" value="1"><input type="hidden" name="envrows" value="1">
     <button type="submit" name="do" value="review" class="sr" tabindex="-1" aria-hidden="true">Review changes</button>
     {{if $d.Reviewing}}<div class="notice" role="status">Nothing changes: the form holds what {{$t.Spec.Name}} has now.</div>{{end}}
     {{with $d.Suggest}}<div class="notice proposed-notice" role="status"><p class="flat">{{.}}</p>{{with $d.SuggestApp}}<p class="flat spaced">{{len .Hit}} of the {{.Inherit}} tenants on {{.App}}'s {{mem .LimitMB}} limit ran out of memory in the last 24 hours: raising {{.App}}'s limit may be the better fix, for all of them. <a href="{{.Href}}">Raise {{.App}}'s memory limit (review)</a></p>{{end}}<div class="actions spaced"><button type="submit" name="do" value="review" class="primary">Review changes</button><a href="/tenants/{{$t.Spec.Name}}/settings" class="button">Discard the proposal</a></div></div>{{end}}
@@ -34,45 +35,41 @@
           <td class="l-main"><label for="f-{{.Name}}">{{.Label}}</label></td>
           <td class="l-side{{if .Mono}} mono{{end}}">{{.Effective}}</td>
           <td class="l-sub dim" data-label="Source">{{.Source}}</td>
-          <td class="l-sub own">
-            <label class="check"><input type="checkbox" name="own-{{.Name}}" value="on" class="own-switch"{{if .Own}} checked{{end}}> Override app value</label>{{if .Proposed}}<span class="proposed">{{if .Own}}{{.Value}}{{if eq .Kind "number"}} {{.Unit}}{{end}}{{else}}inherit again{{end}}, proposed</span>{{end}}
-            <span class="own-field"><input type="{{.Kind}}" id="f-{{.Name}}" name="{{.Name}}" value="{{.Value}}"{{if eq .Kind "number"}} min="{{.Min}}" step="{{.Step}}" class="short"{{else}} class="mono-input"{{end}} autocomplete="off" spellcheck="false">{{if eq .Kind "number"}} <span class="dim small">{{.Unit}}</span>{{end}}</span>
+          <td class="l-sub own" data-label="Override">
+            <label class="check own-check"><input type="checkbox" name="own-{{.Name}}" value="on" class="own-switch"{{if .Own}} checked{{end}}><span class="sr">Override {{.Label}}</span></label>
+            <span class="own-field"><input type="{{.Kind}}" id="f-{{.Name}}" name="{{.Name}}" value="{{.Value}}"{{if eq .Kind "number"}} min="{{.Min}}" step="{{.Step}}" class="short"{{else}} class="mono-input"{{end}} autocomplete="off" spellcheck="false"{{if .Proposed}} aria-describedby="p-{{.Name}}"{{end}}>{{if eq .Kind "number"}} <span class="dim small">{{.Unit}}</span>{{end}}</span>{{if .Proposed}}<span class="caption" id="p-{{.Name}}">{{if .Own}}proposed; {{.Effective}} now{{else}}proposed: inherit again{{end}}</span>{{end}}
           </td>
         </tr>
       {{end}}
       </tbody>
     </table>
 
-    <div class="head spaced"><h2>Environment</h2><span class="dim">what {{$t.Spec.Name}} gets</span></div>
+    <div class="head spaced"><h2>Environment</h2><span class="dim">what {{$t.Spec.Name}} gets; a value of its own replaces {{$t.App}}'s for it alone</span></div>
     <table class="env list">
-      <thead><tr><th>Variable</th><th>In effect</th><th>Source</th></tr></thead>
+      <thead><tr><th>Variable</th><th>In effect</th><th>Source</th><th>Override</th></tr></thead>
       <tbody>
-      {{range $d.Env}}<tr><td class="mono l-main">{{.Key}}</td><td class="mono l-sub" data-label="In effect">{{.Value}}</td><td class="dim l-sub" data-label="Source">{{if .Own}}Tenant override{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}Inherited from {{$t.App}}{{end}}</td></tr>{{else}}<tr><td colspan="3" class="empty l-main">None.</td></tr>{{end}}
+      {{range $d.Env}}<tr><td class="mono l-main">{{.Key}}</td><td class="mono l-sub" data-label="In effect">{{.Value}}</td><td class="dim l-sub" data-label="Source">{{if .Own}}Tenant override{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}Inherited from {{$t.App}}{{end}}</td>
+        <td class="l-sub own" data-label="Override"><input type="hidden" name="envname" value="{{.Key}}"><input type="text" name="envvalue" value="{{if .Own}}{{envshow .Value}}{{end}}" placeholder="{{if .FromApp}}inherit{{else}}unset{{end}}" class="mono-input" aria-label="{{.Key}}: its own value; empty takes {{$t.App}}'s" autocomplete="off" spellcheck="false"></td></tr>{{end}}
+      <tr class="add"><td class="l-main"><input type="text" name="envname" placeholder="NEW_NAME" class="mono-input" aria-label="a variable to add: its name" autocomplete="off" autocapitalize="characters" spellcheck="false"></td><td class="dim l-sub" colspan="2">Add a variable: its name, and its value under Override</td>
+        <td class="l-sub own" data-label="Override"><input type="text" name="envvalue" placeholder="value" class="mono-input" aria-label="a variable to add: its value" autocomplete="off" spellcheck="false"></td></tr>
       </tbody>
     </table>
-    <label class="field">Environment overrides
-      <textarea name="env" rows="{{add1 (lines $f.Env)}}" spellcheck="false">{{$f.Env}}</textarea>
-      <span class="hint">NAME=value, a line each; one the app also sets is replaced for {{$t.Spec.Name}} only. Leading and trailing spaces are dropped: to keep them, or for several lines, quote the value as "a\nb".</span></label>
-    <label class="field">Secret overrides
-      <textarea name="secrets" rows="{{add1 (lines $f.Secrets)}}" spellcheck="false">{{$f.Secrets}}</textarea>
-      <span class="hint">NAME [kind [length]], a line each; kind is hex, base64 or password. Made once, kept encrypted, never shown. They add to the app's.</span></label>
+    <p class="hint">Empty takes the app's value again. Spaces around a value are kept; for a line break, or a value that begins with a quote, quote it as "a\nb".</p>
+    <details class="howto"{{if $f.Secrets}} open{{end}}><summary>{{if $f.Secrets}}Secret overrides{{else}}Add a secret{{end}}</summary>
+      <label class="field spaced"><span class="sr">Secret overrides</span>
+        <textarea name="secrets" rows="{{add1 (lines $f.Secrets)}}" spellcheck="false" aria-label="secret overrides">{{$f.Secrets}}</textarea>
+        <span class="hint">NAME [kind [length]], a line each; kind is hex, base64 or password. Made once, kept encrypted, never shown. They add to the app's.</span></label>
+    </details>
     <label class="field">App <select name="app">{{range $d.Apps}}<option {{if eq . $f.App}}selected{{end}}>{{.}}</option>{{end}}</select>
       <span class="hint">Another app changes its whole spec: image, environment and limits. Its data stays.</span></label>
-    <div class="row"><button type="submit" name="do" value="review" class="primary">Review changes</button><span class="hint">You see what changes before it is saved{{if $t.Archived}}; it runs them once it is restored{{else}} and {{$t.Spec.Name}} restarts{{end}}.</span></div>
+    <div class="head spaced"><h2>Rollouts</h2></div>
+    <label class="check"><input type="checkbox" name="canary"{{if eq $f.Canary "on"}} checked{{end}}> <span>Canary: takes {{$t.App}}'s changes first, before the other tenants</span></label>
+    <label class="check"><input type="checkbox" name="hold"{{if eq $f.Hold "on"}} checked{{end}}> <span>Held: stays on the revision it runs{{if $t.AppRevision}} ({{$t.AppRevision}}){{end}}; released, it follows {{$t.App}} again</span></label>
+    <div class="row"><button type="submit" name="do" value="review" class="primary">Review changes</button><span class="hint">One review for the whole page: you see what changes before it is saved{{if $t.Archived}}; it runs them once it is restored{{else}}, and whether {{$t.Spec.Name}} restarts{{end}}.</span></div>
   </form>
 </section>
 
 {{end}}
-
-<section>
-  <div class="head"><h2>Rollouts</h2></div>
-  <form method="post" class="stack">
-    <input type="hidden" name="do" value="flags">
-    <label class="check"><input type="checkbox" name="canary" {{if $t.Canary}}checked{{end}}> <span>Canary: takes {{$t.App}}'s changes first, before the other tenants</span></label>
-    <label class="check"><input type="checkbox" name="hold" {{if $t.Hold}}checked{{end}}> <span>Held: stays on the revision it runs{{if $t.AppRevision}} ({{$t.AppRevision}}){{end}}; released, it follows {{$t.App}} again</span></label>
-    <div><button type="submit">Save rollout flags</button></div>
-  </form>
-</section>
 
 <section>
   <div class="head"><h2>Secrets</h2><span class="dim">inherited and overridden</span></div>
@@ -91,7 +88,7 @@
             <div class="pop">
               <form method="post" class="stack"><input type="hidden" name="do" value="rotate"><input type="hidden" name="key" value="{{.Name}}">
                 <p class="hint">A new value restarts {{$t.Spec.Name}}; what it signed or set with the old one (sessions, a password) stops working. Save the settings above first. Type its name.</p>
-                <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+                <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
                 <div><button type="submit" class="danger">Give it a new value</button></div>
               </form>
             </div>
