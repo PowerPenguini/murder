@@ -3,6 +3,7 @@ package panel
 import (
 	"context"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -91,7 +92,7 @@ func TestRolloutProgress(t *testing.T) {
 		t.Fatalf("moved a wave without the name: wave %d", app.Rollout.Wave)
 	}
 	_, page := get(t, server.URL+"/apps/web")
-	for _, want := range []string{`<li class="done"><span class="wn">Canaries</span>`, `<li class="now"><span class="wn">A tenth</span>`, "moved, not healthy: blocks the next wave", "waits for half", "stays: it is held", "Half (kowalski-trans) moves once baltic-freight is healthy", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
+	for _, want := range []string{`<li class="done"><span class="wn">Canaries</span>`, `<li class="blocked"><span class="wn">A tenth</span><span class="wc">1 tenant · blocked by baltic-freight</span>`, "moved, not healthy: blocks the next wave", "waits for half", "stays: it is held", "Half (kowalski-trans) moves once baltic-freight is healthy", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, page)
 		}
@@ -393,7 +394,9 @@ func TestClusterResilienceAndBackups(t *testing.T) {
 	server := newServerOf(t, cluster)
 	_, page := get(t, server.URL+"/cluster?tenant=kowalski-trans")
 	for _, want := range []string{"Changes go through: 2 of 3 voters answer; a majority is 2", "One more node down would stop all changes", "nordwind and vistula-cargo are still catching up",
-		"Why, as nbg-1 said", "403 Forbidden", "sudo murder backups now", "How to restore kowalski-trans", "backups restore kowalski-trans -at 20", `open id="restore"`} {
+		`What <a href="/nodes/nbg-1">nbg-1</a> said`, "403 Forbidden", "sudo murder backups now",
+		// A refused key: what to fix first, not to try again.
+		"nbg-1&#39;s backup key cannot write to the bucket (403).", "it needs s3:PutObject on the bucket&#39;s backups/ prefix", "Once fixed, back it up", "How to restore kowalski-trans", "backups restore kowalski-trans -at 20", `open id="restore"`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the cluster page lacks %q:\n%s", want, page)
 		}
@@ -582,5 +585,143 @@ func TestTheFixIsAppliedAndTheAdviceGoes(t *testing.T) {
 	}
 	if _, page = get(t, server.URL+"/apps/web"); strings.Contains(page, "Its memory limit is likely too low") {
 		t.Fatalf("the app's advice after the fix:\n%s", page)
+	}
+}
+
+// A moved tenant is said healthy only for a check that passes now; one
+// starting waits for its check, and one whose node is silent is not known.
+func TestMovedResultsFromLiveHealth(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	tenant := func(status *reconcile.Status) api.Tenant {
+		var t api.Tenant
+		t.Spec.Name, t.Generation, t.Status = "a", 3, status
+		return t
+	}
+	for _, c := range []struct {
+		status *reconcile.Status
+		want   string
+	}{
+		{&reconcile.Status{Phase: "running", Healthy: true, Generation: 3, CheckedAt: now.Add(-10 * time.Second)}, "moved, healthy"},
+		{&reconcile.Status{Phase: "starting", Generation: 3, CheckedAt: now}, "moved, starting: waiting for its health check"},
+		{&reconcile.Status{Phase: "running", Healthy: true, Generation: 2, CheckedAt: now}, "moved, starting: waiting for its health check"},
+		{&reconcile.Status{Phase: "running", Healthy: true, Generation: 3, CheckedAt: now.Add(-9 * time.Minute)}, "moved; its last check passed 9m ago, none since"},
+		{&reconcile.Status{Phase: "running", Generation: 3, CheckedAt: now}, "moved, not healthy: blocks the next wave"},
+		{nil, "moved; how it runs is not known: its node does not answer"},
+	} {
+		tt := tenant(c.status)
+		if got, _ := movedResult(tt, tenantState(tt), now); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.status, got, c.want)
+		}
+	}
+}
+
+// A headline figure opens the set it counts, and a change's scope is the
+// same number on the app's page and in its review.
+func TestFiguresAndScopesAgree(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	_ = cluster
+	_, page := get(t, server.URL+"/")
+	if !strings.Contains(page, `href="/tenants?show=unhealthy"`) || !strings.Contains(page, "5 of 6 serving tenants healthy: show the 1 not healthy") {
+		t.Fatalf("the healthy figure:\n%s", page)
+	}
+	_, page = get(t, server.URL+"/tenants?show=unhealthy")
+	if !strings.Contains(page, "1 of 8 match") || !strings.Contains(page, `href="/tenants/baltic-freight"`) || strings.Contains(page, `href="/tenants/kowalski-trans"`) {
+		t.Fatalf("the tenants not healthy:\n%s", page)
+	}
+	_, page = get(t, server.URL+"/apps/web")
+	if !strings.Contains(page, "6 of 7 live tenants restart; 1 held, left out") {
+		t.Fatalf("the update's scope on the app's page:\n%s", page)
+	}
+	updated := between(page, `name="updated" value="`, `"`)
+	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review-update"}, "updated": {updated}}, server.URL)
+	if !strings.Contains(body, "6 restart · 1 held, left out") || !strings.Contains(body, "Roll out to 6 tenants") {
+		t.Fatalf("the update's scope in its review:\n%s", body)
+	}
+}
+
+// The audit log's actors read as people say them: the person who acted in
+// the panel, or the local panel through its socket; a person's new
+// container is a restart.
+func TestActorsAndRestartsInTheAuditLog(t *testing.T) {
+	for actor, want := range map[string]string{
+		"jan (panel) via murder-panel":         "jan (panel)",
+		"murder-panel socket via murder-panel": "the local panel",
+		"murder-panel socket":                  "the local panel",
+		"jan via murder-panel":                 "jan (panel)",
+		"root":                                 "root",
+		"murder (rollout)":                     "murder (rollout)",
+	} {
+		if got := who(actor); got != want {
+			t.Errorf("who(%q) = %q, want %q", actor, got, want)
+		}
+	}
+	if !sameActor("jan (panel) via murder-panel", "jan (panel)") || sameActor("anna (panel) via murder-panel", "jan (panel)") {
+		t.Fatal("sameActor")
+	}
+	cluster := NewDemoCluster()
+	server := newServerOf(t, cluster)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}, "confirm": {"acme-logistics"}}, server.URL)
+	_, page := get(t, server.URL+"/events")
+	if !strings.Contains(page, `acme-logistics</a> was restarted`) || !strings.Contains(page, "the local panel") || strings.Contains(page, "murder-panel socket") {
+		t.Fatalf("a restart in the audit log:\n%s", page)
+	}
+	if _, page = get(t, server.URL+"/tenants/acme-logistics"); !strings.Contains(page, "by you") {
+		t.Fatalf("one's own restart:\n%s", page)
+	}
+}
+
+// A backup's failure is read for its cause: what to fix comes first for a
+// failure trying again will not mend.
+func TestBackupCauses(t *testing.T) {
+	for text, want := range map[string]string{
+		"put backups/x.db.zst: 403 Forbidden: the bucket refused the upload": "n's backup key cannot write to the bucket (403).",
+		"put: AccessDenied: Access Denied":                                   "n's backup key cannot write to the bucket (403).",
+		"NoSuchBucket: The specified bucket does not exist":                  "The bucket n writes to is not there (404).",
+		"dial tcp: lookup s3.example.com: no such host":                      "n could not reach the bucket.",
+		"write /var/tmp/x: no space left on device":                          "n ran out of disk while it made the backup.",
+		"something else entirely":                                            "",
+	} {
+		if got, _ := (backupView{Node: "n", Error: text, Every: time.Hour}).Cause(); got != want {
+			t.Errorf("%q: %q, want %q", text, got, want)
+		}
+	}
+}
+
+// An interrupted drain says what moved and what did not, offers to drain
+// the rest with the same typed name and warning as the node's page, and
+// links what it changed in the audit log, while it ran.
+func TestAnInterruptedDrainIsFinished(t *testing.T) {
+	path := t.TempDir() + "/jobs.json"
+	if err := SeedDemoJobs(path, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	cluster := NewDemoCluster()
+	s, err := New(cluster, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Actions, s.Apps, s.Cluster = cluster.As, cluster.AsApps, cluster.AsCluster
+	s.Jobs = &Jobs{}
+	if err := s.Jobs.Persist(path, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(s.Handler())
+	defer server.Close()
+	_, page := get(t, server.URL+"/jobs/5eedd8a1n0000001")
+	for _, want := range []string{`<a href="/tenants/atlas">atlas</a>`, `<span class="st ok">moved</span>`, "still on nbg-1", `<span class="st warn">not moved</span>`,
+		"Drain nbg-1 again", `data-confirm="nbg-1"`, "would run on fsn-1 without a ready copy on another node", "the audit log while it ran", "since="} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the interrupted drain lacks %q:\n%s", want, page)
+		}
+	}
+	if strings.Count(page, `<span class="st ok">moved</span>`) != 1 {
+		t.Fatalf("more than atlas moved:\n%s", page)
+	}
+	link := html.UnescapeString(between(page, `<a href="/events?show=all&amp;since=`, `">What it changed`))
+	_, events := get(t, server.URL+"/events?show=all&since="+strings.ReplaceAll(link, "&", "&"))
+	if !strings.Contains(events, "atlas</a> was moved") || strings.Contains(events, "baltic-freight</a> restarted") || !strings.Contains(events, "Only the events from") {
+		t.Fatalf("the audit log while it ran:\n%s", events)
 	}
 }

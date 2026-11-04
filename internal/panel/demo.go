@@ -96,13 +96,13 @@ func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, 
 		{ID: 213, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "node.failed-over", Detail: "hel-1: 2 tenants run from their copies"},
 		{ID: 212, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "vistula-cargo", App: "web", Detail: "hel-1 → nbg-1"},
 		{ID: 211, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "nordwind", App: "web", Detail: "hel-1 → fsn-1"},
-		{ID: 210, At: now.Add(-48 * time.Minute), Actor: "jan via murder-panel", Action: "tenant.suspended", Tenant: "test-staging", App: "web"},
+		{ID: 210, At: now.Add(-48 * time.Minute), Actor: "jan (panel) via murder-panel", Action: "tenant.suspended", Tenant: "test-staging", App: "web"},
 		{ID: 209, At: now.Add(-3 * time.Hour), Actor: "root", Action: "app.updated", App: "web", Detail: "image ghcr.io/example/web@sha256:c23c323553d0"},
 		{ID: 208, At: now.Add(-3 * time.Hour), Actor: "root", Action: "tenant.rolled", Tenant: "atlas", App: "web"},
 		{ID: 207, At: now.Add(-26 * time.Hour), Actor: "root", Action: "node.upgraded", Detail: "fsn-1 to a10e3bfb8220"},
 		// What the drain the panel was stopped in did (SeedDemoJobs).
-		{At: now.Add(-26*time.Hour + 20*time.Second), Actor: "jan via murder-panel", Action: "tenant.moved", Tenant: "atlas", App: "web", Detail: "nbg-1 → fsn-1"},
-		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "jan via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "web"},
+		{At: now.Add(-26*time.Hour + 41*time.Second), Actor: "jan (panel) via murder-panel", Action: "tenant.moved", Tenant: "atlas", App: "web", Detail: "nbg-1 → fsn-1"},
+		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "jan (panel) via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "web"},
 	}
 	all = withHistory(all, now)
 	var out []store.Event
@@ -164,8 +164,11 @@ func SeedDemoJobs(path string, now time.Time) error {
 		return nil
 	}
 	records := []jobRecord{
+		// Its output as clusterops.Drain writes it; the panel stopped two
+		// minutes in, as it moved kowalski-trans.
 		{ID: "5eedd8a1n0000001", Title: "Drain nbg-1 to fsn-1", By: "jan (panel)", Kind: JobDrain, Started: now.Add(-26 * time.Hour),
-			Output: "move atlas to fsn-1\natlas moved\nmove kowalski-trans to fsn-1\n"},
+			Ended: now.Add(-26*time.Hour + 2*time.Minute), Interrupted: true,
+			Output: "atlas moved to fsn-1 in 41s\n\ninterrupted: the panel stopped while this ran; the audit log says what it changed\n"},
 		{ID: "5eedbac0000002", Title: "Back up the tenants of nbg-1", By: "jan (panel)", Kind: JobBackups, Started: now.Add(-27 * time.Hour), Ended: now.Add(-27*time.Hour + 40*time.Second),
 			Output: "baltic-freight: backups/baltic-freight/" + now.Add(-27*time.Hour).UTC().Format("20060102T150405Z") + ".db.zst\nkowalski-trans: failed: put: 403 Forbidden\n", Failed: "1 of 2 backups failed"},
 	}

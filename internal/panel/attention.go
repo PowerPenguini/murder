@@ -168,7 +168,12 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 				} else {
 					n.Reasons = append(n.Reasons, "last backup failed, none yet")
 				}
-				if n.Primary == nil {
+				if cause, _ := b.Cause(); cause != "" {
+					n.Subs = append(n.Subs, sub{Short: cause, Text: cause, Bad: true})
+					if n.Primary == nil {
+						n.Primary = &fix{"What to fix", "/cluster#backups"}
+					}
+				} else if n.Primary == nil {
 					n.Primary = &fix{"Why its backup failed", "/cluster#backups"}
 				}
 			} else {

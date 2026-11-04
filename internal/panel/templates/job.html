@@ -4,8 +4,26 @@
   <h1>{{$j.Title}}</h1>
   {{if not $j.Done}}<span class="st busy">running</span>{{else if $j.Interrupted}}<span class="st warn">interrupted</span>{{else if $j.Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}
 </div>
-<p class="lead">Begun by {{$j.By}} {{ago $j.Started}} ago ({{utc $j.Started}}){{if $j.Done}}, {{if $j.Interrupted}}interrupted when the panel stopped{{else}}ended {{ago $j.Ended}} ago{{end}}{{end}}. {{if $d.Kept}}Its record is kept by this node's panel, across restarts.{{else}}Its record lives in this node's panel until it restarts.{{end}} <a href="/events?show=all">What it changed, in the audit log</a></p>
-{{if $j.Interrupted}}<div class="notice">The panel stopped while this ran, so it did not finish and did not say how it ended: it did not fail as such. What it changed is in the audit log; run it again to finish it.</div>{{end}}
+<p class="lead">Begun by {{who $j.By}} {{ago $j.Started}} ago ({{utc $j.Started}}){{if $j.Done}}, {{if $j.Interrupted}}interrupted when the panel stopped{{else}}ended {{ago $j.Ended}} ago{{end}}{{end}}. {{if $d.Kept}}Its record is kept by this node's panel, across restarts.{{else}}Its record lives in this node's panel until it restarts.{{end}} <a href="/events?show=all&amp;since={{iso $d.Since}}&amp;until={{iso $d.Until}}">What it changed: the audit log while it ran</a></p>
+{{if $j.Interrupted}}<div class="notice">The panel stopped while this ran, so it did not finish and did not say how it ended: it did not fail as such.{{if $d.Drained}} Below is what moved and what did not; drain {{$d.Source}} again to move the rest.{{else}} What it changed is in the audit log; run it again to finish it.{{end}}</div>{{end}}
+{{if $d.Drained}}
+<section class="near">
+  <div class="head"><h2>Its tenants</h2></div>
+  <table class="list">
+    <thead><tr><th>Tenant</th><th>Moved</th><th>Runs on now</th></tr></thead>
+    <tbody>
+    {{range $d.Drained}}
+      <tr>
+        <td class="l-main">{{if .Exists}}<a href="/tenants/{{.Name}}">{{.Name}}</a>{{else}}{{.Name}}{{end}}</td>
+        <td class="l-side">{{if .Moved}}<span class="st ok">moved</span>{{else}}<span class="st warn">not moved</span>{{end}}</td>
+        <td class="l-sub" data-label="Now">{{if not .Exists}}<span class="dim">gone since</span>{{else if eq .Now $d.Source}}still on {{.Now}}{{else}}{{.Now}}{{end}} · <a href="/events?tenant={{.Name}}&amp;show=all">its events</a></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{with $d.Again}}<details class="drop spaced" id="again"><summary class="button">Drain {{$d.Source}} again</summary><div class="pop">{{template "drain-form" .}}</div></details>{{end}}
+</section>
+{{end}}
 {{if $d.Results}}
 <section class="near">
   <div class="head"><h2>{{if $d.Failed}}{{$d.Failed}} failed, {{end}}{{$d.Succeeded}} backed up</h2></div>

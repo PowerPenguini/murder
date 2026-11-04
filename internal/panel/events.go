@@ -41,6 +41,26 @@ func actionText(action string) string {
 
 // byPeople says an event was something a person did, not the cluster's
 // own keeping: the agent's actor is "murder", or "murder (what)".
+// who names an actor of the audit log as people read it. The agent writes
+// a person acting in the panel as "jan (panel) via murder-panel": the
+// panel's own system user signs for them. The panel's socket, where no one
+// signs in, is "the local panel".
+func who(actor string) string {
+	name, viaPanel := strings.CutSuffix(actor, " via murder-panel")
+	switch {
+	case name == "murder-panel socket":
+		return "the local panel"
+	case strings.HasSuffix(name, " (panel)"):
+		return name
+	case viaPanel:
+		return name + " (panel)"
+	}
+	return name
+}
+
+// sameActor says two of the audit log's actors are one.
+func sameActor(a, b string) bool { return a != "" && who(a) == who(b) }
+
 func byPeople(e store.Event) bool {
 	return e.Actor != "murder" && !strings.HasPrefix(e.Actor, "murder (")
 }
@@ -116,6 +136,11 @@ func (r eventRow) Predicate() string {
 	if r.Tenant == "" {
 		return ""
 	}
+	// A new container a person asked for is a restart; the cluster's own
+	// are new containers.
+	if r.Action == "tenant.rolled" && byPeople(r.Event) {
+		return "was restarted"
+	}
 	return predicates[r.Action]
 }
 
@@ -128,6 +153,9 @@ var plurals = map[string]string{
 
 // PredicatePlural says a run's event after "N tenants".
 func (r eventRow) PredicatePlural() string {
+	if r.Action == "tenant.rolled" && byPeople(r.Event) {
+		return "were restarted"
+	}
 	if p, ok := plurals[r.Action]; ok {
 		return p
 	}

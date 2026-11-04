@@ -9,12 +9,14 @@
     <option value="people" {{if eq $d.Show "people"}}selected{{end}}>Operator actions only</option>
     <option value="all" {{if eq $d.Show "all"}}selected{{end}}>Everything, the cluster's own records too</option>
   </select></label>
+  {{if not $d.Since.IsZero}}<input type="hidden" name="since" value="{{iso $d.Since}}">{{end}}{{if not $d.Until.IsZero}}<input type="hidden" name="until" value="{{iso $d.Until}}">{{end}}
   <div class="row"><button type="submit">Show</button>
-  {{if or $d.Tenant $d.App $d.Show}}<a href="/events" class="dim">Clear</a>{{end}}</div>
+  {{if or $d.Tenant $d.App $d.Show (not $d.Since.IsZero)}}<a href="/events" class="dim">Clear</a>{{end}}</div>
   <datalist id="tenant-names">{{range $d.Tenants}}<option value="{{.}}">{{end}}</datalist>
   <datalist id="app-names">{{range $d.Apps}}<option value="{{.}}">{{end}}</datalist>
 </form>
 <section class="near">
+  {{if not $d.Since.IsZero}}<p class="count-line">Only the events from {{utc $d.Since}} to {{utc $d.Until}}. <a href="/events{{if $d.Show}}?show={{$d.Show}}{{end}}">All of them</a></p>{{end}}
   {{if and $d.Hidden (ne $d.Show "all")}}<p class="count-line dim">{{plural $d.Hidden "record" "records"}} of the cluster's own keeping (copies placed, new containers) left out. <a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}show=all">Include them</a></p>{{end}}
   {{template "events" $d.Events}}
   {{if $d.Older}}<div class="more"><a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}{{if $d.Show}}show={{$d.Show}}&amp;{{end}}before={{$d.Older}}">Older events</a></div>{{end}}

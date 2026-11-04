@@ -65,7 +65,7 @@
   {{if $d.Rotating}}
   <p class="lead">A {{$d.Frozen}} runs: it takes changes again once it ends, in a minute or less. One that stopped goes on with <code>sudo murder key rotate</code> on that node.</p>
   {{else}}{{with $d.Upgrading}}
-  <p class="lead">{{$d.Frozen}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>, begun by {{.By}}, runs now and takes changes again once it ends.</p>
+  <p class="lead">{{$d.Frozen}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>, begun by {{who .By}}, runs now and takes changes again once it ends.</p>
   {{else}}
   <p class="lead">{{$d.Frozen}}.</p>
   <p>Taking changes again here is only for an upgrade that stopped, once every node runs one release. Never use it while an upgrade runs from another node's panel or command line: this panel sees only the jobs it began, and nodes of two releases would then take changes.</p>
@@ -100,9 +100,11 @@
   </table>
   {{with $d.Failing}}
   <ul class="attention spaced">
-    {{range $f := .}}<li{{if .Failing}} class="broken"{{end}}><span class="st {{if .Failing}}bad{{else}}warn{{end}}"></span><div><a href="/tenants/{{.Tenant}}" class="subject">{{.Tenant}}</a>{{if .Failing}}'s last backup failed{{if not .None}}; the newest is {{ago .Last}} old{{end}}{{else}}'s newest backup is {{ago .Last}} old, though they run every {{every .Every}}{{end}}.
-      {{with .Error}}<p class="flat small spaced">Why, as {{$f.Node}} said: <span class="mono">{{.}}</span></p>{{else}}{{if .Failing}}<p class="flat small spaced dim">Its node did not say why: its agent's log does (<code>journalctl -u murder-agent</code> on {{.Node}}).</p>{{end}}{{end}}
-      <span class="fixes">{{if eq .Node $.Data.Self}}<span class="dim">Back it up again with "Back up {{.Node}}'s tenants now", below.</span>{{else}}<span class="dim">Back it up again on {{.Node}}: <code>sudo murder backups now</code>, or from {{.Node}}'s panel.</span>{{end}}<a href="/cluster?tenant={{.Tenant}}#backups">How to restore it</a></span>
+    {{range $f := .}}{{$cause := index (causeOf $f) 0}}{{$fix := index (causeOf $f) 1}}<li{{if .Failing}} class="broken"{{end}}><span class="st {{if .Failing}}bad{{else}}warn{{end}}"></span><div>
+      <p class="nhead"><a href="/tenants/{{.Tenant}}" class="subject">{{.Tenant}}</a>{{if .Failing}}'s last backup failed{{if not .None}}; the newest is {{ago .Last}} old{{end}}{{else}}'s newest backup is {{ago .Last}} old, though they run every {{every .Every}}{{end}}.</p>
+      {{if $cause}}<p class="cause bad">{{$cause}}</p><p class="flat small spaced">{{$fix}}</p>{{end}}
+      {{with .Error}}<details class="evidence"><summary>What <a href="{{node $f.Node}}">{{$f.Node}}</a> said</summary><div class="evbody"><p class="mono">{{.}}</p></div></details>{{else}}{{if .Failing}}<p class="flat small spaced dim">Its node did not say why: its agent's log does (<code>journalctl -u murder-agent</code> on <a href="{{node .Node}}">{{.Node}}</a>).</p>{{end}}{{end}}
+      <div class="nacts">{{if eq .Node $.Data.Self}}<span class="dim">{{if $cause}}Once fixed, back it up{{else}}Back it up again{{end}} with "Back up {{.Node}}'s tenants now (this node)", below.</span>{{else}}<span class="dim">{{if $cause}}Once fixed, back it up{{else}}Back it up again{{end}} on <a href="{{node .Node}}">{{.Node}}</a>: <code>sudo murder backups now</code> there, or "Back up its tenants now" in the panel that node serves.</span>{{end}}<a href="/cluster?tenant={{.Tenant}}#backups">How to restore it</a></div>
     </div></li>{{end}}
   </ul>
   {{end}}
@@ -150,7 +152,7 @@
       </div>
     </details>
     {{end}}
-    <form method="post" class="row"><input type="hidden" name="do" value="backups"><button type="submit">Back up {{$d.Self}}'s tenants now</button></form>
+    <form method="post" class="row"><input type="hidden" name="do" value="backups"><button type="submit">Back up {{$d.Self}}'s tenants now (this node)</button></form>
   </div>
   <p class="hint spaced">Each node backs up its own tenants on schedule; this backs up {{$d.Self}}'s at once, as a job.</p>
 </section>
@@ -164,7 +166,7 @@
       <tr>
         <td class="when hide-narrow">{{ago .Started}} ago</td>
         <td class="l-main"><a class="row-link" href="/jobs/{{.ID}}">{{.Title}}</a></td>
-        <td class="dim hide-narrow">{{.By}}</td>
+        <td class="dim hide-narrow">{{who .By}}</td>
         <td class="l-side">{{if not .Done}}<span class="st busy">running</span>{{else if .Interrupted}}<span class="st warn">interrupted</span>{{else if .Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}</td>
       </tr>
     {{else}}

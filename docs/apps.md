@@ -218,6 +218,12 @@ murder app delete web                   # once no tenant (live or archived) runs
 murder events -tenant acme              # the audit log: who changed what, and when
 ```
 
+Each time a tenant's app exits and its node starts it again, the audit log
+says so once, with the exit code and, for a kill, the memory limit it ran
+under ("exit 137: killed (SIGKILL), most likely for using more than its
+256 MB of memory"); the panel judges whether an app's limit is too low from
+the kills at the limit in effect only.
+
 A container's lines go with it, so a node keeps the last 1000 lines (at
 most 64 KB) of each tenant's previous container in `previous-logs/` beside
 its database, readable by root only, until the next one goes: when the app

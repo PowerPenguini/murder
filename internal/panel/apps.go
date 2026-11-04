@@ -213,6 +213,9 @@ type appData struct {
 	// holds a proposed change, from a link.
 	Memory   *appMemory
 	Proposed string
+	// UpdateRestarts and UpdateHeld count, for the newer image, the live
+	// tenants it restarts and those held and left out, as its review does.
+	UpdateRestarts, UpdateHeld int
 }
 
 // Red says something on the app's page is wrong: a blocked rollout, a
@@ -293,6 +296,22 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, p
 	}
 	slices.Sort(data.Archived)
 	slices.Sort(data.Restoring)
+	// What the newer image's review will count: the tenants it restarts,
+	// of the live ones; the held ones left out.
+	if data.App.Latest != "" {
+		next := data.App.Spec
+		next.Image = data.App.Latest
+		for _, row := range data.Rows {
+			t := row.Tenant
+			switch {
+			case t.Archived():
+			case t.Hold:
+				data.UpdateHeld++
+			case scopeOf(t, data.App.Spec, next).Restarts:
+				data.UpdateRestarts++
+			}
+		}
+	}
 	var err error
 	if data.Revisions, err = s.Apps(s.actor(userOf(r))).AppRevisions(ctx, data.App.Name); err != nil {
 		s.fail(w, r, err)

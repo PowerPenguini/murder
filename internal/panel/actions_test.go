@@ -66,7 +66,7 @@ func TestActingOnTenants(t *testing.T) {
 			t.Fatal("the action's notice shown twice")
 		}
 	}
-	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "atlas", Limit: 1}); events[0].Action != "tenant.suspended" || events[0].Actor != "murder-panel socket" {
+	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "atlas", Limit: 1}); events[0].Action != "tenant.suspended" || who(events[0].Actor) != "the local panel" {
 		t.Fatalf("event %+v", events[0])
 	}
 	// Archiving without the name typed does nothing.

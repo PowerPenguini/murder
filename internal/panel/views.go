@@ -472,7 +472,7 @@ func (s *Server) appContext(ctx context.Context, r *http.Request, t api.Tenant, 
 }
 
 // tenantFilters are the tenants' page's filters, in order.
-var tenantFilters = []string{"all", "broken", "risk", "attention", "unprotected", "suspended", "archived"}
+var tenantFilters = []string{"all", "broken", "risk", "attention", "unhealthy", "unprotected", "suspended", "archived"}
 
 // tenantFilter reads the tenants' page's filter from its address.
 func tenantFilter(r *http.Request) (show, query string, byName bool) {
@@ -518,10 +518,13 @@ func filterTenants(rows []tenantRow, show, query string, byName, clustered bool,
 	var out []tenantRow
 	for _, row := range rows {
 		in := map[string]bool{
-			"all":         true,
-			"attention":   hasKey2(attention, row.Spec.Name),
-			"broken":      hasKey2(attention, row.Spec.Name) && attention[row.Spec.Name] == 0,
-			"risk":        hasKey2(attention, row.Spec.Name) && attention[row.Spec.Name] == 1,
+			"all":       true,
+			"attention": hasKey2(attention, row.Spec.Name),
+			"broken":    hasKey2(attention, row.Spec.Name) && attention[row.Spec.Name] == 0,
+			"risk":      hasKey2(attention, row.Spec.Name) && attention[row.Spec.Name] == 1,
+			// The serving tenants not healthy: what the overview's "5 / 6
+			// tenants healthy" leaves out.
+			"unhealthy":   !row.Archived() && !row.Spec.Suspended && row.State.Kind != "ok",
 			"unprotected": row.Unprotected(clustered) && !row.Spec.Suspended,
 			"suspended":   row.Spec.Suspended && !row.Archived(),
 			"archived":    row.Archived(),
@@ -671,8 +674,10 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 }
 
 type eventsData struct {
-	Events      []store.Event
-	Tenant, App string
+	// Since and Until bound the events shown, when a window was asked for.
+	Since, Until time.Time
+	Events       []store.Event
+	Tenant, App  string
 	// Show is what is shown: "" for what people did and failures, people
 	// for what people did only, all for the cluster's own records too.
 	Show string
@@ -727,7 +732,10 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	case show != "all" && show != "people":
 		show = ""
 	}
-	if show != "all" {
+	// A window of time, as a job's page links to what it changed.
+	since, _ := time.Parse(time.RFC3339, q.Get("since"))
+	until, _ := time.Parse(time.RFC3339, q.Get("until"))
+	if show != "all" || !since.IsZero() || !until.IsZero() {
 		// What is shown is found among more of the cluster's own.
 		query.Limit = activityEvents
 	}
@@ -751,6 +759,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 	slices.Sort(data.Tenants)
 	data.Apps = slices.Sorted(maps.Keys(apps))
+	if !since.IsZero() || !until.IsZero() {
+		events = slices.DeleteFunc(events, func(e store.Event) bool {
+			return (!since.IsZero() && e.At.Before(since)) || (!until.IsZero() && e.At.After(until))
+		})
+		data.Since, data.Until = since, until
+	}
 	read := events
 	if show != "all" {
 		events = slices.DeleteFunc(slices.Clone(events), func(e store.Event) bool { return !eventShown(e, show) })
@@ -829,7 +843,7 @@ func (s *Server) funcs() template.FuncMap {
 			return ""
 		},
 		"filterLabel": func(name string) string {
-			return map[string]string{"all": "All", "broken": "Broken", "risk": "At risk", "attention": "Needs attention", "unprotected": "Without a ready copy", "suspended": "Suspended", "archived": "Archived"}[name]
+			return map[string]string{"all": "All", "broken": "Broken", "risk": "At risk", "attention": "Needs attention", "unhealthy": "Not healthy", "unprotected": "Without a ready copy", "suspended": "Suspended", "archived": "Archived"}[name]
 		},
 		"node":   nodeHref,
 		"plural": plural,
@@ -844,6 +858,12 @@ func (s *Server) funcs() template.FuncMap {
 		"mem":   memory,
 		"lines": func(text string) int { return strings.Count(text, "\n") + 1 },
 		"ago":   func(t time.Time) string { return ago(s.now(), t) },
+		"who":   who,
+		"causeOf": func(b interface{ Cause() (string, string) }) []string {
+			cause, fix := b.Cause()
+			return []string{cause, fix}
+		},
+		"same": sameActor,
 		// exitsaid says the agent's words for an exit as people do.
 		"exitsaid": func(text string) string {
 			if e, ok := parseExit(text); ok {

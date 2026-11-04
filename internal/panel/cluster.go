@@ -876,11 +876,31 @@ type jobData struct {
 	Job *Job
 	// Kept says job records outlive a restart of the panel.
 	Kept bool
+	// Drained are a drain's tenants, moved or not, and where each runs
+	// now; Source and Target its nodes. Again is the drain asked once
+	// more, from where it stopped; Since and Until the time it ran in.
+	Drained        []drainRow
+	Source, Target string
+	Again          *nodeActs
+	Since, Until   time.Time
 	// Results are a backup job's, tenant by tenant; Succeeded and Failed
 	// count them.
 	Results           []jobResult
 	Succeeded, Failed int
 }
+
+// drainRow is one tenant of a drain: moved or not, and where it is now.
+type drainRow struct {
+	Name, Now     string
+	Moved, Exists bool
+}
+
+// drainTitle reads a drain's nodes from its title.
+var drainTitle = regexp.MustCompile(`^Drain (\S+) to (\S+)$`)
+
+// drainMoved reads a drain's moves from its output, as clusterops.Drain
+// writes them: "atlas moved to fsn-1 in 41s".
+var drainMoved = regexp.MustCompile(`(?m)^(\S+) moved to (\S+)`)
 
 // jobResult is one tenant's line of a backup job.
 type jobResult struct {
@@ -918,7 +938,54 @@ func (s *Server) jobPage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, &api.Error{Status: http.StatusNotFound, Message: "no such job on this node's panel: jobs are kept by the panel that began them, until it restarts"})
 		return
 	}
-	data := jobData{Job: job, Kept: s.Jobs.kept()}
+	data := jobData{Job: job, Kept: s.Jobs.kept(), Since: job.Started.Add(-time.Minute), Until: job.Ended}
+	if data.Until.IsZero() {
+		data.Until = s.now()
+	}
+	data.Until = data.Until.Add(time.Minute)
+	if m := drainTitle.FindStringSubmatch(job.Title); job.Kind == JobDrain && m != nil {
+		data.Source, data.Target = m[1], m[2]
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		tenants, _ := s.backend.List(ctx)
+		where := map[string]string{}
+		for _, t := range tenants {
+			where[t.Spec.Name] = t.Node
+		}
+		moved := map[string]bool{}
+		for _, m := range drainMoved.FindAllStringSubmatch(job.Output(), -1) {
+			if !moved[m[1]] {
+				moved[m[1]] = true
+				_, ok := where[m[1]]
+				data.Drained = append(data.Drained, drainRow{Name: m[1], Moved: true, Now: where[m[1]], Exists: ok})
+			}
+		}
+		slices.SortFunc(tenants, func(a, b api.Tenant) int { return strings.Compare(a.Spec.Name, b.Spec.Name) })
+		for _, t := range tenants {
+			if t.Node == data.Source && !moved[t.Spec.Name] {
+				data.Drained = append(data.Drained, drainRow{Name: t.Spec.Name, Now: t.Node, Exists: true})
+			}
+		}
+		// Once it stopped, the rest can be drained again, as from the
+		// node's page.
+		if job.Done() && (job.Interrupted || job.Failed != "") {
+			if nodes, err := s.backend.Nodes(ctx); err == nil {
+				for _, n := range nodes.Nodes {
+					if n.Name != data.Source {
+						continue
+					}
+					var targets []string
+					for _, other := range nodes.Nodes {
+						if other.Name != n.Name && other.Answers && !other.Failed() {
+							targets = append(targets, other.Name)
+						}
+					}
+					acts := drainOf(nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: n.Name == nodes.Self, Targets: targets, From: "node"}, tenants)
+					data.Again = &acts
+				}
+			}
+		}
+	}
 	if job.Kind == JobBackups {
 		data.Results = backupResults(job.Output())
 		for _, result := range data.Results {

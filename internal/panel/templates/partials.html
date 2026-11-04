@@ -12,13 +12,13 @@ tenant, its detail), then who. A row opens on its whole record. */}}
       <td class="l-main">
         <details class="event" data-id="{{.ID}}" id="ev-{{.ID}}">
           {{if .Group}}
-          <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{if eq (len .Tenants) 1}}<a href="/tenants/{{index .Tenants 0}}">{{index .Tenants 0}}</a> {{.Predicate}}, {{len .Group}} times{{else if .Tenants}}{{len .Tenants}} tenants {{.PredicatePlural}}, {{len .Group}} times{{else}}{{action .Action}}, {{len .Group}} times{{end}}</span><span class="detail">{{with .Detail}}{{.}} · {{end}}{{if eq (ago .Oldest.At) (ago .At)}}{{ago .At}} ago{{else}}{{ago .Oldest.At}} to {{ago .At}} ago{{end}}<span class="phone-inline"> · by {{.Actor}}</span></span></summary>
+          <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{if eq (len .Tenants) 1}}<a href="/tenants/{{index .Tenants 0}}">{{index .Tenants 0}}</a> {{.Predicate}}, {{len .Group}} times{{else if .Tenants}}{{len .Tenants}} tenants {{.PredicatePlural}}, {{len .Group}} times{{else}}{{action .Action}}, {{len .Group}} times{{end}}</span><span class="detail">{{with .Detail}}{{.}} · {{end}}{{if eq (ago .Oldest.At) (ago .At)}}{{ago .At}} ago{{else}}{{ago .Oldest.At}} to {{ago .At}} ago{{end}}<span class="phone-inline"> · by {{who .Actor}}</span></span></summary>
           <ul class="grouped">{{range .Group}}<li id="ev-{{.ID}}"><span class="num">{{utc .At}}</span>{{with .Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{end}} <span class="dim">#{{.ID}}</span></li>{{end}}</ul>
           {{else}}
-          <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{with .Predicate}}<a href="/tenants/{{$e.Tenant}}">{{$e.Tenant}}</a> {{.}}{{else}}{{with $e.Node}}<a href="{{node .}}">{{.}}</a>{{$e.NodePredicate}}{{else}}{{with $e.AppPredicate}}<a href="/apps/{{$e.App}}">{{$e.App}}</a>{{.}}{{else}}{{action $e.Action}}{{with $e.Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{else}}{{with $e.App}} <a href="/apps/{{.}}" class="dim">app {{.}}</a>{{end}}{{end}}{{end}}{{end}}{{end}}</span><span class="detail">{{if $e.Node}}{{with $e.NodeDetail}}{{.}}<span class="phone-inline"> · </span>{{end}}{{else}}{{with .Detail}}{{.}}<span class="phone-inline"> · </span>{{end}}{{end}}<span class="phone-inline">by {{$e.Actor}}</span></span></summary>
+          <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{with .Predicate}}<a href="/tenants/{{$e.Tenant}}">{{$e.Tenant}}</a> {{.}}{{else}}{{with $e.Node}}<a href="{{node .}}">{{.}}</a>{{$e.NodePredicate}}{{else}}{{with $e.AppPredicate}}<a href="/apps/{{$e.App}}">{{$e.App}}</a>{{.}}{{else}}{{action $e.Action}}{{with $e.Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{else}}{{with $e.App}} <a href="/apps/{{.}}" class="dim">app {{.}}</a>{{end}}{{end}}{{end}}{{end}}{{end}}</span><span class="detail">{{if $e.Node}}{{with $e.NodeDetail}}{{.}}<span class="phone-inline"> · </span>{{end}}{{else}}{{with .Detail}}{{.}}<span class="phone-inline"> · </span>{{end}}{{end}}<span class="phone-inline">by {{who $e.Actor}}</span></span></summary>
           <dl class="pairs">
             <dt>At</dt><dd class="num">{{utc .At}}</dd>
-            <dt>By</dt><dd>{{.Actor}}</dd>
+            <dt>By</dt><dd>{{who .Actor}}</dd>
             <dt>Action</dt><dd class="mono">{{.Action}}</dd>
             {{with .Tenant}}<dt>Tenant</dt><dd><a href="/tenants/{{.}}">{{.}}</a></dd>{{end}}
             {{with .App}}<dt>App</dt><dd><a href="/apps/{{.}}">{{.}}</a></dd>{{end}}
@@ -28,7 +28,7 @@ tenant, its detail), then who. A row opens on its whole record. */}}
           {{end}}
         </details>
       </td>
-      <td class="by hide-narrow">{{.Actor}}</td>
+      <td class="by hide-narrow">{{who .Actor}}</td>
     </tr>
   {{else}}
     <tr><td colspan="3" class="empty l-main">None to show.</td></tr>
@@ -163,16 +163,7 @@ its pages beside it, what can be done to it, and where it runs. */}}
 {{/* What can be done to a node: drain it while it answers; fail it over
 once it is off; remove it once it runs and keeps nothing. */}}
 {{define "node-actions"}}
-  {{if and .Answers .Targets}}{{$n := .}}
-  <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="drain"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
-    <label class="field">Drain to <select name="to" required>{{if gt (len .Targets) 1}}<option value="" selected disabled>choose a node</option>{{end}}{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
-    <p class="hint">{{if .Tenants}}Moves its {{plural (len .Tenants) "tenant" "tenants"}} ({{range $i, $t := .Tenants}}{{if $i}}, {{end}}{{$t}}{{end}}) there, one after the other, each with its data. Each answers no request for the seconds it moves.{{else}}It runs no tenant: nothing moves.{{end}}{{if .Keeps}} The {{plural .Keeps "copy" "copies"}} it keeps stay on it until it is removed.{{end}}{{if .Archived}} Archived data stays on it too.{{end}}</p>
-    {{range $target := .Targets}}{{with index $n.Unprotected $target}}<p class="hint red">{{if gt (len $n.Targets) 1}}If drained to {{$target}}: {{end}}{{range $i, $u := .}}{{if $i}}, {{end}}{{$u}}{{end}} would run on {{$target}} without a ready copy on another node: if {{$target}} fails, {{if eq (len .) 1}}it stops{{else}}they stop{{end}}.</p>{{end}}{{end}}
-    <p class="hint">Type its name to drain it.</p>
-    <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
-    <div><button type="submit" class="danger">Drain {{.Name}}</button></div>
-  </form>
-  {{end}}
+  {{template "drain-form" .}}
   {{if and (not .Answers) (not .Failed)}}
   <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="failover"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
     <p class="hint">Only once you made sure it is powered off: its tenants must never run twice. Their copies take over; a tenant without a copy stays stopped. Type its name to confirm.</p>
@@ -195,3 +186,16 @@ once it is off; remove it once it runs and keeps nothing. */}}
 
 {{/* A tenant's newest backup: when, and whether something is wrong. */}}
 {{define "backup"}}{{with .Backup}}{{if .Failing}}<span class="st bad">last try failed</span>{{if not .None}} <span class="dim">newest {{ago .Last}} ago</span>{{end}}{{else if .Stale}}<span class="st warn">{{ago .Last}} ago</span> <span class="dim">late, runs every {{every .Every}}</span>{{else if .None}}<span class="dim">none yet</span>{{else}}{{ago .Last}} ago{{end}}{{else}}<span class="faint">not reported</span>{{end}}{{end}}
+
+{{define "drain-form"}}
+  {{if and .Answers .Targets}}{{$n := .}}
+  <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="drain"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
+    <label class="field">Drain to <select name="to" required>{{if gt (len .Targets) 1}}<option value="" selected disabled>choose a node</option>{{end}}{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
+    <p class="hint">{{if .Tenants}}Moves its {{plural (len .Tenants) "tenant" "tenants"}} ({{range $i, $t := .Tenants}}{{if $i}}, {{end}}{{$t}}{{end}}) there, one after the other, each with its data. Each answers no request for the seconds it moves.{{else}}It runs no tenant: nothing moves.{{end}}{{if .Keeps}} The {{plural .Keeps "copy" "copies"}} it keeps stay on it until it is removed.{{end}}{{if .Archived}} Archived data stays on it too.{{end}}</p>
+    {{range $target := .Targets}}{{with index $n.Unprotected $target}}<p class="hint red">{{if gt (len $n.Targets) 1}}If drained to {{$target}}: {{end}}{{range $i, $u := .}}{{if $i}}, {{end}}{{$u}}{{end}} would run on {{$target}} without a ready copy on another node: if {{$target}} fails, {{if eq (len .) 1}}it stops{{else}}they stop{{end}}.</p>{{end}}{{end}}
+    <p class="hint">Type its name to drain it.</p>
+    <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+    <div><button type="submit" class="danger">Drain {{.Name}}</button></div>
+  </form>
+  {{end}}
+{{end}}

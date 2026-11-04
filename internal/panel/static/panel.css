@@ -539,6 +539,8 @@ ol.waves li.done { box-shadow: inset 0 3px 0 var(--soft); }
 ol.waves li.now { box-shadow: inset 0 3px 0 var(--fg); }
 ol.waves li.now .wn::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: var(--s2); background: var(--fg); animation: pulse 2.4s ease-in-out infinite; }
 ol.waves li.paused { box-shadow: inset 0 3px 0 var(--bad); }
+ol.waves li.blocked { box-shadow: inset 0 3px 0 var(--bad); background: var(--bad-wash); }
+ol.waves li.blocked .wc { color: var(--bad); }
 ol.waves li.next .wn { color: var(--soft); }
 ol.waves.plan li { box-shadow: none; }
 @media (max-width: 760px) {
@@ -762,3 +764,10 @@ table.scope td .strong { font-weight: 600; }
 fieldset.pace { border: 1px solid var(--frame); padding: var(--pad-y) var(--pad-x); margin: 0 0 var(--s4); display: grid; gap: var(--s3); flex-basis: 100%; }
 fieldset.pace legend { padding: 0 var(--s2); color: var(--soft); font-size: 13px; }
 fieldset.pace label.check { align-items: flex-start; line-height: 1.45; }
+
+/* The rollout's actions keep 12 px from its waves; on a phone, Pause sits
+   on the column's edge like every other button. */
+.rollout-actions { margin-bottom: var(--s3); }
+@media (max-width: 760px) {
+  .rollout-head form { margin-left: 0; }
+}

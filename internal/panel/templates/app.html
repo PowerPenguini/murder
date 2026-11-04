@@ -24,10 +24,10 @@
   </div>
   {{end}}
   <ol class="waves desktop-only spaced" aria-label="its waves">
-    {{range .Steps}}<li class="{{.State}}"><span class="wn">{{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{if eq .State "done"}}moved{{else if eq .State "now"}}moving, watched{{else if eq .State "paused"}}paused{{else}}waits{{end}}</span></li>{{end}}
+    {{range .Steps}}<li class="{{.State}}"><span class="wn">{{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{.Said}}</span></li>{{end}}
   </ol>
   <details class="howto phone-only spaced"><summary>Its waves: {{range $i, $w := .Steps}}{{if $i}}, {{end}}{{$w.Name}}{{if eq $w.State "now"}} (now){{end}}{{end}}</summary>
-    <ol class="waves spaced">{{range .Steps}}<li class="{{.State}}"><span class="wn">{{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{if eq .State "done"}}moved{{else if eq .State "now"}}moving, watched{{else if eq .State "paused"}}paused{{else}}waits{{end}}</span></li>{{end}}</ol>
+    <ol class="waves spaced">{{range .Steps}}<li class="{{.State}}"><span class="wn">{{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{.Said}}</span></li>{{end}}</ol>
   </details>
   {{with .Before}}<details class="howto spaced"><summary>Why the new revision is likely not the cause</summary><div class="panel spaced"><p class="flat">{{.}} Fix the cause and the rollout continues; or roll back to put every tenant on the revision before.</p>{{with $d.Memory}}{{if $.Edits}}<span class="fixes"><a href="{{.Href}}">Raise {{$a.Name}}'s memory limit</a></span>{{end}}{{end}}</div></details>{{end}}
   <input type="checkbox" id="allrows" class="sr phone-toggle"><label for="allrows" class="phone-only showall">Show all {{len .Rows}} tenants, not only those to look at</label>
@@ -40,7 +40,7 @@
         <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         <td class="l-sub" data-label="Runs">{{if .Moved}}{{.To}} <span class="dim">(from {{.From}})</span>{{else if .Held}}<span class="dim">{{.From}}, held</span>{{else if eq .From .To}}{{.To}}{{else}}<span class="dim">{{.From}}</span>{{end}}</td>
         <td class="hide-narrow hide-mid">{{if .Wave}}{{wavename (sub .Wave 1)}}{{else}}<span class="faint">none</span>{{end}}</td>
-        <td class="l-sub" data-label="Result">{{if .Blocks}}<span class="st bad">moved, not healthy: blocks the next wave</span>{{else if .Moved}}moved, healthy{{else if .Held}}<span class="dim">stays: it is held</span>{{else if eq .From .To}}<span class="dim">ran it already</span>{{else}}<span class="dim">waits for {{lower (wavename (sub .Wave 1))}}</span>{{end}}</td>
+        <td class="l-sub" data-label="Result">{{if .Moved}}{{if eq .Kind "ok"}}{{.Result}}{{else}}<span class="st {{.Kind}}">{{.Result}}</span>{{end}}{{else if .Held}}<span class="dim">stays: it is held</span>{{else if eq .From .To}}<span class="dim">ran it already</span>{{else}}<span class="dim">waits for {{lower (wavename (sub .Wave 1))}}</span>{{end}}</td>
       </tr>
     {{end}}
     </tbody>
@@ -99,7 +99,7 @@
     <p class="flat"><span class="st warn"></span> A newer image of <span class="mono">{{$a.Tag}}</span> is in its registry: <span class="mono" title="{{$a.Latest}}">{{short $a.Latest}}</span>, found {{ago $a.LatestAt}} ago.</p>
     <form method="post" class="row spaced"><input type="hidden" name="do" value="review-update"><input type="hidden" name="updated" value="{{$d.Updated}}">
       <button type="submit"{{if not $d.Red}} class="primary"{{end}}>Review the update</button>
-      <span class="hint">{{if $a.Tenants}}to {{plural (len $a.Tenants) "live tenant" "live tenants"}}, in waves{{with $d.Rollout}}; it replaces the rollout that runs now{{end}}{{else}}no live tenant runs it{{end}}</span></form>
+      <span class="hint">{{if $a.Tenants}}{{$d.UpdateRestarts}} of {{plural (len $a.Tenants) "live tenant" "live tenants"}} restart{{if eq $d.UpdateRestarts 1}}s{{end}}{{with $d.UpdateHeld}}; {{.}} held, left out{{end}}{{with $d.Rollout}}; it replaces the rollout that runs now{{end}}{{else}}no live tenant runs it{{end}}</span></form>
   </div>
   {{end}}
   <table class="kv">
@@ -152,7 +152,7 @@
         <td class="l-main">{{$r.Revision}}{{if eq $r.Revision $a.Revision}} <span class="dim">current</span>{{end}}</td>
         <td class="mono l-sub" title="{{$r.Spec.Image}}">{{short $r.Spec.Image}}{{if ne $r.Tag $a.Tag}} <span class="dim">{{if $r.Tag}}{{$r.Tag}}{{else}}pinned{{end}}</span>{{end}}</td>
         <td class="when hide-narrow">{{ago $r.CreatedAt}} ago</td>
-        <td class="dim hide-narrow">{{$r.Actor}}</td>
+        <td class="dim hide-narrow">{{who $r.Actor}}</td>
         <td class="end l-side">{{if ne $r.Revision $a.Revision}}<form method="post" class="row"><input type="hidden" name="do" value="review-restore"><input type="hidden" name="revision" value="{{$r.Revision}}"><input type="hidden" name="updated" value="{{$d.Updated}}"><button type="submit" class="small">Review going back</button></form>{{end}}</td>
       </tr>
     {{else}}

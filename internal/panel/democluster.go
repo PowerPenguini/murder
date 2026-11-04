@@ -100,7 +100,9 @@ func (a *demoActor) record(action, tenant, detail string) {
 	if len(a.events) > 0 {
 		id = a.events[0].ID + 1
 	}
-	a.events = append([]store.Event{{ID: id, At: time.Now(), Actor: a.actor, Action: action, Tenant: tenant, App: "web", Detail: detail}}, a.events...)
+	// As the agent records it: the panel's system user signs for the
+	// person (apiserver's actor).
+	a.events = append([]store.Event{{ID: id, At: time.Now(), Actor: a.actor + " via murder-panel", Action: action, Tenant: tenant, App: "web", Detail: detail}}, a.events...)
 }
 
 func (a *demoActor) change(name, action, detail string, change func(*api.Tenant) error) (api.Tenant, error) {

@@ -414,8 +414,24 @@ type rolloutView struct {
 type rolloutStep struct {
 	Name  string
 	Count int
-	// State is done, now, paused or next.
-	State string
+	// State is done, now, blocked, paused or next; Blockers block it.
+	State    string
+	Blockers []string
+}
+
+// Said says how the wave goes: "moved", "blocked by baltic-freight".
+func (s rolloutStep) Said() string {
+	switch s.State {
+	case "done":
+		return "moved"
+	case "now":
+		return "moving, watched"
+	case "blocked":
+		return "blocked by " + strings.Join(s.Blockers, ", ")
+	case "paused":
+		return "paused"
+	}
+	return "waits"
 }
 
 type rolloutRow struct {
@@ -426,6 +442,32 @@ type rolloutRow struct {
 	Wave int
 	// Moved says it runs the new revision; Held that it stays.
 	Moved, Held, Blocks bool
+	// Result says how its move goes, from its health now, and Kind its
+	// colour: "moved, healthy" only for a check that passes now.
+	Result, Kind string
+}
+
+// healthFresh is how old a passing check may be for a moved tenant to be
+// said healthy: older, it is not known.
+const healthFresh = 2 * time.Minute
+
+// movedResult says how a moved tenant does on its new revision, from how
+// it runs now.
+func movedResult(t api.Tenant, state tag, now time.Time) (string, string) {
+	s := t.Status
+	switch {
+	case s == nil:
+		return "moved; how it runs is not known: its node does not answer", "warn"
+	case state.Kind == "bad":
+		return "moved, not healthy: blocks the next wave", "bad"
+	case s.Phase == "starting" || (s.Generation != 0 && s.Generation < t.Generation) || state.Kind == "busy":
+		return "moved, starting: waiting for its health check", "busy"
+	case s.Phase == "running" && s.Healthy && !s.CheckedAt.IsZero() && now.Sub(s.CheckedAt) <= healthFresh:
+		return "moved, healthy", "ok"
+	case s.Phase == "running" && s.Healthy:
+		return "moved; its last check passed " + ago(now, s.CheckedAt) + " ago, none since", "warn"
+	}
+	return "moved, " + state.Label, state.Kind
 }
 
 // rolloutOf reads an app's rollout from its tenants and the audit log.
@@ -469,6 +511,7 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 			v.Moved++
 			v.Total++
 			// A tenant still starting is not yet a blocker: one broken is.
+			row.Result, row.Kind = movedResult(t, row.State, now)
 			if row.State.Kind == "bad" {
 				row.Blocks = true
 				v.Blockers = append(v.Blockers, t.Spec.Name)
@@ -497,8 +540,11 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 		step := rolloutStep{Name: waveName(w - 1), Count: waveCount[w], State: "done"}
 		if w == r.Wave {
 			step.State = "now"
-			if r.State == store.RolloutPaused {
+			switch {
+			case r.State == store.RolloutPaused:
 				step.State = "paused"
+			case len(v.Blockers) > 0:
+				step.State, step.Blockers = "blocked", v.Blockers
 			}
 		}
 		v.Steps = append(v.Steps, step)

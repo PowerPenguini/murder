@@ -61,7 +61,7 @@ func TestCreatingAnApp(t *testing.T) {
 	if response.Request.URL.Path != "/apps/shop" || !strings.Contains(body, "app shop is created") || !strings.Contains(body, "SESSION_SECRET: hex") {
 		t.Fatalf("after creating shop (%s):\n%s", response.Request.URL, body)
 	}
-	if events, _ := cluster.Events(ctx, store.EventQuery{App: "shop", Limit: 1}); len(events) != 1 || events[0].Action != "app.created" || events[0].Actor != "murder-panel socket" {
+	if events, _ := cluster.Events(ctx, store.EventQuery{App: "shop", Limit: 1}); len(events) != 1 || events[0].Action != "app.created" || who(events[0].Actor) != "the local panel" {
 		t.Fatalf("the audit log: %+v", events)
 	}
 	if _, page := get(t, server.URL+"/events?app=shop"); !strings.Contains(page, "app.created") || strings.Contains(page, "tenant.suspended") {

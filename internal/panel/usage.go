@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
@@ -183,6 +184,42 @@ type backupView struct {
 
 // Bad says something is wrong with its backups.
 func (b backupView) Bad() bool { return b.Failing || b.Stale }
+
+// Cause reads its node's words for why its last try failed: what is wrong,
+// in a line, and what to do about it. A failure trying again will not mend
+// (a refused key, a missing bucket) says what to fix first; none, for a
+// cause not known, where trying again is all there is to say.
+func (b backupView) Cause() (string, string) {
+	e := strings.ToLower(b.Error)
+	has := func(words ...string) bool {
+		for _, w := range words {
+			if strings.Contains(e, strings.ToLower(w)) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case e == "":
+		return "", ""
+	case has("403", "accessdenied", "access denied", "forbidden"):
+		return b.Node + "'s backup key cannot write to the bucket (403).",
+			"Check the key in " + b.Node + "'s config: it needs s3:PutObject on the bucket's backups/ prefix, the bucket's policy must allow it, and with object lock, the lock's mode must let it put new objects. Then back it up again: trying again before that fails the same way."
+	case has("nosuchbucket", "no such bucket", "404"):
+		return "The bucket " + b.Node + " writes to is not there (404).",
+			"Check the bucket's name, endpoint and region in " + b.Node + "'s config (backups:), then back it up again."
+	case has("signaturedoesnotmatch", "invalidaccesskeyid", "401", "unauthorized"):
+		return b.Node + "'s backup key is refused by the bucket.",
+			"Check the access key and secret in " + b.Node + "'s config: one is wrong or was revoked. Then back it up again."
+	case has("no space left", "disk full", "enospc"):
+		return b.Node + " ran out of disk while it made the backup.",
+			"Free disk on " + b.Node + " (df -h), then back it up again."
+	case has("timeout", "timed out", "deadline exceeded", "no such host", "connection refused", "connection reset", "dial "):
+		return b.Node + " could not reach the bucket.",
+			"Check " + b.Node + "'s network and the endpoint in its config. It tries again on its next run, every " + every(b.Every) + "."
+	}
+	return "", ""
+}
 
 // nodeBackups is a node's backups of its tenants.
 type nodeBackups struct {

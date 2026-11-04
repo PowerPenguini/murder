@@ -43,7 +43,7 @@ func (d *DemoCluster) demoApps() {
 		oldest.Image = "ghcr.io/example/web@sha256:" + strings.Repeat("9f", 32)
 		d.revisions["web"] = []store.Revision{
 			{Revision: 1, Spec: oldest, Tag: web.Tag, CreatedAt: created, Actor: "root"},
-			{Revision: 2, Spec: older, Tag: web.Tag, CreatedAt: time.Now().Add(-9 * 24 * time.Hour), Actor: "jan via murder-panel"},
+			{Revision: 2, Spec: older, Tag: web.Tag, CreatedAt: time.Now().Add(-9 * 24 * time.Hour), Actor: "jan (panel) via murder-panel"},
 			{Revision: 3, Spec: web.Spec, Tag: web.Tag, CreatedAt: web.UpdatedAt, Actor: "root"},
 		}
 		web.Revision = 3
@@ -180,7 +180,7 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 			stored.Latest, stored.LatestAt = old.Latest, old.LatestAt
 		}
 	}
-	a.revisions[name] = append(a.revisions[name], store.Revision{Revision: stored.Revision, Spec: app, Tag: tag, CreatedAt: now, Actor: a.actor})
+	a.revisions[name] = append(a.revisions[name], store.Revision{Revision: stored.Revision, Spec: app, Tag: tag, CreatedAt: now, Actor: a.actor + " via murder-panel"})
 	action := "app.updated"
 	if !existed {
 		action = "app.created"
@@ -222,7 +222,7 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 	}
 	if waves && len(applied.Tenants) > 0 {
 		applied.Rollout = true
-		stored.Rollout = &store.Rollout{App: name, ToRevision: stored.Revision, State: store.RolloutRunning, WaveStarted: now, StartedAt: now, UpdatedAt: now, Actor: a.actor}
+		stored.Rollout = &store.Rollout{App: name, ToRevision: stored.Revision, State: store.RolloutRunning, WaveStarted: now, StartedAt: now, UpdatedAt: now, Actor: a.actor + " via murder-panel"}
 	}
 	a.apps[name] = stored
 	stored.Tenants = a.liveTenantsOf(name)
