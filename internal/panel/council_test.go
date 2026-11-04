@@ -417,6 +417,10 @@ func TestJobsSurviveARestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	done, _ := first.Start(JobBackups, "Back up the tenants of fsn-1", "jan (panel)", now, log, func(_ context.Context, out io.Writer) error {
+		// More than a record keeps: only its end is kept.
+		if _, err := io.WriteString(out, strings.Repeat("x", jobOutputKept)+"\n"); err != nil {
+			return err
+		}
 		_, err := io.WriteString(out, "atlas: backups/atlas/20261104T120000Z.db.zst\n")
 		return err
 	})
@@ -434,13 +438,16 @@ func TestJobsSurviveARestart(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 || info.Size() > 2*jobOutputKept {
+		t.Fatalf("the jobs' file: %v, %v", info, err)
+	}
 	second := &Jobs{}
 	if err := second.Persist(path, now()); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
 	got, gone := second.find(done.ID), second.find(running.ID)
-	if got == nil || !got.Done() || got.Interrupted || got.Failed != "" || !strings.Contains(got.Output(), "atlas: backups") {
+	if got == nil || !got.Done() || got.Interrupted || got.Failed != "" || !strings.Contains(got.Output(), "atlas: backups") || len(got.Output()) > jobOutputKept {
 		t.Fatalf("the ended job after a restart: %+v", got)
 	}
 	if gone == nil || !gone.Done() || !gone.Interrupted || gone.Failed != "" {
