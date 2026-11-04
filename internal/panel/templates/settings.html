@@ -41,9 +41,9 @@
     </table>
 
     <div class="head spaced"><h2>Environment</h2><span class="dim">what {{$t.Spec.Name}} gets</span></div>
-    <table class="kv env">
+    <table class="kv env list">
       <tbody>
-      {{range $d.Env}}<tr><td class="mono">{{.Key}}</td><td class="mono{{if not .Own}} dim{{end}}">{{.Value}}</td><td class="dim small end">{{if .Own}}its own{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}from app {{$t.App}}{{end}}</td></tr>{{else}}<tr><td colspan="3" class="empty">None.</td></tr>{{end}}
+      {{range $d.Env}}<tr><td class="mono l-main">{{.Key}}</td><td class="mono l-sub{{if not .Own}} dim{{end}}">{{.Value}}</td><td class="dim small end l-side">{{if .Own}}its own{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}from app {{$t.App}}{{end}}</td></tr>{{else}}<tr><td colspan="3" class="empty l-main">None.</td></tr>{{end}}
       </tbody>
     </table>
     <label class="field">Its own variables

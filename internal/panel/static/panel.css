@@ -117,7 +117,7 @@ button.link:hover { color: var(--fg); background: none; border: 0; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .livestate.on .live { animation: none; } }
 /* What it shows may be old: values grey, what is wrong still red. */
-body.stale main { --fg: #9a9a9a; --soft: #808080; }
+body.stale main { --fg: #9a9a9a; --soft: #808080; color: var(--fg); }
 body.stale main .stale-banner { --fg: #ededed; }
 
 .page { flex: 1; min-width: 0; }
@@ -480,6 +480,11 @@ details.event dl.pairs { margin-top: var(--s3); padding: var(--s3) var(--pad-x);
   .pagehead nav.tabs { order: 4; flex: 1 0 100%; margin: 0; gap: var(--s5); }
   .pagehead .actions { order: 3; margin-left: 0; }
   .pagehead > .lead { order: 2; }
+  table.settings td.own, table.env td.end { white-space: normal; width: auto; }
+  table.settings td.own .check { margin-bottom: var(--s2); }
+  table.list td.l-side { overflow-wrap: anywhere; }
+  input.mono-input { width: 100%; }
+  .review-box { padding: var(--s4); }
   nav.seg { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--frame); }
   nav.seg a { justify-content: center; border-left: 0; background: var(--bg); }
   nav.seg a.on { background: var(--fg); }
