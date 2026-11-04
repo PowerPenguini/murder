@@ -105,7 +105,16 @@ its pages beside it, what can be done to it, and where it runs. */}}
       {{if $t.Spec.Suspended}}
       <form method="post" action="/tenants/{{$t.Spec.Name}}" class="row"><input type="hidden" name="do" value="resume"><button type="submit" class="primary">Resume</button></form>
       {{else}}
-      <form method="post" action="/tenants/{{$t.Spec.Name}}" class="row"><input type="hidden" name="do" value="roll"><button type="submit" title="Stops its container and starts a new one; its data stays. It answers no request for the few seconds it starts.">Restart container</button></form>
+      <details class="drop">
+        <summary class="button" aria-label="Restart {{$t.Spec.Name}}'s container">Restart container</summary>
+        <div class="pop">
+          <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="roll">
+            <p class="hint">Restarting stops {{$t.Spec.Name}}'s container and starts a new one of the same spec: <span class="nowrap">{{$t.Host}}</span> answers no request for the few seconds it starts. Its data stays. Type its name to restart it.</p>
+            <input type="text" name="confirm" placeholder="type {{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+            <div><button type="submit" class="danger">Restart {{$t.Spec.Name}}</button></div>
+          </form>
+        </div>
+      </details>
       {{end}}
       {{if .Targets}}
       <details class="drop">
@@ -126,20 +135,20 @@ its pages beside it, what can be done to it, and where it runs. */}}
         {{if $t.Archived}}
         <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="purge">
           <p class="hint">Purging deletes its data for good: it cannot be undone. Type its name to purge it.</p>
-          <input type="text" name="confirm" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <input type="text" name="confirm" placeholder="type {{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" autocomplete="off" spellcheck="false" required>
           <div><button type="submit" class="danger">Purge {{$t.Spec.Name}}</button></div>
         </form>
         {{else}}
         {{if not $t.Spec.Suspended}}
         <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="suspend">
           <p class="hint">Suspending stops its container: <span class="nowrap">{{$t.Host}}</span> answers no request until it is resumed. Its data stays. Type its name to suspend it.</p>
-          <input type="text" name="confirm" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <input type="text" name="confirm" placeholder="type {{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" autocomplete="off" spellcheck="false" required>
           <div><button type="submit" class="danger">Suspend {{$t.Spec.Name}}</button></div>
         </form>
         {{end}}
         <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="archive">
           <p class="hint">Archiving stops it serving and runs it nowhere; its data stays until it is purged. Type its name to archive it.</p>
-          <input type="text" name="confirm" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <input type="text" name="confirm" placeholder="type {{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" autocomplete="off" spellcheck="false" required>
           <div><button type="submit" class="danger">Archive {{$t.Spec.Name}}</button></div>
         </form>
         {{end}}
@@ -147,32 +156,36 @@ its pages beside it, what can be done to it, and where it runs. */}}
     </details>
   </div>
   {{end}}
-  <p class="lead">App <a href="/apps/{{$t.App}}">{{$t.App}}</a>{{if $t.Archived}} · archived {{ago $t.ArchivedAt}} ago{{else}} · runs on <a href="{{node $t.Node}}">{{$t.Node}}</a>{{end}} · <a href="{{$t.URL}}">{{$t.Host}}</a>{{if $t.Canary}} · <span class="dim">canary</span>{{end}}{{if $t.Hold}} · <span class="dim">held on revision {{$t.AppRevision}}</span>{{end}}</p>
+  <p class="lead">App <a href="/apps/{{$t.App}}">{{$t.App}}</a>{{if $t.Archived}} · archived {{ago $t.ArchivedAt}} ago{{else}} · runs on <a href="{{node $t.Node}}">{{$t.Node}}</a>{{end}} · <a href="{{$t.URL}}" class="nowrap">{{$t.Host}}</a>{{if $t.Canary}} · <span class="dim">canary</span>{{end}}{{if $t.Hold}} · <span class="dim">held on revision {{$t.AppRevision}}</span>{{end}}</p>
 </header>
 {{end}}
 
 {{/* What can be done to a node: drain it while it answers; fail it over
 once it is off; remove it once it runs and keeps nothing. */}}
 {{define "node-actions"}}
-  {{if and .Answers .Targets}}
+  {{if and .Answers .Targets}}{{$n := .}}
   <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="drain"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
-    <label class="field">Drain to <select name="to" required><option value="" selected disabled>choose a node</option>{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
-    <p class="hint">{{if .Tenants}}Moves its {{plural (len .Tenants) "tenant" "tenants"}} ({{range $i, $n := .Tenants}}{{if $i}}, {{end}}{{$n}}{{end}}) there, one after the other, each with its data. Each answers no request for the seconds it moves.{{else}}It runs no tenant: nothing moves.{{end}} Type its name to drain it.</p>
-    <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+    <label class="field">Drain to <select name="to" required>{{if gt (len .Targets) 1}}<option value="" selected disabled>choose a node</option>{{end}}{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
+    <p class="hint">{{if .Tenants}}Moves its {{plural (len .Tenants) "tenant" "tenants"}} ({{range $i, $t := .Tenants}}{{if $i}}, {{end}}{{$t}}{{end}}) there, one after the other, each with its data. Each answers no request for the seconds it moves.{{else}}It runs no tenant: nothing moves.{{end}}{{if .Keeps}} The {{plural .Keeps "copy" "copies"}} it keeps stay on it until it is removed.{{end}}{{if .Archived}} Archived data stays on it too.{{end}}</p>
+    {{range $target := .Targets}}{{with index $n.Unprotected $target}}<p class="hint red">{{if gt (len $n.Targets) 1}}If drained to {{$target}}: {{end}}{{range $i, $u := .}}{{if $i}}, {{end}}{{$u}}{{end}} would run on {{$target}} without a ready copy on another node: if {{$target}} fails, {{if eq (len .) 1}}it stops{{else}}they stop{{end}}.</p>{{end}}{{end}}
+    <p class="hint">Type its name to drain it.</p>
+    <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
     <div><button type="submit" class="danger">Drain {{.Name}}</button></div>
   </form>
   {{end}}
   {{if and (not .Answers) (not .Failed)}}
   <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="failover"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
     <p class="hint">Only once you made sure it is powered off: its tenants must never run twice. Their copies take over; a tenant without a copy stays stopped. Type its name to confirm.</p>
-    <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+    <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
     <div><button type="submit" class="danger">It is off: fail it over</button></div>
   </form>
   {{end}}
-  {{if not .Self}}
+  {{if and (not .Self) (or .Tenants .Keeps)}}
+  <p class="hint">Remove from the cluster: once it runs no tenant and keeps no copy (now {{len .Tenants}} and {{.Keeps}}).</p>
+  {{else if not .Self}}
   <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="remove"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
     <p class="hint">Only once it runs no tenant and keeps no copy: the cluster forgets it, and it must be switched off. Type its name to remove it.</p>
-    <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+    <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
     <div><button type="submit" class="danger">Remove {{.Name}} from the cluster</button></div>
   </form>
   {{else if not (and .Answers .Targets)}}

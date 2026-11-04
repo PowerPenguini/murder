@@ -3,11 +3,18 @@
 <h1>{{$d.Title}}</h1>
 <p class="lead">Nothing has changed yet. Look it over; rolling it out stores revision {{next $a.Revision}} of {{$a.Name}}.</p>
 <div data-still hidden></div>
-{{with $a.Rollout}}{{if .Active}}<div class="notice spaced"><span class="lead-in">A rollout of revision {{.ToRevision}} runs, at wave {{.Wave}}.</span> This change replaces it: the new one starts again with the canaries, and tenants it moved stay on revision {{.ToRevision}} until their wave.</div>{{end}}{{end}}
+{{with $a.Rollout}}{{if .Active}}<div class="notice spaced">{{if $d.Blocked}}<span class="lead-in">A rollout of revision {{.ToRevision}} is blocked at {{$d.AtWave}} by {{range $i, $b := $d.Blocked}}{{if $i}}, {{end}}{{$b}}{{end}}.</span>{{else}}<span class="lead-in">A rollout of revision {{.ToRevision}} runs, at {{$d.AtWave}}.</span>{{end}} This change replaces it: the new one starts again with the canaries, and tenants it moved stay on revision {{.ToRevision}} until their wave.</div>{{end}}{{end}}
 
 <section class="near">
   <div class="head"><h2>What changes</h2>{{if $d.Changed}}<span class="dim num">{{plural $d.Removed "line" "lines"}} out, {{plural $d.Added "line" "lines"}} in</span>{{end}}</div>
   {{if $d.Changed}}
+  {{if $d.NewImage}}<div class="imagechange">
+    <p class="flat"><span class="dim">Image</span> <span class="mono">{{imageRepo $d.OldImage}}</span> <span class="mono">{{imageShort $d.OldImage}}</span> → {{if ne (imageRepo $d.OldImage) (imageRepo $d.NewImage)}}<span class="mono">{{imageRepo $d.NewImage}}</span> {{end}}<span class="mono strong">{{imageShort $d.NewImage}}</span></p>
+    <details class="howto"><summary>Full image reference</summary>
+      <div class="panel spaced"><p class="flat dim small">Current</p><pre class="secret" id="image-old">{{$d.OldImage}}</pre><button type="button" class="small" data-copy="image-old" hidden>Copy</button>
+      <p class="flat dim small">Proposed</p><pre class="secret" id="image-new">{{$d.NewImage}}</pre><button type="button" class="small" data-copy="image-new" hidden>Copy</button></div>
+    </details>
+  </div>{{end}}
   <div class="diff" role="table" aria-label="the change, line by line">
     {{range $d.Diff}}{{if eq .Op ""}}<div class="gap" role="row"><span role="cell">…</span></div>{{else}}<div class="{{if eq .Op "+"}}in{{else if eq .Op "-"}}out{{end}}" role="row"><span class="ln" role="cell">{{if .Old}}{{.Old}}{{end}}</span><span class="ln" role="cell">{{if .New}}{{.New}}{{end}}</span><span class="op" role="cell" aria-label="{{if eq .Op "+"}}added{{else if eq .Op "-"}}removed{{else}}kept{{end}}">{{.Op}}</span><span class="tx" role="cell"{{if .Short}} title="{{.Text}}"{{end}}>{{if .Short}}{{.Short}}{{else}}{{.Text}}{{end}}</span></div>{{end}}{{end}}
   </div>
@@ -27,7 +34,7 @@
       <tr>
         <td class="l-main"><a href="/tenants/{{.Name}}">{{.Name}}</a>{{if .Canary}} <span class="dim">canary</span>{{end}}</td>
         <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
-        <td class="num l-sub" data-label="Wave">{{.Wave}}</td>
+        <td class="l-sub" data-label="Wave">{{wavename (sub .Wave 1)}}</td>
         <td class="l-sub" data-label="Overrides">{{range $i, $o := .Overrides}}{{if $i}}, {{end}}<span class="mono">{{$o}}</span>{{end}}</td>
       </tr>
     {{end}}{{end}}

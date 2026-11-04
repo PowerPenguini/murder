@@ -60,7 +60,7 @@ func TestActingOnTheCluster(t *testing.T) {
 	cluster, s, server, client := newClusterPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/cluster")
-	for _, want := range []string{"fsn-1", "nbg-1", "hel-1", "· schema 13", `placeholder="hel-1"`, "None yet."} {
+	for _, want := range []string{"fsn-1", "nbg-1", "hel-1", "· schema 13", `placeholder="type hel-1"`, "None yet."} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the cluster page lacks %q:\n%s", want, page)
 		}
@@ -95,7 +95,7 @@ func TestActingOnTheCluster(t *testing.T) {
 	// A drain is a job: its page tells each move.
 	response, _ := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}, "confirm": {"nbg-1"}}, server.URL)
 	body = waitForJob(t, s, client, response)
-	if !strings.Contains(body, "drain nbg-1 to fsn-1") || !strings.Contains(body, ">done<") || !strings.Contains(body, "moved") {
+	if !strings.Contains(body, "Drain nbg-1 to fsn-1") || !strings.Contains(body, ">done<") || !strings.Contains(body, "moved") {
 		t.Fatalf("the drain's page:\n%s", body)
 	}
 	tenants, _ := cluster.List(ctx)
@@ -104,7 +104,7 @@ func TestActingOnTheCluster(t *testing.T) {
 			t.Fatalf("%s still runs on nbg-1 after the drain", tenant.Spec.Name)
 		}
 	}
-	if _, page = get(t, server.URL+"/cluster"); !strings.Contains(page, "drain nbg-1 to fsn-1") {
+	if _, page = get(t, server.URL+"/cluster"); !strings.Contains(page, "Drain nbg-1 to fsn-1") {
 		t.Fatalf("the cluster page does not list the drain:\n%s", page)
 	}
 
@@ -113,7 +113,7 @@ func TestActingOnTheCluster(t *testing.T) {
 		t.Fatalf("the cluster page offers no balancing:\n%s", page)
 	}
 	response, _ = submit(t, client, server, "/cluster", url.Values{"do": {"balance"}}, server.URL)
-	if body = waitForJob(t, s, client, response); !strings.Contains(body, "balance the tenants") || !strings.Contains(body, "to nbg-1") || !strings.Contains(body, ">done<") {
+	if body = waitForJob(t, s, client, response); !strings.Contains(body, "Balance the tenants") || !strings.Contains(body, "to nbg-1") || !strings.Contains(body, ">done<") {
 		t.Fatalf("the balance's page:\n%s", body)
 	}
 	if _, page = get(t, server.URL+"/cluster"); !strings.Contains(page, "Tenant counts are balanced") {
@@ -122,7 +122,7 @@ func TestActingOnTheCluster(t *testing.T) {
 
 	// Backing up is a job too, listing each tenant's backup.
 	response, _ = submit(t, client, server, "/cluster", url.Values{"do": {"backups"}}, server.URL)
-	if body = waitForJob(t, s, client, response); !strings.Contains(body, "back up the tenants of fsn-1") || !strings.Contains(body, ".db.zst") {
+	if body = waitForJob(t, s, client, response); !strings.Contains(body, "Back up the tenants of fsn-1") || !strings.Contains(body, ".db.zst") {
 		t.Fatalf("the backups' page:\n%s", body)
 	}
 

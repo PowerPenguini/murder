@@ -148,6 +148,39 @@ type reviewData struct {
 	// field; Whole the others, which take the spec whole.
 	Overridden int
 	Whole      []reviewTenant
+	// OldImage and NewImage are the image references, whole, when the
+	// change is of the image.
+	OldImage, NewImage string
+	// Blocked names the tenants that block the rollout this change would
+	// replace, and the wave it is at.
+	Blocked []string
+	AtWave  string
+}
+
+// imageOf is the image a spec's file names.
+func imageOf(file string) string {
+	for _, line := range splitLines(file) {
+		if value, ok := strings.CutPrefix(line, "image:"); ok {
+			value, _, _ = strings.Cut(value, " #")
+			return strings.Trim(strings.TrimSpace(value), `"'`)
+		}
+	}
+	return ""
+}
+
+// ImageParts splits an image reference into its repository and a short
+// digest or tag.
+func ImageParts(ref string) (repository, short string) {
+	if repo, digest, ok := strings.Cut(ref, "@sha256:"); ok {
+		return repo, "sha256:" + digest[:min(12, len(digest))]
+	}
+	if strings.HasPrefix(ref, "sha256:") {
+		return "", ref[:min(len(ref), 19)]
+	}
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		return ref[:i], ref[i+1:]
+	}
+	return ref, ""
 }
 
 // waveNames say each wave as the rollout's plan does.
@@ -234,6 +267,14 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 	}
 	data.Changed = data.Added+data.Removed > 0
 	data.Diff = changedOnly(all, 3)
+	if old, next := imageOf(from), imageOf(to); old != next {
+		data.OldImage, data.NewImage = old, next
+	}
+	if ro := app.Rollout; ro != nil && ro.Active() {
+		if v := rolloutOf(app, tenants, nil, s.now()); v != nil {
+			data.Blocked, data.AtWave = v.Blockers, waveName(max(ro.Wave-1, 0))
+		}
+	}
 	for i := range data.Diff {
 		if short := digest.ReplaceAllStringFunc(data.Diff[i].Text, func(d string) string { return d[:len("sha256:")+12] + "…" }); short != data.Diff[i].Text {
 			data.Diff[i].Short = short

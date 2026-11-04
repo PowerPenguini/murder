@@ -79,7 +79,7 @@
       <div class="pop">
         <form method="post" class="stack"><input type="hidden" name="do" value="abort">
           <p class="hint">They start on their data as it is, on the revision before. Type the app's name.</p>
-          <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+          <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
           <div><button type="submit" class="danger">Start them as they are</button></div>
         </form>
       </div>
@@ -112,7 +112,7 @@
 </section>
 
 <section data-still id="spec">
-  <div class="head"><h2>App spec</h2><span class="dim">the file of <code>murder app apply</code>; keep it in git in step</span></div>
+  <div class="head"><h2>App spec</h2><span class="dim">what <code>murder app apply</code> reads; keep it in git</span></div>
   <form method="post" class="stack">
     <input type="hidden" name="do" value="review">
     <input type="hidden" name="updated" value="{{$d.Updated}}">
@@ -150,7 +150,7 @@
     <tbody>
     {{range $r := $d.Revisions}}
       <tr>
-        <td class="num l-main">{{$r.Revision}}{{if eq $r.Revision $a.Revision}} <span class="dim">current</span>{{end}}</td>
+        <td class="l-main">{{$r.Revision}}{{if eq $r.Revision $a.Revision}} <span class="dim">current</span>{{end}}</td>
         <td class="mono l-sub" title="{{$r.Spec.Image}}">{{short $r.Spec.Image}}{{if ne $r.Tag $a.Tag}} <span class="dim">{{if $r.Tag}}{{$r.Tag}}{{else}}pinned{{end}}</span>{{end}}</td>
         <td class="when hide-narrow">{{ago $r.CreatedAt}} ago</td>
         <td class="dim hide-narrow">{{$r.Actor}}</td>
@@ -171,7 +171,7 @@
     <div class="pop">
       <form method="post" class="stack"><input type="hidden" name="do" value="delete">
         <p class="hint">No tenant runs it. Its revisions go with it. Type its name.</p>
-        <input type="text" name="confirm" placeholder="{{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+        <input type="text" name="confirm" placeholder="type {{$a.Name}}" data-confirm="{{$a.Name}}" aria-label="type {{$a.Name}} to confirm" autocomplete="off" spellcheck="false" required>
         <div><button type="submit" class="danger">Delete the app</button></div>
       </form>
     </div>

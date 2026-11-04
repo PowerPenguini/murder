@@ -2,20 +2,21 @@
 <nav class="crumbs" aria-label="where this is"><a href="/cluster">Cluster</a><span>/</span><span>Jobs</span></nav>
 <div class="title">
   <h1>{{$j.Title}}</h1>
-  {{if not $j.Done}}<span class="st busy">running</span>{{else if $j.Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}
+  {{if not $j.Done}}<span class="st busy">running</span>{{else if $j.Interrupted}}<span class="st warn">interrupted</span>{{else if $j.Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}
 </div>
-<p class="lead">Begun by {{$j.By}} {{ago $j.Started}} ago{{if $j.Done}}, ended {{ago $j.Ended}} ago{{end}}. Its record lives in this node's panel until the panel restarts; the audit log keeps what it changed. <a href="/cluster#backups">Cluster</a></p>
+<p class="lead">Begun by {{$j.By}} {{ago $j.Started}} ago ({{utc $j.Started}}){{if $j.Done}}, {{if $j.Interrupted}}interrupted when the panel stopped{{else}}ended {{ago $j.Ended}} ago{{end}}{{end}}. {{if $d.Kept}}Its record is kept by this node's panel, across restarts.{{else}}Its record lives in this node's panel until it restarts.{{end}} <a href="/events?show=all">What it changed, in the audit log</a></p>
+{{if $j.Interrupted}}<div class="notice">The panel stopped while this ran, so it did not finish and did not say how it ended: it did not fail as such. What it changed is in the audit log; run it again to finish it.</div>{{end}}
 {{if $d.Results}}
 <section class="near">
   <div class="head"><h2>{{if $d.Failed}}{{$d.Failed}} failed, {{end}}{{$d.Succeeded}} backed up</h2></div>
   <table class="list">
-    <thead><tr><th>Tenant</th><th>Result</th><th>Backup</th></tr></thead>
+    <thead><tr><th>Tenant</th><th>Result</th><th>Backed up at</th></tr></thead>
     <tbody>
     {{range $d.Results}}
       <tr>
         <td class="l-main">{{if eq .Name "the cluster's state"}}{{.Name}}{{else}}<a href="/tenants/{{.Name}}">{{.Name}}</a>{{end}}</td>
         <td class="l-side">{{if .Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">backed up</span>{{end}}</td>
-        <td class="l-sub mono small">{{.Detail}}</td>
+        <td class="l-sub" data-label="At">{{if .Failed}}<span class="red-text-inline">{{.Detail}}</span>{{else}}{{if not .At.IsZero}}<span class="num">{{utc .At}}</span>{{end}}<details class="rowmore"><summary>Object key</summary><pre class="secret spaced">{{.Detail}}</pre></details>{{end}}</td>
       </tr>
     {{end}}
     </tbody>

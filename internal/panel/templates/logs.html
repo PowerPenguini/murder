@@ -4,7 +4,7 @@
   <form method="get" class="filters" role="search">
     <nav class="seg" aria-label="how loud">
       <a href="?level=all{{with $d.Query}}&amp;q={{.}}{{end}}{{if $d.Follow}}&amp;follow=1{{end}}&amp;tail={{$d.Tail}}"{{if eq $d.Level "all"}} class="on" aria-current="true"{{end}}>All <span class="n">{{$d.All}}</span></a>
-      <a href="?level=warn{{with $d.Query}}&amp;q={{.}}{{end}}{{if $d.Follow}}&amp;follow=1{{end}}&amp;tail={{$d.Tail}}"{{if eq $d.Level "warn"}} class="on" aria-current="true"{{end}}><span class="desktop-inline">Warnings and errors</span><span class="phone-inline">Warnings</span> <span class="n">{{add $d.Warnings $d.Errors}}</span></a>
+      <a href="?level=warn{{with $d.Query}}&amp;q={{.}}{{end}}{{if $d.Follow}}&amp;follow=1{{end}}&amp;tail={{$d.Tail}}"{{if eq $d.Level "warn"}} class="on" aria-current="true"{{end}}><span class="desktop-inline">Warnings and errors</span><span class="phone-inline">Warn + error</span> <span class="n">{{add $d.Warnings $d.Errors}}</span></a>
       <a href="?level=error{{with $d.Query}}&amp;q={{.}}{{end}}{{if $d.Follow}}&amp;follow=1{{end}}&amp;tail={{$d.Tail}}"{{if eq $d.Level "error"}} class="on" aria-current="true"{{end}}>Errors <span class="n">{{$d.Errors}}</span></a>
     </nav>
     <div class="row">

@@ -26,8 +26,9 @@ type nodeData struct {
 	Acts      bool
 	// Runs are the tenants it runs, Keeps those it keeps a copy of.
 	Runs, Keeps []tenantRow
-	// RunNames are the live tenants it runs, by name.
+	// RunNames are the live tenants it runs, by name; All every tenant.
 	RunNames []string
+	All      []api.Tenant
 	// Moved are the tenants that failed over from it, and where each runs
 	// now, as the audit log says.
 	Moved []movedTenant
@@ -76,7 +77,7 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 	node := nodes.Nodes[i]
 	now := s.now()
 	data := nodeData{Node: node, State: nodeState(node, now), Leader: node.Name == nodes.Leader, Self: node.Name == nodes.Self,
-		Clustered: len(nodes.Nodes) > 1, Acts: s.Cluster != nil}
+		Clustered: len(nodes.Nodes) > 1, Acts: s.Cluster != nil, All: tenants}
 	for _, other := range nodes.Nodes {
 		if other.Name != name && other.Answers && !other.Failed() {
 			data.Targets = append(data.Targets, other.Name)

@@ -8,6 +8,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	file := between(page, `aria-label="the app's spec">`, "</textarea>")
 	changed := strings.Replace(file, "memoryMB: 256", "memoryMB: 512", 1)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review"}, "file": {changed}, "updated": {updated}}, server.URL)
-	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", "Canaries", "atlas", "FEATURE_PLANNER", `name="do" value="save"`, "Roll out to 6 tenants", "Held, and left out until released", "A rollout of revision 3 runs"} {
+	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", "Canaries", "atlas", "FEATURE_PLANNER", `name="do" value="save"`, "Roll out to 6 tenants", "Held, and left out until released", "A rollout of revision 3 is blocked at A tenth by baltic-freight"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the review lacks %q:\n%s", want, body)
 		}
@@ -305,7 +306,11 @@ func TestOperationIsFollowed(t *testing.T) {
 	server := newServerOf(t, cluster)
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
-	_, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}}, server.URL)
+	// Restarting stops it serving for a moment: the name is typed.
+	if _, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}}, server.URL); !strings.Contains(body, "type the tenant&#39;s name to restart it") {
+		t.Fatalf("restarted without the name:\n%s", body)
+	}
+	_, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}, "confirm": {"acme-logistics"}}, server.URL)
 	// One line says it: no flash, no "It is starting" box beside it.
 	if !strings.Contains(body, "its new container is starting") || strings.Contains(body, "is restarting in a new container") || strings.Contains(body, "It is starting") {
 		t.Fatalf("after a restart:\n%s", body)
@@ -385,5 +390,94 @@ func TestTenantRowsSayWhy(t *testing.T) {
 	_, page = get(t, server.URL+"/tenants?show=risk")
 	if !strings.Contains(page, `<div class="reason"><span class="st warn"></span>copy catching up</div>`) || strings.Contains(page, "kowalski-trans") {
 		t.Fatalf("at risk rows:\n%s", page)
+	}
+}
+
+// Draining says which tenants it would leave without a copy elsewhere, and
+// Remove is offered only once it can be done.
+func TestDrainSaysWhatItLeavesUnprotected(t *testing.T) {
+	server := newServerOf(t, NewDemoCluster())
+	_, page := get(t, server.URL+"/nodes/nbg-1")
+	if !strings.Contains(page, "baltic-freight, kowalski-trans, vistula-cargo would run on fsn-1 without a ready copy on another node") || !strings.Contains(page, "(now 3 and 4)") || strings.Contains(page, `value="remove"`) {
+		t.Fatalf("the drain:\n%s", page)
+	}
+	if _, page = get(t, server.URL+"/nodes/hel-1"); !strings.Contains(page, `value="remove"`) {
+		t.Fatal("an empty failed node cannot be removed")
+	}
+}
+
+// Jobs' records outlive a restart of the panel: one that ended stays as it
+// ended, one that ran is interrupted, which is not failed.
+func TestJobsSurviveARestart(t *testing.T) {
+	path := t.TempDir() + "/jobs.json"
+	now := func() time.Time { return time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC) }
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	first := &Jobs{}
+	if err := first.Persist(path, now()); err != nil {
+		t.Fatal(err)
+	}
+	done, _ := first.Start(JobBackups, "Back up the tenants of fsn-1", "jan (panel)", now, log, func(_ context.Context, out io.Writer) error {
+		_, err := io.WriteString(out, "atlas: backups/atlas/20261104T120000Z.db.zst\n")
+		return err
+	})
+	release := make(chan struct{})
+	running, _ := first.Start(JobDrain, "Drain nbg-1 to fsn-1", "jan (panel)", now, log, func(context.Context, io.Writer) error {
+		<-release
+		return nil
+	})
+	<-done.done
+	// The running job's record is written as it begins; the panel stops.
+	for i := 0; i < 100; i++ {
+		data, _ := os.ReadFile(path)
+		if strings.Contains(string(data), running.ID) && strings.Contains(string(data), "20261104T120000Z") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	second := &Jobs{}
+	if err := second.Persist(path, now()); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	got, gone := second.find(done.ID), second.find(running.ID)
+	if got == nil || !got.Done() || got.Interrupted || got.Failed != "" || !strings.Contains(got.Output(), "atlas: backups") {
+		t.Fatalf("the ended job after a restart: %+v", got)
+	}
+	if gone == nil || !gone.Done() || !gone.Interrupted || gone.Failed != "" {
+		t.Fatalf("the running job after a restart: %+v", gone)
+	}
+	// Its page says so, at the same address.
+	s, err := New(NewDemoCluster(), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster := NewDemoCluster()
+	s.Cluster, s.Jobs = cluster.AsCluster, second
+	server := httptest.NewServer(s.Handler())
+	defer server.Close()
+	if _, page := get(t, server.URL+"/jobs/"+running.ID); !strings.Contains(page, ">interrupted<") || !strings.Contains(page, "did not fail as such") || !strings.Contains(page, "across restarts") {
+		t.Fatalf("the interrupted job's page:\n%s", page)
+	}
+}
+
+// A restore follows the time chosen, says where each step runs and what
+// is lost; a review of a new image shows both references whole.
+func TestRestoreAtAChosenTimeAndImageReferences(t *testing.T) {
+	cluster := NewDemoCluster()
+	server, client := newServerOf(t, cluster), &http.Client{}
+	_, page := get(t, server.URL+"/cluster?tenant=kowalski-trans&at=2026-11-04+09:00")
+	for _, want := range []string{"backups restore kowalski-trans -at 2026-11-04T09:00:00Z", "On nbg-1, archive it", "Everything it wrote after that time is replaced", `href="/tenants/kowalski-trans/logs"`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the restore lacks %q:\n%s", want, page)
+		}
+	}
+	if _, page = get(t, server.URL+"/cluster?tenant=kowalski-trans&at=yesterday"); !strings.Contains(page, "is not a time") {
+		t.Fatalf("a time that is not one:\n%s", page)
+	}
+	_, page = get(t, server.URL+"/apps/web")
+	updated := between(page, `name="updated" value="`, `"`)
+	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review-update"}, "updated": {updated}}, server.URL)
+	if !strings.Contains(body, "Full image reference") || !strings.Contains(body, strings.Repeat("5e", 32)) || !strings.Contains(body, "is blocked at A tenth by baltic-freight") {
+		t.Fatalf("the image review:\n%s", body)
 	}
 }

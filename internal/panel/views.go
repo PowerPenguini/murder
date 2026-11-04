@@ -577,8 +577,10 @@ type tenantData struct {
 	Place   *rolloutRow
 	// AppMemory says its app's tenants run out of memory, if they do.
 	AppMemory *appMemory
-	// Operation is what a person did to it lately, and how it went.
+	// Operation is what a person did to it lately, and how it went; Me is
+	// who looks, as the audit log names them.
 	Operation *operation
+	Me        string
 	Head      tenantHead
 }
 
@@ -634,6 +636,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	}
 	s.appContext(ctx, r, t, &data)
 	data.Operation = operationOf(t, events, s.now())
+	data.Me = s.actor(userOf(r))
 	if use != nil {
 		for i := range use.Charts {
 			use.Charts[i].Marks = use.Charts[i].marksOf(events)
@@ -776,15 +779,17 @@ func (s *Server) funcs() template.FuncMap {
 		"action":   actionText,
 		"loglines": logLines,
 		"failure":  failureEvent,
-		"nodeActs": func(n api.NodeState, self bool, targets, tenants []string, from string) nodeActs {
-			return nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, Tenants: tenants, From: from}
+		"nodeActs": func(n api.NodeState, self bool, targets []string, all []api.Tenant, from string) nodeActs {
+			return drainOf(nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, From: from}, all)
 		},
-		"every":     every,
-		"marksJSON": func(marks []mark) string { return jsonOf(marks) },
-		"groups":    groupEvents,
-		"lower":     strings.ToLower,
-		"wavename":  waveName,
-		"sub":       func(a, b int) int { return a - b },
+		"every":      every,
+		"imageRepo":  func(ref string) string { r, _ := ImageParts(ref); return r },
+		"imageShort": func(ref string) string { _, short := ImageParts(ref); return short },
+		"marksJSON":  func(marks []mark) string { return jsonOf(marks) },
+		"groups":     groupEvents,
+		"lower":      strings.ToLower,
+		"wavename":   waveName,
+		"sub":        func(a, b int) int { return a - b },
 		"others": func(n api.Nodes) string {
 			var out []string
 			for _, node := range n.Nodes {
@@ -927,6 +932,35 @@ type nodeActs struct {
 	// Targets are the nodes to drain it to; Tenants those it runs.
 	Targets, Tenants []string
 	From             string
+	// Keeps counts the copies it keeps, Archived the archived tenants'
+	// data it holds; Unprotected are, by target, the tenants a drain there
+	// leaves without a ready copy on another node.
+	Keeps, Archived int
+	Unprotected     map[string][]string
+}
+
+// drainOf says what draining a node would do: the tenants it moves, and,
+// for each node it could go to, those left without a copy elsewhere: they
+// would run where their copy is, or have none.
+func drainOf(a nodeActs, all []api.Tenant) nodeActs {
+	a.Unprotected = map[string][]string{}
+	slices.SortFunc(all, func(x, y api.Tenant) int { return strings.Compare(x.Spec.Name, y.Spec.Name) })
+	for _, t := range all {
+		switch {
+		case t.Node == a.Name && t.Archived():
+			a.Archived++
+		case t.Node == a.Name:
+			a.Tenants = append(a.Tenants, t.Spec.Name)
+			for _, target := range a.Targets {
+				if t.Replica == "" || t.Replica == target || !t.ReplicaReady {
+					a.Unprotected[target] = append(a.Unprotected[target], t.Spec.Name)
+				}
+			}
+		case t.Replica == a.Name && !t.Archived():
+			a.Keeps++
+		}
+	}
+	return a
 }
 
 // tenantsQuery is the tenants' page's address with a filter: pairs of a

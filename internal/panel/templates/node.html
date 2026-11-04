@@ -6,11 +6,11 @@
   <div class="actions">
     <details class="drop end">
       <summary class="button">Act on {{$n.Name}}</summary>
-      <div class="pop">{{template "node-actions" (nodeActs $n $d.Self $d.Targets $d.RunNames "node")}}</div>
+      <div class="pop">{{template "node-actions" (nodeActs $n $d.Self $d.Targets $d.All "node")}}</div>
     </details>
   </div>
   {{end}}
-  <p class="lead">{{if $d.Leader}}Leads the cluster · {{end}}{{if $d.Self}}The node this panel asks · {{end}}public {{addrs $n}}{{with $n.Tunnel}} · tunnel <span class="mono">{{.Address}}</span>{{end}} · joined {{ago $n.CreatedAt}} ago</p>
+  <p class="lead">{{if $d.Leader}}Leads the cluster · {{end}}{{if $d.Self}}the node this panel asks · {{end}}public {{addrs $n}}{{with $n.Tunnel}} · tunnel <span class="mono">{{.Address}}</span>{{end}} · joined {{ago $n.CreatedAt}} ago</p>
 </header>
 
 {{if $n.Failed}}
@@ -38,7 +38,7 @@
     {{end}}
     <div class="stat"><div class="caps">Runs</div><div class="v num">{{plural (len $d.Runs) "tenant" "tenants"}}</div></div>
     <div class="stat"><div class="caps">Keeps copies of</div><div class="v num">{{plural (len $d.Keeps) "tenant" "tenants"}}</div></div>
-    <div class="stat"><div class="caps">Backups</div><div class="v">{{with $d.Backups}}{{if .Failing}}<span class="st bad">{{.Failing}} failing</span>{{else if .Stale}}<span class="st warn">{{.Stale}} late</span>{{else if .Ready}}<span class="st ok">every {{every .Every}}</span>{{else}}<span class="st warn">not running</span>{{end}}{{else}}<span class="dim">{{if $n.Answers}}not set up{{else}}not known{{end}}</span>{{end}}</div></div>
+    <div class="stat"><div class="caps">Backups</div><div class="v figure-like">{{with $d.Backups}}{{if .Failing}}<span class="red-text-inline">{{.Failing}} failing</span>{{else if .Stale}}{{.Stale}} late{{else if .Ready}}every {{every .Every}}{{else}}not running{{end}}{{else}}<span class="dim">{{if $n.Answers}}not set up{{else}}not known{{end}}</span>{{end}}</div></div>
   </div>
 </section>
 

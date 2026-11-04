@@ -31,7 +31,7 @@
         <td class="end l-side">
           <details class="menu">
             <summary aria-label="what to do with {{.Name}}">⋯</summary>
-            <div class="pop">{{template "node-actions" (nodeActs .NodeState (eq .Name $d.Self) .Targets .Runs "")}}            </div>
+            <div class="pop">{{template "node-actions" (nodeActs .NodeState (eq .Name $d.Self) .Targets $d.All "")}}            </div>
           </details>
         </td>
       </tr>
@@ -80,7 +80,7 @@
   <div class="head"><h2>Backups</h2><span class="dim">encrypted, to S3, by each node of its own tenants</span></div>
   {{if $d.Reported}}
   <table class="list">
-    <thead><tr><th>Node</th><th>State</th><th>Runs</th><th class="num">Tenants</th><th>Oldest latest backup</th><th class="hide-narrow">Cluster's state</th></tr></thead>
+    <thead><tr><th>Node</th><th>State</th><th>Runs</th><th class="num">Tenants</th><th>Oldest successful backup</th><th class="hide-narrow">State backup</th></tr></thead>
     <tbody>
     {{range $d.Backups}}
       <tr>
@@ -110,16 +110,24 @@
   <p class="calm">No node reports backups: they are set up in each node's config (<code>backups:</code>), then <code>sudo murder backups setup</code>.</p>
   {{end}}
   <details class="howto spaced"{{if $d.Asked}} open{{end}} id="restore">
-    <summary>How to restore {{if ne $d.Tenant "TENANT"}}{{$d.Tenant}}{{else}}a tenant{{end}} from its backup</summary>
+    <summary>How to restore {{if ne $d.Tenant "TENANT"}}{{$d.Tenant}}{{else}}a tenant{{end}} from a backup</summary>
     <div class="panel">
-      <p class="flat">A restore puts a backup in place of a tenant's data, on the node that runs it. The panel does not run it: it needs the backups' private key, which stays off the cluster. {{if $d.RestoreNode}}On {{$d.RestoreNode}}, which runs {{$d.Tenant}}:{{else}}On the node that runs it:{{end}}</p>
+      <p class="flat">A restore puts a backup in place of a tenant's data, on the node that runs it{{with $d.RestoreNode}} ({{.}}){{end}}. The panel does not run it: it needs the backups' private key, which stays off the cluster.</p>
+      <form method="get" action="/cluster#restore" class="row restore-at">
+        <input type="hidden" name="tenant" value="{{$d.Tenant}}">
+        <label class="field">Go back to (UTC) <input type="text" name="at" value="{{if not $d.RestoreAt.IsZero}}{{$d.RestoreAt.UTC.Format "2006-01-02 15:04:05"}}{{end}}" placeholder="2026-11-04 11:29" class="short" autocomplete="off" spellcheck="false"></label>
+        <button type="submit">Use this time</button>
+        {{if not $d.Newest.IsZero}}<span class="hint">Its newest backup is from {{utc $d.Newest}}{{if not $d.Chosen}}, used below{{end}}. Step 1 lists the others.</span>{{end}}
+      </form>
+      {{with $d.AtProblem}}<div class="notice bad flat">{{.}}</div>{{end}}
       <ol class="steps">
-        <li>List its backups, and pick the time to go back to{{if not $d.RestoreAt.IsZero}} (its newest is from {{utc $d.RestoreAt}}){{end}}: <pre class="secret">sudo murder backups list {{$d.Tenant}}</pre></li>
-        <li>Archive it, so nothing writes to its data meanwhile: <pre class="secret">sudo murder tenant archive {{$d.Tenant}}</pre></li>
-        <li>Restore its data as of that time, with the key: <pre class="secret">sudo murder backups restore {{$d.Tenant}} -at {{if $d.RestoreAt.IsZero}}TIME{{else}}{{iso $d.RestoreAt}}{{end}} -identity key.txt</pre></li>
-        <li>Run it again, then check its page here: <pre class="secret">sudo murder tenant restore {{$d.Tenant}}</pre></li>
+        <li>On {{if $d.RestoreNode}}{{$d.RestoreNode}}{{else}}the node that runs it{{end}}, list its backups, to check there is one at or before that time: <pre class="secret">sudo murder backups list {{$d.Tenant}}</pre></li>
+        <li>On {{if $d.RestoreNode}}{{$d.RestoreNode}}{{else}}that node{{end}}, archive it, so nothing writes to its data meanwhile; it stops serving: <pre class="secret">sudo murder tenant archive {{$d.Tenant}}</pre></li>
+        <li>Bring the backups' private key (<code>key.txt</code>) to {{if $d.RestoreNode}}{{$d.RestoreNode}}{{else}}that node{{end}} for this step only, and restore its data as of {{if $d.RestoreAt.IsZero}}that time{{else}}{{utc $d.RestoreAt}}{{end}}. Everything it wrote after that time is replaced. <pre class="secret">sudo murder backups restore {{$d.Tenant}} -at {{if $d.RestoreAt.IsZero}}TIME{{else}}{{iso $d.RestoreAt}}{{end}} -identity key.txt</pre> Then remove the key from the node.</li>
+        <li>Run it again: <pre class="secret">sudo murder tenant restore {{$d.Tenant}}</pre></li>
+        <li>Check it here: its <a href="/tenants/{{$d.Tenant}}">state</a> and <a href="/tenants/{{$d.Tenant}}/logs">logs</a>. What it had stays beside it, unmounted (<code>murder-replaced-…</code>), until you remove it.</li>
       </ol>
-      <p class="hint">What it had stays beside it, unmounted (<code>murder-replaced-…</code>), until you remove it. For another tenant, open it from its page's "how to restore".</p>
+      <p class="hint">For another tenant, open it from its page's "Restore".</p>
     </div>
   </details>
 </section>
@@ -157,10 +165,10 @@
         <td class="when hide-narrow">{{ago .Started}} ago</td>
         <td class="l-main"><a class="row-link" href="/jobs/{{.ID}}">{{.Title}}</a></td>
         <td class="dim hide-narrow">{{.By}}</td>
-        <td class="l-side">{{if not .Done}}<span class="st warn">running</span>{{else if .Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}</td>
+        <td class="l-side">{{if not .Done}}<span class="st busy">running</span>{{else if .Interrupted}}<span class="st warn">interrupted</span>{{else if .Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}</td>
       </tr>
     {{else}}
-      <tr><td colspan="4" class="empty l-main">None yet. Jobs live in this node's panel until it restarts.</td></tr>
+      <tr><td colspan="4" class="empty l-main">None yet. {{if $d.JobsKept}}This node's panel keeps its jobs' records, across restarts.{{else}}Jobs live in this node's panel until it restarts.{{end}}</td></tr>
     {{end}}
     </tbody>
   </table>

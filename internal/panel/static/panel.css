@@ -117,7 +117,7 @@ button.link:hover { color: var(--fg); background: none; border: 0; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .livestate.on .live { animation: none; } }
 /* What it shows may be old: values grey, what is wrong still red. */
-body.stale main { --fg: #9a9a9a; --soft: #808080; color: var(--fg); }
+body.stale main { --fg: #7c7c7c; --soft: #6f6f6f; color: var(--fg); }
 body.stale main .stale-banner { --fg: #ededed; }
 
 .page { flex: 1; min-width: 0; }
@@ -720,3 +720,9 @@ form.stack > .head { margin-bottom: calc(var(--s3) - var(--s4)); }
 .notice, .problem { border: 0; box-shadow: inset 2px 0 0 var(--soft); background: var(--raised); }
 .notice.bad, .problem.bad { border: 0; box-shadow: inset 2px 0 0 var(--bad); background: var(--bad-wash); }
 .problem { max-width: none; }
+.imagechange { margin-bottom: var(--s3); display: grid; gap: var(--s2); }
+.mono.strong { font-weight: 600; color: var(--fg); }
+.panel > button[data-copy] { justify-self: start; }
+.stat .v.figure-like, .stat .v.figure-like .red-text-inline { font-size: 20px; font-weight: 500; }
+.logview .toggles { align-self: center; }
+.logview .filters .row a.dim { min-width: 3em; }

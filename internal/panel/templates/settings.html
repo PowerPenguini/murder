@@ -91,7 +91,7 @@
             <div class="pop">
               <form method="post" class="stack"><input type="hidden" name="do" value="rotate"><input type="hidden" name="key" value="{{.Name}}">
                 <p class="hint">A new value restarts {{$t.Spec.Name}}; what it signed or set with the old one (sessions, a password) stops working. Save the settings above first. Type its name.</p>
-                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+                <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
                 <div><button type="submit" class="danger">Give it a new value</button></div>
               </form>
             </div>

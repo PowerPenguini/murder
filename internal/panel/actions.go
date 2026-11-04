@@ -85,6 +85,11 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 		_, err = agent.Suspend(ctx, name, false)
 		done = name + " runs again"
 	case "roll":
+		// It stops serving for a moment: the name is typed.
+		if !confirmed {
+			err = errors.New("type the tenant's name to restart it")
+			break
+		}
 		_, err = agent.Roll(ctx, name)
 		done = name + " is restarting in a new container, its data kept: its state shows when it is healthy"
 	case "move":

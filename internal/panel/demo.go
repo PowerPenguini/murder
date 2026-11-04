@@ -2,8 +2,10 @@ package panel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/netip"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -146,4 +148,24 @@ func withHistory(events []store.Event, now time.Time) []store.Event {
 		events[i].ID = int64(len(events) - i)
 	}
 	return events
+}
+
+// SeedDemoJobs writes job records to show, in a file the demo keeps its
+// jobs in, unless it has some: a drain the panel was stopped in, and a
+// backup that ended.
+func SeedDemoJobs(path string, now time.Time) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	records := []jobRecord{
+		{ID: "5eedd8a1n0000001", Title: "Drain nbg-1 to fsn-1", By: "jan (panel)", Kind: JobDrain, Started: now.Add(-26 * time.Hour),
+			Output: "move atlas to fsn-1\natlas moved\nmove nordwind to fsn-1\n"},
+		{ID: "5eedbac0000002", Title: "Back up the tenants of nbg-1", By: "anna (panel)", Kind: JobBackups, Started: now.Add(-27 * time.Hour), Ended: now.Add(-27*time.Hour + 40*time.Second),
+			Output: "baltic-freight: backups/baltic-freight/" + now.Add(-27*time.Hour).UTC().Format("20060102T150405Z") + ".db.zst\nkowalski-trans: failed: put: 403 Forbidden\n", Failed: "1 of 2 backups failed"},
+	}
+	data, err := json.Marshal(records)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }

@@ -47,6 +47,11 @@ func runPanel(args []string) error {
 	server.Apps = func(actor string) panel.AppAgent { return client.WithActor(actor) }
 	// Beside the database: /tmp may be small, in memory, or noexec.
 	server.UploadDir = filepath.Join(filepath.Dir(cfg.Database), "panel-uploads")
+	// The jobs' records outlive a restart of the panel, beside the
+	// database too; without them the panel still runs, forgetting them.
+	if err := server.Jobs.Persist(filepath.Join(filepath.Dir(cfg.Database), "panel-jobs.json"), time.Now()); err != nil {
+		log.Warn("the panel's job records are not kept across restarts", "error", err)
+	}
 	// What a panel stopped mid-upgrade left behind.
 	if err := os.RemoveAll(server.UploadDir); err != nil {
 		log.Warn("the panel's old uploads stay", "error", err)

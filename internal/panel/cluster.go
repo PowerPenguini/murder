@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,6 +47,9 @@ type Job struct {
 	Started, Ended time.Time
 	Failed         string
 	Kind           JobKind
+	// Interrupted says the panel stopped while the job ran: it ended
+	// without saying how, which is not that it failed.
+	Interrupted bool
 
 	done chan struct{}
 
@@ -92,6 +98,104 @@ type Jobs struct {
 	list    []*Job
 	closed  bool
 	running sync.WaitGroup
+	// path, if set, keeps the jobs' records across restarts of the panel.
+	path string
+	// saving keeps one write of the records at a time.
+	saving sync.Mutex
+}
+
+// jobRecord is a job as kept in its file.
+type jobRecord struct {
+	ID, Title, By  string
+	Kind           JobKind
+	Started, Ended time.Time
+	Failed         string
+	Interrupted    bool
+	Output         string
+}
+
+// jobOutputKept bounds the output a record keeps: its end.
+const jobOutputKept = 64 << 10
+
+// Persist keeps the jobs' records in the file at path, and reads those it
+// holds: a job that was running when the panel stopped is interrupted.
+// Only the panel's root reads the file.
+func (j *Jobs) Persist(path string, now time.Time) error {
+	j.mu.Lock()
+	j.path = path
+	j.mu.Unlock()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var records []jobRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		return fmt.Errorf("the panel's job records %s: %w", path, err)
+	}
+	j.mu.Lock()
+	for _, r := range records {
+		job := &Job{ID: r.ID, Title: r.Title, By: r.By, Kind: r.Kind, Started: r.Started, Ended: r.Ended, Failed: r.Failed, Interrupted: r.Interrupted, done: make(chan struct{})}
+		job.out.WriteString(r.Output)
+		if job.Ended.IsZero() {
+			job.Ended, job.Interrupted = now, true
+			job.out.WriteString("\ninterrupted: the panel stopped while this ran; the audit log says what it changed\n")
+		}
+		close(job.done)
+		j.list = append(j.list, job)
+	}
+	j.mu.Unlock()
+	return j.save()
+}
+
+// kept says the jobs' records outlive a restart of the panel.
+func (j *Jobs) kept() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.path != ""
+}
+
+// save writes the jobs' records, if they are kept: whole, or not at all.
+func (j *Jobs) save() error {
+	j.saving.Lock()
+	defer j.saving.Unlock()
+	j.mu.Lock()
+	path := j.path
+	list := slices.Clone(j.list)
+	j.mu.Unlock()
+	if path == "" {
+		return nil
+	}
+	var records []jobRecord
+	for _, job := range list {
+		job.mu.Lock()
+		out := job.out.String()
+		if len(out) > jobOutputKept {
+			out = out[len(out)-jobOutputKept:]
+		}
+		records = append(records, jobRecord{ID: job.ID, Title: job.Title, By: job.By, Kind: job.Kind, Started: job.Started, Ended: job.Ended, Failed: job.Failed, Interrupted: job.Interrupted, Output: out})
+		job.mu.Unlock()
+	}
+	data, err := json.Marshal(records)
+	if err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".panel-jobs-*")
+	if err != nil {
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		os.Remove(temp.Name())
+		return err
+	}
+	if err := errors.Join(temp.Chmod(0o600), temp.Close()); err != nil {
+		os.Remove(temp.Name())
+		return err
+	}
+	return os.Rename(temp.Name(), path)
 }
 
 // jobsKept bounds the ended jobs kept; running ones are always kept.
@@ -135,7 +239,18 @@ func (j *Jobs) Start(kind JobKind, title, by string, now func() time.Time, log *
 	j.list = kept
 	j.running.Add(1)
 	go func() {
+		if err := j.save(); err != nil {
+			log.Warn("the panel's job records are not kept", "error", err)
+		}
+	}()
+	go func() {
 		defer j.running.Done()
+		// Kept once it ended, before the panel may stop.
+		defer func() {
+			if err := j.save(); err != nil {
+				log.Warn("the panel's job records are not kept", "error", err)
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), jobLimit)
 		defer cancel()
 		err := work(ctx, job)
@@ -257,7 +372,9 @@ type clusterData struct {
 	// Upgrading the upgrade among them, which takes changes again.
 	Busy, Upgrading *Job
 	Jobs            []*Job
-	Self            string
+	// JobsKept says job records outlive a restart of the panel.
+	JobsKept bool
+	Self     string
 	// Balance are the moves that would even the nodes' tenants.
 	Balance []store.Move
 	// Backups are each node's backups, in the nodes' order; Reported says
@@ -271,8 +388,14 @@ type clusterData struct {
 	// backup's time and RestoreNode the node it runs on, to run it there.
 	Tenant, RestoreNode string
 	RestoreAt           time.Time
-	// Asked says the tenant was asked for, from its page.
-	Asked bool
+	// Asked says the tenant was asked for, from its page; Chosen that a
+	// time to go back to was, Newest its newest backup's, AtProblem why a
+	// time given is not one.
+	Asked, Chosen bool
+	Newest        time.Time
+	AtProblem     string
+	// All are the tenants, for what a drain would do.
+	All []api.Tenant
 	// Resilience says whether the cluster takes changes, what one more
 	// node down would do, and how its copies stand.
 	Resilience []fact
@@ -425,6 +548,7 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 	data.Release, data.Mixed = releaseOf(data.Nodes)
 	archived := map[string]bool{}
 	if tenants, err := s.backend.List(ctx); err == nil {
+		data.All = tenants
 		slices.SortFunc(tenants, func(a, b api.Tenant) int { return strings.Compare(a.Spec.Name, b.Spec.Name) })
 		for _, t := range tenants {
 			archived[t.Spec.Name] = t.Archived()
@@ -465,7 +589,19 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if b, ok := use.Backups[data.Tenant]; ok {
-		data.RestoreAt, data.RestoreNode = b.Last, b.Node
+		data.RestoreAt, data.RestoreNode, data.Newest = b.Last, b.Node, b.Last
+	}
+	// A time chosen to go back to, in UTC; its newest backup otherwise.
+	if at := strings.TrimSpace(r.URL.Query().Get("at")); at != "" {
+		for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02 15:04"} {
+			if when, err := time.ParseInLocation(layout, at, time.UTC); err == nil {
+				data.RestoreAt, data.Chosen = when.UTC(), true
+				break
+			}
+		}
+		if !data.Chosen {
+			data.AtProblem = "\"" + at + "\" is not a time: write it as 2026-11-04 11:29, in UTC."
+		}
 	}
 	if data.Tenant == "" {
 		data.Tenant = "TENANT"
@@ -479,7 +615,7 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 	}
 	tenants, _ := s.backend.List(ctx)
 	data.Resilience = resilienceOf(status, nodes, tenants, s.now())
-	data.Jobs, data.Busy = s.Jobs.all(), s.Jobs.Busy()
+	data.Jobs, data.Busy, data.JobsKept = s.Jobs.all(), s.Jobs.Busy(), s.Jobs.kept()
 	if data.Busy != nil && data.Busy.Kind == JobUpgrade {
 		data.Upgrading = data.Busy
 	}
@@ -512,7 +648,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	switch r.FormValue("do") {
 	case "balance":
-		toJob(s.Jobs.Start(JobBalance, "balance the tenants", user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+		toJob(s.Jobs.Start(JobBalance, "Balance the tenants", user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			return clusterops.Balance(ctx, agent, false, out)
 		}))
 	case "drain":
@@ -525,7 +661,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", "pick the node to move the tenants to")
 			return
 		}
-		toJob(s.Jobs.Start(JobDrain, "drain "+node+" to "+to, user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+		toJob(s.Jobs.Start(JobDrain, "Drain "+node+" to "+to, user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			return clusterops.Drain(ctx, agent, node, to, out)
 		}))
 	case "remove":
@@ -576,7 +712,7 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 		}
 		back("done", "changes are taken again")
 	case "backups":
-		toJob(s.Jobs.Start(JobBackups, "back up the tenants of "+s.nodeName(ctx, agent), user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+		toJob(s.Jobs.Start(JobBackups, "Back up the tenants of "+s.nodeName(ctx, agent), user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			results, err := agent.RunBackups(ctx)
 			failed := 0
 			for _, result := range results {
@@ -655,7 +791,7 @@ func (s *Server) upgradeAction(w http.ResponseWriter, r *http.Request) {
 		back("the file did not tell its murder version, so it is not used: " + err.Error())
 		return
 	}
-	job, err := s.Jobs.Start(JobUpgrade, "upgrade the cluster", user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+	job, err := s.Jobs.Start(JobUpgrade, "Upgrade the cluster", user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 		defer os.Remove(path)
 		return clusterops.Upgrade(ctx, agent, path, 5*time.Minute, out)
 	})
@@ -738,6 +874,8 @@ func uploadError(err error) error {
 
 type jobData struct {
 	Job *Job
+	// Kept says job records outlive a restart of the panel.
+	Kept bool
 	// Results are a backup job's, tenant by tenant; Succeeded and Failed
 	// count them.
 	Results           []jobResult
@@ -748,7 +886,12 @@ type jobData struct {
 type jobResult struct {
 	Name, Detail string
 	Failed       bool
+	// At is when the backup was made, read from its key.
+	At time.Time
 }
+
+// keyTime is the time in a backup's key, as 20261104T144838Z.
+var keyTime = regexp.MustCompile(`\d{8}T\d{6}Z`)
 
 // backupResults reads a backup job's output, "tenant: key" or "tenant:
 // failed: why" a line.
@@ -760,7 +903,11 @@ func backupResults(output string) []jobResult {
 			continue
 		}
 		why, failed := strings.CutPrefix(rest, "failed: ")
-		out = append(out, jobResult{Name: name, Detail: why, Failed: failed})
+		result := jobResult{Name: name, Detail: why, Failed: failed}
+		if at, err := time.Parse("20060102T150405Z", keyTime.FindString(why)); err == nil && !failed {
+			result.At = at
+		}
+		out = append(out, result)
 	}
 	return out
 }
@@ -771,7 +918,7 @@ func (s *Server) jobPage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, &api.Error{Status: http.StatusNotFound, Message: "no such job on this node's panel: jobs are kept by the panel that began them, until it restarts"})
 		return
 	}
-	data := jobData{Job: job}
+	data := jobData{Job: job, Kept: s.Jobs.kept()}
 	if job.Kind == JobBackups {
 		data.Results = backupResults(job.Output())
 		for _, result := range data.Results {

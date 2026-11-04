@@ -97,12 +97,12 @@
       bar.append(home);
       return;
     }
-    lead.textContent = "Can't reach " + node + ". ";
-    bar.append(lead, document.createTextNode(lostWhy + since + (others ? "Other nodes answered: " + others + ". The panel's name leads to the nodes that answer: reload in a moment to reach one. " : "")));
+    lead.textContent = "Can't reach " + node + " since " + clock(readAt) + ". ";
+    bar.append(lead, document.createTextNode(lostWhy + " Values below are from then, greyed. " + (others ? others + " still answered: reload, and the panel's address takes you to a node that answers. " : "")));
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "link";
-    retry.textContent = "Try again now";
+    retry.textContent = "Retry";
     retry.addEventListener("click", () => tick(true));
     bar.append(retry);
   };
@@ -122,7 +122,7 @@
     }
     if (lostWhy) {
       state.classList.add("lost");
-      text.textContent = "Can't reach " + node + ", " + age(Date.now() - readAt) + " old ";
+      text.textContent = (matchMedia("(max-width: 760px)").matches ? "Offline, " : "Can't reach " + node + ", ") + age(Date.now() - readAt) + " old ";
       const retry = document.createElement("button");
       retry.type = "button";
       retry.className = "link";
@@ -134,7 +134,7 @@
     const paused = pausedBy();
     if (paused) {
       state.classList.add("paused");
-      text.textContent = paused + ", " + age(Date.now() - readAt) + " old";
+      text.textContent = (matchMedia("(max-width: 760px)").matches ? "Updates paused" : paused) + ", " + age(Date.now() - readAt) + " old";
       return;
     }
     state.classList.add("on");

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"time"
 
 	"github.com/PowerPenguini/murder/internal/panel"
 )
@@ -17,6 +18,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:7480", "address to serve on")
 	signIn := flag.Bool("signin", false, "sign in with passkeys, at http://localhost:<port>; an invitation for jan is printed")
 	name := flag.String("name", "", "a name the panel answers as besides localhost, such as the address it listens on in a private network")
+	jobs := flag.String("jobs", "", "a file to keep the jobs' records in across restarts of the demo")
 	flag.Parse()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	cluster := panel.NewDemoCluster()
@@ -26,6 +28,14 @@ func main() {
 		os.Exit(1)
 	}
 	server.Name = *name
+	if *jobs != "" {
+		if err := panel.SeedDemoJobs(*jobs, time.Now()); err != nil {
+			log.Warn("the jobs' records", "error", err)
+		}
+		if err := server.Jobs.Persist(*jobs, time.Now()); err != nil {
+			log.Warn("the jobs' records", "error", err)
+		}
+	}
 	server.Actions = cluster.As
 	server.Cluster = cluster.AsCluster
 	server.Apps = cluster.AsApps
