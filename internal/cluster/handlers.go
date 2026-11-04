@@ -215,7 +215,113 @@ func (c *Cluster) voterAddress(name string) (string, bool) {
 	if future.Error() != nil {
 		return "", false
 	}
-	for _, server := range future.Configuration().Servers {
+	return serverAddress(future.Configuration(), name)
+}
+
+// configuration is the latest configuration of the voters, and the index
+// of the log entry that made it, as one pair: Raft passed an index changes
+// the voters only if the configuration is still the one the index names.
+// Raft's GetConfiguration does not say its index (as of v1.8.0). Raft
+// builds its own as it does here: the configuration of the newest snapshot
+// that opens, replaced by the last configuration entry in the log after
+// that snapshot, if there is one. Entries the log keeps from before the
+// snapshot do not count: an installed snapshot may have replaced the
+// history they belong to. (Raft also passes over a snapshot that opens but
+// does not restore, which cannot be seen from here: changeVoters tells
+// when Raft goes by another configuration.)
+func (c *Cluster) configuration() (raft.Configuration, uint64, error) {
+	snapshot, err := c.usableSnapshot()
+	if err != nil {
+		return raft.Configuration{}, 0, err
+	}
+	var configuration raft.Configuration
+	var index, after uint64
+	if snapshot != nil {
+		configuration, index, after = snapshot.Configuration, snapshot.ConfigurationIndex, snapshot.Index
+	}
+	last, err := c.logs.LastIndex()
+	if err != nil {
+		return raft.Configuration{}, 0, err
+	}
+	first, err := c.logs.FirstIndex()
+	if err != nil {
+		return raft.Configuration{}, 0, err
+	}
+	c.joinStage(joinReading, "")
+	for at := last; at > after && at >= first && at > 0; at-- {
+		var entry raft.Log
+		if err := c.logs.GetLog(at, &entry); errors.Is(err, raft.ErrLogNotFound) {
+			// Compacted meanwhile, into a newer snapshot: the pair read
+			// is older than Raft's, and Raft refuses a change to it.
+			break
+		} else if err != nil {
+			return raft.Configuration{}, 0, err
+		}
+		if entry.Type == raft.LogConfiguration {
+			return raft.DecodeConfiguration(entry.Data), at, nil
+		}
+	}
+	if snapshot == nil {
+		return raft.Configuration{}, 0, errors.New("neither the log nor a snapshot holds a configuration")
+	}
+	return configuration, index, nil
+}
+
+// usableSnapshot is the newest snapshot that opens, as Raft restores the
+// newest that does; nil if there is none at all. Opening checks the
+// snapshot whole; it is closed again unread.
+func (c *Cluster) usableSnapshot() (*raft.SnapshotMeta, error) {
+	snapshots, err := c.snapshots.List()
+	if err != nil {
+		return nil, err
+	}
+	var failures []error
+	for _, snapshot := range snapshots {
+		_, contents, err := c.snapshots.Open(snapshot.ID)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("snapshot %s: %w", snapshot.ID, err))
+			continue
+		}
+		_ = contents.Close()
+		return snapshot, nil
+	}
+	if len(snapshots) > 0 {
+		// Raft would not have started.
+		return nil, fmt.Errorf("no snapshot opens: %w", errors.Join(failures...))
+	}
+	return nil, nil
+}
+
+// errVotersChanged is a change to the voters Raft refused, as they changed
+// since they were read: asking again reads them afresh.
+var errVotersChanged = errors.New("the voters changed meanwhile")
+
+// changeVoters has Raft make change to the voters as they are at index,
+// and tells apart why Raft refuses it: the voters changed since (errVotersChanged),
+// or Raft goes by a configuration other than the one this node's log and
+// snapshots name. Raft may just be storing a change it already counts, so
+// that is only concluded when it refuses the same index twice, a moment
+// apart.
+func (c *Cluster) changeVoters(change func(index uint64) raft.IndexFuture, index uint64) error {
+	for attempt := 1; ; attempt++ {
+		err := waitFuture(change(index), commitTimeout+futureGrace)
+		var since, latest uint64
+		if _, scanErr := fmt.Sscanf(fmt.Sprint(err), "configuration changed since %d (latest is %d)", &since, &latest); err == nil || scanErr != nil {
+			return err
+		}
+		if _, read, readErr := c.configuration(); readErr != nil || read != index {
+			return errVotersChanged
+		}
+		if attempt == 2 {
+			return fmt.Errorf("Raft goes by the voters as of log entry %d, while this node's log and snapshots name those as of %d, maybe as Raft passed over a snapshot it could not restore; restart node %s to have Raft read them afresh", latest, index, c.config.Node)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// serverAddress is where configuration has node name.
+func serverAddress(configuration raft.Configuration, name string) (string, bool) {
+	for _, server := range configuration.Servers {
 		if server.ID == raft.ServerID(name) {
 			return string(server.Address), true
 		}
@@ -225,9 +331,10 @@ func (c *Cluster) voterAddress(name string) (string, bool) {
 
 // The stages of a join a test can pause it at.
 const (
-	joinWrite = "write" // before the node is written to the state
-	joinVote  = "vote"  // after that, before the checks for the voters
-	joinAdd   = "add"   // after the checks, before the node is a voter
+	joinWrite   = "write"   // before the node is written to the state
+	joinVote    = "vote"    // after that, before the checks for the voters
+	joinReading = "reading" // part way through reading the voters, for a join or a removal
+	joinAdd     = "add"     // after the checks, before the node is a voter
 )
 
 // joinStage runs the test hook, if any, at stage of a join.
@@ -261,8 +368,10 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// One change of the members at a time, its checks and both its writes:
 	// two hosts joining with one name cannot both pass the checks and leave
 	// the state and the voters naming different addresses.
-	c.membership.Lock()
-	defer c.membership.Unlock()
+	if !c.lockMembership(w, r) {
+		return
+	}
+	defer c.unlockMembership()
 	// A node of the same name elsewhere would take the member's place.
 	if address, member := c.memberAddress(name); member && address != request.Address {
 		writeError(w, http.StatusConflict, fmt.Errorf("node %s is already a member at %s; remove it first, or give the new node another name", name, address))
@@ -324,14 +433,33 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		c.moved(w)
 		return
 	}
-	if address, voter := c.voterAddress(name); voter && address != request.Address {
+	// Every decision on the voters is made from this one configuration,
+	// and the change made to it alone.
+	configuration, index, err := c.configuration()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	if address, voter := serverAddress(configuration, name); voter && address != request.Address {
 		writeError(w, http.StatusConflict, fmt.Errorf("node %s is already a voter at %s; remove it first, or give the new node another name", name, address))
 		return
 	}
 	c.joinStage(joinAdd, name)
-	if err := waitFuture(c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), 0, commitTimeout), commitTimeout+futureGrace); err != nil {
+	// Raft adds the voter only to the configuration the checks saw: one
+	// that changed meanwhile, as under a leader between, is not taken
+	// over, nor a node of the same name moved to this host's address.
+	addVoter := func(index uint64) raft.IndexFuture {
+		return c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(request.Address), index, commitTimeout)
+	}
+	if err := c.changeVoters(addVoter, index); err != nil {
 		if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
 			// The node may be a voter now, or not: asking again is safe.
+			c.moved(w)
+			return
+		}
+		if errors.Is(err, errVotersChanged) {
+			// The voters changed since the checks: asking again checks
+			// them afresh.
 			c.moved(w)
 			return
 		}
@@ -351,22 +479,55 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		node, known := nodeNamed(c.config.Store.Nodes(), name)
-		switch {
-		case known && node.Address == request.Address:
+		if known && node.Address == request.Address {
 			writeJSON(w, http.StatusOK, struct{}{})
 			return
-		case known:
-			// Another node of that name joined meanwhile: the voter goes
-			// back to its address, never out.
-			_ = waitFuture(c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(node.Address), 0, commitTimeout), commitTimeout+futureGrace)
-		default:
-			_ = waitFuture(c.raft.RemoveServer(raft.ServerID(name), 0, commitTimeout), commitTimeout+futureGrace)
+		}
+		// Each undo too changes only the configuration it was decided
+		// on; one that changed meanwhile is left to the host's next ask.
+		if configuration, index, err := c.configuration(); err == nil {
+			address, voter := serverAddress(configuration, name)
+			switch {
+			case known && voter && address != node.Address:
+				// Another node of that name joined meanwhile: the voter
+				// goes back to its address, never out.
+				_ = waitFuture(c.raft.AddVoter(raft.ServerID(name), raft.ServerAddress(node.Address), index, commitTimeout), commitTimeout+futureGrace)
+			case !known && voter:
+				_ = waitFuture(c.raft.RemoveServer(raft.ServerID(name), index, commitTimeout), commitTimeout+futureGrace)
+			}
 		}
 		c.moved(w)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct{}{})
 }
+
+// lockMembership waits for the members to be this request's to change,
+// for as long as its sender waits: a change whose sender gave up, such as
+// one queued behind a join that stalled, is not made later, from checks
+// its sender no longer stands behind.
+func (c *Cluster) lockMembership(w http.ResponseWriter, r *http.Request) bool {
+	refuse := func() bool {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("the change of the members was given up: %w", r.Context().Err()))
+		return false
+	}
+	if r.Context().Err() != nil {
+		return refuse()
+	}
+	select {
+	case c.membership <- struct{}{}:
+	case <-r.Context().Done():
+		return refuse()
+	}
+	// A select between a free lock and a sender that gave up takes either.
+	if r.Context().Err() != nil {
+		c.unlockMembership()
+		return refuse()
+	}
+	return true
+}
+
+func (c *Cluster) unlockMembership() { <-c.membership }
 
 // handleRemove takes a node out of the voters and the state. A leader
 // removing itself hands over leadership.
@@ -375,23 +536,24 @@ func (c *Cluster) handleRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	c.membership.Lock()
-	defer c.membership.Unlock()
+	if !c.lockMembership(w, r) {
+		return
+	}
+	defer c.unlockMembership()
 	// A new leader may not have applied a node's addition yet, committed
 	// under the leader before it: it applies what was committed first.
 	if err := c.catchUp(); err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	future := c.raft.GetConfiguration()
-	if err := future.Error(); err != nil {
+	// The voter is removed only from the configuration read here: one
+	// that changed meanwhile, as under a leader between, is read again.
+	configuration, index, err := c.configuration()
+	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	voter := false
-	for _, server := range future.Configuration().Servers {
-		voter = voter || server.ID == raft.ServerID(name)
-	}
+	_, voter := serverAddress(configuration, name)
 	_, known := nodeNamed(c.config.Store.Nodes(), name)
 	if !voter && !known {
 		writeError(w, http.StatusNotFound, fmt.Errorf("node %s is not part of the cluster", name))
@@ -411,9 +573,18 @@ func (c *Cluster) handleRemove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if voter {
-		if err := waitFuture(c.raft.RemoveServer(raft.ServerID(name), 0, commitTimeout), commitTimeout+futureGrace); err != nil {
+		removeServer := func(index uint64) raft.IndexFuture {
+			return c.raft.RemoveServer(raft.ServerID(name), index, commitTimeout)
+		}
+		if err := c.changeVoters(removeServer, index); err != nil {
 			if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
 				// Asking the next leader again is safe.
+				c.moved(w)
+				return
+			}
+			if errors.Is(err, errVotersChanged) {
+				// The voters changed since they were read: asking again
+				// reads them afresh.
 				c.moved(w)
 				return
 			}

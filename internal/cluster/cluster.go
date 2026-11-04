@@ -25,10 +25,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
@@ -101,6 +101,8 @@ type Config struct {
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
+	// stable, if set, wraps where Raft keeps its term and vote, in tests.
+	stable func(raft.StableStore) raft.StableStore
 }
 
 // Cluster is this node's part of the cluster.
@@ -110,16 +112,18 @@ type Cluster struct {
 	raft        *raft.Raft
 	logs        *raftboltdb.BoltStore
 	snapshots   raft.SnapshotStore
+	transport   *gatedTransport
 	listener    *listener
 	server      *http.Server
 	credentials *Credentials
 	// joins answers hosts that bring an invitation.
 	joins  *http.Server
 	client *http.Client
-	// membership keeps joins and removals one at a time on the leader.
-	membership sync.Mutex
+	// membership keeps joins and removals one at a time on the leader: a
+	// channel of one, held while one runs.
+	membership chan struct{}
 	// joinHook, if set, runs at each stage of a join (joinWrite, joinVote,
-	// joinAdd): tests pause a join there.
+	// joinReading, joinAdd): tests pause a join there.
 	joinHook atomic.Pointer[func(stage, name string)]
 	// catchUpVerify and joinVerify each let one VerifyLeader call at a
 	// time hand its request to Raft; see verifyLeader.
@@ -155,21 +159,25 @@ func Start(config Config) (*Cluster, error) {
 		_ = logs.Close()
 		return nil, fmt.Errorf("cluster address: %w", err)
 	}
-	transport := raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{Stream: l.raftLayer(), MaxPool: 3, Timeout: 10 * time.Second, Logger: logger})
+	transport := &gatedTransport{NetworkTransport: raft.NewNetworkTransportWithConfig(transportConfig(l.raftLayer(), logger))}
 	raftConfig := raft.DefaultConfig()
 	raftConfig.LocalID = raft.ServerID(config.Node)
 	raftConfig.Logger = logger
 	if config.raft != nil {
 		config.raft(raftConfig)
 	}
-	r, err := raft.NewRaft(raftConfig, &fsm{store: config.Store, fatal: config.Fatal}, logs, logs, snapshots, transport)
+	var stable raft.StableStore = logs
+	if config.stable != nil {
+		stable = config.stable(logs)
+	}
+	r, err := raft.NewRaft(raftConfig, &fsm{store: config.Store, fatal: config.Fatal}, logs, stable, snapshots, transport)
 	if err != nil {
 		_ = transport.Close()
 		_ = logs.Close()
 		return nil, err
 	}
-	c := &Cluster{config: config, address: l.inner.Addr().String(), raft: r, logs: logs, snapshots: snapshots, listener: l, credentials: credentials,
-		catchUpVerify: make(chan struct{}, 1), joinVerify: make(chan struct{}, 1)}
+	c := &Cluster{config: config, address: l.inner.Addr().String(), raft: r, logs: logs, snapshots: snapshots, transport: transport, listener: l, credentials: credentials,
+		catchUpVerify: make(chan struct{}, 1), joinVerify: make(chan struct{}, 1), membership: make(chan struct{}, 1)}
 	c.client = &http.Client{
 		Transport: namedTransport{cluster: config.Store.Cluster, next: &http.Transport{
 			DialTLSContext: func(ctx context.Context, _, address string) (net.Conn, error) {
@@ -194,6 +202,20 @@ func Start(config Config) (*Cluster, error) {
 	}()
 	config.Store.Replicate(c.commit, c.catchUp)
 	return c, nil
+}
+
+// transportConfig sets up Raft's transport over stream.
+//
+// Replication sends each follower one request at a time (MaxRPCsInFlight
+// 1). Raft's pipelined replication, its default, can wedge for good: once
+// the follower answers with a newer term (the leader was replaced) or a
+// refusal, the pipeline's decoder stops, and a send already under way
+// waits, with nothing left to take it, for the pipeline to close, which
+// only that send's caller does. The leader then never replicates to that
+// follower again, and its Shutdown waits for that goroutine forever.
+// Raft's own documentation finds that pipelining gains little.
+func transportConfig(stream raft.StreamLayer, logger hclog.Logger) *raft.NetworkTransportConfig {
+	return &raft.NetworkTransportConfig{Stream: stream, MaxPool: 3, MaxRPCsInFlight: 1, Timeout: 10 * time.Second, Logger: logger}
 }
 
 // Invitation is an invitation to this node, for its secret.
@@ -223,6 +245,9 @@ func InviteSecret() ([]byte, error) {
 func (c *Cluster) Close() error {
 	err := errors.Join(c.server.Close(), c.joins.Close())
 	err = errors.Join(err, c.raft.Shutdown().Error(), c.listener.close())
+	// Shutdown does not wait for the heartbeats the transport is handling:
+	// the log closes once none is.
+	c.transport.stopHeartbeats()
 	return errors.Join(err, c.logs.Close())
 }
 
