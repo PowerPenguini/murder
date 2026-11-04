@@ -919,6 +919,91 @@ func TestAVerifyLeaderRaftDoesNotTakeIsGivenUp(t *testing.T) {
 	}
 }
 
+// joinPause holds the first join that gets to a stage there, on whichever
+// node takes it: leadership may move before the join gets anywhere.
+type joinPause struct {
+	stage   string
+	nodes   []*node
+	paused  chan *node
+	release chan struct{}
+	resumed sync.Once
+	// reached counts the joins that got to the stage.
+	reached atomic.Int32
+}
+
+func pauseJoins(t *testing.T, nodes []*node, stage string) *joinPause {
+	t.Helper()
+	p := &joinPause{stage: stage, nodes: nodes, paused: make(chan *node, 1), release: make(chan struct{})}
+	// Only the first is held; later ones, on any node, go on.
+	var held atomic.Bool
+	for _, n := range nodes {
+		hook := func(at, _ string) {
+			if at != stage {
+				return
+			}
+			p.reached.Add(1)
+			if held.CompareAndSwap(false, true) {
+				p.paused <- n
+				<-p.release
+			}
+		}
+		n.cluster.joinHook.Store(&hook)
+	}
+	// Before the nodes stop: a join held would hold them.
+	t.Cleanup(p.resume)
+	return p
+}
+
+// wait returns the node the join is held on, and another one.
+func (p *joinPause) wait(t *testing.T, joined <-chan error) (held, other *node) {
+	t.Helper()
+	select {
+	case held = <-p.paused:
+	case err := <-joined:
+		t.Fatalf("the join ended before it got to stage %s: %v", p.stage, err)
+	case <-time.After(eventuallyFor):
+		t.Fatalf("the join never got to stage %s", p.stage)
+	}
+	for _, n := range p.nodes {
+		if n != held {
+			return held, n
+		}
+	}
+	panic("one node")
+}
+
+func (p *joinPause) resume() { p.resumed.Do(func() { close(p.release) }) }
+
+// asLeader runs op with to leading, handing it the leadership first, and
+// again after an attempt that timed out: under load the leadership can
+// move back to the node holding a join, where op waits behind it until
+// it gives up.
+func asLeader(t *testing.T, nodes []*node, to *node, what string, op func(context.Context) error) {
+	t.Helper()
+	deadline := time.Now().Add(2 * eventuallyFor)
+	for {
+		handOver(t, nodes, to)
+		attempt, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		err := op(attempt)
+		cancel()
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, context.DeadlineExceeded) || time.Now().After(deadline) {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+}
+
+// joinedAgain is a join's outcome, asked again: a node an attempt that
+// timed out made a member has joined.
+func joinedAgain(err error) error {
+	if errors.Is(err, ErrMember) {
+		return nil
+	}
+	return err
+}
+
 // handOver has to lead, asking whichever of nodes leads to hand over. A
 // transfer that does not finish within Raft's election timeout, as on a
 // loaded host, is asked for again.
@@ -959,61 +1044,24 @@ func TestAJoinAcrossTwoLeadershipChangesMakesNoUnknownVoter(t *testing.T) {
 	for _, stage := range []string{joinVote, joinAdd} {
 		t.Run(stage, func(t *testing.T) {
 			nodes := threeNodes(t)
-			var old, next *node
-			eventually(t, "a leader", func() bool {
-				for _, n := range nodes {
-					if n.cluster.Leader() {
-						old = n
-					}
-				}
-				return old != nil
-			})
-			for _, n := range nodes {
-				if n != old {
-					next = n
-					break
-				}
-			}
-			paused, release := make(chan struct{}), make(chan struct{})
-			var once sync.Once
-			var reached atomic.Int32
-			hook := func(at, name string) {
-				if at == stage {
-					reached.Add(1)
-					once.Do(func() { close(paused); <-release })
-				}
-			}
-			old.cluster.joinHook.Store(&hook)
-			defer func() {
-				select {
-				case <-release:
-				default:
-					close(release)
-				}
-			}()
-
+			pause := pauseJoins(t, nodes, stage)
 			x := newNode(t, "x-1")
 			joined := make(chan error, 1)
-			go func() { joined <- x.cluster.Join(ctx(t), old.address, "alice") }()
-			select {
-			case <-paused:
-			case <-time.After(60 * time.Second):
-				t.Fatal("the join never got to stage " + stage)
-			}
-			handOver(t, nodes, next)
-			if err := next.cluster.Remove(ctx(t), "x-1", "bob"); err != nil {
-				t.Fatalf("remove x-1: %v", err)
-			}
+			go func() { joined <- x.cluster.Join(ctx(t), nodes[0].address, "alice") }()
+			old, next := pause.wait(t, joined)
+			asLeader(t, nodes, next, "remove x-1", func(ctx context.Context) error {
+				return next.cluster.Remove(ctx, "x-1", "bob")
+			})
 			eventually(t, old.name+" applied the removal", func() bool {
 				_, known := nodeNamed(old.store.Nodes(), "x-1")
 				return !known
 			})
 			handOver(t, nodes, old)
-			close(release)
+			pause.resume()
 			if err := awaitJoin(t, joined); err != nil {
 				t.Fatalf("the join, resumed: %v", err)
 			}
-			if reached.Load() < 2 {
+			if pause.reached.Load() < 2 {
 				t.Fatal("the join was not asked again")
 			}
 			for _, n := range append(nodes, x) {
@@ -1033,50 +1081,15 @@ func TestAJoinAcrossTwoLeadershipChangesMakesNoUnknownVoter(t *testing.T) {
 // address.
 func TestAJoinAcrossALeadershipChangeKeepsOneAddress(t *testing.T) {
 	nodes := threeNodes(t)
-	var old, next *node
-	eventually(t, "a leader", func() bool {
-		for _, n := range nodes {
-			if n.cluster.Leader() {
-				old = n
-			}
-		}
-		return old != nil
-	})
-	for _, n := range nodes {
-		if n != old {
-			next = n
-			break
-		}
-	}
-	paused, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	hook := func(stage, name string) {
-		if stage == joinWrite {
-			once.Do(func() { close(paused); <-release })
-		}
-	}
-	old.cluster.joinHook.Store(&hook)
-	defer func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	}()
-
+	pause := pauseJoins(t, nodes, joinWrite)
 	first, second := newNode(t, "x-1"), newNode(t, "x-1")
 	joined := make(chan error, 1)
-	go func() { joined <- first.cluster.Join(ctx(t), old.address, "mallory") }()
-	select {
-	case <-paused:
-	case <-time.After(60 * time.Second):
-		t.Fatal("the first join never got to its write")
-	}
-	handOver(t, nodes, next)
-	if err := second.cluster.Join(ctx(t), next.address, "alice"); err != nil {
-		t.Fatalf("the second join: %v", err)
-	}
-	close(release)
+	go func() { joined <- first.cluster.Join(ctx(t), nodes[0].address, "mallory") }()
+	_, next := pause.wait(t, joined)
+	asLeader(t, nodes, next, "the second join", func(ctx context.Context) error {
+		return joinedAgain(second.cluster.Join(ctx, next.address, "alice"))
+	})
+	pause.resume()
 	if err := awaitJoin(t, joined); err == nil || !strings.Contains(err.Error(), "already a member at "+second.address) {
 		t.Fatalf("the first join, resumed: %v", err)
 	}
@@ -1092,62 +1105,37 @@ func TestAJoinAcrossALeadershipChangeKeepsOneAddress(t *testing.T) {
 
 // A join that waited across two leadership changes, while its node was
 // removed and another of the same name joined at another address, leaves
-// that other one where it is, in the state and the voters.
+// that other one where it is, in the state and the voters: whether it
+// waited part way through reading the voters (reading) or after checking
+// them (add), what it read is not what Raft has by then, and Raft refuses
+// its change.
 func TestAStaleJoinLeavesAReplacementInPlace(t *testing.T) {
+	for _, stage := range []string{joinReading, joinAdd} {
+		t.Run(stage, func(t *testing.T) { staleJoin(t, stage) })
+	}
+}
+
+func staleJoin(t *testing.T, stage string) {
 	nodes := threeNodes(t)
-	var old, next *node
-	eventually(t, "a leader", func() bool {
-		for _, n := range nodes {
-			if n.cluster.Leader() {
-				old = n
-			}
-		}
-		return old != nil
-	})
-	for _, n := range nodes {
-		if n != old {
-			next = n
-			break
-		}
-	}
-	paused, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	hook := func(at, name string) {
-		if at == joinAdd {
-			once.Do(func() { close(paused); <-release })
-		}
-	}
-	old.cluster.joinHook.Store(&hook)
-	defer func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	}()
+	pause := pauseJoins(t, nodes, stage)
 	stale := newNode(t, "x-1")
 	joined := make(chan error, 1)
-	go func() { joined <- stale.cluster.Join(ctx(t), old.address, "alice") }()
-	select {
-	case <-paused:
-	case <-time.After(60 * time.Second):
-		t.Fatal("the join never got to adding the voter")
-	}
-	handOver(t, nodes, next)
-	if err := next.cluster.Remove(ctx(t), "x-1", "bob"); err != nil {
-		t.Fatalf("remove x-1: %v", err)
-	}
+	go func() { joined <- stale.cluster.Join(ctx(t), nodes[0].address, "alice") }()
+	old, next := pause.wait(t, joined)
+	asLeader(t, nodes, next, "remove x-1", func(ctx context.Context) error {
+		return next.cluster.Remove(ctx, "x-1", "bob")
+	})
 	// Another host joins as x-1, through the new leader.
 	replacement := newNode(t, "x-1")
-	if err := replacement.cluster.Join(ctx(t), next.address, "bob"); err != nil {
-		t.Fatalf("the replacement joins: %v", err)
-	}
+	asLeader(t, nodes, next, "the replacement joins", func(ctx context.Context) error {
+		return joinedAgain(replacement.cluster.Join(ctx, next.address, "bob"))
+	})
 	eventually(t, old.name+" knows the replacement", func() bool {
 		node, known := nodeNamed(old.store.Nodes(), "x-1")
 		return known && node.Address == replacement.address
 	})
 	handOver(t, nodes, old)
-	close(release)
+	pause.resume()
 	_ = awaitJoin(t, joined)
 	for _, n := range nodes {
 		eventually(t, n.name+" names the replacement in the state and the voters", func() bool {
@@ -1341,5 +1329,91 @@ func TestHeartbeatsDuringCloseDoNotCrash(t *testing.T) {
 		close(stop)
 		senders.Wait()
 		_ = client.Close()
+	}
+}
+
+// Once the log no longer holds the last configuration, the voters and
+// their index come from the newest snapshot, as Raft has them: a node
+// joins as before.
+func TestAJoinAfterTheLogIsCompacted(t *testing.T) {
+	nodes := threeTunedNodes(t, func(config *raft.Config) {
+		config.SnapshotThreshold = 4
+		config.TrailingLogs = 2
+		config.SnapshotInterval = 100 * time.Millisecond
+	})
+	if _, err := nodes[0].store.PutApp(store.App{Name: "web", Spec: appSpec()}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 12 {
+		if _, err := nodes[0].store.Create(store.NewTenant{Name: fmt.Sprintf("t%02d", i), App: "web"}, "bob"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var leader *node
+	eventually(t, "the leader's log holds no configuration", func() bool {
+		for _, n := range nodes {
+			if n.cluster.Leader() {
+				leader = n
+			}
+		}
+		return leader != nil && len(configurations(t, leader)) == 0
+	})
+	configuration, index, err := leader.cluster.configuration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := leader.cluster.snapshots.List()
+	if err != nil || len(snapshots) == 0 {
+		t.Fatalf("snapshots: %v, %v", snapshots, err)
+	}
+	if want := leader.cluster.raft.GetConfiguration().Configuration(); !reflect.DeepEqual(configuration, want) || index != snapshots[0].ConfigurationIndex {
+		t.Fatalf("configuration %+v at %d, want %+v at %d", configuration, index, want, snapshots[0].ConfigurationIndex)
+	}
+	x := newNode(t, "x-1")
+	if err := x.cluster.Join(ctx(t), leader.address, "alice"); err != nil {
+		t.Fatalf("join after compaction: %v", err)
+	}
+	eventually(t, "x-1 is a voter", func() bool {
+		address, voter := leader.cluster.voterAddress("x-1")
+		return voter && address == x.address
+	})
+}
+
+// A change of the members queued behind another, whose sender gave up
+// meanwhile, is not made once the other is done.
+func TestAChangeWhoseSenderGaveUpIsNotMade(t *testing.T) {
+	nodes := threeNodes(t)
+	pause := pauseJoins(t, nodes, joinWrite)
+	x := newNode(t, "x-1")
+	joined := make(chan error, 1)
+	go func() { joined <- x.cluster.Join(ctx(t), nodes[0].address, "alice") }()
+	held, _ := pause.wait(t, joined)
+	// y-1 asks the node holding x-1's join to add it, and gives up.
+	y := newNode(t, "y-1")
+	request := marshal(joinRequest{Address: y.address, Actor: "bob"})
+	for {
+		attempt, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := y.cluster.call(attempt, held.address, http.MethodPost, "/cluster/v1/nodes", request, nil)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			break
+		}
+		if !errors.Is(err, ErrNotLeader) {
+			t.Fatalf("y-1's join: %v", err)
+		}
+		handOver(t, nodes, held)
+	}
+	pause.resume()
+	if err := awaitJoin(t, joined); err != nil {
+		t.Fatalf("x-1's join: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+	for _, n := range nodes {
+		if _, known := nodeNamed(n.store.Nodes(), "y-1"); known {
+			t.Fatalf("%s names y-1, whose join gave up", n.name)
+		}
+		if n.cluster.isVoter("y-1") {
+			t.Fatalf("y-1, whose join gave up, is a voter on %s", n.name)
+		}
 	}
 }

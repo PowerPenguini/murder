@@ -25,7 +25,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -120,10 +119,11 @@ type Cluster struct {
 	// joins answers hosts that bring an invitation.
 	joins  *http.Server
 	client *http.Client
-	// membership keeps joins and removals one at a time on the leader.
-	membership sync.Mutex
+	// membership keeps joins and removals one at a time on the leader: a
+	// channel of one, held while one runs.
+	membership chan struct{}
 	// joinHook, if set, runs at each stage of a join (joinWrite, joinVote,
-	// joinAdd): tests pause a join there.
+	// joinReading, joinAdd): tests pause a join there.
 	joinHook atomic.Pointer[func(stage, name string)]
 	// catchUpVerify and joinVerify each let one VerifyLeader call at a
 	// time hand its request to Raft; see verifyLeader.
@@ -177,7 +177,7 @@ func Start(config Config) (*Cluster, error) {
 		return nil, err
 	}
 	c := &Cluster{config: config, address: l.inner.Addr().String(), raft: r, logs: logs, snapshots: snapshots, transport: transport, listener: l, credentials: credentials,
-		catchUpVerify: make(chan struct{}, 1), joinVerify: make(chan struct{}, 1)}
+		catchUpVerify: make(chan struct{}, 1), joinVerify: make(chan struct{}, 1), membership: make(chan struct{}, 1)}
 	c.client = &http.Client{
 		Transport: namedTransport{cluster: config.Store.Cluster, next: &http.Transport{
 			DialTLSContext: func(ctx context.Context, _, address string) (net.Conn, error) {
