@@ -67,6 +67,8 @@ type fakeRuntime struct {
 	exitBeforeInspect bool
 	// volumes are the paths images declare as volumes (VOLUME).
 	volumes map[string][]string
+	// logs, if set, gives a container's output.
+	logs func(id string, tail int) ([]byte, error)
 	// state is what Inspect reports beyond the PID: restarts and the last
 	// exit. onStop runs when Stop is called.
 	state  runtime.ContainerState
@@ -268,7 +270,15 @@ func (f *fakeRuntime) Remove(_ context.Context, id string) error {
 	return nil
 }
 
-func (f *fakeRuntime) Logs(context.Context, string, int) ([]byte, error) { return nil, nil }
+func (f *fakeRuntime) Logs(_ context.Context, id string, tail int) ([]byte, error) {
+	f.mu.Lock()
+	logs := f.logs
+	f.mu.Unlock()
+	if logs == nil {
+		return nil, nil
+	}
+	return logs(id, tail)
+}
 
 func (f *fakeRuntime) Resolve(_ context.Context, ref string) (string, string, error) {
 	return ref, "", nil

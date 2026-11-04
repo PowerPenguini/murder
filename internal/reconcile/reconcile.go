@@ -77,6 +77,9 @@ type Config struct {
 	DefaultLimits spec.Limits
 	StopTimeout   time.Duration
 	HealthTimeout time.Duration
+	// PreviousDir keeps the last lines of each tenant's previous container
+	// (previous.go); empty keeps none.
+	PreviousDir string
 }
 
 // Reconciler drives the runtime towards the store's desired state.
@@ -300,12 +303,19 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		if err := r.interrupted(ctx); err != nil {
 			return err
 		}
-		if err := r.removeContainers(step, byTenant[tenant]); err != nil {
+		if err := r.removeContainers(step, byTenant[tenant], ""); err != nil {
 			errs = append(errs, fmt.Errorf("remove containers of %q, which no tenant wants: %w", tenant, err))
 			continue
 		}
 		r.log.Info("removed the containers of a tenant no longer wanted", "tenant", tenant)
 	}
+	// What is kept of a previous container stays while the tenant is this
+	// node's, archived too; a tenant gone elsewhere or purged takes none.
+	here := map[string]bool{}
+	for _, record := range r.own() {
+		here[record.Spec.Name] = true
+	}
+	r.forgetPrevious(here)
 	if err := r.removeOrphanNetworks(step, wanted); err != nil {
 		errs = append(errs, err)
 	}

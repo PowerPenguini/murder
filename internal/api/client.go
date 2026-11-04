@@ -309,6 +309,13 @@ func (c *Client) Logs(ctx context.Context, name string, tail int) ([]byte, error
 	return output, c.do(ctx, http.MethodGet, tenantPath(name)+"/logs?tail="+strconv.Itoa(tail), nil, &output)
 }
 
+// PreviousLogs are the last lines of a tenant's previous container; a 404
+// when its node kept none.
+func (c *Client) PreviousLogs(ctx context.Context, name string) (PreviousLogs, error) {
+	var previous PreviousLogs
+	return previous, c.do(ctx, http.MethodGet, tenantPath(name)+"/logs?previous=1", nil, &previous)
+}
+
 func (c *Client) Reconcile(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/reconcile", nil, nil)
 }

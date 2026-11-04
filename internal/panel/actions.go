@@ -26,6 +26,9 @@ type ActionAgent interface {
 	Restore(ctx context.Context, name string) (api.Tenant, error)
 	Purge(ctx context.Context, name string) error
 	Logs(ctx context.Context, name string, tail int) ([]byte, error)
+	// PreviousLogs are the last lines its node kept of the tenant's
+	// previous container; a 404 when it kept none.
+	PreviousLogs(ctx context.Context, name string) (api.PreviousLogs, error)
 }
 
 // flashCookie is __Host-, so only the panel's own name sets it, not a
@@ -186,10 +189,93 @@ type logsData struct {
 	Follow       bool
 	// ReadAt is when they were read.
 	ReadAt time.Time
-	// Restarted says its container restarted: the lines of the one before
-	// are gone.
+	// Restarted says its container restarted; LastExit how it last exited.
 	Restarted bool
 	LastExit  string
+	// Previous is what its node kept of its previous container, if
+	// anything; Showing says the page shows those lines, not the current
+	// container's. PreviousProblem says why they could not be read.
+	Previous        *api.PreviousLogs
+	Showing         bool
+	PreviousProblem string
+}
+
+// Link is this page's address with some of its choices changed: pairs of
+// a name ("level", "q", "follow", "tail", "container") and its value, an
+// empty value dropping it.
+func (d logsData) Link(pairs ...string) string {
+	values := url.Values{}
+	set := func(name, value string) {
+		if value == "" {
+			values.Del(name)
+		} else {
+			values.Set(name, value)
+		}
+	}
+	if d.Level != "all" {
+		set("level", d.Level)
+	}
+	set("q", d.Query)
+	if d.Follow {
+		set("follow", "1")
+	}
+	if d.Tail != 300 {
+		set("tail", strconv.Itoa(d.Tail))
+	}
+	if d.Showing {
+		set("container", "previous")
+	}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		set(pairs[i], pairs[i+1])
+	}
+	if values.Get("level") == "all" {
+		values.Del("level")
+	}
+	if len(values) == 0 {
+		return "?"
+	}
+	return "?" + values.Encode()
+}
+
+// PreviousSaid is how a previous container went: "exit 137, 4m ago".
+func (d logsData) PreviousSaid() string {
+	p := d.Previous
+	if p == nil {
+		return ""
+	}
+	switch {
+	case p.Why == "exited" || p.ExitKnown:
+		return "exit " + strconv.Itoa(p.ExitCode) + ", " + ago(d.ReadAt, p.ExitedAt) + " ago"
+	case p.Why == "stopped":
+		return "stopped " + ago(d.ReadAt, p.At) + " ago"
+	}
+	return "replaced " + ago(d.ReadAt, p.At) + " ago"
+}
+
+// PreviousWhy says in a sentence how the previous container ended.
+func (d logsData) PreviousWhy() string {
+	p := d.Previous
+	if p == nil {
+		return ""
+	}
+	at := p.At
+	if !p.ExitedAt.IsZero() {
+		at = p.ExitedAt
+	}
+	when := ago(d.ReadAt, at) + " ago (" + at.UTC().Format("2006-01-02 15:04:05") + " UTC)"
+	switch {
+	case p.ExitKnown && (p.OOMKilled || p.ExitCode == 137) && p.MemoryMB > 0:
+		how := "was killed"
+		if !p.OOMKilled {
+			how = "was killed (exit 137), most likely"
+		}
+		return "Its app " + how + " for using more than its " + memory(p.MemoryMB) + " of memory " + when + "."
+	case p.ExitKnown:
+		return "Its app exited with code " + strconv.Itoa(p.ExitCode) + " " + when + "."
+	case p.Why == "stopped":
+		return "It was removed as the tenant was suspended, " + when + "."
+	}
+	return "A new container took its place " + when + "."
 }
 
 // ansi matches terminal escapes, which a page shows as noise.
@@ -206,8 +292,12 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	var data []byte
 	var t api.Tenant
 	var nodes api.Nodes
+	var previous api.PreviousLogs
+	var previousErr error
+	agent := s.Actions(s.actor(userOf(r)))
 	if err := all(
-		func() (err error) { data, err = s.Actions(s.actor(userOf(r))).Logs(ctx, name, tail); return },
+		func() (err error) { data, err = agent.Logs(ctx, name, tail); return },
+		func() error { previous, previousErr = agent.PreviousLogs(ctx, name); return nil },
 		func() (err error) { t, err = s.backend.Get(ctx, name); return },
 		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
 	); err != nil {
@@ -226,6 +316,19 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	}
 	if t.Status != nil && t.Status.Restarts > 0 {
 		logs.Restarted, logs.LastExit = true, t.Status.LastExit
+	}
+	var missing *api.Error
+	switch {
+	case previousErr == nil:
+		logs.Previous = &previous
+		if q.Get("container") == "previous" {
+			// What was kept does not change: nothing to follow.
+			logs.Showing, logs.Follow = true, false
+			data = []byte(previous.Lines)
+		}
+	case errors.As(previousErr, &missing) && missing.Status == http.StatusNotFound:
+	default:
+		logs.PreviousProblem = previousErr.Error()
 	}
 	query := strings.ToLower(logs.Query)
 	for _, line := range logLines(ansi.ReplaceAllString(string(data), "")) {

@@ -233,6 +233,7 @@ form.filters label.check { align-self: center; }
 
 /* Segments: a choice of views, as links. */
 nav.seg { display: flex; flex-wrap: wrap; border: 1px solid var(--frame); }
+nav.seg.which { margin-bottom: var(--s3); }
 nav.seg a { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 var(--s3); font-size: 13px; color: var(--dim); text-decoration: none; border-left: 1px solid var(--frame); }
 nav.seg a:first-child { border-left: 0; }
 nav.seg a:hover { color: var(--fg); }

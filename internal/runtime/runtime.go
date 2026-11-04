@@ -131,6 +131,12 @@ type ContainerState struct {
 	RestartPolicy string
 }
 
+// SinceLogs is a runtime that reads only what a container wrote after a
+// time: the lines of its current run, once it was started again in place.
+type SinceLogs interface {
+	LogsSince(ctx context.Context, id string, tail int, since time.Time) ([]byte, error)
+}
+
 // Container is the observed state of one managed container.
 type Container struct {
 	ID      string

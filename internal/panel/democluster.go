@@ -214,13 +214,45 @@ func (a *demoActor) Purge(_ context.Context, name string) error {
 func (a *demoActor) Logs(_ context.Context, name string, tail int) ([]byte, error) {
 	now := time.Now().UTC()
 	var lines []byte
+	if name == "baltic-freight" {
+		// Its container was started again 4m ago, after the kill: its
+		// current run's lines begin there, and its memory climbs again.
+		start := now.Add(-4 * time.Minute)
+		lines = fmt.Appendf(lines, "%s INFO listening on :8080 version=3\n", start.Add(2*time.Second).Format(time.RFC3339))
+		lines = fmt.Appendf(lines, "%s INFO cache warmed entries=48210\n", start.Add(9*time.Second).Format(time.RFC3339))
+	}
 	for i := 12; i > 0; i-- {
 		lines = fmt.Appendf(lines, "%s INFO request method=GET path=/api/freights status=200 took=%dms\n", now.Add(-time.Duration(i)*7*time.Second).Format(time.RFC3339), 3+i%5)
 	}
 	lines = fmt.Appendf(lines, "%s WARN \x1b[33mslow query\x1b[0m table=fuelings took=412ms\n", now.Add(-5*time.Second).Format(time.RFC3339))
 	if name == "baltic-freight" {
 		lines = fmt.Appendf(lines, "%s WARN heap at 241 MB of 256 MB: caches trimmed\n", now.Add(-3*time.Second).Format(time.RFC3339))
-		lines = fmt.Appendf(lines, "%s ERROR export failed: cannot allocate memory path=/api/freights/export rows=184220\n", now.Add(-time.Second).Format(time.RFC3339))
 	}
 	return lines, nil
+}
+
+// PreviousLogs: baltic-freight's node kept the lines of the container the
+// kernel killed 4m ago; no other tenant's container went while the agent
+// kept them.
+func (a *demoActor) PreviousLogs(_ context.Context, name string) (api.PreviousLogs, error) {
+	if name != "baltic-freight" {
+		return api.PreviousLogs{}, &api.Error{Status: 404, Message: "tenant " + name + ": no previous container's lines are kept"}
+	}
+	exited := time.Now().UTC().Add(-4 * time.Minute)
+	var lines []byte
+	line := func(before time.Duration, text string) {
+		lines = fmt.Appendf(lines, "%s %s\n", exited.Add(-before).Format(time.RFC3339), text)
+	}
+	for i := 18; i > 6; i-- {
+		line(time.Duration(i)*9*time.Second, fmt.Sprintf("INFO request method=GET path=/api/freights status=200 took=%dms", 4+i%6))
+	}
+	line(52*time.Second, "INFO export started path=/api/freights/export rows=184220")
+	line(40*time.Second, "WARN heap at 231 MB of 256 MB: caches trimmed")
+	line(31*time.Second, "WARN slow query table=freights took=2210ms")
+	line(22*time.Second, "WARN heap at 247 MB of 256 MB: caches trimmed")
+	line(14*time.Second, "WARN gc pause 840ms heap=251MB")
+	line(6*time.Second, "ERROR export failed: cannot allocate memory path=/api/freights/export rows=184220")
+	line(2*time.Second, "WARN heap at 255 MB of 256 MB")
+	return api.PreviousLogs{Container: "4f1c0e9a77b2", Image: "ghcr.io/example/web@sha256:c23c323553d0a47eedff01b1cfb4a83a8f9b1b03f7f75a454c9ebf1391201156",
+		Why: "exited", ExitedAt: exited, ExitKnown: true, ExitCode: 137, MemoryMB: 256, At: exited.Add(time.Second), Lines: string(lines)}, nil
 }

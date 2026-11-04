@@ -159,3 +159,23 @@ type ErrorBody struct {
 // acts for. It is recorded next to the socket user, never instead of it:
 // anyone who can use the socket controls every tenant anyway.
 const ActorHeader = "X-Murder-Actor"
+
+// PreviousLogs are the last lines of a tenant's previous container, kept
+// by its node as the container exited and was started again, or was
+// replaced or removed: at most 1000 lines or 64 KB.
+type PreviousLogs struct {
+	Container string `json:"container"`
+	Image     string `json:"image,omitempty"`
+	// Why is "exited" (started again in place), "replaced" or "stopped"
+	// (removed as the tenant was suspended).
+	Why       string    `json:"why"`
+	ExitedAt  time.Time `json:"exitedAt,omitzero"`
+	ExitKnown bool      `json:"exitKnown,omitempty"`
+	ExitCode  int       `json:"exitCode,omitempty"`
+	OOMKilled bool      `json:"oomKilled,omitempty"`
+	MemoryMB  int       `json:"memoryMB,omitempty"`
+	// At is when they were kept; Cut says older lines were dropped.
+	At    time.Time `json:"at"`
+	Cut   bool      `json:"cut,omitempty"`
+	Lines string    `json:"lines"`
+}

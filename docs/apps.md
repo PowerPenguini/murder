@@ -203,6 +203,7 @@ murder tenant show acme
 murder tenant secret acme ADMIN_PASSWORD
 murder tenant rotate acme ADMIN_PASSWORD -wait 3m   # new value; the container restarts
 murder tenant logs acme -tail 100
+murder tenant logs acme -previous      # the last lines of the container before (it exited, or was replaced)
 murder tenant suspend acme              # stop it, keep its address (visitors get 503)
 murder tenant resume acme -wait 3m
 murder tenant archive acme              # take it out of service; data, secrets and overrides are kept
@@ -216,6 +217,18 @@ murder app rollout web                  # how web's rollout goes
 murder app delete web                   # once no tenant (live or archived) runs it
 murder events -tenant acme              # the audit log: who changed what, and when
 ```
+
+A container's lines go with it, so a node keeps the last 1000 lines (at
+most 64 KB) of each tenant's previous container in `previous-logs/` beside
+its database, readable by root only, until the next one goes: when the app
+exits and the agent starts it again (its lines up to the exit, with the
+exit code), and when the container is replaced (a roll, a new image, spec,
+limits or secret) or removed as the tenant is suspended. `murder tenant
+logs NAME -previous` and the panel's Logs show them. None are kept when
+the node itself stopped (a power loss, a kernel panic, a failover), when a
+tenant moved to another node (the old node drops them as the tenant
+leaves), for an exit while the agent was down, or for a container an older
+release left to the engine's own restart policy.
 
 An archive is one change: the edge stops routing to the tenant at once, and
 the reconcile pass it starts removes the container and network (a pass that

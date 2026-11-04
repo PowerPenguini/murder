@@ -765,6 +765,21 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, fmt.Errorf("%w: tenant %s runs on node %s: read its logs there", reconcile.ErrElsewhere, name, record.Node))
 		return
 	}
+	if r.URL.Query().Get("previous") != "" {
+		kept, err := s.reconciler.Previous(name)
+		if errors.Is(err, reconcile.ErrNoPrevious) {
+			writeError(w, notFound(fmt.Errorf("tenant %s: no previous container's lines are kept on node %s", name, record.Node)))
+			return
+		}
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, api.PreviousLogs{Container: kept.Container, Image: kept.Image, Why: kept.Why,
+			ExitedAt: kept.ExitedAt, ExitKnown: kept.ExitKnown, ExitCode: kept.ExitCode, OOMKilled: kept.OOMKilled, MemoryMB: kept.MemoryMB,
+			At: kept.At, Cut: kept.Cut, Lines: string(kept.Lines)})
+		return
+	}
 	tail := 200
 	if value := r.URL.Query().Get("tail"); value != "" {
 		parsed, err := strconv.Atoi(value)
@@ -779,7 +794,19 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, notFound(fmt.Errorf("tenant %s has no container", name)))
 		return
 	}
-	output, err := s.runtime.Logs(r.Context(), status.ContainerID, tail)
+	// A container started again in place after its app exited holds the
+	// lines of its runs before; those are the previous container's, kept
+	// apart. Its current run's are those after that exit.
+	var output []byte
+	if since := s.reconciler.LinesSince(name, status.ContainerID); !since.IsZero() {
+		if reader, ok := s.runtime.(runtime.SinceLogs); ok {
+			output, err = reader.LogsSince(r.Context(), status.ContainerID, tail, since)
+		} else {
+			output, err = s.runtime.Logs(r.Context(), status.ContainerID, tail)
+		}
+	} else {
+		output, err = s.runtime.Logs(r.Context(), status.ContainerID, tail)
+	}
 	if err != nil {
 		writeError(w, err)
 		return

@@ -93,7 +93,7 @@ func (r *Reconciler) WatchReplacing() <-chan struct{} {
 func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, existing []runtime.Container) (status Status, err error) {
 	tenant := record.Spec
 	if tenant.Suspended {
-		if err := r.removeContainers(ctx, existing); err != nil {
+		if err := r.removeContainers(ctx, existing, "stopped"); err != nil {
 			return Status{}, err
 		}
 		return Status{Phase: PhaseSuspended}, nil
@@ -217,7 +217,7 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		}
 		current = &runtime.Container{ID: id, Running: true}
 	} else {
-		if err := r.removeContainers(ctx, outdated); err != nil {
+		if err := r.removeContainers(ctx, outdated, "replaced"); err != nil {
 			return Status{}, err
 		}
 		// The engine starts no container by itself (runtime.RestartPolicy):
@@ -237,6 +237,10 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 					exits.count++
 					exits.at = state.ExitedAt
 					exits.last = lastExit(state, tenant.Limits.Or(r.config.DefaultLimits).MemoryMB)
+					// Its lines up to the exit, before the new run's.
+					r.keepPrevious(ctx, tenant.Name, *current, Previous{Why: "exited", Image: tenant.Image,
+						ExitedAt: state.ExitedAt.UTC(), ExitKnown: state.ExitKnown, ExitCode: state.ExitCode, OOMKilled: state.OOMKilled,
+						MemoryMB: tenant.Limits.Or(r.config.DefaultLimits).MemoryMB})
 				}
 				restarted = true
 			}
@@ -345,7 +349,7 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, dataPath 
 		case <-time.After(r.replaceNotice):
 		}
 	}
-	if err := r.removeContainers(ctx, outdated); err != nil {
+	if err := r.removeContainers(ctx, outdated, "replaced"); err != nil {
 		return "", false, err
 	}
 	// With no old container running, the first snapshot holds every write.
@@ -430,7 +434,7 @@ func (r *Reconciler) pruneSnapshots(ctx context.Context, record store.Record) {
 // as it left it. Until then the edges hold its requests.
 func (r *Reconciler) restoreData(ctx context.Context, record store.Record, existing []runtime.Container) error {
 	tenant := record.Spec.Name
-	if err := r.removeContainers(ctx, existing); err != nil {
+	if err := r.removeContainers(ctx, existing, "replaced"); err != nil {
 		return err
 	}
 	if record.DataImage != record.Restore {
@@ -569,14 +573,31 @@ func (r *Reconciler) awaitReplaced(ctx context.Context, record store.Record) {
 	}
 }
 
-func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.Container) error {
+// removeContainers stops and removes containers. With a reason, "replaced"
+// or "stopped", the last lines of the tenant's container are kept first
+// (previous.go), with its exit if it had exited; with none, nothing is
+// kept: the tenant leaves the node, or is purged.
+func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.Container, why string) error {
 	var errs []error
 	for _, container := range containers {
+		var exit runtime.ContainerState
+		if why != "" && !container.Running {
+			exit, _ = r.runtime.Inspect(ctx, container.ID)
+		}
 		if container.Running {
 			if err := r.runtime.Stop(ctx, container.ID, r.config.StopTimeout); err != nil {
 				errs = append(errs, fmt.Errorf("stop %s: %w", container.Name, err))
 				continue
 			}
+		}
+		if tenant := container.Labels[runtime.LabelTenant]; why != "" && tenant != "" {
+			kept := Previous{Why: why}
+			// A container that had exited before it was replaced: its
+			// lines end at that exit.
+			if exit.Pid == 0 && !exit.ExitedAt.IsZero() && exit.ExitKnown && exit.ExitCode != 143 {
+				kept.ExitedAt, kept.ExitKnown, kept.ExitCode, kept.OOMKilled = exit.ExitedAt.UTC(), true, exit.ExitCode, exit.OOMKilled
+			}
+			r.keepPrevious(ctx, tenant, container, kept)
 		}
 		if err := r.runtime.Remove(ctx, container.ID); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", container.Name, err))

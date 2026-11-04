@@ -196,8 +196,19 @@ func TestLogsFilter(t *testing.T) {
 	cluster := NewDemoCluster()
 	server := newServerOf(t, cluster)
 	_, page := get(t, server.URL+"/tenants/baltic-freight/logs?level=error")
-	if !strings.Contains(page, "1 of 15 lines match") || !strings.Contains(page, "cannot allocate memory") || strings.Contains(page, "slow query") {
-		t.Fatalf("errors only:\n%s", page)
+	if !strings.Contains(page, "0 of 16 lines match") || strings.Contains(page, "slow query") {
+		t.Fatalf("errors only, of the current container:\n%s", page)
+	}
+	// The container the kernel killed: its lines up to the kill, kept by
+	// its node, with the same filters and their own counts.
+	_, page = get(t, server.URL+"/tenants/baltic-freight/logs?level=error&container=previous")
+	if !strings.Contains(page, "1 of 19 lines match") || !strings.Contains(page, "cannot allocate memory") || !strings.Contains(page, "Previous container <span class=\"n\">exit 137, 4m ago</span>") ||
+		!strings.Contains(page, "was killed (exit 137), most likely for using more than its 256 MB of memory 4m ago") || strings.Contains(page, "Follow new lines") {
+		t.Fatalf("errors only, of the previous container:\n%s", page)
+	}
+	// A tenant whose node kept nothing says so, and why it may not have.
+	if _, other := get(t, server.URL+"/tenants/acme-logistics/logs"); strings.Contains(other, "Previous container") || !strings.Contains(other, "its node kept none of the one before") {
+		t.Fatalf("no previous container:\n%s", other)
 	}
 	if !strings.Contains(page, `class="t-short"`) || !strings.Contains(page, "Restart container") || !strings.Contains(page, ">unhealthy<") {
 		t.Fatalf("times or the header:\n%s", page)
