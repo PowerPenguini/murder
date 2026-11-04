@@ -123,14 +123,23 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 			head, whole := tenantHeadline(row.Tenant, row.State, used, limit, now)
 			causes = append(causes, cause{head, strings.Join(whole, " ")})
 			if e, ok := parseExit(statusExit(row.Tenant)); ok {
-				n.Reasons = append(n.Reasons, "last "+e.Reason(now))
+				// "out of memory 4m ago": the figures are in the row's
+				// Memory column.
+				if e.Memory {
+					n.Reasons = append(n.Reasons, e.Short(now))
+				} else {
+					n.Reasons = append(n.Reasons, "last "+e.Reason(now))
+				}
 				n.Fixes = append(n.Fixes, fix{"Its last lines before the exit", href + "/logs?container=previous"})
 			} else {
 				n.Fixes = append(n.Fixes, fix{"Logs", href + "/logs"})
 			}
 		}
 		if memHigh {
-			n.Reasons = append(n.Reasons, "memory "+used+" of "+limit)
+			// Said once: an exit out of memory says it already.
+			if !slices.ContainsFunc(n.Reasons, func(r string) bool { return strings.HasPrefix(r, "out of memory") }) {
+				n.Reasons = append(n.Reasons, "memory "+nbsp(used)+" of "+nbsp(limit))
+			}
 			texts = append(texts, "uses "+used+" of its "+limit+" of memory")
 			if len(causes) == 0 {
 				causes = append(causes, cause{" uses " + usedOf(used, limit) + " of memory", "It uses " + used + " of its " + limit + " of memory: the kernel kills it at the limit."})
@@ -263,8 +272,19 @@ func (a navAlerts) Of(section string) int {
 	return 0
 }
 
-// Elsewhere says another section than section has something broken.
+// Elsewhere says another section than section has something broken, even
+// when this one has its own: a phone's header shows only this section, so
+// a failed node must not hide behind a tenant's count. The overview
+// counts every section already.
 func (a navAlerts) Elsewhere(section string) bool {
+	if section == "overview" {
+		return false
+	}
+	for other, n := range map[string]int{"tenants": a.Tenants, "cluster": a.Cluster, "apps": a.Apps} {
+		if other != section && n > 0 {
+			return true
+		}
+	}
 	return a.Overview > 0 && a.Of(section) == 0
 }
 
@@ -460,3 +480,6 @@ func raiseMemory(t api.Tenant) string {
 	}
 	return href + "#memory"
 }
+
+// nbsp keeps a number with its unit: "250 MB".
+func nbsp(text string) string { return strings.ReplaceAll(text, " ", "\u00a0") }

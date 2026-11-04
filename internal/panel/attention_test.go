@@ -122,3 +122,15 @@ func TestAttentionOnThePages(t *testing.T) {
 		t.Fatalf("a tenant that runs as it should is said to have a problem:\n%s", page)
 	}
 }
+
+// A phone's header says something is broken elsewhere even on a page with
+// its own count: a failed node shows from a tenant's page.
+func TestElsewhereShowsBesideAPagesOwnCount(t *testing.T) {
+	a := navAlerts{Overview: 3, Tenants: 1, Cluster: 2}
+	if !a.Elsewhere("tenants") || !a.Elsewhere("events") || a.Elsewhere("overview") {
+		t.Fatalf("elsewhere: tenants %v, events %v, overview %v", a.Elsewhere("tenants"), a.Elsewhere("events"), a.Elsewhere("overview"))
+	}
+	if only := (navAlerts{Overview: 1, Tenants: 1}); only.Elsewhere("tenants") {
+		t.Fatal("the tenants' own problem said to be elsewhere")
+	}
+}

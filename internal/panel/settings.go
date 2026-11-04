@@ -28,8 +28,11 @@ type settingField struct {
 	// what is saved, not yet reviewed.
 	Own, Stored, Proposed bool
 	Value                 string
-	// Mono says the value is code-like (an image).
-	Mono bool
+	// Mono says the value is code-like (an image); Empty that its
+	// Override was sent on with no value.
+	Mono, Empty bool
+	// Inherit is the app's value, raw: an Override turned on starts at it.
+	Inherit string
 	// Kind, Step and Min shape the input.
 	Kind, Step, Min string
 }
@@ -123,9 +126,10 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingFi
 	l, a := t.Spec.Limits, app.Limits
 	// What is in effect and where it comes from is what is saved; the form
 	// is only proposed.
-	field := func(name, label, unit, kind, step, value, saved string, effective string, appSet bool) settingField {
-		return settingField{Name: name, Label: label, Unit: unit, Kind: kind, Step: step, Min: "0", Own: value != "", Value: value,
-			Stored: saved != "", Proposed: value != saved, Effective: effective, Source: source(saved != "", appSet)}
+	field := func(name, label, unit, kind, step, value, saved string, effective string, appSet bool, inherit string) settingField {
+		empty := slices.Contains(form.empty(), name)
+		return settingField{Name: name, Label: label, Unit: unit, Kind: kind, Step: step, Min: "0", Own: value != "" || empty, Value: value, Inherit: inherit,
+			Stored: saved != "", Proposed: value != saved && !empty, Effective: effective, Source: source(saved != "", appSet), Empty: empty}
 	}
 	number := func(n int, unit string) string {
 		if n == 0 {
@@ -142,12 +146,12 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingFi
 		memoryText = memory(l.MemoryMB)
 	}
 	return []settingField{
-		{Name: "image", Label: "Image", Kind: "text", Own: form.Image != "", Value: form.Image, Mono: true, Unit: "",
-			Stored: stored.Image != "", Proposed: form.Image != stored.Image, Effective: shortImage(t.Spec.Image), Source: source(stored.Image != "", true)},
-		field("memoryMB", "Memory", "MB", "number", "1", form.MemoryMB, stored.MemoryMB, memoryText, a.MemoryMB != 0),
-		field("cpus", "CPUs", "cores", "number", "0.05", form.CPUs, stored.CPUs, cpus, a.CPUs != 0),
-		field("pids", "Processes", "at most", "number", "1", form.PIDs, stored.PIDs, number(l.PIDs, ""), a.PIDs != 0),
-		field("diskGB", "Disk", "GB", "number", "1", form.DiskGB, stored.DiskGB, number(l.DiskGB, " GB"), a.DiskGB != 0),
+		{Name: "image", Label: "Image", Kind: "text", Inherit: t.Spec.Image, Own: form.Image != "" || slices.Contains(form.empty(), "image"), Empty: slices.Contains(form.empty(), "image"), Value: form.Image, Mono: true, Unit: "",
+			Stored: stored.Image != "", Proposed: form.Image != stored.Image, Effective: imageDigest(t.Spec.Image), Source: source(stored.Image != "", true)},
+		field("memoryMB", "Memory", "MB", "number", "1", form.MemoryMB, stored.MemoryMB, memoryText, a.MemoryMB != 0, intText(l.MemoryMB)),
+		field("cpus", "CPUs", "cores", "number", "0.05", form.CPUs, stored.CPUs, cpus, a.CPUs != 0, floatText(l.CPUs)),
+		field("pids", "Processes", "at most", "number", "1", form.PIDs, stored.PIDs, number(l.PIDs, ""), a.PIDs != 0, intText(l.PIDs)),
+		field("diskGB", "Disk", "GB", "number", "1", form.DiskGB, stored.DiskGB, number(l.DiskGB, " GB"), a.DiskGB != 0, intText(l.DiskGB)),
 	}
 }
 
@@ -202,7 +206,7 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 		}
 		return own + unit + ", tenant override"
 	}
-	appImage := shortImage(app.Image)
+	appImage := imageDigest(app.Image)
 	pairs := []struct {
 		field, unit, before, after, app string
 	}{
@@ -308,4 +312,9 @@ func exactMemory(mb int) string {
 		return strconv.Itoa(mb/1024) + " GB"
 	}
 	return strconv.Itoa(mb) + " MB"
+}
+
+// settingLabel names a limit's form field as the page does.
+func settingLabel(name string) string {
+	return map[string]string{"image": "Image", "memoryMB": "Memory", "cpus": "CPUs", "pids": "Processes", "diskGB": "Disk"}[name]
 }

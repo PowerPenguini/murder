@@ -60,7 +60,7 @@ func TestActingOnTheCluster(t *testing.T) {
 	cluster, s, server, client := newClusterPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/cluster")
-	for _, want := range []string{"fsn-1", "nbg-1", "hel-1", "· schema 13", `placeholder="type hel-1"`, "None yet."} {
+	for _, want := range []string{"fsn-1", "nbg-1", "hel-1", "· schema 13", `placeholder="hel-1" data-confirm="hel-1"`, "None yet."} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the cluster page lacks %q:\n%s", want, page)
 		}
@@ -324,7 +324,7 @@ func TestOneChangeOfTheClusterAtATime(t *testing.T) {
 	if nodes, _ := cluster.Nodes(context.Background()); nodes.Frozen == "" || !strings.Contains(body, "takes changes again once it ends") {
 		t.Fatalf("thawed during an upgrade:\n%s", body)
 	}
-	if strings.Contains(body, `placeholder="type thaw"`) || strings.Contains(body, `action="/cluster/upgrade"`) || !strings.Contains(body, "/jobs/"+upgrading.ID) {
+	if strings.Contains(body, `data-confirm="thaw"`) || strings.Contains(body, `action="/cluster/upgrade"`) || !strings.Contains(body, "/jobs/"+upgrading.ID) {
 		t.Fatalf("the page offers thawing or upgrading during an upgrade:\n%s", body)
 	}
 	response := uploadBinary(t, client, server, os.Args[0], "upgrade")
@@ -384,7 +384,7 @@ func TestARotationsFreezeIsNotThawedFromThePanel(t *testing.T) {
 	cluster, _, server, client := newClusterPanel(t)
 	_ = cluster.AsCluster("test").Freeze(context.Background(), store.RotationFreeze+"fsn-1")
 	_, page := get(t, server.URL+"/cluster")
-	if !strings.Contains(page, "master key rotation from node fsn-1 runs") || strings.Contains(page, `placeholder="type thaw"`) {
+	if !strings.Contains(page, "master key rotation from node fsn-1 runs") || strings.Contains(page, `data-confirm="thaw"`) {
 		t.Fatalf("the cluster page during a rotation:\n%s", page)
 	}
 	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}, "frozen": {store.RotationFreeze + "fsn-1"}}, server.URL)

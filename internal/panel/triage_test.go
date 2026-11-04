@@ -107,7 +107,7 @@ func TestRemovingAccessNeedsTheName(t *testing.T) {
 }
 
 // The phone's page menu shows the page's own count, and a mark when
-// another page has something broken.
+// another page has something broken, beside its own count too.
 func TestPhoneMenuCountsItsOwnPage(t *testing.T) {
 	cluster := NewDemoCluster()
 	server := newServerOf(t, cluster)
@@ -118,7 +118,7 @@ func TestPhoneMenuCountsItsOwnPage(t *testing.T) {
 	}
 	_, page = get(t, server.URL+"/tenants")
 	summary = between(page, `<details class="navmenu" id="navmenu">`, "</summary>")
-	if !strings.Contains(summary, `<span class="count" title="2 broken here">2</span>`) || strings.Contains(summary, "elsewhere") {
+	if !strings.Contains(summary, `<span class="count" title="2 broken here">2</span>`) || !strings.Contains(summary, `class="elsewhere"`) {
 		t.Fatalf("tenants' menu: %s", summary)
 	}
 }

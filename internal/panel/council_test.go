@@ -466,7 +466,7 @@ func TestSettingsProposalIsNotInEffect(t *testing.T) {
 func TestTenantRowsSayWhy(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, page := get(t, server.URL+"/tenants?show=broken")
-	if !strings.Contains(page, `<div class="reason bad"><span class="st bad"></span>last backup failed, newest 3h old</div>`) || !strings.Contains(page, "blocks its app&#39;s rollout") {
+	if !strings.Contains(page, `<div class="reason bad"><span class="st bad"></span>last backup failed, newest 3h old</div>`) || !strings.Contains(page, "out of memory 4m ago; blocks web&#39;s rollout") {
 		t.Fatalf("broken rows:\n%s", page)
 	}
 	_, page = get(t, server.URL+"/tenants?show=risk")
@@ -894,7 +894,7 @@ func TestTheBrokenFirstPace(t *testing.T) {
 	// The waves are named as the plan named them, on every page: the
 	// first, then the canaries.
 	for _, want := range []string{`<span class="wn">First, now</span><span class="wc">1 tenant · moving, watched</span>`, `<span class="wn">Canaries</span>`,
-		"Canaries (acme-logistics) moves once"} {
+		"Canaries (acme-logistics) moves once baltic-freight has stayed healthy for two minutes, about "} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, body)
 		}
@@ -904,6 +904,11 @@ func TestTheBrokenFirstPace(t *testing.T) {
 	}
 	if _, page := get(t, server.URL+"/tenants/acme-logistics"); !strings.Contains(page, `moves to 4 in its wave "canaries"`) {
 		t.Fatalf("acme-logistics's wave:\n%s", page)
+	}
+	// atlas's own memory covers the change: its page says so, not a bare
+	// link.
+	if _, page := get(t, server.URL+"/tenants/atlas"); !strings.Contains(page, "web&#39;s revision 4 changes nothing for atlas: its own memory (768 MB) stays over what it changed, so it kept its container.") {
+		t.Fatalf("atlas, unchanged:\n%s", page)
 	}
 	ctx := context.Background()
 	baltic, _ := cluster.Get(ctx, "baltic-freight")
@@ -1066,15 +1071,24 @@ func TestChangingATenantsApp(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
 	_, body := get(t, server.URL+"/tenants/atlas")
-	if !strings.Contains(body, `action="/tenants/atlas/settings#review"`) || !strings.Contains(body, "Change its app <select name=\"app\"><option>testapp</option>") {
+	if !strings.Contains(body, `action="/tenants/atlas/settings#review"`) || !strings.Contains(body, "Change its app…</span>") {
 		t.Fatalf("the menu's app change:\n%s", body)
 	}
 	_, body = get(t, server.URL+"/tenants/atlas/settings")
-	if strings.Contains(body, `<label class="field">App <select`) {
-		t.Fatalf("the settings page still chooses the app:\n%s", body)
+	if strings.Contains(between(body, `id="settings"`, `</form>`), `<select name="app">`) {
+		t.Fatalf("the settings form still chooses the app:\n%s", body)
 	}
+	// The review composes what atlas would run: each setting now and after,
+	// its own settings kept, what goes with web, and a warning that its data
+	// was written by another user than testapp runs as.
 	_, body = get(t, server.URL+"/tenants/atlas/settings?do=review&app=testapp")
-	for _, want := range []string{"Review 1 change to atlas", "testapp: its whole spec changes", "Save and restart atlas"} {
+	for _, want := range []string{"Review moving atlas to app testapp", "<th>Now, on web</th><th>After, on testapp</th>",
+		"testapp runs as 10001:10001, but atlas's data at /data was written as 1000:1000.",
+		`<td class="l-main">User</td><td class="dim l-sub" data-label="Now">1000:1000</td><td class="l-sub" data-label="After">10001:10001</td>`,
+		`<td class="l-main">Image</td>`, "Its own, kept over testapp's", `<span class="nowrap">memory 768 MB</span>`, `<span class="nowrap">TZ</span>`, `<td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1</td><td class="l-sub" data-label="After">no limit</td>`,
+		`<td class="l-main">SESSION_KEY (secret)</td><td class="dim l-sub" data-label="Now">hex, 32 bytes</td><td class="l-sub" data-label="After">not set</td>`,
+		"Gone with web", `<span class="nowrap">DATA_DIR</span>`, `<span class="nowrap">SESSION_KEY (secret)</span>`,
+		"Type atlas to confirm.", `data-confirm="atlas"`, `class="danger">Move atlas to testapp</button>`, "data-review"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the app change's review lacks %q:\n%s", want, body)
 		}
@@ -1083,8 +1097,34 @@ func TestChangingATenantsApp(t *testing.T) {
 	for _, name := range []string{"generation", "reviewed", "app", "image", "memoryMB", "cpus", "pids", "diskGB", "env", "secrets", "flags", "canary", "hold"} {
 		form.Set(name, html.UnescapeString(between(body, `name="`+name+`" value="`, `"`)))
 	}
+	// Without its name typed, nothing changes.
+	if _, refused := submit(t, client, server, "/tenants/atlas/settings", form, server.URL); !strings.Contains(refused, "type atlas to change its app") {
+		t.Fatalf("saved without the name typed:\n%s", refused)
+	}
+	if still, _ := cluster.Get(ctx, "atlas"); still.App != "web" {
+		t.Fatalf("atlas moved to %q without its name typed", still.App)
+	}
+	form.Set("confirm", "atlas")
 	submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
 	if after, _ := cluster.Get(ctx, "atlas"); after.App != "testapp" {
 		t.Fatalf("atlas runs app %q", after.App)
+	}
+}
+
+// An Override sent on with no value is said on its row, never taken as
+// "nothing changes".
+func TestAnEmptyOverrideIsSaid(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	acme, _ := cluster.Get(context.Background(), "acme-logistics")
+	form := url.Values{"do": {"review"}, "generation": {strconv.FormatInt(acme.Generation, 10)}, "app": {"web"}, "owns": {"1"}, "own-memoryMB": {"on"}, "memoryMB": {""}}
+	_, body := submit(t, client, server, "/tenants/acme-logistics/settings", form, server.URL)
+	for _, want := range []string{"Memory: Override is on but has no value. Type one, or turn Override off.", `<tr class="setting missing" id="memory">`,
+		`name="own-memoryMB" value="on" class="own-switch" checked`, `aria-invalid="true" data-focus`, "Give a value, or turn Override off", `data-inherit="256"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("an empty override lacks %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Nothing changes: the form holds") {
+		t.Fatalf("an empty override said nothing changes:\n%s", body)
 	}
 }

@@ -5,14 +5,17 @@
 "use strict";
 (() => {
   // As the server compares: spaces around and the case of letters aside,
-  // as a phone may capitalise the first letter. A line under the field
-  // says why its button waits, and when the name matches.
+  // as a phone may capitalise the first letter. The sentence above the
+  // field says what to type, once; a line under it speaks only when what
+  // is typed cannot become the name ("atlass is not atlas").
   const confirmed = (input) => {
     const want = input.dataset.confirm;
-    const ok = input.value.trim().toLowerCase() === want.toLowerCase();
+    const typed = input.value.trim();
+    const ok = typed.toLowerCase() === want.toLowerCase();
     // A field may belong to a form elsewhere on the page (form="...").
-    const buttons = [...input.form.elements].filter((el) => el.matches("button[type=submit], button:not([type])"));
+    const buttons = [...input.form.elements].filter((el) => el.matches("button[type=submit]:not([formnovalidate]), button:not([type])"));
     for (const button of buttons) button.disabled = !ok;
+    const wrong = typed !== "" && !want.toLowerCase().startsWith(typed.toLowerCase());
     let hint = input.nextElementSibling;
     if (!hint || !hint.classList.contains("typed")) {
       hint = document.createElement("p");
@@ -20,9 +23,9 @@
       hint.setAttribute("aria-live", "polite");
       input.after(hint);
     }
-    const label = buttons.length ? buttons[0].textContent.trim() : "the button";
-    hint.textContent = ok ? "Matches: " + label + " is ready." : "Type " + want + " to enable " + label + ".";
-    hint.classList.toggle("ok", ok);
+    hint.textContent = wrong ? typed + " is not " + want + "." : "";
+    hint.hidden = !wrong;
+    input.toggleAttribute("aria-invalid", wrong);
   };
   // A filter hides what does not match as it is typed, and says how many
   // do; sent, the server filters the same way.
@@ -130,9 +133,30 @@
       return;
     }
     if (phone.matches && details.querySelector(":scope > .pop")) asSheet(details);
-    const field = details.querySelector(".pop input:not([type=hidden]), .pop select, .pop textarea") || details.querySelector(".pop button:not(.sheet-close)");
+    // A menu of actions puts focus on its first; an action opened, on its
+    // form's first field; any other menu, on its first field.
+    const act = details.classList.contains("act");
+    const pop = details.querySelector(":scope > .pop");
+    if (!act && !pop) return;
+    const field = act
+      ? details.querySelector("form input:not([type=hidden]), form select, form textarea, form button")
+      : pop.querySelector(":scope > .act > summary") || pop.querySelector("input:not([type=hidden]), select, textarea") || pop.querySelector("button:not(.sheet-close)");
     if (field) field.focus();
   }, true);
+  // An Override turned on starts at the value inherited, selected, so one
+  // keystroke replaces it; it never sends an empty override.
+  document.addEventListener("change", (event) => {
+    const box = event.target;
+    if (!box.matches || !box.matches("input.own-switch") || !box.checked) return;
+    const row = box.closest("tr");
+    const field = row && row.querySelector(".own-field input:not([type=hidden])");
+    if (!field) return;
+    if (field.value === "" && field.dataset.inherit) {
+      field.value = field.dataset.inherit;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    requestAnimationFrame(() => { field.focus(); if (field.select) field.select(); });
+  });
   arm();
   // What is shown once can be copied with a button, which says it did.
   const armCopy = (root) => {

@@ -92,6 +92,8 @@ p { margin: var(--s3) 0; }
 }
 .menu a:hover, .navlist a:hover { color: var(--fg); }
 .menu a.on, .navlist a.on { color: var(--fg); border-left-color: var(--fg); }
+/* The keyboard's ring inside the link, as on buttons, not cut by the edge. */
+.menu a:focus-visible, .navlist a:focus-visible { outline-offset: -2px; }
 .count {
   display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 18px; padding: 0 5px;
   font-size: 11.5px; font-weight: 600; color: #000; background: var(--bad);
@@ -229,7 +231,14 @@ input[type=number].short { width: 8em; }
 textarea { display: block; width: 100%; padding: var(--pad-y) var(--pad-x); font-family: var(--mono); font-size: 12.5px; line-height: 1.6; resize: vertical; tab-size: 2; }
 input[type=file] { color: var(--dim); font: inherit; font-size: 13px; }
 input[type=file]::file-selector-button { background: transparent; color: var(--fg); border: 1px solid var(--frame); padding: 6px var(--s3); font: inherit; font-size: 13px; margin-right: 10px; cursor: pointer; }
-input[type=checkbox] { accent-color: var(--fg); width: 16px; height: 16px; margin: 0; flex: none; }
+/* A checkbox drawn in the grey ramp, as the radios: a square frame, white
+   with a black tick when on; the same 16 px everywhere. */
+input[type=checkbox] { appearance: none; -webkit-appearance: none; width: 16px; height: 16px; margin: 0; flex: none; border: 1.5px solid var(--soft); background: transparent; display: inline-grid; place-content: center; cursor: pointer; }
+input[type=checkbox]::before { content: ""; width: 9px; height: 5px; margin-top: -2px; border-left: 2px solid var(--bg); border-bottom: 2px solid var(--bg); transform: rotate(-45deg) scale(0); }
+input[type=checkbox]:checked { background: var(--fg); border-color: var(--fg); }
+input[type=checkbox]:checked::before { transform: rotate(-45deg) scale(1); }
+input[type=checkbox]:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+input[type=checkbox]:disabled { opacity: 0.5; cursor: default; }
 /* Radios in the one grey ramp, drawn, not the browser's colour: a ring,
    a white dot when chosen, the focus ring as everywhere. */
 input[type=radio] { appearance: none; -webkit-appearance: none; width: 16px; height: 16px; margin: 1px 0 0; flex: none; border: 1.5px solid var(--soft); border-radius: 50%; background: transparent; display: inline-grid; place-content: center; cursor: pointer; }
@@ -238,7 +247,7 @@ input[type=radio]:checked { border-color: var(--fg); }
 input[type=radio]:checked::before { transform: scale(1); }
 input[type=radio]:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 .pace-form fieldset.pace { margin: 0; }
-form.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); }
+form.stack, .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); }
 label.field { display: grid; gap: 6px; color: var(--soft); font-size: 13px; font-weight: 500; }
 label.field > input, label.field > select { justify-self: start; }
 label.field > input:not(.short) { width: min(100%, 420px); }
@@ -277,6 +286,21 @@ details.drop.end .pop, .pagehead details.drop .pop { left: auto; right: 0; }
 .pop.wide { min-width: 360px; }
 .pop > form + form { border-top: 1px solid var(--frame); padding-top: var(--s4); }
 .pop .hint { max-width: 44ch; }
+/* A menu of actions: a line each (its name, what it does); one opens its
+   own form under it, the others close. */
+.pop.acts { gap: 0; padding: var(--s2) 0; width: 340px; }
+.pop.acts > .act + .act, .pop.acts > .act-note { border-top: 1px solid var(--frame); }
+.pop.acts > .act > summary { display: grid; gap: 2px; padding: var(--s3) var(--s4); cursor: pointer; list-style: none; }
+.pop.acts > .act > summary::-webkit-details-marker { display: none; }
+.pop.acts > .act > summary:hover { background: var(--hover, #161616); }
+.pop.acts .act-name { font-weight: 600; }
+.pop.acts .act-say { color: var(--dim); font-size: 12.5px; }
+.pop.acts > .act[open] > summary .act-name { text-decoration: underline; text-underline-offset: 3px; }
+.pop.acts > .act > form { padding: 0 var(--s4) var(--s4); }
+.pop.acts > .act-note { margin: 0; padding: var(--s3) var(--s4); max-width: none; }
+.pop.acts .hint { max-width: none; }
+.pop.acts > .act > summary:focus-visible { outline-offset: -2px; }
+@media (max-width: 760px) { .pop.acts { width: auto; padding-top: var(--s4); } .pop.acts > .act > summary, .pop.acts > .act > form, .pop.acts > .act-note { padding-left: 0; padding-right: 0; } }
 .panel { padding: var(--s5); border: 1px solid var(--frame); background: var(--raised); }
 
 /* ── notices ──────────────────────────────────────── */
@@ -405,7 +429,7 @@ details.event > summary::after { content: ""; position: absolute; right: 2px; to
 details.event[open] > summary::after { top: 10px; transform: rotate(-135deg); }
 details.event .what { font-weight: 500; }
 details.event .what .st::before { margin-right: 6px; }
-details.event .detail { display: block; color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+details.event .detail { display: block; color: var(--dim); font-size: 13px; overflow-wrap: break-word; }
 details.event dl.pairs { margin-top: var(--s3); padding: var(--s3) var(--pad-x); background: var(--raised); border: 1px solid var(--rule); }
 
 @media (max-width: 1000px) {
@@ -807,8 +831,10 @@ fieldset.pace label.check { align-items: flex-start; line-height: 1.45; }
 }
 
 /* Under a typed confirmation: why its button waits, or that it matches. */
-p.typed { margin: calc(-1 * var(--s2)) 0 0; font-size: 12.5px; color: var(--dim); }
-p.typed.ok { color: var(--soft); }
+/* A typed confirmation speaks only when what is typed is wrong. */
+p.typed { margin: calc(-1 * var(--s2)) 0 0; font-size: 12.5px; color: var(--bad); }
+p.typed[hidden] { display: none; }
+input[data-confirm][aria-invalid] { border-color: var(--bad); }
 
 /* A chart's marks: the one read is said under the plot, with a link to
    its event, in a line of fixed height; nothing moves. */
@@ -867,7 +893,13 @@ td.empty a, p.calm a { text-decoration: underline; text-underline-offset: 3px; }
 .annot .desc { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .annot details.nearby { flex: none; position: relative; margin-left: var(--s3); }
 .annot details.nearby > summary { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
-.annot details.nearby ul { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; margin: 0; padding: var(--s2) var(--s3); list-style: none; width: max-content; max-width: min(420px, 86vw); background: var(--raised); border: 1px solid var(--soft); box-shadow: 0 0 0 6px var(--bg); white-space: normal; display: grid; gap: 6px; text-align: left; }
+/* Open, the list takes a line of its own under the row, at every width,
+   pushing what is under it: it never covers the next chart. */
+.legrow:has(details.nearby[open]) { flex-wrap: wrap; }
+.annot:has(details.nearby[open]) { flex-basis: 100%; flex-wrap: wrap; }
+.annot details.nearby[open] { flex-basis: 100%; margin: 6px 0 0; }
+.annot details.nearby ul { margin: 6px 0 0; padding: var(--s2) var(--s3); list-style: none; background: var(--raised); border: 1px solid var(--frame); white-space: normal; display: grid; gap: 6px; text-align: left; }
+.annot details.nearby[open] > summary { text-align: right; }
 .annot details.nearby li a { color: var(--fg); }
 @media (max-width: 760px) {
   /* On a phone the reading has a line of its own, held for it, under the
@@ -875,8 +907,7 @@ td.empty a, p.calm a { text-decoration: underline; text-underline-offset: 3px; }
   .legrow { flex-wrap: wrap; }
   .annot { flex-basis: 100%; justify-content: flex-start; height: 1.6em; }
   .annot:has(details[open]) { height: auto; flex-wrap: wrap; }
-  .annot details.nearby[open] { flex-basis: 100%; margin: 6px 0 0; }
-  .annot details.nearby ul { position: static; max-width: none; width: auto; box-shadow: none; margin-top: 6px; }
+  .annot details.nearby[open] > summary { text-align: left; }
 }
 
 /* Environment and secrets edited like the limits: a switch, and the
@@ -937,19 +968,27 @@ table.settings.grid col.c-effect { width: 19%; }
 table.settings.grid col.c-source { width: 25%; }
 table.settings.grid col.c-own { width: 24%; }
 table.settings.grid col.c-act { width: 10%; }
+/* A table with no row actions has no empty column for them: its Override
+   column takes that width, starting where the others' does. */
+table.settings.grid col.c-own-wide { width: 34%; }
 table.settings.grid td { overflow-wrap: anywhere; }
 table.settings.grid td.own { width: auto; white-space: nowrap; }
 table.settings.grid td.own .own-field { display: inline-flex; align-items: center; gap: 6px; width: calc(100% - 32px); vertical-align: middle; }
 table.settings.grid td.own .own-field input[type=text] { flex: 1 1 auto; width: auto; min-width: 0; }
-table.settings.grid input[type=text], table.settings.grid input[type=number], table.settings.grid select { height: 32px; padding-top: 0; padding-bottom: 0; }
+/* The table's own inputs at its rows' height; a pop-over's inside a row
+   (a typed confirmation) keeps the normal size. */
+table.settings.grid td.own input[type=text], table.settings.grid td.own input[type=number], table.settings.grid td.own select,
+table.settings.grid tr.add input[type=text], table.settings.grid tr.add input[type=number], table.settings.grid tr.add select { height: 32px; padding-top: 0; padding-bottom: 0; }
 table.settings.grid tr.add td.own { white-space: nowrap; }
 table.settings.grid tr.add td.own input[type=text] { width: 100%; }
+table.env.grid tr.add td.own input[type=text] { width: calc(100% - 72px); }
 table.settings.grid td.act { width: auto; text-align: right; }
 table.settings.grid .own-switch { width: 16px; height: 16px; }
 .own-check .sw { display: none; }
 @media (max-width: 1279px) {
   table.settings.grid col.c-source { width: 22%; }
   table.settings.grid col.c-act { width: 13%; }
+  table.settings.grid col.c-own-wide { width: 37%; }
   table.settings.grid td.act details.menu-text > summary.button { white-space: normal; text-align: right; }
   table.settings.grid td.own { white-space: normal; }
   table.settings.grid td.own .own-field { width: 100%; margin-top: var(--s2); }
@@ -985,3 +1024,15 @@ p.summary-line + .lead { margin-top: var(--s1); }
   table.scope td.l-sub[data-label]::before { display: block; width: auto; margin: 0 0 2px; }
 }
 .after-cmd { display: block; margin-top: var(--s2); }
+
+/* An Override sent on with no value: its row says so, in red. */
+table.settings tr.missing td.own input[aria-invalid] { border-color: var(--bad); }
+.problem .inline-form form.stack { max-width: 440px; }
+p.before-actions { margin: 0 0 var(--s3); }
+p.cause a.inline { margin-left: 0; }
+/* A result that wraps keeps its lines clear of its square: a hanging
+   indent the square's width. */
+td[data-label="Result"] .st { white-space: normal; display: inline-block; padding-left: 15px; text-indent: -15px; }
+
+/* The override switch's label is a 32 px target at every width. */
+table.settings .own-check { min-height: 32px; display: inline-flex; align-items: center; }

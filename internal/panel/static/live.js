@@ -20,6 +20,7 @@
   // A page holding an edit (an app's spec, settings, logs) puts in only
   // its parts marked data-live, so the edit is never replaced.
   const partial = () => !!document.querySelector("[data-still]");
+  const reviewing = () => !!document.querySelector("[data-review]");
   const selectChanged = (select) => {
     const initial = [...select.options].findIndex((option) => option.defaultSelected);
     return select.selectedIndex !== (initial < 0 ? 0 : initial);
@@ -155,8 +156,16 @@
       return;
     }
     state.classList.add("on");
-    // A page that is a form to fill (a review, settings) does not follow
-    // the cluster by design: it says so, not that it was paused.
+    // A review holds what you are about to confirm still, by design.
+    if (reviewing()) {
+      state.classList.remove("on");
+      state.classList.add("paused");
+      text.textContent = "Not live: a review";
+      state.title = "A review holds still while you read it; it was read " + age(Date.now() - readAt) + " ago";
+      return;
+    }
+    // A page that is a form to fill (settings) does not follow the
+    // cluster by design: it says so, not that it was paused.
     if (partial() && !document.querySelector("[data-live]")) {
       state.classList.remove("on");
       state.classList.add("paused");
@@ -223,7 +232,7 @@
 
   const tick = async (now) => {
     if (stopped || asking || document.hidden) return;
-    if (!now && pausedBy()) return say();
+    if (!now && (pausedBy() || reviewing())) return say();
     asking = true;
     const abort = new AbortController();
     const late = setTimeout(() => abort.abort(), 8000);

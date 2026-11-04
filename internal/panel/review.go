@@ -661,9 +661,17 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 			break
 		}
 	}
-	soak := "a minute"
-	if r.Wave == 1 {
-		soak = "two minutes"
+	// As the driver: the first cohort and the canaries soak two minutes.
+	soak, soakFor := "a minute", time.Minute
+	if r.Wave <= r.First+1 {
+		soak, soakFor = "two minutes", 2*time.Minute
+	}
+	// The wave that moved last, by its tenants' names.
+	var current []string
+	for _, row := range v.Rows {
+		if row.Moved && row.Wave == r.Wave {
+			current = append(current, row.Name)
+		}
 	}
 	next := "The rollout ends"
 	if len(v.Next) > 0 {
@@ -679,7 +687,13 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 		v.Waits = next + " once " + strings.Join(v.Blockers, ", ") + " " + map[bool]string{true: "is", false: "are"}[len(v.Blockers) == 1] +
 			" healthy on revision " + strconv.FormatInt(r.ToRevision, 10) + " for " + soak + ". A tenant not healthy within 5 minutes of its move pauses the rollout."
 	default:
-		v.Waits = next + " once the wave that moved " + ago(now, r.WaveStarted) + " ago has stayed healthy for " + soak + "."
+		who := "its wave \"" + strings.ToLower(r.WaveName(r.Wave)) + "\" has"
+		if len(current) == 1 {
+			who = current[0] + " has"
+		} else if len(current) > 1 {
+			who = strings.Join(current, ", ") + " have"
+		}
+		v.Waits = next + " once " + who + " stayed healthy for " + soak + ", about " + r.WaveStarted.Add(soakFor).UTC().Format("15:04") + " UTC."
 	}
 	return v
 }

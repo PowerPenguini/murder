@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -266,16 +268,17 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 			continue
 		}
 		attention[n.Subject] = map[bool]int{true: 0, false: 1}[n.Bad]
-		reasons := n.Reasons
-		for _, sub := range n.Subs {
-			if strings.HasPrefix(sub.Text, "It blocks ") {
-				reasons = append(reasons, "blocks its app's rollout")
-			}
-		}
 		for i := range data.Tenants {
-			if data.Tenants[i].Spec.Name == n.Subject {
-				data.Tenants[i].Reason, data.Tenants[i].ReasonBad, data.Tenants[i].Attention = strings.Join(reasons, "; "), n.Bad, true
+			if data.Tenants[i].Spec.Name != n.Subject {
+				continue
 			}
+			reasons := slices.Clone(n.Reasons)
+			for _, sub := range n.Subs {
+				if strings.HasPrefix(sub.Text, "It blocks ") {
+					reasons = append(reasons, "blocks "+data.Tenants[i].App+"'s rollout")
+				}
+			}
+			data.Tenants[i].Reason, data.Tenants[i].ReasonBad, data.Tenants[i].Attention = strings.Join(reasons, "; "), n.Bad, true
 		}
 	}
 	data.Shown, data.Counts = filterTenants(data.Tenants, data.Show, data.Query, data.ByName, clustered, attention)
@@ -464,6 +467,11 @@ func (s *Server) appContext(ctx context.Context, r *http.Request, t api.Tenant, 
 			}
 		}
 	}
+	if p := data.Place; p != nil && !p.Moved && !p.Held && p.From == p.To && s.Apps != nil {
+		if revisions, err := s.Apps(s.actor(userOf(r))).AppRevisions(ctx, t.App); err == nil {
+			data.Unchanged = unchangedBy(t, apps[i], revisions)
+		}
+	}
 	// The app's limit is said to be the cause only of a tenant that uses it,
 	// ran out of memory, and is broken now: not of one merely starting.
 	if m := appMemoryOf(apps[i], tenants, events, now); m != nil && m.Hit[t.Spec.Name] > 0 && data.Broken {
@@ -596,6 +604,8 @@ type tenantData struct {
 	// Rollout is its app's rollout under way, and Place its own row in it.
 	Rollout *rolloutView
 	Place   *rolloutRow
+	// Unchanged says why the rollout leaves it as it runs, when it does.
+	Unchanged string
 	// AppMemory says its app's tenants run out of memory, if they do.
 	AppMemory *appMemory
 	// Operation is what a person did to it lately, and how it went; Me is
@@ -868,6 +878,7 @@ func (s *Server) funcs() template.FuncMap {
 		"every":      every,
 		"imageRepo":  func(ref string) string { r, _ := ImageParts(ref); return r },
 		"imageShort": func(ref string) string { _, short := ImageParts(ref); return short },
+		"breakable":  breakable,
 		"marksJSON":  func(marks []mark) string { return jsonOf(marks) },
 		"groups":     groupEvents,
 		"lower":      strings.ToLower,
@@ -999,6 +1010,13 @@ func ago(now, t time.Time) string {
 }
 
 // shortImage shortens a digest to its first 12 hex digits.
+// imageDigest says an image as the panel does everywhere: its digest's
+// first 12, "sha256:c23c323553d0".
+func imageDigest(ref string) string {
+	_, short := ImageParts(ref)
+	return short
+}
+
 func shortImage(image string) string {
 	if _, digest, ok := strings.Cut(image, "sha256:"); ok && len(digest) >= 12 {
 		return digest[:12]
@@ -1114,4 +1132,64 @@ func tenantsQuery(pairs ...string) template.URL {
 func hasKey2(m map[string]int, key string) bool {
 	_, ok := m[key]
 	return ok
+}
+
+// unchangedBy says why app's newest revision leaves tenant t as it runs:
+// what the revision changed, and t's own settings that stay over it.
+func unchangedBy(t api.Tenant, app api.App, revisions []store.Revision) string {
+	var before *spec.Tenant
+	for i := range revisions {
+		if revisions[i].Revision == app.Revision-1 {
+			before = &revisions[i].Spec
+		}
+	}
+	lead := app.Name + "'s revision " + strconv.FormatInt(app.Revision, 10) + " changes nothing for " + t.Spec.Name
+	if before == nil {
+		return lead + ": its own settings already cover what changed, so it kept its container."
+	}
+	o := t.Overrides
+	var own []string
+	for _, d := range diffSpecs(before.WithDefaults(), app.Spec.WithDefaults()) {
+		switch d.Key {
+		case "memory":
+			if o.Limits.MemoryMB != 0 {
+				own = append(own, "memory ("+memory(o.Limits.MemoryMB)+")")
+			}
+		case "CPUs":
+			if o.Limits.CPUs != 0 {
+				own = append(own, "CPUs ("+strconv.FormatFloat(o.Limits.CPUs, 'f', -1, 64)+")")
+			}
+		case "processes":
+			if o.Limits.PIDs != 0 {
+				own = append(own, "processes ("+strconv.Itoa(o.Limits.PIDs)+")")
+			}
+		case "disk":
+			if o.Limits.DiskGB != 0 {
+				own = append(own, "disk ("+strconv.Itoa(o.Limits.DiskGB)+" GB)")
+			}
+		case "image":
+			if o.Image != "" {
+				own = append(own, "image ("+imageDigest(o.Image)+")")
+			}
+		default:
+			if v, ok := o.Env[d.Key]; ok {
+				own = append(own, d.Key+" ("+v+")")
+			}
+		}
+	}
+	if len(own) == 0 {
+		return lead + ": its own settings already cover what changed, so it kept its container."
+	}
+	return lead + ": its own " + strings.Join(own, ", ") + " stays over what it changed, so it kept its container."
+}
+
+// digestText is a digest as it is written in an event's detail.
+var digestText = regexp.MustCompile(`sha256:[0-9a-f]+`)
+
+// breakable says a detail so a narrow line breaks before an image's
+// digest ("…/web" | "@sha256:…"), never inside it.
+func breakable(text string) template.HTML {
+	escaped := template.HTMLEscapeString(text)
+	escaped = digestText.ReplaceAllString(escaped, `<span class="nowrap">$0</span>`)
+	return template.HTML(strings.ReplaceAll(escaped, "@", "<wbr>@"))
 }

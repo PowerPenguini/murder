@@ -6,7 +6,7 @@
   <div class="actions">
     <details class="drop end">
       <summary class="button">Act on {{$n.Name}}</summary>
-      <div class="pop">{{template "node-actions" (nodeActs $n $d.Self $d.Targets $d.All "node")}}</div>
+      <div class="pop acts">{{template "node-actions" (nodeActs $n $d.Self $d.Targets $d.All "node")}}</div>
     </details>
   </div>
   {{end}}
@@ -16,11 +16,16 @@
 {{if $n.Failed}}
 <div class="problem bad" role="alert">
   <p class="flat">It failed {{ago $n.FailedAt}} ago ({{utc $n.FailedAt}}). Its tenants were failed over to their copies; {{if $d.Moved}}{{len $d.Moved}} moved, listed below{{else}}none was left on it{{end}}{{if $d.Runs}}, but {{len $d.Runs}} with no copy {{if eq (len $d.Runs) 1}}stays{{else}}stay{{end}} stopped on it{{end}}.</p>
+  {{if or $d.Runs $d.Keeps $d.Self}}
   <ol class="steps">
     <li>If it comes back, it rejoins and is emptied first: nothing runs twice.</li>
     <li>To replace it, make an invitation on a live node (<code>sudo murder invite</code>) and join a new server with it.</li>
-    <li>Once it runs no tenant and keeps no copy, remove it here{{if $d.Runs}}; first restore its stopped tenants from their backups{{end}}.</li>
+    <li>Once it runs no tenant and keeps no copy, remove it{{if $d.Runs}}; first restore its stopped tenants from their backups{{end}}.</li>
   </ol>
+  {{else}}
+  <p class="flat spaced"><span class="lead-in">It runs nothing and keeps no copy: remove it, or join a replacement first.</span> To replace it, make an invitation on a live node (<code>sudo murder invite</code>) and join a new server with it; the cluster then has a node to spare again.</p>
+  {{if $d.Acts}}<div class="spaced inline-form">{{template "remove-form" (nodeActs $n $d.Self $d.Targets $d.All "node")}}</div>{{end}}
+  {{end}}
 </div>
 {{else if not $n.Answers}}
 <div class="problem bad" role="alert">
@@ -99,10 +104,10 @@
     </tbody>
   </table>
 </section>{{else}}
-<section>
+{{if not $n.Failed}}<section>
   <div class="head"><h2>Tenants and copies</h2></div>
-  <p class="calm">It runs no tenant{{if $n.Failed}}: every tenant it ran was failed over{{end}}, and keeps no copy.{{if not $d.Self}} It can be removed: Act on {{$n.Name}}.{{end}}</p>
-</section>
+  <p class="flat dim">It runs no tenant and keeps no copy.</p>
+</section>{{end}}
 {{end}}
 
 <section>

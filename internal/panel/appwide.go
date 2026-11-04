@@ -216,13 +216,23 @@ const operationSpan = 15 * time.Minute
 // operationOf is the latest action a person took on t, and how it went:
 // whether its new container runs, healthy.
 func operationOf(t api.Tenant, events []store.Event, now time.Time) *operation {
+	// A container the rollout gave it since (or a failover) is newer than
+	// what a person did: that is what runs, and the rollout's line says it.
+	replaced := false
 	for _, e := range events {
 		if now.Sub(e.At) > operationSpan {
 			return nil
 		}
+		if e.Tenant == t.Spec.Name && !byPeople(e) && (e.Action == "app.rolled-out" || e.Action == "tenant.failed-over") {
+			replaced = true
+			continue
+		}
 		said, ok := operations[e.Action]
 		if !ok || !byPeople(e) || e.Tenant != t.Spec.Name {
 			continue
+		}
+		if replaced {
+			return nil
 		}
 		op := &operation{Event: e, Said: said}
 		if e.Action == "tenant.moved" && t.Node != "" {

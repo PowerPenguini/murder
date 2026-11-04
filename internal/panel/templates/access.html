@@ -71,12 +71,12 @@
                 <p class="hint">Ten codes, shown once; each adds a passkey should you lose yours. Your old codes stop working.</p>
                 <div><button type="submit">Make new recovery codes</button></div></form>{{end}}
               {{range .Passkeys}}{{$name := passkeyName .Label $p.Name}}<form method="post" action="/access" class="stack"><input type="hidden" name="do" value="remove-passkey"><input type="hidden" name="id" value="{{.ID}}">
-                <p class="hint">Removing passkey {{$name}} stops it signing {{if eq $p.Name $d.Me}}you{{else}}{{$p.Name}}{{end}} in{{if eq (len $p.Passkeys) 1}}; it is the only one, so {{if eq $p.Name $d.Me}}you{{else}}{{$p.Name}}{{end}} then need{{if ne $p.Name $d.Me}}s{{end}} a recovery code or an invitation{{end}}. Type its name.</p>
-                <input type="text" name="confirm" placeholder="type {{$name}}" data-confirm="{{$name}}" aria-label="type {{$name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+                <p class="hint">Removing passkey {{$name}} stops it signing {{if eq $p.Name $d.Me}}you{{else}}{{$p.Name}}{{end}} in{{if eq (len $p.Passkeys) 1}}; it is the only one, so {{if eq $p.Name $d.Me}}you{{else}}{{$p.Name}}{{end}} then need{{if ne $p.Name $d.Me}}s{{end}} a recovery code or an invitation{{end}}. Type {{$name}} to confirm.</p>
+                <input type="text" name="confirm" placeholder="{{$name}}" data-confirm="{{$name}}" aria-label="type {{$name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
                 <div><button type="submit" class="danger">Remove passkey {{$name}}</button></div></form>{{end}}
               {{if ne .Name $d.Me}}<form method="post" action="/access" class="stack"><input type="hidden" name="do" value="remove-person"><input type="hidden" name="name" value="{{.Name}}">
-                <p class="hint">Removing {{.Name}} signs them out and stops their passkeys working. Type their name to remove them.</p>
-                <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+                <p class="hint">Removing {{.Name}} signs them out and stops their passkeys working. Type {{.Name}} to confirm.</p>
+                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
                 <div><button type="submit" class="danger">Remove {{.Name}}</button></div></form>{{end}}
             </div>
           </details>
@@ -115,8 +115,8 @@
           <details class="menu">
             <summary aria-label="what to do with {{.Name}}">⋯</summary>
             <div class="pop"><form method="post" action="/access" class="stack"><input type="hidden" name="do" value="remove-device"><input type="hidden" name="name" value="{{.Name}}">
-              <p class="hint">{{.Name}} no longer reaches the panel through the tunnel: its configuration stops working. Type its name.</p>
-              <input type="text" name="confirm" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+              <p class="hint">{{.Name}} no longer reaches the panel through the tunnel: its configuration stops working. Type {{.Name}} to confirm.</p>
+              <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
               <div><button type="submit" class="danger">Remove {{.Name}}</button></div></form></div>
           </details>
         </td>

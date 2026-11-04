@@ -239,7 +239,7 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 		t.Fatalf("the app's page:\n%s", page)
 	}
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"check"}}, server.URL)
-	if !strings.Contains(body, "a newer image of ghcr.io/example/web:stable is in its registry: 5e5e5e5e5e5e") {
+	if !strings.Contains(body, "a newer image of ghcr.io/example/web:stable is in its registry: sha256:5e5e5e5e5e5e") {
 		t.Fatalf("after checking:\n%s", body)
 	}
 	before, _ := agent.App(ctx, "web")

@@ -138,8 +138,40 @@
           mark.setAttribute("x", String(Math.max(0, Math.min(1000 - size, Number(mark.dataset.x) - size / 2))));
         }
       };
+      // Marks closer than 8 px are one glyph: the strongest kind (a
+      // restart over a change), doubled, its link the group's first; the
+      // readout and its "nearby" list say every mark in it.
+      const merge = () => {
+        const width = plot.getBoundingClientRect().width;
+        if (width === 0) return;
+        const items = [...lane.querySelectorAll(":scope > a")].map((a) => {
+          const glyph = a.querySelector("rect.m-restart, rect.m-change");
+          return { a, glyph, x: Number(glyph.dataset.x), restart: glyph.classList.contains("m-restart") };
+        }).sort((p, q) => p.x - q.x);
+        for (const item of items) {
+          item.a.removeAttribute("display");
+          for (const twin of item.a.querySelectorAll(".m-twin")) twin.remove();
+        }
+        let start = 0;
+        while (start < items.length) {
+          let end = start + 1;
+          while (end < items.length && ((items[end].x - items[start].x) * width) / 1000 < 8) end++;
+          const group = items.slice(start, end);
+          if (group.length > 1) {
+            const lead = group.find((item) => item.restart) || group[0];
+            for (const item of group) if (item !== lead) item.a.setAttribute("display", "none");
+            const twin = lead.glyph.cloneNode();
+            twin.classList.add("m-twin");
+            twin.setAttribute("x", String(Math.max(0, Math.min(1000 - units(3), Number(lead.glyph.getAttribute("x")) + units(lead.restart ? 5 : 8)))));
+            lead.glyph.after(twin);
+            lead.a.setAttribute("aria-label", group.length + " marks, the first: " + lead.a.getAttribute("aria-label").replace(/^\d+ marks, the first: /, ""));
+          }
+          start = end;
+        }
+      };
       widen();
-      new ResizeObserver(widen).observe(plot);
+      merge();
+      new ResizeObserver(() => { widen(); merge(); }).observe(plot);
       lane.addEventListener("click", (event) => {
         // A mouse, or the keyboard (Enter: no pointer), opens the event; a
         // touch reads the moment and says the events near it.

@@ -1,14 +1,33 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}{{$f := $d.Form}}
 {{template "tenant-head" $d.Head}}
 
-{{if and $d.Reviewing $d.Review}}
-<section data-still class="near">
+{{if and $d.Reviewing (or $d.Review $d.AppChange)}}
+<section data-still data-review class="near">
   <form method="post" class="review-box" id="review">
     <input type="hidden" name="generation" value="{{$f.Generation}}"><input type="hidden" name="reviewed" value="{{$d.Token}}">
     <input type="hidden" name="app" value="{{$f.App}}"><input type="hidden" name="image" value="{{$f.Image}}">
     <input type="hidden" name="memoryMB" value="{{$f.MemoryMB}}"><input type="hidden" name="cpus" value="{{$f.CPUs}}"><input type="hidden" name="pids" value="{{$f.PIDs}}"><input type="hidden" name="diskGB" value="{{$f.DiskGB}}">
     <input type="hidden" name="env" value="{{$f.Env}}"><input type="hidden" name="secrets" value="{{$f.Secrets}}">
     <input type="hidden" name="flags" value="1"><input type="hidden" name="canary" value="{{$f.Canary}}"><input type="hidden" name="hold" value="{{$f.Hold}}">
+    {{with $d.AppChange}}{{$c := .}}
+    <h2>Review moving {{$t.Spec.Name}} to app {{.To}}</h2>
+    <p class="summary-line">{{.Summary}}.</p>
+    {{if .OwnerAfter}}<div class="notice bad spaced" role="alert"><p class="flat"><span class="lead-in">{{.To}} runs as {{.OwnerAfter}}, but {{$t.Spec.Name}}'s data at {{.DataPath}} was written as {{.OwnerNow}}.</span> Its new container may not be able to read or write it.</p>
+      <p class="flat spaced">Before you move it, check that {{.To}}'s image can use data owned by {{.OwnerNow}}, or set <span class="mono">user: "{{.OwnerNow}}"</span> in {{.To}}'s spec if its image allows.</p></div>{{end}}
+    <table class="list changes spaced">
+      <thead><tr><th>Setting</th><th>Now, on {{.From}}</th><th>After, on {{.To}}</th></tr></thead>
+      <tbody>{{range .Fields}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.Now}}</td><td class="l-sub" data-label="After">{{.After}}</td></tr>{{end}}
+      {{range $d.Review}}{{if or (eq .Field "Canary") (eq .Field "Held")}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="After">{{.To}}</td></tr>{{end}}{{end}}</tbody>
+    </table>
+    <dl class="carry">
+      {{with .Kept}}<div><dt>Its own, kept over {{$c.To}}'s</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
+      {{with .Dropped}}<div><dt>Gone with {{$c.From}}</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
+      {{with .Made}}<div><dt>Made new for it</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
+    </dl>
+    <p class="hint">Its data stays as it is, and {{.To}}'s container starts on it: {{.To}}'s image must understand it. An image may change data as it starts (a migration), and moving back to {{.From}} later does not undo that. {{$t.Spec.Name}} answers no request while its new container starts. Type {{$t.Spec.Name}} to confirm.</p>
+    <input type="text" name="confirm" class="confirm-field" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+    <div class="actions"><button type="submit" name="do" value="save" class="danger">Move {{$t.Spec.Name}} to {{.To}}</button><button type="submit" name="do" value="edit" formnovalidate>Keep editing</button></div>
+    {{else}}
     <h2>Review {{plural (len $d.Review) "change" "changes"}} to {{$t.Spec.Name}}</h2>
     <table class="list changes">
       <thead><tr><th>Setting</th><th>Current</th><th>Proposed</th></tr></thead>
@@ -16,6 +35,7 @@
     </table>
     <p class="hint">{{if $d.Restarts}}Saving gives {{$t.Spec.Name}} a new container{{if $t.Archived}} once it is restored{{else}}: it answers no request for the few seconds it starts{{end}}. Its data stays.{{else}}Rollout flags change no container: they count from {{$t.App}}'s next rollout.{{end}} Exactly these values are saved; to change them, keep editing.</p>
     <div class="actions"><button type="submit" name="do" value="save" class="primary">{{if $d.Restarts}}Save and restart {{$t.Spec.Name}}{{else}}Save{{end}}</button><button type="submit" name="do" value="edit">Keep editing</button></div>
+    {{end}}
   </form>
 </section>
 {{else}}
@@ -28,19 +48,18 @@
     {{with $d.Suggest}}<div class="notice proposed-notice" role="status"><p class="flat">{{.}}</p>{{with $d.SuggestApp}}<p class="flat spaced">{{len .Hit}} of the {{.Inherit}} tenants on {{.App}}'s {{mem .LimitMB}} limit ran out of memory in the last 24 hours: raising {{.App}}'s limit may be the better fix, for all of them. <a href="{{.Href}}">Raise {{.App}}'s memory limit</a></p>{{end}}<div class="actions spaced"><button type="submit" name="do" value="review" class="primary">Review changes</button><a href="/tenants/{{$t.Spec.Name}}/settings" class="button">Discard the proposal</a></div></div>{{end}}
     <div class="head"><h2>Tenant overrides</h2><span class="dim">over app <a href="/apps/{{$t.App}}">{{$t.App}}</a>; without an override, a setting is inherited</span></div>
     <table class="settings list grid">
-      <colgroup><col class="c-name"><col class="c-effect"><col class="c-source"><col class="c-own"><col class="c-act"></colgroup>
-      <thead><tr><th>Setting</th><th>In effect</th><th>Source</th><th>Override</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
+      <colgroup><col class="c-name"><col class="c-effect"><col class="c-source"><col class="c-own-wide"></colgroup>
+      <thead><tr><th>Setting</th><th>In effect</th><th>Source</th><th>Override</th></tr></thead>
       <tbody>
       {{range $d.Fields}}
-        <tr class="setting" id="{{if eq .Name "memoryMB"}}memory{{else}}{{.Name}}{{end}}">
+        <tr class="setting{{if .Empty}} missing{{end}}" id="{{if eq .Name "memoryMB"}}memory{{else}}{{.Name}}{{end}}">
           <td class="l-main"><label for="f-{{.Name}}">{{.Label}}</label></td>
           <td class="l-side{{if .Mono}} mono{{end}}">{{.Effective}}</td>
           <td class="l-sub dim" data-label="Source">{{.Source}}</td>
           <td class="l-sub own" data-label="Override">
             <label class="check own-check"><input type="checkbox" name="own-{{.Name}}" value="on" class="own-switch"{{if .Own}} checked{{end}} aria-label="Override {{.Label}}"><span class="sw" aria-hidden="true">Override</span></label>
-            <span class="own-field"><input type="{{.Kind}}" id="f-{{.Name}}" name="{{.Name}}" value="{{.Value}}"{{if eq .Kind "number"}} min="{{.Min}}" step="{{.Step}}" class="short"{{else}} class="mono-input"{{end}} autocomplete="off" spellcheck="false"{{if .Proposed}} aria-describedby="p-{{.Name}}"{{end}}>{{if eq .Kind "number"}} <span class="dim small">{{.Unit}}</span>{{end}}</span>{{if .Proposed}}<span class="caption" id="p-{{.Name}}">{{if .Own}}proposed; {{.Effective}} now{{else}}proposed: inherit again{{end}}</span>{{end}}
+            <span class="own-field"><input type="{{.Kind}}" id="f-{{.Name}}" name="{{.Name}}" value="{{.Value}}"{{with .Inherit}} data-inherit="{{.}}"{{end}}{{if eq .Kind "number"}} min="{{.Min}}" step="{{.Step}}" class="short"{{else}} class="mono-input"{{end}} autocomplete="off" spellcheck="false"{{if .Proposed}} aria-describedby="p-{{.Name}}"{{else if .Empty}} aria-describedby="p-{{.Name}}" aria-invalid="true" data-focus{{end}}>{{if eq .Kind "number"}} <span class="dim small">{{.Unit}}</span>{{end}}</span>{{if .Proposed}}<span class="caption" id="p-{{.Name}}">{{if .Own}}proposed; {{.Effective}} now{{else}}proposed: inherit again{{end}}</span>{{else if .Empty}}<span class="caption red" id="p-{{.Name}}">Give a value, or turn Override off</span>{{end}}
           </td>
-          <td class="end act"></td>
         </tr>
       {{end}}
       </tbody>
@@ -49,8 +68,8 @@
     <div class="head spaced"><h2>Environment</h2><span class="dim">what {{$t.Spec.Name}} gets; a value of its own replaces {{$t.App}}'s for it alone</span></div>
     <input type="hidden" name="secretrows" value="1">
     <table class="env settings list grid" id="env">
-      <colgroup><col class="c-name"><col class="c-effect"><col class="c-source"><col class="c-own"><col class="c-act"></colgroup>
-      <thead><tr><th>Variable</th><th>In effect</th><th>Source</th><th>Override</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
+      <colgroup><col class="c-name"><col class="c-effect"><col class="c-source"><col class="c-own-wide"></colgroup>
+      <thead><tr><th>Variable</th><th>In effect</th><th>Source</th><th>Override</th></tr></thead>
       <tbody>
       {{range $d.Env}}<tr class="setting">
         <td class="mono l-main">{{.Key}}</td>
@@ -58,12 +77,11 @@
         <td class="dim l-sub" data-label="Source">{{if .New}}Added in this draft{{else if .Own}}Tenant override{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}Inherited from {{$t.App}}{{end}}</td>
         <td class="l-sub own" data-label="Override"><input type="hidden" name="envname" value="{{.Key}}">
           <label class="check own-check"><input type="checkbox" name="envown" value="{{.Key}}" class="own-switch" data-key="{{.Key}}"{{if .DraftOwn}} checked{{end}} aria-label="Override {{.Key}}{{if .New}}; off removes it{{end}}"><span class="sw" aria-hidden="true">Override</span></label>
-          <span class="own-field"><input type="text" name="envvalue" value="{{.Draft}}" class="mono-input" data-key="{{.Key}}" aria-label="{{.Key}}: its own value" autocomplete="off" spellcheck="false"></span></td><td class="end act"></td></tr>{{end}}
+          <span class="own-field"><input type="text" name="envvalue" value="{{.Draft}}" class="mono-input" data-key="{{.Key}}" aria-label="{{.Key}}: its own value" autocomplete="off" spellcheck="false"></span></td></tr>{{end}}
       {{range $i, $_ := (repeat $d.Blank)}}<tr class="add">
         <td class="l-main"><input type="text" name="envnewname" placeholder="NEW_NAME" class="mono-input" aria-label="a variable to add: its name" autocomplete="off" autocapitalize="characters" spellcheck="false"></td>
         <td class="dim l-sub add-help" colspan="2">A new variable: its name, and its value</td>
-        <td class="l-sub own" data-label="Value"><input type="text" name="envnewvalue" placeholder="value" class="mono-input" aria-label="a variable to add: its value" autocomplete="off" spellcheck="false"></td>
-        <td class="end act"><button type="button" class="link remove-row" hidden>Remove</button></td></tr>{{end}}
+        <td class="l-sub own" data-label="Value"><input type="text" name="envnewvalue" placeholder="value" class="mono-input" aria-label="a variable to add: its value" autocomplete="off" spellcheck="false"><button type="button" class="link remove-row" hidden>Remove</button></td></tr>{{end}}
       </tbody>
     </table>
     <div class="row"><button type="submit" name="do" value="addrow" class="small" data-add-row="env" aria-controls="env">Add a variable</button><span class="hint">Off takes the app's value again. Spaces around a value are kept; for a line break, or a value that begins with a quote, quote it as "a\nb".</span></div>
@@ -84,8 +102,8 @@
             <summary class="button small">New value…</summary>
             <div class="pop">
               <div class="stack">
-                <p class="hint">A new value restarts {{$t.Spec.Name}}; what it signed or set with the old one (sessions, a password) stops working. It is not part of the review above. Type its name.</p>
-                <input type="text" name="confirm" form="rotate-{{.Name}}" placeholder="type {{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+                <p class="hint">A new value for {{$t.Spec.Name}} alone{{if not .Own}}: each tenant has its own value of {{.Name}}, so {{$t.App}}'s other tenants keep theirs, and its kind stays {{$t.App}}'s{{end}}. It restarts {{$t.Spec.Name}}, and what it signed or set with the old one (sessions, a password) stops working. It is not part of the review above. Type {{.Name}} to confirm.</p>
+                <input type="text" name="confirm" form="rotate-{{.Name}}" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
                 <div><button type="submit" form="rotate-{{.Name}}" class="danger">Give it a new value</button></div>
               </div>
             </div>

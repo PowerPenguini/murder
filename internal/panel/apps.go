@@ -467,7 +467,7 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 		case err != nil:
 			back("problem", err.Error())
 		case check.Newer:
-			back("done", "a newer image of "+check.App.Tag+" is in its registry: "+shortImage(check.Image))
+			back("done", "a newer image of "+check.App.Tag+" is in its registry: "+imageDigest(check.Image))
 		default:
 			back("done", "app "+name+" runs the newest image of "+check.App.Tag)
 		}
@@ -518,6 +518,17 @@ type settingsForm struct {
 	// form said them.
 	Canary, Hold string
 	Flags        bool
+	// Empty are the settings whose Override is on with no value: said
+	// back, never taken as inheriting again.
+	Empty string
+}
+
+// empty lists the settings sent with Override on and no value.
+func (f settingsForm) empty() []string {
+	if f.Empty == "" {
+		return nil
+	}
+	return strings.Split(f.Empty, ",")
 }
 
 // onOff is a flag as a form says it.
@@ -545,7 +556,7 @@ func (f settingsForm) flagsChanged(t api.Tenant) bool {
 // made from: its app or overrides, not its rollout flags.
 func (f settingsForm) containerChanged(t api.Tenant) bool {
 	was := formOf(t)
-	f.Canary, f.Hold, f.Flags = was.Canary, was.Hold, was.Flags
+	f.Canary, f.Hold, f.Flags, f.Empty = was.Canary, was.Hold, was.Flags, ""
 	return f != was
 }
 
@@ -656,9 +667,13 @@ func formFrom(r *http.Request) settingsForm {
 	// tenant's own: one switched off takes the app's again, whatever its
 	// field holds.
 	if r.FormValue("owns") != "" {
-		for name, field := range map[string]*string{"image": &form.Image, "memoryMB": &form.MemoryMB, "cpus": &form.CPUs, "pids": &form.PIDs, "diskGB": &form.DiskGB} {
-			if r.FormValue("own-"+name) == "" {
+		for _, name := range []string{"image", "memoryMB", "cpus", "pids", "diskGB"} {
+			field := map[string]*string{"image": &form.Image, "memoryMB": &form.MemoryMB, "cpus": &form.CPUs, "pids": &form.PIDs, "diskGB": &form.DiskGB}[name]
+			switch {
+			case r.FormValue("own-"+name) == "":
 				*field = ""
+			case *field == "":
+				form.Empty = strings.TrimPrefix(form.Empty+","+name, ",")
 			}
 		}
 	}
@@ -819,6 +834,8 @@ type settingsData struct {
 	// the app's limit, when it is likely the better fix.
 	Suggest    string
 	SuggestApp *appMemory
+	// AppChange is what another app does to it, when the form moves it.
+	AppChange *appChange
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -885,6 +902,21 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 	data.Kinds = secretKinds
 	data.Blank = max(1, atoi(r.FormValue("blank")))
 	data.BlankSecret = max(1, atoi(r.FormValue("blanksecret")))
+	// Another app: the whole spec it would run, reviewed field by field.
+	if form.App != t.App {
+		found := false
+		for _, app := range apps {
+			if app.Name == form.App {
+				change := appChangeOf(t, app, form)
+				data.AppChange, found = &change, true
+			}
+		}
+		if !found && problem == "" {
+			problem, status = "there is no app "+form.App+": choose one of the apps listed", http.StatusUnprocessableEntity
+			form.App = t.App
+			data.Form = form
+		}
+	}
 	if r.FormValue("do") == "review" {
 		data.Reviewing = true
 		data.Review = settingChanges(t, appSpec, form)
@@ -958,6 +990,16 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 			s.settingsPage(w, r, t, form, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		// An Override on with no value is said, on its row.
+		if form.Empty != "" && r.FormValue("do") == "review" {
+			var said []string
+			for _, name := range form.empty() {
+				said = append(said, settingLabel(name))
+			}
+			r.Form.Set("do", "")
+			s.settingsPage(w, r, t, form, strings.Join(said, ", ")+": Override is on but has no value. Type one, or turn Override off.", http.StatusUnprocessableEntity)
+			return
+		}
 		if r.FormValue("do") == "edit" {
 			r.Form.Set("do", "")
 		}
@@ -977,6 +1019,13 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		// Only what was reviewed is saved.
 		if r.FormValue("reviewed") != reviewToken(name, form) {
 			refuse("these are not the values you reviewed: review them again before saving")
+			return
+		}
+		// Another app is a new spec on its data: its name typed, as for
+		// any change that can stop it serving.
+		if form.App != t.App && strings.TrimSpace(r.FormValue("confirm")) != name {
+			r.Form.Set("do", "review")
+			refuse("type " + name + " to change its app")
 			return
 		}
 		// Its container's settings, then its rollout flags, which change

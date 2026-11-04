@@ -3,7 +3,7 @@
 <h1>{{$d.Title}}</h1>
 {{with $d.Summary}}<p class="summary-line">{{.}}.</p>{{end}}
 <p class="lead">Nothing has changed yet. Look it over; rolling it out stores revision {{next $a.Revision}} of {{$a.Name}}.</p>
-<div data-still hidden></div>
+<div data-still data-review hidden></div>
 {{if and $d.Changed $d.Restart}}
 <section class="near" id="pace">
   <form method="get" action="/apps/{{$a.Name}}/review#pace" class="pace-form" data-pace>
@@ -92,13 +92,13 @@
 {{end}}
 
 <section>
+  {{if and $d.Changed $d.Restart (ne $d.Pace $d.Proposed)}}<p class="hint{{if and (eq $d.Pace "now") $d.ImageTenants}} red{{end}} before-actions">{{if eq $d.Pace "now"}}Not the pace proposed: no health gate{{with $d.ImageTenants}}, and {{plural (len .) "tenant takes" "tenants take"}} a new image at once{{end}}.{{else}}Not the pace proposed: {{if eq $d.Proposed "first"}}{{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} now, the rest in waves{{else}}in waves{{end}} was.{{end}}</p>{{end}}
   <form method="post" action="/apps/{{$a.Name}}" class="actions">
     <input type="hidden" name="updated" value="{{$d.Updated}}">
     {{if eq $d.Do "save"}}<input type="hidden" name="file" value="{{$d.File}}">{{end}}
     {{if eq $d.Do "restore"}}<input type="hidden" name="revision" value="{{$d.Revision}}">{{end}}
     {{if and $d.Changed $d.Restart}}<input type="hidden" name="pace" value="{{$d.Pace}}">{{if eq $d.Pace "first"}}<input type="hidden" name="first" value="{{range $i, $b := $d.Broken}}{{if $i}},{{end}}{{$b}}{{end}}">{{end}}{{end}}
     {{if $d.Changed}}<button type="submit" name="do" value="{{$d.Do}}" class="{{if or (not $d.Restart) (eq $d.Pace $d.Proposed)}}primary{{else}}unproposed{{end}}">{{if not $d.Tenants}}Store the change{{else if not $d.Restart}}Store revision {{next $a.Revision}}: no tenant restarts{{else if eq $d.Pace "now"}}{{if eq $d.Do "restore"}}Return {{plural (len $d.Restart) "tenant" "tenants"}} to revision {{$d.Revision}} now{{else}}Restart {{plural (len $d.Restart) "tenant" "tenants"}} now{{end}}{{else if eq $d.Pace "first"}}Restart {{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} now, the rest in waves{{else if eq $d.Do "restore"}}Return {{plural (len $d.Restart) "tenant" "tenants"}} to revision {{$d.Revision}} in waves{{else}}Roll out to {{plural (len $d.Restart) "tenant" "tenants"}} in waves{{end}}</button>{{end}}
-    {{if and $d.Changed $d.Restart (ne $d.Pace $d.Proposed)}}<span class="hint{{if and (eq $d.Pace "now") $d.ImageTenants}} red{{end}}">{{if eq $d.Pace "now"}}Not the pace proposed: no health gate{{with $d.ImageTenants}}, and {{plural (len .) "tenant takes" "tenants take"}} a new image at once{{end}}.{{else}}Not the pace proposed.{{end}}</span>{{end}}
     {{if eq $d.Do "save"}}<button type="submit" name="do" value="edit">Back to editing</button>{{else}}<a href="/apps/{{$a.Name}}" class="button">Back to {{$a.Name}}</a>{{end}}
   </form>
 </section>
