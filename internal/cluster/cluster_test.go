@@ -1621,3 +1621,156 @@ func TestAnInstalledSnapshotReplacesTheLogsVoters(t *testing.T) {
 		t.Fatalf("Raft refused a change to the voters as read: %v", err)
 	}
 }
+
+// fileSnapshots is a snapshot store in dir holding, oldest first,
+// snapshots at the indexes given, each made of contents.
+func fileSnapshots(t *testing.T, dir string, transport raft.Transport, snapshots ...fileSnapshotOf) *raft.FileSnapshotStore {
+	t.Helper()
+	store, err := raft.NewFileSnapshotStore(dir, len(snapshots), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, snapshot := range snapshots {
+		sink, err := store.Create(raft.SnapshotVersionMax, snapshot.index, 1, snapshot.configuration, snapshot.configurationIndex, transport)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sink.Write([]byte(snapshot.contents)); err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.spoil != nil {
+			snapshot.spoil(t, filepath.Join(dir, "snapshots", sink.ID(), "state.bin"))
+		}
+	}
+	return store
+}
+
+type fileSnapshotOf struct {
+	index, configurationIndex uint64
+	configuration             raft.Configuration
+	contents                  string
+	// spoil, if set, breaks the snapshot's state file.
+	spoil func(t *testing.T, state string)
+}
+
+// A snapshot that does not open is passed over, as Raft passes over it:
+// the voters are read from the newest that does, and the log after it.
+func TestASnapshotThatDoesNotOpenIsPassedOver(t *testing.T) {
+	alone := raft.Configuration{Servers: []raft.Server{{ID: "a", Address: "a", Suffrage: raft.Voter}}}
+	withB := raft.Configuration{Servers: []raft.Server{{ID: "a", Address: "a", Suffrage: raft.Voter}, {ID: "b", Address: "b", Suffrage: raft.Voter}}}
+	for _, test := range []struct {
+		name  string
+		spoil func(t *testing.T, state string)
+	}{{
+		name: "its state does not match its checksum",
+		spoil: func(t *testing.T, state string) {
+			if err := os.WriteFile(state, []byte("bad"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}, {
+		name: "its state is gone",
+		spoil: func(t *testing.T, state string) {
+			if err := os.Remove(state); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			logs, err := raftboltdb.NewBoltStore(filepath.Join(dir, "raft.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer logs.Close()
+			_, transport := raft.NewInmemTransport("a")
+			snapshots := fileSnapshots(t, dir, transport,
+				fileSnapshotOf{index: 10, configurationIndex: 5, configuration: withB, contents: "snapshot"},
+				fileSnapshotOf{index: 20, configurationIndex: 15, configuration: withB, contents: "snapshot", spoil: test.spoil})
+			// After the snapshot Raft restores, at 10, the log makes a
+			// alone at 12; the one it passes over would hide that.
+			if err := logs.StoreLogs(logOf(12, map[uint64]raft.Configuration{1: withB, 12: alone})); err != nil {
+				t.Fatal(err)
+			}
+			r, err := raft.NewRaft(fastRaft("a"), discardFSM{}, logs, logs, snapshots, transport)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = r.Shutdown().Error() }()
+			leading(t, r)
+			c := &Cluster{logs: logs, snapshots: snapshots}
+			configuration, index, err := c.configuration()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := r.GetConfiguration().Configuration(); !reflect.DeepEqual(configuration, want) || index != 12 {
+				t.Fatalf("read %+v at %d, Raft has %+v at 12", configuration, index, want)
+			}
+			if err := r.AddVoter("c", "c", index, time.Second).Error(); err != nil {
+				t.Fatalf("Raft refused a change to the voters as read: %v", err)
+			}
+		})
+	}
+}
+
+// pickyFSM restores no snapshot made of "broken".
+type pickyFSM struct{ discardFSM }
+
+func (pickyFSM) Restore(r io.ReadCloser) error {
+	defer r.Close()
+	data, err := io.ReadAll(r)
+	if err == nil && string(data) == "broken" {
+		err = errors.New("a broken snapshot")
+	}
+	return err
+}
+
+// A snapshot that opens but does not restore, which Raft passes over
+// unseen, makes Raft go by other voters than the ones read: a change is
+// refused at once, with what to do, rather than asked again for good.
+func TestRaftGoingByOtherVotersIsReported(t *testing.T) {
+	alone := raft.Configuration{Servers: []raft.Server{{ID: "a", Address: "a", Suffrage: raft.Voter}}}
+	dir := t.TempDir()
+	logs, err := raftboltdb.NewBoltStore(filepath.Join(dir, "raft.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	_, transport := raft.NewInmemTransport("a")
+	snapshots := fileSnapshots(t, dir, transport,
+		fileSnapshotOf{index: 10, configurationIndex: 5, configuration: alone, contents: "snapshot"},
+		fileSnapshotOf{index: 20, configurationIndex: 15, configuration: alone, contents: "broken"})
+	r, err := raft.NewRaft(fastRaft("a"), pickyFSM{}, logs, logs, snapshots, transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown().Error() }()
+	leading(t, r)
+	c := &Cluster{config: Config{Node: "a"}, raft: r, logs: logs, snapshots: snapshots}
+	_, index, err := c.configuration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 15 {
+		t.Fatalf("read the voters at %d, want the unrestored snapshot's 15", index)
+	}
+	start := time.Now()
+	err = c.changeVoters(func(index uint64) raft.IndexFuture { return r.AddVoter("c", "c", index, time.Second) }, index)
+	if err == nil || errors.Is(err, errVotersChanged) {
+		t.Fatalf("the change: %v", err)
+	}
+	for _, want := range []string{"log entry 5", "as of 15", "restart node a"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("%q does not say %q", err, want)
+		}
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatalf("took %s to give up", time.Since(start))
+	}
+	if _, voter := serverAddress(r.GetConfiguration().Configuration(), "c"); voter {
+		t.Fatal("c was added")
+	}
+}
