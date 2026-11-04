@@ -1036,3 +1036,12 @@ td[data-label="Result"] .st { white-space: normal; display: inline-block; paddin
 
 /* The override switch's label is a 32 px target at every width. */
 table.settings .own-check { min-height: 32px; display: inline-flex; align-items: center; }
+.caption.red { color: var(--bad); font-weight: 600; }
+/* What a tenant keeps and loses with another app: a label and its list,
+   a line each, aligned as a table's columns are. */
+dl.carry { display: grid; grid-template-columns: minmax(10em, max-content) minmax(0, 1fr); gap: var(--s2) var(--s5); margin: var(--s5) 0 var(--s4); }
+dl.carry > div { display: contents; }
+dl.carry dt { color: var(--dim); }
+dl.carry dd { margin: 0; }
+input.confirm-field { max-width: 320px; }
+@media (max-width: 760px) { dl.carry { grid-template-columns: minmax(0, 1fr); gap: 2px; } dl.carry dd { margin-bottom: var(--s3); } input.confirm-field { max-width: none; } }

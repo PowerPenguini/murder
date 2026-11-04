@@ -138,7 +138,7 @@
           mark.setAttribute("x", String(Math.max(0, Math.min(1000 - size, Number(mark.dataset.x) - size / 2))));
         }
       };
-      // Marks closer than 8 px are one glyph: the strongest kind (a
+      // Marks closer than 12 px (as near as the readout lists) are one glyph: the strongest kind (a
       // restart over a change), doubled, its link the group's first; the
       // readout and its "nearby" list say every mark in it.
       const merge = () => {
@@ -155,14 +155,18 @@
         let start = 0;
         while (start < items.length) {
           let end = start + 1;
-          while (end < items.length && ((items[end].x - items[start].x) * width) / 1000 < 8) end++;
+          while (end < items.length && ((items[end].x - items[start].x) * width) / 1000 < 12) end++;
           const group = items.slice(start, end);
           if (group.length > 1) {
             const lead = group.find((item) => item.restart) || group[0];
             for (const item of group) if (item !== lead) item.a.setAttribute("display", "none");
             const twin = lead.glyph.cloneNode();
             twin.classList.add("m-twin");
-            twin.setAttribute("x", String(Math.max(0, Math.min(1000 - units(3), Number(lead.glyph.getAttribute("x")) + units(lead.restart ? 5 : 8)))));
+            // The twin beside its lead: after it, or before it at the lane's end.
+            const leadX = Number(lead.glyph.getAttribute("x"));
+            const size = Number(lead.glyph.getAttribute("width"));
+            const step = units(lead.restart ? 5 : 8);
+            twin.setAttribute("x", String(leadX + step + size <= 1000 ? leadX + step : Math.max(0, leadX - step)));
             lead.glyph.after(twin);
             lead.a.setAttribute("aria-label", group.length + " marks, the first: " + lead.a.getAttribute("aria-label").replace(/^\d+ marks, the first: /, ""));
           }
