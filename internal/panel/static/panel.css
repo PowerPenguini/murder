@@ -662,3 +662,15 @@ section.near { margin-top: var(--s4); }
 .logview .count-line + .hint { margin: 0 0 var(--s2); }
 .review-box { margin-top: 0; }
 table.rollout-table td .st, table.list td.l-sub .st { white-space: normal; }
+.hint.red { color: var(--bad); font-weight: 600; }
+@media (max-width: 760px) { nav.seg:has(> a:nth-child(3):last-child) a:last-child { grid-column: auto; } }
+/* A wrapped log line hangs under its text, not its time. */
+div.logs > div:has(> .ts) { padding-left: 9ch; text-indent: -9ch; }
+.logview:has(#fulltimes:checked) div.logs > div:has(> .ts) { padding-left: 21ch; text-indent: -21ch; }
+div.logs > div.error:has(> .ts) { padding-left: calc(9ch + var(--s2)); }
+@media (max-width: 760px) {
+  .filters .row { flex-wrap: wrap; }
+  .filters .row input[type=search] { flex: 1 1 0; min-width: 0; }
+}
+/* A measure's limit sits under it, the same in every tile. */
+.statgroup .stat .v small { display: block; margin-top: 2px; }

@@ -31,7 +31,7 @@
         <td class="l-sub" data-label="Overrides">{{range $i, $o := .Overrides}}{{if $i}}, {{end}}<span class="mono">{{$o}}</span>{{end}}</td>
       </tr>
     {{end}}{{end}}
-    {{with $d.Whole}}<tr><td class="l-main" colspan="3">{{plural (len .) "tenant" "tenants"}} with no overrides: {{range $i, $w := .}}{{if $i}}, {{end}}<a href="/tenants/{{$w.Name}}">{{$w.Name}}</a>{{if $w.Canary}} <span class="dim">canary</span>{{end}}{{if ne $w.State.Kind "ok"}} <span class="st {{$w.State.Kind}}">{{$w.State.Label}}</span>{{end}}{{end}}</td><td class="l-sub" data-label="Overrides"><span class="dim">No overrides: each takes the spec whole</span></td></tr>{{end}}
+    {{with $d.Whole}}<tr><td class="l-main" colspan="3">{{plural (len .) "tenant" "tenants"}} with no overrides: {{range $i, $w := .}}{{if $i}}, {{end}}<a href="/tenants/{{$w.Name}}">{{$w.Name}}</a>{{if $w.Canary}} <span class="dim">canary</span>{{end}}{{if ne $w.State.Kind "ok"}} <span class="st {{$w.State.Kind}}">{{$w.State.Label}}</span>{{end}}{{end}}</td><td class="l-sub" data-label="Overrides"><span class="dim">none</span></td></tr>{{end}}
     </tbody>
   </table>
   {{if $d.Overridden}}<p class="hint spaced">A tenant's override wins over the app's spec: a change to an overridden field does not reach that tenant. Each tenant's wave is in the plan below.</p>{{end}}

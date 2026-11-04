@@ -76,7 +76,8 @@
       head.className = "sheet-head";
       const title = document.createElement("span");
       title.className = "sheet-title";
-      title.textContent = summary.getAttribute("aria-label") || summary.textContent.trim();
+      const said = summary.getAttribute("aria-label") || summary.textContent.trim();
+      title.textContent = said.charAt(0).toUpperCase() + said.slice(1);
       const close = document.createElement("button");
       close.type = "button";
       close.className = "sheet-close";

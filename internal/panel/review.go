@@ -1,11 +1,11 @@
 package panel
 
 import (
-	"regexp"
 	"context"
 	"fmt"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"

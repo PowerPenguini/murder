@@ -544,7 +544,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// While its new container starts, what was wrong was of the old one.
-	if op := data.Operation; op != nil && op.Kind == "busy" && data.Problem != "" {
+	if op := data.Operation; op != nil && op.Kind == "busy" && data.Broken {
 		data.Problem = "Before: " + data.Problem
 		data.Broken = false
 	}
