@@ -154,6 +154,7 @@
         <td class="mono l-sub" title="{{$r.Spec.Image}}">{{short $r.Spec.Image}}{{if ne $r.Tag $a.Tag}} <span class="dim">{{if $r.Tag}}{{$r.Tag}}{{else}}pinned{{end}}</span>{{end}}</td>
         <td class="when hide-narrow">{{ago $r.CreatedAt}} ago</td>
         <td class="dim hide-narrow">{{who $r.Actor}}</td>
+        <td class="l-sub phone-only" data-label="Stored">{{ago $r.CreatedAt}} ago, by {{who $r.Actor}}</td>
         <td class="end l-side">{{if ne $r.Revision $a.Revision}}<form method="post" class="row"><input type="hidden" name="do" value="review-restore"><input type="hidden" name="revision" value="{{$r.Revision}}"><input type="hidden" name="updated" value="{{$d.Updated}}"><button type="submit" class="small">Review going back</button></form>{{end}}</td>
       </tr>
     {{else}}
@@ -181,7 +182,7 @@
 {{end}}
 
 {{define "app-memory"}}{{$d := .Data}}{{$a := $d.App}}{{with $d.Memory}}<div class="nrow{{if .Bad}} bad{{end}}" role="{{if .Bad}}alert{{else}}status{{end}}" id="memory">
-  <p class="nhead"><strong>Its memory limit is likely too low.</strong></p>
+  <p class="nhead"><strong>{{$a.Name}}'s memory limit is likely too low.</strong></p>
   <p class="cause{{if .Bad}} bad{{end}}">{{len .Hit}} of the {{plural .Inherit "tenant" "tenants"}} on its {{mem .LimitMB}} ran out of memory in 24 h.</p>
   {{if and (not $d.Proposed) $.Edits}}<div class="nacts"><a href="{{.Href}}" class="button primary">Raise {{$a.Name}}'s memory limit</a><span class="dim">to {{mem .ProposeMB}}, reviewed before it rolls out</span></div>{{end}}
   <details class="evidence"><summary>Evidence and affected tenants</summary><div class="evbody">

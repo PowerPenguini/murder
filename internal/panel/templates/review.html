@@ -56,7 +56,7 @@
     {{range $d.Groups}}
       <tr class="{{.Kind}}">
         <td class="l-main">{{range $i, $t := .Tenants}}{{if $i}}, {{end}}<a href="/tenants/{{$t.Name}}">{{$t.Name}}</a>{{if $t.Canary}} <span class="dim">canary</span>{{end}}{{if eq $t.State.Kind "bad"}} <span class="st bad">{{$t.State.Label}}</span>{{end}}{{end}}</td>
-        <td class="l-sub" data-label="Result">{{if eq .Kind "restart"}}<span class="strong">New container:</span> {{end}}{{.Result}}</td>
+        <td class="l-sub" data-label="Result">{{if eq .Kind "restart"}}<span class="strong">New container</span>{{range (index .Tenants 0).Scope.Lines}}<span class="scope-line">{{.}}</span>{{end}}{{else}}{{.Result}}{{end}}</td>
       </tr>
     {{end}}
     </tbody>

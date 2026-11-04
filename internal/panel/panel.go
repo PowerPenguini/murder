@@ -459,7 +459,18 @@ func (s *Server) alertsFor(r *http.Request, nodes api.Nodes, data any) navAlerts
 func (s *Server) write(w http.ResponseWriter, name string, p page, status int) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	if err := s.pages[name].ExecuteTemplate(w, "layout.html", p); err != nil {
+	// Actors read as the reader says them: their own actions are "you".
+	tmpl := s.pages[name]
+	if clone, err := tmpl.Clone(); err == nil {
+		me := s.actor(p.User)
+		tmpl = clone.Funcs(template.FuncMap{"who": func(actor string) string {
+			if sameActor(actor, me) {
+				return "you"
+			}
+			return who(actor)
+		}})
+	}
+	if err := tmpl.ExecuteTemplate(w, "layout.html", p); err != nil {
 		s.log.Error("render a panel page", "page", name, "error", err)
 	}
 }

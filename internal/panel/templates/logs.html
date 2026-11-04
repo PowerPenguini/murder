@@ -2,8 +2,8 @@
 {{template "tenant-head" $d.Head}}
 <section data-still class="near logview">
   {{if $d.Previous}}<nav class="seg which" aria-label="which container's lines">
-    <a href="{{$d.Link "container" ""}}"{{if not $d.Showing}} class="on" aria-current="true"{{end}}>Current container</a>
-    <a href="{{$d.Link "container" "previous" "follow" ""}}"{{if $d.Showing}} class="on" aria-current="true"{{end}}>Previous container <span class="n">{{$d.PreviousSaid}}</span></a>
+    <a href="{{$d.Link "container" ""}}"{{if not $d.Showing}} class="on" aria-current="true"{{end}}>Current<span class="desktop-inline"> container</span></a>
+    <a href="{{$d.Link "container" "previous" "follow" ""}}"{{if $d.Showing}} class="on" aria-current="true"{{end}}>Previous<span class="desktop-inline"> container</span> <span class="n">{{$d.PreviousSaid}}</span></a>
   </nav>{{end}}
   <form method="get" class="filters" role="search">
     <nav class="seg" aria-label="how loud">

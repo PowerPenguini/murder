@@ -191,3 +191,18 @@ func secretText(s spec.Secret) string {
 	}
 	return text
 }
+
+// Lines says it a line each: a changed setting a line, then what stays.
+func (s scope) Lines() []string {
+	if !s.Restarts {
+		return []string{s.Result()}
+	}
+	var lines []string
+	for _, d := range s.Changes {
+		lines = append(lines, capital(d.Text()))
+	}
+	for _, d := range s.Stays {
+		lines = append(lines, capital(d.Key)+" stays "+d.To)
+	}
+	return lines
+}

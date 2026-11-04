@@ -92,7 +92,7 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 		case n.Failed():
 			failed[n.Name] = true
 			out = append(out, notice{Bad: true, Node: true, Subject: n.Name, Href: href, Text: " failed " + ago(now, n.FailedAt) + " ago: its tenants run from their copies, and it keeps none",
-				Head: " failed " + ago(now, n.FailedAt) + " ago: its tenants run from their copies", Primary: &fix{"What to do", href},
+				Head: " failed " + ago(now, n.FailedAt) + " ago: its tenants run from their copies", Primary: &fix{"Replace or remove " + n.Name, href},
 				Evidence: []string{"It stopped answering at " + n.FailedAt.UTC().Format("15:04:05") + " UTC; the cluster failed its tenants over to their copies on the other nodes, and it keeps no copy now."}})
 		case n.State.Kind == "bad":
 			out = append(out, notice{Bad: true, Node: true, Subject: n.Name, Href: href, Text: " does not answer: its tenants stop until it is failed over",
@@ -171,7 +171,7 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 				if cause, _ := b.Cause(); cause != "" {
 					n.Subs = append(n.Subs, sub{Short: cause, Text: cause, Bad: true})
 					if n.Primary == nil {
-						n.Primary = &fix{"What to fix", "/cluster#backups"}
+						n.Primary = &fix{"Fix " + b.Node + "'s backups", "/cluster#backups"}
 					}
 				} else if n.Primary == nil {
 					n.Primary = &fix{"Why its backup failed", "/cluster#backups"}

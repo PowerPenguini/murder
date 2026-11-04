@@ -339,4 +339,17 @@
     for (const hide of form.querySelectorAll(".js-hide")) hide.hidden = true;
     form.addEventListener("change", () => form.requestSubmit());
   }
+  // How logs are shown (wrapped, full times) is kept for the tab, across
+  // their filters, containers and following.
+  for (const id of ["wrap", "fulltimes"]) {
+    const box = document.getElementById(id);
+    if (!box) continue;
+    try {
+      const kept = sessionStorage.getItem("murder-logs-" + id);
+      if (kept !== null) box.checked = kept === "on";
+    } catch {}
+    box.addEventListener("change", () => {
+      try { sessionStorage.setItem("murder-logs-" + id, box.checked ? "on" : "off"); } catch {}
+    });
+  }
 })();

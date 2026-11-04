@@ -16,9 +16,9 @@
   <datalist id="app-names">{{range $d.Apps}}<option value="{{.}}">{{end}}</datalist>
 </form>
 <section class="near">
-  {{if not $d.Since.IsZero}}<p class="count-line">Only the events from {{utc $d.Since}} to {{utc $d.Until}}. <a href="/events{{if $d.Show}}?show={{$d.Show}}{{end}}">All of them</a></p>{{end}}
-  {{if and $d.Hidden (ne $d.Show "all")}}<p class="count-line dim">{{plural $d.Hidden "record" "records"}} of the cluster's own keeping (copies placed, new containers) left out. <a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}show=all">Include them</a></p>{{end}}
+  {{if not $d.Since.IsZero}}<p class="count-line">Only the events from {{utc $d.Since}} to {{utc $d.Until}}. <a href="{{$d.Link "since" "" "until" ""}}">Every time, not only these</a></p>{{end}}
+  {{if and $d.Hidden (ne $d.Show "all")}}<p class="count-line dim">{{plural $d.Hidden "record" "records"}} of the cluster's own keeping (copies placed, new containers) left out. <a href="{{$d.Link "show" "all"}}">Include them</a></p>{{end}}
   {{template "events" $d.Events}}
-  {{if $d.Older}}<div class="more"><a href="/events?{{if $d.Tenant}}tenant={{$d.Tenant}}&amp;{{end}}{{if $d.App}}app={{$d.App}}&amp;{{end}}{{if $d.Show}}show={{$d.Show}}&amp;{{end}}before={{$d.Older}}">Older events</a></div>{{end}}
+  {{if $d.Older}}<div class="more"><a href="{{$d.Link "before" (printf "%d" $d.Older)}}">Older events</a></div>{{end}}
 </section>
 {{end}}

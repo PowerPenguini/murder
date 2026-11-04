@@ -690,6 +690,36 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	s.write(w, "tenant", p, http.StatusOK)
 }
 
+// Link is the events page's address with some of its filters changed,
+// the others kept: pairs of a name (tenant, app, show, since, until,
+// before) and its value, an empty value dropping it.
+func (d eventsData) Link(pairs ...string) string {
+	values := url.Values{}
+	set := func(name, value string) {
+		if value == "" {
+			values.Del(name)
+		} else {
+			values.Set(name, value)
+		}
+	}
+	set("tenant", d.Tenant)
+	set("app", d.App)
+	set("show", d.Show)
+	if !d.Since.IsZero() {
+		set("since", d.Since.UTC().Format(time.RFC3339))
+	}
+	if !d.Until.IsZero() {
+		set("until", d.Until.UTC().Format(time.RFC3339))
+	}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		set(pairs[i], pairs[i+1])
+	}
+	if len(values) == 0 {
+		return "/events"
+	}
+	return "/events?" + values.Encode()
+}
+
 type eventsData struct {
 	// Since and Until bound the events shown, when a window was asked for.
 	Since, Until time.Time
@@ -870,12 +900,22 @@ func (s *Server) funcs() template.FuncMap {
 			}
 			return t.UTC().Format("2006-01-02 15:04:05") + " UTC"
 		},
-		"iso":     func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
-		"query":   func(args ...string) template.URL { return tenantsQuery(args...) },
-		"mem":     memory,
-		"lines":   func(text string) int { return strings.Count(text, "\n") + 1 },
-		"ago":     func(t time.Time) string { return ago(s.now(), t) },
-		"who":     who,
+		"iso":   func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
+		"query": func(args ...string) template.URL { return tenantsQuery(args...) },
+		"mem":   memory,
+		"lines": func(text string) int { return strings.Count(text, "\n") + 1 },
+		"ago":   func(t time.Time) string { return ago(s.now(), t) },
+		"who":   who,
+		// superseded says a failed job was run again since, and that run
+		// ended well: its failure is past.
+		"superseded": func(job *Job, all []*Job) bool {
+			for _, other := range all {
+				if other != job && other.Title == job.Title && other.Started.After(job.Started) && other.Done() && other.Failed == "" && !other.Interrupted {
+					return true
+				}
+			}
+			return false
+		},
 		"repeat":  func(n int) []int { return make([]int, n) },
 		"envshow": envValue,
 		"causeOf": func(b interface{ Cause() (string, string) }) []string {

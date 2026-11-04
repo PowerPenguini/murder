@@ -242,7 +242,7 @@ func TestLogsFilter(t *testing.T) {
 	// The container the kernel killed: its lines up to the kill, kept by
 	// its node, with the same filters and their own counts.
 	_, page = get(t, server.URL+"/tenants/baltic-freight/logs?level=error&container=previous")
-	if !strings.Contains(page, "1 of 19 lines match") || !strings.Contains(page, "cannot allocate memory") || !strings.Contains(page, "Previous container <span class=\"n\">exit 137, 4m ago</span>") ||
+	if !strings.Contains(page, "1 of 19 lines match") || !strings.Contains(page, "cannot allocate memory") || !strings.Contains(page, "Previous<span class=\"desktop-inline\"> container</span> <span class=\"n\">exit 137, 4m ago</span>") ||
 		!strings.Contains(page, "was killed (exit 137), most likely for using more than its 256 MB of memory 4m ago") || strings.Contains(page, "Follow new lines") {
 		t.Fatalf("errors only, of the previous container:\n%s", page)
 	}
@@ -552,7 +552,7 @@ func TestRestoreAtAChosenTimeAndImageReferences(t *testing.T) {
 	cluster := NewDemoCluster()
 	server, client := newServerOf(t, cluster), &http.Client{}
 	_, page := get(t, server.URL+"/cluster?tenant=kowalski-trans&at=2026-11-04+09:00")
-	for _, want := range []string{"backups restore kowalski-trans -at 2026-11-04T09:00:00Z", "On nbg-1, archive it", "Everything it wrote after that time is replaced", `href="/tenants/kowalski-trans/logs"`} {
+	for _, want := range []string{"backups restore kowalski-trans -at 2026-11-04T09:00:00Z", "On nbg-1, archive it", "That backup may be older than the time chosen", `href="/tenants/kowalski-trans/logs"`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the restore lacks %q:\n%s", want, page)
 		}
@@ -602,7 +602,7 @@ func TestTheFixIsAppliedAndTheAdviceGoes(t *testing.T) {
 	if strings.Contains(page, "limit is likely too low") || strings.Contains(page, "Likely web") || strings.Contains(page, "baltic-freight</a> is unhealthy") {
 		t.Fatalf("the advice after the fix:\n%s", page)
 	}
-	if _, page = get(t, server.URL+"/apps/web"); strings.Contains(page, "Its memory limit is likely too low") {
+	if _, page = get(t, server.URL+"/apps/web"); strings.Contains(page, "memory limit is likely too low") {
 		t.Fatalf("the app's advice after the fix:\n%s", page)
 	}
 	// It says the fix held: on the app, and on a tenant it reached.
@@ -691,7 +691,8 @@ func TestActorsAndRestartsInTheAuditLog(t *testing.T) {
 	client := &http.Client{Jar: jar}
 	submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}, "confirm": {"acme-logistics"}}, server.URL)
 	_, page := get(t, server.URL+"/events")
-	if !strings.Contains(page, `acme-logistics</a> was restarted`) || !strings.Contains(page, "the local panel") || strings.Contains(page, "murder-panel socket") {
+	// The reader's own actions are "you"; others' are said by name.
+	if !strings.Contains(page, `acme-logistics</a> was restarted`) || !strings.Contains(page, `<td class="by hide-narrow">you</td>`) || !strings.Contains(page, `<td class="by hide-narrow">jan (panel)</td>`) || strings.Contains(page, "murder-panel socket") {
 		t.Fatalf("a restart in the audit log:\n%s", page)
 	}
 	if _, page = get(t, server.URL+"/tenants/acme-logistics"); !strings.Contains(page, "by you") {
@@ -962,5 +963,20 @@ func TestSettingsRowsWithoutScript(t *testing.T) {
 	}
 	if !strings.Contains(between(body, `name="secrets" value="`, `"`), "API_TOKEN base64 48") {
 		t.Fatalf("the reviewed secrets:\n%s", body)
+	}
+}
+
+// The events' links keep their scope: the tenant, the app and the time
+// window survive "Include them" and "Older events".
+func TestEventLinksKeepTheirScope(t *testing.T) {
+	d := eventsData{Tenant: "atlas", Show: "people", Since: time.Date(2026, 11, 4, 1, 0, 0, 0, time.UTC), Until: time.Date(2026, 11, 4, 2, 0, 0, 0, time.UTC)}
+	if got := d.Link("show", "all"); got != "/events?show=all&since=2026-11-04T01%3A00%3A00Z&tenant=atlas&until=2026-11-04T02%3A00%3A00Z" {
+		t.Fatalf("include them: %s", got)
+	}
+	if got := d.Link("before", "9"); !strings.Contains(got, "before=9") || !strings.Contains(got, "since=") || !strings.Contains(got, "tenant=atlas") || !strings.Contains(got, "show=people") {
+		t.Fatalf("older: %s", got)
+	}
+	if got := d.Link("since", "", "until", ""); got != "/events?show=people&tenant=atlas" {
+		t.Fatalf("every time: %s", got)
 	}
 }

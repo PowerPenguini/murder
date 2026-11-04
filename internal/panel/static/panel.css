@@ -894,3 +894,4 @@ table.secrets td.l-main input, table.env td.l-main input { width: 100%; min-widt
   table.secrets td.own { width: auto; }
   table.secrets td.own .own-field, table.secrets tr.add td.own { flex-wrap: wrap; }
 }
+.scope-line { display: block; }
