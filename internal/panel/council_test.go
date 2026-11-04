@@ -44,7 +44,9 @@ func TestAppChangesAreReviewed(t *testing.T) {
 		`name="pace" value="first" checked`, "baltic-freight now, the rest in waves <span class=\"dim\">(proposed)</span>",
 		"3 tenants also take a new image with it:</span> kowalski-trans, nordwind, vistula-cargo",
 		`<span class="wn">1. First, now</span><span class="wc">baltic-freight</span>`, `<span class="wn">2. Canaries</span><span class="wc">acme-logistics</span>`, "Restart baltic-freight now, the rest in waves",
-		`name="first" value="baltic-freight"`, `name="pace" value="first">`} {
+		`name="first" value="baltic-freight"`, `name="pace" value="first">`,
+		// One line first, and the proposed pace's button filled.
+		"Memory 256 MB → 512 MB; 5 restart, 3 also take a new image; baltic-freight first, the rest in waves.", `class="primary">Restart baltic-freight now`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the review lacks %q:\n%s", want, body)
 		}
@@ -60,7 +62,8 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	_, now := submit(t, client, server, "/apps/web", url.Values{"do": {"review"}, "file": {changed}, "updated": {updated}, "pace": {"now"}}, server.URL)
 	if !strings.Contains(now, "Together, now:</span> acme-logistics, baltic-freight, kowalski-trans, nordwind, vistula-cargo restart at once") || !strings.Contains(now, "No health gate") ||
 		!strings.Contains(now, "Restart 5 tenants now") || strings.Contains(now, `class="waves plan"`) || strings.Contains(now, "starts again with the canaries") ||
-		!strings.Contains(now, "Every tenant now gives them that image at once") {
+		!strings.Contains(now, "Every tenant now gives them that image at once") || !strings.Contains(now, `class="unproposed">Restart 5 tenants now`) ||
+		!strings.Contains(now, "Not the pace proposed: no health gate, and 3 tenants take a new image at once.") {
 		t.Fatalf("the now review:\n%s", now)
 	}
 	if app, _ := agent.App(ctx, "web"); app.Revision != 3 {
@@ -413,7 +416,7 @@ func TestClusterResilienceAndBackups(t *testing.T) {
 	server := newServerOf(t, cluster)
 	_, page := get(t, server.URL+"/cluster?tenant=kowalski-trans")
 	for _, want := range []string{"Changes go through: 2 of 3 voters answer; a majority is 2", "One more node down would stop all changes", "nordwind and vistula-cargo are still catching up",
-		`What <a href="/nodes/nbg-1">nbg-1</a> said`, "403 Forbidden", "sudo murder backups now",
+		"What nbg-1 said", "What to check", "403 Forbidden", "sudo murder backups now",
 		// A refused key: what to fix first, not to try again.
 		"nbg-1&#39;s backup key cannot write to the bucket (403).", "it needs s3:PutObject on the bucket&#39;s backups/ prefix", "Once fixed, back it up", "How to restore kowalski-trans", "backups restore kowalski-trans -at 20", `open id="restore"`} {
 		if !strings.Contains(page, want) {

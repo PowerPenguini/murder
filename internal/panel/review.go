@@ -181,7 +181,10 @@ type reviewData struct {
 	// the rest in waves) or now; Paces those offered, the default marked.
 	// ImageTenants are the restarting tenants whose image changes too,
 	// ImageChange how (the first of them).
-	Pace         string
+	Pace     string
+	Proposed string
+	// Summary says the change and its reach in a line, before the rest.
+	Summary      string
 	Paces        []paceOption
 	ImageTenants []string
 	ImageChange  string
@@ -438,11 +441,38 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 	}
 	var proposed string
 	data.Paces, proposed = pacesOf(restartNames, data.Broken, data.ImageTenants)
-	data.Pace = proposed
+	data.Pace, data.Proposed = proposed, proposed
 	if asked := r.FormValue("pace"); slices.ContainsFunc(data.Paces, func(p paceOption) bool { return p.Value == asked }) {
 		data.Pace = asked
 	}
 	data.ReviewDo = map[string]string{"save": "review", "restore": "review-restore", "update": "review-update"}[data.Do]
+	// In a line: what changes, how many restart, who takes a new image
+	// with it, and the pace.
+	var said []string
+	for _, d := range diffSpecs(app.Spec.WithDefaults(), next) {
+		said = append(said, capital(d.Text()))
+	}
+	if len(said) > 3 {
+		said = append(said[:3], plural(len(said)-3, "more setting", "more settings"))
+	}
+	summary := strings.Join(said, ", ")
+	if len(data.Restart) > 0 {
+		summary += "; " + strconv.Itoa(len(data.Restart)) + " restart"
+		if n := len(data.ImageTenants); n > 0 && data.NewImage == "" {
+			summary += ", " + strconv.Itoa(n) + " also take a new image"
+		}
+		switch data.Pace {
+		case "first":
+			summary += "; " + strings.Join(data.Broken, ", ") + " first, the rest in waves"
+		case "now":
+			summary += "; all at once"
+		default:
+			summary += "; in waves"
+		}
+	} else if len(data.Tenants) > 0 {
+		summary += "; no tenant restarts"
+	}
+	data.Summary = summary
 	// The plan the page shows is the pace's.
 	switch data.Pace {
 	case "now":

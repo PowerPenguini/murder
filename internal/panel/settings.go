@@ -214,7 +214,12 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 	}
 	for _, p := range pairs {
 		if p.before != p.after {
-			out = append(out, settingChange{p.field, say(p.before, p.unit, p.app), say(p.after, p.unit, p.app)})
+			from, to := say(p.before, p.unit, p.app), say(p.after, p.unit, p.app)
+			// Memory as the panel says it everywhere: 1 GB, not 1024 MB.
+			if p.field == "Memory" {
+				from, to = sayMemory(p.before, p.app, t.App), sayMemory(p.after, p.app, t.App)
+			}
+			out = append(out, settingChange{p.field, from, to})
 		}
 	}
 	before, _ := was.overrides()
@@ -282,4 +287,25 @@ func reviewToken(tenant string, form settingsForm) string {
 		hash.Write([]byte{0})
 	}
 	return hex.EncodeToString(hash.Sum(nil))[:32]
+}
+
+// sayMemory says a memory setting of the review: its own, the app's, or
+// the node's default.
+func sayMemory(own, app, appName string) string {
+	switch {
+	case own != "":
+		return exactMemory(atoi(own)) + ", tenant override"
+	case app == "" || app == "0":
+		return "the node's default"
+	}
+	return exactMemory(atoi(app)) + ", inherited from " + appName
+}
+
+// exactMemory says an amount of memory without rounding it: in GB when
+// whole ones, else in MB.
+func exactMemory(mb int) string {
+	if mb >= 1024 && mb%1024 == 0 {
+		return strconv.Itoa(mb/1024) + " GB"
+	}
+	return strconv.Itoa(mb) + " MB"
 }

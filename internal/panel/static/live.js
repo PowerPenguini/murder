@@ -73,6 +73,7 @@
       return;
     }
     document.body.classList.add("stale");
+    for (const count of document.querySelectorAll(".side .count, .navmenu .count")) count.title = "as of " + clock(readAt);
     // The node it cannot reach is not said to be up: no one knows.
     if (lostWhy) {
       for (const cell of document.querySelectorAll('[data-node-state="' + CSS.escape(node) + '"]')) {
@@ -150,9 +151,13 @@
       return;
     }
     state.classList.add("on");
+    // A page that is a form to fill (a review, settings) does not follow
+    // the cluster by design: it says so, not that it was paused.
     if (partial() && !document.querySelector("[data-live]")) {
-      text.textContent = "Paused · " + age(Date.now() - readAt);
-      state.title = "Automatic updates paused on this page: it holds a form; read " + age(Date.now() - readAt) + " ago";
+      state.classList.remove("on");
+      state.classList.add("paused");
+      text.textContent = "Not live: a form";
+      state.title = "This page holds a form and does not follow the cluster; it was read " + age(Date.now() - readAt) + " ago";
       return;
     }
     text.textContent = "Live · " + age(Date.now() - readAt);

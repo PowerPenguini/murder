@@ -1,8 +1,13 @@
 // jscheck.mjs BASE (node internal/panel/demo/jscheck.mjs http://127.0.0.1:7485, with the demo running): checks the panel's scripts by driving Chromium.
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 const base = process.argv[2] || "http://127.0.0.1:7485";
 const port = 9700 + Math.floor(Math.random() * 90);
-const chrome = spawn("chromium", ["--headless=new", "--no-sandbox", "--disable-gpu", `--remote-debugging-port=${port}`, `--user-data-dir=/tmp/jscheck-${port}`, "about:blank"], { stdio: "ignore" });
+// Chromium's profile, removed as the check ends.
+const profile = `${process.env.TMPDIR || tmpdir()}/jscheck-${port}`;
+process.on("exit", () => { try { rmSync(profile, { recursive: true, force: true }); } catch {} });
+const chrome = spawn("chromium", ["--headless=new", "--no-sandbox", "--disable-gpu", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let target;
 for (let i = 0; i < 50 && !target; i++) { await sleep(200); try { target = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((x) => x.type === "page"); } catch {} }
@@ -60,5 +65,5 @@ check("two ArrowDowns reached every tenant now, focus kept", after2.pace === "no
 check("the address is a GET review with the pace", after2.url.includes("/apps/web/review?") && after2.url.includes("pace=now") && url1.includes("/apps/web/review?"), after2.url);
 dialogs = 0; await send("Page.reload"); await sleep(1500);
 check("a reload asks nothing and keeps the pace", dialogs === 0 && (await ev(`document.querySelector("input[name=pace]:checked").value`)) === "now");
-ws.close(); chrome.kill();
+ws.close(); chrome.kill(); await sleep(500);
 process.exit(results.every(Boolean) ? 0 : 1);

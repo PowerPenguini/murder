@@ -62,7 +62,7 @@
 </section>
 {{end}}
 
-<section>
+{{if or $d.Runs $d.Keeps}}<section>
   <div class="head"><h2>Tenants it runs</h2></div>
   <table class="list rows">
     <thead><tr><th>Tenant</th><th>State</th><th>Copy</th><th>Newest backup</th></tr></thead>
@@ -98,7 +98,12 @@
     {{end}}
     </tbody>
   </table>
+</section>{{else}}
+<section>
+  <div class="head"><h2>Tenants and copies</h2></div>
+  <p class="calm">It runs no tenant{{if $n.Failed}}: every tenant it ran was failed over{{end}}, and keeps no copy.{{if not $d.Self}} It can be removed: Act on {{$n.Name}}.{{end}}</p>
 </section>
+{{end}}
 
 <section>
   <div class="head"><h2>Events that name it</h2><a href="/events?all=1" class="dim">All events</a></div>

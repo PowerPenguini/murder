@@ -956,3 +956,20 @@ table.settings.grid tr.setting:not(:has(.own-switch:checked)) .own-field { displ
 /* A row's action is a quiet text control that opens its menu. */
 table.settings.grid td.act details.menu-text > summary.button { border: 0; padding: 4px 0; min-height: 0; background: none; color: var(--fg); text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
 table.settings.grid td.act details.menu-text > summary.button::after { display: none; }
+
+/* While the page shows old data, the side bar's counts and marks are old
+   too: grey and outlined, not red. */
+body.stale .count { background: transparent; color: #7c7c7c; box-shadow: inset 0 0 0 1px #4a4a4a; }
+body.stale .elsewhere { background: transparent; box-shadow: inset 0 0 0 1px #7c7c7c; }
+/* A change at a pace other than the one proposed: an outlined button,
+   with the reason beside it. */
+button.unproposed { background: transparent; color: var(--fg); border-color: var(--fg); }
+/* A review's change and reach in a line, before the rest. */
+p.summary-line { margin: calc(-1 * var(--s2)) 0 var(--s4); font-weight: 600; }
+@media (max-width: 760px) {
+  /* What a change does to each group of tenants: full width under their
+     names. */
+  table.scope td.l-sub[data-label] { padding-left: 0; }
+  table.scope td.l-sub[data-label]::before { display: block; width: auto; margin: 0 0 2px; }
+}
+.after-cmd { display: block; margin-top: var(--s2); }
