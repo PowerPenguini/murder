@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"maps"
 	"net/url"
 	"slices"
 	"strconv"
@@ -27,27 +28,58 @@ func outOfMemory(e store.Event) bool {
 	return e.Action == "tenant.restarted" && (strings.Contains(e.Detail, "137") || strings.Contains(e.Detail, "out of memory"))
 }
 
-// appMemory is an app whose tenants run out of memory.
+// appMemory is an app whose tenants run out of memory, said from the
+// tenants as they are configured now: which use the app's limit, which
+// keep their own, and which a change of the app's limit would reach.
 type appMemory struct {
 	App string
-	// Hit are the tenants that ran out of memory in oomSpan, by name, with
-	// how many times; Live counts the app's live tenants.
-	Hit  map[string]int
-	Live int
-	// LimitMB is the app's memory limit; Propose twice it.
+	// Hit are the tenants that use the app's limit and ran out of memory in
+	// oomSpan, by name, with how many times; Inherit counts the live
+	// tenants that use the app's limit.
+	Hit     map[string]int
+	Inherit int
+	// Own are the tenants that keep a limit of their own, by name, with it
+	// in MB; OwnHit those of them that ran out of memory too.
+	Own    map[string]int
+	OwnHit []string
+	// Reaches are the tenants a change of the app's limit reaches now;
+	// Held those it reaches only once released, Suspended once resumed.
+	Reaches, Held, Suspended []string
+	// LimitMB is the app's memory limit; ProposeMB twice it, at least 512.
 	LimitMB, ProposeMB int
+	// Bad says one of the tenants it explains is broken now: the same red
+	// everywhere the problem shows.
+	Bad bool
 }
 
-// Text says it, as a sentence after the app's name.
+// Text says it, as a sentence after the app's name: the counts are of the
+// tenants that use the app's limit, which is what its change would touch.
 func (m appMemory) Text() string {
-	text := ": " + strconv.Itoa(len(m.Hit)) + " of its " + plural(m.Live, "tenant", "tenants") + " ran out of memory in the last 24 hours"
-	if len(m.Hit) == m.Live {
-		text = ": all " + plural(m.Live, "tenant", "tenants") + " ran out of memory in the last 24 hours"
-	}
-	if m.LimitMB > 0 {
-		text += " (limit " + memory(m.LimitMB) + ")"
+	text := ": " + strconv.Itoa(len(m.Hit)) + " of the " + plural(m.Inherit, "tenant", "tenants") + " on its " + memory(m.LimitMB) + " limit ran out of memory in the last 24 hours"
+	if len(m.Hit) == m.Inherit {
+		text = ": all " + plural(m.Inherit, "tenant", "tenants") + " on its " + memory(m.LimitMB) + " limit ran out of memory in the last 24 hours"
 	}
 	return text
+}
+
+// Exceptions says the tenants a change of the app's limit does not reach,
+// or not now: "atlas keeps its own 768 MB; test-staging is held".
+func (m appMemory) Exceptions() string {
+	var parts []string
+	for _, name := range slices.Sorted(maps.Keys(m.Own)) {
+		part := name + " keeps its own " + memory(m.Own[name])
+		if slices.Contains(m.OwnHit, name) {
+			part += " (and ran out of it too)"
+		}
+		parts = append(parts, part)
+	}
+	for _, name := range m.Held {
+		parts = append(parts, name+" is held on its revision")
+	}
+	for _, name := range m.Suspended {
+		parts = append(parts, name+" is suspended, and takes it when resumed")
+	}
+	return strings.Join(parts, "; ")
 }
 
 // Href is where its fix is reviewed: the app's spec with twice its limit.
@@ -56,24 +88,58 @@ func (m appMemory) Href() string {
 }
 
 // appMemoryOf is the app's tenants that ran out of memory since now
-// less oomSpan, if enough did to say it is the app's.
+// less oomSpan, if enough of those on the app's limit did to say the limit
+// is likely too low. Exit 137 is a likely memory kill, not a proof: the
+// panel proposes, it does not promise.
 func appMemoryOf(app api.App, tenants []api.Tenant, events []store.Event, now time.Time) *appMemory {
-	m := appMemory{App: app.Name, Hit: map[string]int{}, LimitMB: app.Spec.Limits.MemoryMB}
-	live := map[string]bool{}
+	m := appMemory{App: app.Name, Hit: map[string]int{}, Own: map[string]int{}, LimitMB: app.Spec.Limits.MemoryMB}
+	if m.LimitMB == 0 {
+		return nil
+	}
+	inherits, owns := map[string]bool{}, map[string]bool{}
+	broken := map[string]bool{}
+	slices.SortFunc(tenants, func(a, b api.Tenant) int { return strings.Compare(a.Spec.Name, b.Spec.Name) })
 	for _, t := range tenants {
-		if t.App == app.Name && !t.Archived() {
-			m.Live++
-			live[t.Spec.Name] = true
+		if t.App != app.Name || t.Archived() {
+			continue
+		}
+		if mb := t.Overrides.Limits.MemoryMB; mb != 0 {
+			m.Own[t.Spec.Name] = mb
+			owns[t.Spec.Name] = true
+			continue
+		}
+		inherits[t.Spec.Name] = true
+		m.Inherit++
+		switch {
+		case t.Hold:
+			m.Held = append(m.Held, t.Spec.Name)
+		case t.Spec.Suspended:
+			m.Suspended = append(m.Suspended, t.Spec.Name)
+		default:
+			m.Reaches = append(m.Reaches, t.Spec.Name)
+		}
+		if _, bad := tenantProblem(t, tenantState(t)); bad && !t.Spec.Suspended {
+			broken[t.Spec.Name] = true
 		}
 	}
 	for _, e := range events {
-		if e.At.After(now.Add(-oomSpan)) && outOfMemory(e) && live[e.Tenant] && (e.App == "" || e.App == app.Name) {
+		if !e.At.After(now.Add(-oomSpan)) || !outOfMemory(e) || (e.App != "" && e.App != app.Name) {
+			continue
+		}
+		switch {
+		case inherits[e.Tenant]:
 			m.Hit[e.Tenant]++
+		case owns[e.Tenant] && !slices.Contains(m.OwnHit, e.Tenant):
+			m.OwnHit = append(m.OwnHit, e.Tenant)
 		}
 	}
-	if len(m.Hit) < oomTenants || m.Live < 2 {
+	if len(m.Hit) < oomTenants || m.Inherit < 2 {
 		return nil
 	}
+	for name := range m.Hit {
+		m.Bad = m.Bad || broken[name]
+	}
+	slices.Sort(m.OwnHit)
 	m.ProposeMB = max(2*m.LimitMB, 512)
 	return &m
 }

@@ -1,11 +1,11 @@
 {{define "content"}}{{$d := .Data}}
 <h1>Events</h1>
-<p class="lead">The audit log, newest first: what operators did, and what broke. Open an event for its exact time and whole record.</p>
+<p class="lead">The audit log, newest first: what operators did, what rolled out, and what broke. Open an event for its exact time and whole record.</p>
 <form class="filters events-filters" method="get" action="/events">
   <label class="field">Tenant <input type="search" name="tenant" value="{{$d.Tenant}}" placeholder="any" list="tenant-names" autocomplete="off" class="short"></label>
   <label class="field">App <input type="search" name="app" value="{{$d.App}}" placeholder="any" list="app-names" autocomplete="off" class="short"></label>
   <label class="field">Show <select name="show">
-    <option value="" {{if eq $d.Show ""}}selected{{end}}>Operator actions and failures</option>
+    <option value="" {{if eq $d.Show ""}}selected{{end}}>Operator actions, rollouts and failures</option>
     <option value="people" {{if eq $d.Show "people"}}selected{{end}}>Operator actions only</option>
     <option value="all" {{if eq $d.Show "all"}}selected{{end}}>Everything, the cluster's own records too</option>
   </select></label>

@@ -11,7 +11,9 @@
     {{range $i, $a := $d.Apps}}{{with $a}}
       <tr>
         <td class="l-main"><a class="row-link" href="/apps/{{.Name}}">{{.Name}}</a>{{if .Revision}} <span class="dim small">revision {{.Revision}}</span>{{end}}</td>
-        <td class="l-side">{{with .Rollout}}{{if eq .State "running"}}<span class="st busy">rolling out</span>{{else if eq .State "paused"}}<span class="st warn">rollout paused</span>{{else if $a.Latest}}<span class="st warn">update waiting</span>{{else}}<span class="st ok">current</span>{{end}}{{else}}{{if $a.Latest}}<span class="st warn">update waiting</span>{{else}}<span class="st ok">current</span>{{end}}{{end}}</td>
+        <td class="l-side">{{$st := index $d.States .Name}}{{if $st.Blockers}}<a href="/apps/{{.Name}}#rollout" class="st bad">rollout blocked by {{range $i, $b := $st.Blockers}}{{if $i}}, {{end}}{{$b}}{{end}}</a>{{else}}{{with .Rollout}}{{if eq .State "running"}}<span class="st busy">rolling out</span>{{else if eq .State "paused"}}<span class="st warn">rollout paused</span>{{else}}<span class="st ok">current</span>{{end}}{{else}}<span class="st ok">current</span>{{end}}{{end}}
+          {{with $st.Memory}}<div class="reason{{if .Bad}} bad{{end}}"><span class="st {{if .Bad}}bad{{else}}warn{{end}}"></span>{{len .Hit}} of {{.Inherit}} tenants out of memory in 24 h</div>{{end}}
+          {{if $a.Latest}}<div class="reason"><span class="st warn"></span>newer image waiting</div>{{end}}</td>
         <td class="mono dim hide-narrow" title="{{.Spec.Image}}">{{short .Spec.Image}}</td>
         <td class="num l-sub" data-label="Live tenants">{{len .Tenants}}</td>
         <td class="when hide-narrow">{{ago .UpdatedAt}} ago</td>

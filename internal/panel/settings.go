@@ -23,9 +23,11 @@ type settingField struct {
 	Name, Label, Unit string
 	// Effective is the value in effect, said; Source where it comes from.
 	Effective, Source string
-	// Own says the tenant keeps its own value, Value is it.
-	Own   bool
-	Value string
+	// Own says the form overrides the app's value, Value is it; Stored
+	// says an override is saved now; Proposed that the form's differs from
+	// what is saved, not yet reviewed.
+	Own, Stored, Proposed bool
+	Value                 string
 	// Mono says the value is code-like (an image).
 	Mono bool
 	// Kind, Step and Min shape the input.
@@ -47,6 +49,7 @@ type settingChange struct{ Field, From, To string }
 
 // settingFields are a tenant's fields, from its app's spec and its form.
 func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingField {
+	stored := formOf(t)
 	source := func(own bool, appValue bool) string {
 		switch {
 		case own:
@@ -57,9 +60,11 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingFi
 		return "the node's default"
 	}
 	l, a := t.Spec.Limits, app.Limits
-	field := func(name, label, unit, kind, step, value string, effective string, appSet bool) settingField {
+	// What is in effect and where it comes from is what is saved; the form
+	// is only proposed.
+	field := func(name, label, unit, kind, step, value, saved string, effective string, appSet bool) settingField {
 		return settingField{Name: name, Label: label, Unit: unit, Kind: kind, Step: step, Min: "0", Own: value != "", Value: value,
-			Effective: effective, Source: source(value != "", appSet)}
+			Stored: saved != "", Proposed: value != saved, Effective: effective, Source: source(saved != "", appSet)}
 	}
 	number := func(n int, unit string) string {
 		if n == 0 {
@@ -77,11 +82,11 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingFi
 	}
 	return []settingField{
 		{Name: "image", Label: "Image", Kind: "text", Own: form.Image != "", Value: form.Image, Mono: true, Unit: "",
-			Effective: shortImage(t.Spec.Image), Source: source(form.Image != "", true)},
-		field("memoryMB", "Memory", "MB", "number", "1", form.MemoryMB, memoryText, a.MemoryMB != 0),
-		field("cpus", "CPUs", "cores", "number", "0.05", form.CPUs, cpus, a.CPUs != 0),
-		field("pids", "Processes", "at most", "number", "1", form.PIDs, number(l.PIDs, ""), a.PIDs != 0),
-		field("diskGB", "Disk", "GB", "number", "1", form.DiskGB, number(l.DiskGB, " GB"), a.DiskGB != 0),
+			Stored: stored.Image != "", Proposed: form.Image != stored.Image, Effective: shortImage(t.Spec.Image), Source: source(stored.Image != "", true)},
+		field("memoryMB", "Memory", "MB", "number", "1", form.MemoryMB, stored.MemoryMB, memoryText, a.MemoryMB != 0),
+		field("cpus", "CPUs", "cores", "number", "0.05", form.CPUs, stored.CPUs, cpus, a.CPUs != 0),
+		field("pids", "Processes", "at most", "number", "1", form.PIDs, stored.PIDs, number(l.PIDs, ""), a.PIDs != 0),
+		field("diskGB", "Disk", "GB", "number", "1", form.DiskGB, stored.DiskGB, number(l.DiskGB, " GB"), a.DiskGB != 0),
 	}
 }
 

@@ -50,7 +50,7 @@
 {{define "nav"}}
     <a href="/" {{if eq .Section "overview"}}class="on" aria-current="page"{{end}}>Overview{{with .Alerts.Overview}}<span class="count" title="{{plural . "thing" "things"}} broken">{{.}}</span>{{end}}</a>
     <a href="/tenants" {{if eq .Section "tenants"}}class="on" aria-current="page"{{end}}>Tenants{{with .Alerts.Tenants}}<span class="count" title="{{plural . "tenant" "tenants"}} broken">{{.}}</span>{{end}}</a>
-    {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on" aria-current="page"{{end}}>Apps</a>{{end}}
+    {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on" aria-current="page"{{end}}>Apps{{with .Alerts.Apps}}<span class="count" title="{{plural . "app" "apps"}} broken: a rollout blocked, or a limit that breaks a tenant">{{.}}</span>{{end}}</a>{{end}}
     <a href="/events" {{if eq .Section "events"}}class="on" aria-current="page"{{end}}>Events</a>
     <a href="/cluster" {{if eq .Section "cluster"}}class="on" aria-current="page"{{end}}>Cluster{{with .Alerts.Cluster}}<span class="count" title="{{.}} broken: nodes down or backups failing">{{.}}</span>{{end}}</a>
     <a href="/access" {{if eq .Section "access"}}class="on" aria-current="page"{{end}}>Access</a>

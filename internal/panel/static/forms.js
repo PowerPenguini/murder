@@ -149,6 +149,28 @@
     problem.scrollIntoView({ block: "center" });
     if (!field) problem.focus();
   }
+  // A form marked as a draft (a tenant's settings) is not lost by leaving
+  // the page, or by sending another form of it, without a word: the page
+  // asks first. One opened with a proposal counts as changed already.
+  for (const form of document.querySelectorAll("form[data-draft-form]")) {
+    const state = () => new URLSearchParams(new FormData(form)).toString();
+    const initial = state();
+    let sending = false;
+    const changed = () => form.hasAttribute("data-proposed") || state() !== initial;
+    form.addEventListener("submit", () => { sending = true; });
+    addEventListener("beforeunload", (event) => {
+      if (!sending && changed()) event.preventDefault();
+    });
+    document.addEventListener("submit", (event) => {
+      if (event.target === form || !changed() || event.target.method === "get") return;
+      if (!confirm("Your changes to the settings are not saved. Send this other form, and leave them?")) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      } else {
+        sending = true;
+      }
+    }, true);
+  }
   // A draft is not lost by leaving the page by mistake.
   for (const draft of document.querySelectorAll("[data-draft]")) {
     let sending = false;

@@ -108,6 +108,20 @@ func (s *Server) tenantUsage(ctx context.Context, name, rangeName string) *tenan
 		u.Memory.CPU, u.CPULimit = meterOf(int(series.Now.CPU*1000), int(limit*1000)), cores(limit)
 	}
 	u.Requests, u.Errors, u.Wait = rate(float64(series.Now.Requests)), rate(float64(series.Now.Errors)), wait(series.Now.P95)
+	// The tiles say what the charts' last step says: one sample, one value.
+	if counts := pick(counted, func(p usage.Point) []float64 {
+		return []float64{float64(p.Requests) / float64(p.Minutes), float64(p.Errors) / float64(p.Minutes)}
+	}); len(counts) > 0 {
+		last := counts[len(counts)-1].Values
+		u.Requests, u.Errors = rate(last[0]), rate(last[1])
+		u.ErrorsBad = last[0] > 0 && last[1]/last[0] > errorShare
+		if len(u.Charts[2].Series) > 1 {
+			u.Charts[2].Series[1].Stroke = map[bool]string{true: inkBad, false: ink1}[u.ErrorsBad]
+		}
+	}
+	if answers := pick(answered, func(p usage.Point) []float64 { return []float64{p.P95} }); len(answers) > 0 {
+		u.Wait = wait(answers[len(answers)-1].Values[0])
+	}
 	if limit := series.Now.MemoryLimit; limit > 0 {
 		u.Memory.Memory = meterOf(int(series.Now.Memory>>20), int(limit>>20))
 		u.Memory.MemoryLimit = size(float64(limit))

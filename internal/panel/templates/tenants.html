@@ -21,10 +21,10 @@
 <section class="near">
   <form method="get" action="/tenants" class="filters" role="search">
     <nav class="seg desktop-only" aria-label="show">
-      {{range $f := list "all" "attention" "unprotected" "suspended" "archived"}}<a href="{{query "show" $f "q" $d.Query "sort" (sortName $d.ByName)}}"{{if eq $f $d.Show}} class="on" aria-current="true"{{end}}>{{filterLabel $f}} <span class="n">{{index $d.Counts $f}}</span></a>{{end}}
+      {{range $f := list "all" "broken" "risk" "unprotected" "suspended" "archived"}}<a href="{{query "show" $f "q" $d.Query "sort" (sortName $d.ByName)}}"{{if eq $f $d.Show}} class="on" aria-current="true"{{end}}>{{filterLabel $f}} <span class="n">{{index $d.Counts $f}}</span></a>{{end}}
     </nav>
     <div class="row">
-      <label class="phone-only field-inline"><span class="sr">Show</span><select name="show">{{range $f := list "all" "attention" "unprotected" "suspended" "archived"}}<option value="{{$f}}"{{if eq $f $d.Show}} selected{{end}}>{{filterLabel $f}} ({{index $d.Counts $f}})</option>{{end}}</select></label>
+      <label class="phone-only field-inline"><span class="sr">Show</span><select name="show">{{range $f := list "all" "broken" "risk" "unprotected" "suspended" "archived"}}<option value="{{$f}}"{{if eq $f $d.Show}} selected{{end}}>{{filterLabel $f}} ({{index $d.Counts $f}})</option>{{end}}</select></label>
       {{if $d.ByName}}<input type="hidden" name="sort" value="name">{{end}}
       <input type="search" name="q" value="{{$d.Query}}" class="short" placeholder="Name, app or node" aria-label="filter tenants by name, app or node" autocomplete="off" data-filter="tenants">
       <button type="submit">Filter</button>
@@ -37,7 +37,7 @@
     <tbody>
     {{range $d.Shown}}
       <tr>
-        <td class="l-main"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a> <span class="dim small">{{.App}}</span></td>
+        <td class="l-main"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a> <span class="dim small">{{.App}}</span>{{if .Reason}}<div class="reason{{if .ReasonBad}} bad{{end}}"><span class="st {{if .ReasonBad}}bad{{else}}warn{{end}}"></span>{{.Reason}}</div>{{end}}</td>
         <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         {{with .Use}}
         <td class="barcell l-sub" data-label="Memory"><div class="barline">{{template "bar" .Memory}}<span class="num{{if ge .Memory.Width 90.0}} red{{end}}">{{.MemoryText}}{{with .MemoryLimit}} <span class="dim of">of {{.}}</span>{{end}}</span></div></td>

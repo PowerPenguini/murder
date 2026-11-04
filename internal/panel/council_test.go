@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // An app's change is reviewed before it is stored: the lines it changes,
@@ -221,26 +223,79 @@ func newServerOf(t *testing.T, cluster *DemoCluster) *httptest.Server {
 }
 
 // A broken tenant, the rollout it blocks and the app-wide cause point at
-// each other: on the overview, the tenant and the app.
+// each other, said once, under the tenant, and only as far as they are true:
+// the app's limit reaches the tenants that use it, not one with its own.
 func TestCauseTenantAndRolloutJoin(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, page := get(t, server.URL+"/")
-	for _, want := range []string{"waits for baltic-freight, not healthy on it", "it blocks web&#39;s rollout of revision 3", "web</a>: all 7 tenants ran out of memory", "Raise web&#39;s memory limit", "/apps/web?memoryMB=512#spec"} {
+	for _, want := range []string{"It blocks web&#39;s rollout of revision 3: the next wave (half) waits for it.", "web&#39;s limit is likely too low: 5 of the 6 tenants on its 256 MB limit ran out of memory",
+		"atlas keeps its own 768 MB", "test-staging is held on its revision", "Raise web&#39;s memory limit (review)", "/apps/web?memoryMB=512#spec", "Only this tenant: raise its limit"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the overview lacks %q:\n%s", want, page)
 		}
 	}
+	// Every red row is counted, and only those: hel-1, baltic-freight,
+	// kowalski-trans.
+	if n := strings.Count(page, `<li class="broken">`); n != 3 || !strings.Contains(page, `<div class="n">3</div><div class="l">broken</div>`) {
+		t.Fatalf("%d red rows", n)
+	}
 	_, page = get(t, server.URL+"/tenants/baltic-freight")
-	for _, want := range []string{"It blocks web's rollout", `href="/apps/web#r-baltic-freight"`, "The cause is likely web's", "Raise web's, for all its tenants"} {
+	for _, want := range []string{"It blocks web's rollout", `href="/apps/web#r-baltic-freight"`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the tenant lacks %q:\n%s", want, page)
 		}
 	}
 	_, page = get(t, server.URL+"/apps/web?memoryMB=512")
-	for _, want := range []string{"memoryMB: 512", "Proposed in the editor below", "also ran out of memory", `id="r-baltic-freight"`} {
+	for _, want := range []string{"memoryMB: 512", "Proposed in the editor below", "also ran out of memory", `id="r-baltic-freight"`, "reaches 5 tenants now", "may stop these restarts", "atlas keeps its own 768 MB"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the app lacks %q:\n%s", want, page)
 		}
+	}
+	if strings.Contains(page, "fixes them all") {
+		t.Fatal("the app promises a fix")
+	}
+	// A tenant on its own limit is not said to be caused by the app's.
+	if _, page = get(t, server.URL+"/tenants/atlas"); strings.Contains(page, "web's limit") {
+		t.Fatalf("atlas is said to be on web's limit:\n%s", page)
+	}
+	// The apps list says what is wrong, and Apps counts it.
+	_, page = get(t, server.URL+"/apps")
+	if !strings.Contains(page, "rollout blocked by baltic-freight") || !strings.Contains(page, "5 of 6 tenants out of memory in 24 h") || !strings.Contains(page, `Apps<span class="count"`) {
+		t.Fatalf("the apps list:\n%s", page)
+	}
+}
+
+// The app-wide memory advice counts from the tenants as they are: those on
+// the app's limit, those with their own, held and suspended ones.
+func TestAppMemoryAdvice(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	app := api.App{Name: "web"}
+	app.Spec.Limits.MemoryMB = 256
+	mk := func(name string, own int, hold, suspended bool) api.Tenant {
+		var t api.Tenant
+		t.Spec.Name, t.App, t.Hold, t.Spec.Suspended = name, "web", hold, suspended
+		t.Overrides.Limits.MemoryMB = own
+		t.Status = &reconcile.Status{Phase: "running", Healthy: name != "a"}
+		return t
+	}
+	tenants := []api.Tenant{mk("a", 0, false, false), mk("b", 0, false, false), mk("c", 0, false, false), mk("d", 768, false, false), mk("e", 0, true, false), mk("f", 0, false, true)}
+	oom := func(name string, ago time.Duration) store.Event {
+		return store.Event{At: now.Add(-ago), Action: "tenant.restarted", Tenant: name, App: "web", Detail: "exit 137 (most likely out of memory)"}
+	}
+	events := []store.Event{oom("a", time.Hour), oom("b", 2*time.Hour), oom("d", 3*time.Hour), oom("c", 30*time.Hour)}
+	if m := appMemoryOf(app, tenants, events, now); m != nil {
+		t.Fatalf("two of five on the limit is not the app's: %+v", m)
+	}
+	events = append(events, oom("c", 3*time.Hour), oom("e", 4*time.Hour))
+	m := appMemoryOf(app, tenants, events, now)
+	if m == nil || len(m.Hit) != 4 || m.Inherit != 5 || !m.Bad || m.ProposeMB != 512 {
+		t.Fatalf("advice %+v", m)
+	}
+	if strings.Join(m.Reaches, " ") != "a b c" || strings.Join(m.Held, " ") != "e" || strings.Join(m.Suspended, " ") != "f" || m.Own["d"] != 768 || strings.Join(m.OwnHit, " ") != "d" {
+		t.Fatalf("reach %+v", m)
+	}
+	if m.Text() != ": 4 of the 5 tenants on its 256 MB limit ran out of memory in the last 24 hours" || !strings.Contains(m.Exceptions(), "d keeps its own 768 MB (and ran out of it too)") {
+		t.Fatalf("%q / %q", m.Text(), m.Exceptions())
 	}
 }
 
@@ -303,5 +358,31 @@ func TestSpecProblemsInPlainWords(t *testing.T) {
 	}
 	if text, line := specProblem("the spec: yaml: unmarshal errors:\n  line 3: field helthPath not found in type spec.Tenant", file); !strings.HasPrefix(text, `Line 3: "helthPath" is not a setting`) || line != 3 {
 		t.Fatalf("%q %d", text, line)
+	}
+}
+
+// A tenant's settings say what is saved; a proposal shows as proposed.
+func TestSettingsProposalIsNotInEffect(t *testing.T) {
+	server := newServerOf(t, NewDemoCluster())
+	_, page := get(t, server.URL+"/tenants/baltic-freight/settings?memoryMB=512")
+	row := between(page, `<tr class="setting" id="memory">`, "</tr>")
+	if !strings.Contains(row, "Inherited from web") || strings.Contains(row, "Tenant override") || !strings.Contains(row, "512 MB, proposed") {
+		t.Fatalf("the memory row: %s", row)
+	}
+	if !strings.Contains(page, `data-proposed`) || !strings.Contains(page, "proposed-notice") || !strings.Contains(page, "raising web's limit may be the better fix") {
+		t.Fatalf("the proposal:\n%s", page)
+	}
+}
+
+// Every tenant that needs attention says why on its row.
+func TestTenantRowsSayWhy(t *testing.T) {
+	server := newServerOf(t, NewDemoCluster())
+	_, page := get(t, server.URL+"/tenants?show=broken")
+	if !strings.Contains(page, `<div class="reason bad"><span class="st bad"></span>last backup failed, newest 3h old</div>`) || !strings.Contains(page, "blocks its app&#39;s rollout") {
+		t.Fatalf("broken rows:\n%s", page)
+	}
+	_, page = get(t, server.URL+"/tenants?show=risk")
+	if !strings.Contains(page, `<div class="reason"><span class="st warn"></span>copy catching up</div>`) || strings.Contains(page, "kowalski-trans") {
+		t.Fatalf("at risk rows:\n%s", page)
 	}
 }

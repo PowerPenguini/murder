@@ -429,18 +429,31 @@ func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section 
 // the tenants a page read already, or asked for.
 func (s *Server) alertsFor(r *http.Request, nodes api.Nodes, data any) navAlerts {
 	if d, ok := data.(overviewData); ok {
-		return alertsOf(d.Attention, d.FailingBackups)
+		a := alertsOf(d.Attention, d.FailingBackups)
+		a.Apps = badApps(d.AppStates)
+		return a
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	var tenants []api.Tenant
 	var use clusterUse
+	var apps []api.App
+	var events []store.Event
 	_ = all(
 		func() (err error) { tenants, err = s.backend.List(ctx); return },
 		func() error { use = s.usageNow(ctx); return nil },
+		func() error {
+			if s.Actions != nil {
+				apps, _ = s.Actions(s.actor(userOf(r))).Apps(ctx)
+			}
+			return nil
+		},
+		func() error { events, _ = s.backend.Events(ctx, store.EventQuery{Limit: activityEvents}); return nil },
 	)
-	notices, failing := s.triage(nodes, tenants, use)
-	return alertsOf(notices, failing)
+	notices, failing, badApps := s.triage(nodes, tenants, use, apps, events)
+	a := alertsOf(notices, failing)
+	a.Apps = badApps
+	return a
 }
 
 func (s *Server) write(w http.ResponseWriter, name string, p page, status int) {

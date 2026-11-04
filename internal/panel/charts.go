@@ -315,7 +315,7 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 	say := func(s sample) []string {
 		var parts []string
 		for i, label := range labels {
-			parts = append(parts, format(s.Values[i])+" "+label)
+			parts = append(parts, unit(format(s.Values[i]), label))
 		}
 		return parts
 	}
@@ -387,3 +387,12 @@ func round1(v float64) float64 { return math.Round(v*10) / 10 }
 
 // f writes a coordinate, to a tenth.
 func f(v float64) string { return strconv.FormatFloat(math.Round(v*10)/10, 'f', -1, 64) }
+
+// unit says a value and its label, the label singular for one: "1
+// error", "2 errors".
+func unit(value, label string) string {
+	if value == "1" && strings.HasSuffix(label, "s") {
+		return value + " " + strings.TrimSuffix(label, "s")
+	}
+	return value + " " + label
+}

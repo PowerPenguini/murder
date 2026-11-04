@@ -57,7 +57,7 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 		}
 	}
 	moving := tenant("kowalski-trans", "web", "nbg-1", "fsn-1", true, running(0))
-	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 3, LastExit: "exit 137 (most likely out of memory) 4m ago", Generation: 2, CheckedAt: now.Add(-3 * time.Second)})
+	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 1, LastExit: "exit 137 (most likely out of memory) 4m ago", Generation: 3, CheckedAt: now.Add(-3 * time.Second)})
 	syncing := tenant("nordwind", "web", "fsn-1", "nbg-1", false, running(0))
 	suspended := tenant("test-staging", "web", "fsn-1", "nbg-1", true, &reconcile.Status{Phase: "stopped", Generation: 5, CheckedAt: now.Add(-6 * time.Second)})
 	suspended.Spec.Suspended = true
@@ -84,6 +84,8 @@ func (d Demo) Get(ctx context.Context, name string) (api.Tenant, error) {
 func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, error) {
 	now := d.now()
 	all := []store.Event{
+		// Its last exit, which the tenant's status says.
+		{At: now.Add(-4 * time.Minute), Actor: "murder", Action: "tenant.restarted", Tenant: "baltic-freight", App: "web", Detail: "exit 137 (most likely out of memory)"},
 		{ID: 214, At: now.Add(-50 * time.Second), Actor: "murder", Action: "tenant.replica", Tenant: "vistula-cargo", App: "web", Detail: "a new copy on fsn-1, as hel-1 failed"},
 		{ID: 213, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "node.failed-over", Detail: "hel-1: 2 tenants run from their copies"},
 		{ID: 212, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "vistula-cargo", App: "web", Detail: "hel-1 → nbg-1"},
@@ -131,6 +133,12 @@ func withHistory(events []store.Event, now time.Time) []store.Event {
 		}
 		r := routine[next(len(routine))]
 		tenant := tenants[next(len(tenants))]
+		// atlas keeps its own 768 MB and stays within it; test-staging is
+		// suspended: neither runs out of memory. Its last exit an hour ago
+		// is baltic-freight's newest before the one above.
+		if r.action == "tenant.restarted" && (tenant == "atlas" || tenant == "test-staging") {
+			tenant = "nordwind"
+		}
 		events = append(events, store.Event{At: now.Add(-ago - time.Minute), Actor: "murder", Action: r.action, Tenant: tenant, App: "web", Detail: r.detail})
 	}
 	slices.SortStableFunc(events, func(a, b store.Event) int { return b.At.Compare(a.At) })

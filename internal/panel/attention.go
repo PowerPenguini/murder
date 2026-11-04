@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"regexp"
 	"net/url"
 	"slices"
 	"strconv"
@@ -24,6 +25,19 @@ type notice struct {
 	Fixes []fix
 	// Node says it is about a node, App about an app, not a tenant.
 	Node, App bool
+	// Reasons say, short, what its row in a list shows: "last backup failed
+	// 3h ago", "copy catching up".
+	Reasons []string
+	// Subs are what else it explains or causes, said under it: an app's
+	// limit that is likely too low, a rollout it blocks.
+	Subs []sub
+}
+
+// sub is a line under a notice, with its own fixes.
+type sub struct {
+	Text  string
+	Bad   bool
+	Fixes []fix
 }
 
 // fix is a way to act on what needs attention.
@@ -65,17 +79,24 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 			n.Bad = n.Bad || bad
 			n.Fixes = append(n.Fixes, fix{"Logs", href + "/logs"})
 		}
+		if problem, _ := tenantProblem(row.Tenant, row.State); problem != "" && row.Status != nil && row.Status.LastExit != "" {
+			n.Reasons = append(n.Reasons, "last "+parenthetical.ReplaceAllString(row.Status.LastExit, ""))
+		}
 		if row.Use != nil && row.Use.MemoryLimit != "" && row.Use.Memory.Width >= memoryWarn {
+			n.Reasons = append(n.Reasons, "memory "+row.Use.MemoryText+" of "+row.Use.MemoryLimit)
 			causes = append(causes, "uses "+row.Use.MemoryText+" of its "+row.Use.MemoryLimit+" of memory")
 			n.Fixes = append(n.Fixes, fix{"Raise its memory limit", raiseMemory(row.Tenant)})
 		}
 		if clustered {
 			switch {
 			case row.Replica.Kind == "bad":
+				n.Reasons = append(n.Reasons, "no copy")
 				causes = append(causes, "has no copy: if "+row.Node+" fails, it stops")
 			case row.Tenant.Replica != "" && !row.ReplicaReady && row.ReplicaNext == "":
+				n.Reasons = append(n.Reasons, "copy catching up")
 				causes = append(causes, "its copy on "+row.Tenant.Replica+" is still catching up: if "+row.Node+" fails now, it stops")
 			case row.ReplicaNext != "" && failed[row.ReplicaNext]:
+				n.Reasons = append(n.Reasons, "copy moving to a failed node")
 				causes = append(causes, "its copy moves to "+row.ReplicaNext+", which failed")
 			}
 		}
@@ -86,9 +107,13 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 				text := "its last backup failed"
 				if !b.None {
 					text += "; the newest is " + ago(now, b.Last) + " old"
+					n.Reasons = append(n.Reasons, "last backup failed, newest "+ago(now, b.Last)+" old")
+				} else {
+					n.Reasons = append(n.Reasons, "last backup failed, none yet")
 				}
 				causes = append(causes, text)
 			} else {
+				n.Reasons = append(n.Reasons, "newest backup "+ago(now, b.Last)+" old")
 				causes = append(causes, "its newest backup is "+ago(now, b.Last)+" old, though they run every "+every(b.Every))
 			}
 			n.Fixes = append(n.Fixes, fix{"Backups", "/cluster#backups"})
@@ -115,10 +140,12 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 // so that a failure is seen from any page. They are counted from the same
 // notices as the overview's: one definition of broken everywhere.
 type navAlerts struct {
-	// Overview counts the broken things, nodes and tenants; Tenants the
-	// broken tenants; Cluster the broken nodes and the nodes whose backups
-	// fail.
-	Overview, Tenants, Cluster int
+	// Overview counts the broken things, nodes and tenants: the red rows of
+	// the overview, an app's cause or blocked rollout being said under the
+	// tenant it breaks. Tenants counts the broken tenants; Cluster the
+	// broken nodes and the nodes whose backups fail; Apps the apps whose
+	// rollout is blocked or whose limit breaks a tenant.
+	Overview, Tenants, Cluster, Apps int
 }
 
 // alertsOf counts what is broken among notices; failing are the nodes
@@ -151,6 +178,8 @@ func (a navAlerts) Of(section string) int {
 		return a.Tenants
 	case "cluster":
 		return a.Cluster
+	case "apps":
+		return a.Apps
 	}
 	return 0
 }
@@ -223,6 +252,9 @@ func sentence(causes []string) string {
 	}
 	return b.String()
 }
+
+// parenthetical is an aside in brackets, left out of a short reason.
+var parenthetical = regexp.MustCompile(` \([^)]*\)`)
 
 // every says how often something runs: 6h, 30m, a day.
 func every(d time.Duration) string {

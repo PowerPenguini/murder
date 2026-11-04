@@ -2,7 +2,9 @@
 <nav class="crumbs" aria-label="where this is"><a href="/apps">Apps</a><span>/</span><span>{{$a.Name}}</span></nav>
 <div class="title"><h1>{{$a.Name}}</h1>{{with $d.Rollout}}{{if eq .State "paused"}}<span class="st warn">rollout paused</span>{{else}}<span class="st busy">rolling out</span>{{end}}{{end}}</div>
 <p class="lead">{{plural (len $a.Tenants) "live tenant" "live tenants"}} · {{if $a.Revision}}revision {{$a.Revision}} · {{end}}changed {{ago $a.UpdatedAt}} ago · <a href="#spec">App spec</a> · <a href="/events?app={{$a.Name}}&amp;all=1">Its events</a></p>
-{{with $d.Memory}}<div class="problem bad" role="alert"><span class="lead-in">{{if eq (len .Hit) .Live}}All {{.Live}} of its tenants{{else}}{{len .Hit}} of its {{plural .Live "tenant" "tenants"}}{{end}} ran out of memory in the last 24 hours</span>{{if .LimitMB}}, each with a limit of {{mem .LimitMB}}{{end}}: {{range $i, $n := .HitNames}}{{if $i}}, {{end}}<a href="/tenants/{{$n}}">{{$n}}</a>{{end}}. The limit is likely too low for the app.{{if not $d.Proposed}}<span class="fixes"><a href="{{.Href}}">Propose {{mem .ProposeMB}} for all its tenants</a></span>{{end}}</div>{{end}}
+{{with $d.Memory}}<div class="problem{{if .Bad}} bad{{end}}" role="{{if .Bad}}alert{{else}}status{{end}}"><span class="lead-in">Its memory limit is likely too low</span>{{.Text}}: {{range $i, $n := .HitNames}}{{if $i}}, {{end}}<a href="/tenants/{{$n}}">{{$n}}</a>{{end}}. Exit 137 is a likely memory kill.
+  <p class="flat spaced">Raising {{$a.Name}}'s limit to {{mem .ProposeMB}} reaches {{plural (len .Reaches) "tenant" "tenants"}} now{{with .Reaches}} ({{range $i, $n := .}}{{if $i}}, {{end}}{{$n}}{{end}}){{end}} and may stop these restarts.{{with .Exceptions}} It does not reach every tenant: {{.}}.{{end}}</p>
+  {{if not $d.Proposed}}<span class="fixes"><a href="{{.Href}}">Raise {{$a.Name}}'s memory limit (review)</a></span>{{end}}</div>{{end}}
 
 {{with $d.Rollout}}{{$r := .}}
 <section class="near" id="rollout" data-live>

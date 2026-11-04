@@ -72,7 +72,7 @@ func TestLineChart(t *testing.T) {
 	if chart.Limit == nil || chart.Limit.Label != "limit 20" || chart.Top != "20" {
 		t.Fatalf("chart: limit %+v, top %q", chart.Limit, chart.Top)
 	}
-	if last := points[7]; chart.Now != "1 used · 1 errors" || last[1] != "Nov 2 17:15" || last[2] != "1 used" || last[3] != "1 errors" {
+	if last := points[7]; chart.Now != "1 used · 1 error" || last[1] != "Nov 2 17:15" || last[2] != "1 used" || last[3] != "1 error" {
 		t.Fatalf("now %q, last point %v", chart.Now, points[7])
 	}
 	// The limit at 20 is the highest value and a round one: the top.

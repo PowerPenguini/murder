@@ -95,6 +95,10 @@ type tenantRow struct {
 	// Backup is its newest backup; nil if its node backs up nothing, or
 	// did not say.
 	Backup *backupView
+	// Reason says why it needs attention, as its row shows it; ReasonBad
+	// that it is broken; Attention that it needs it at all.
+	Reason               string
+	ReasonBad, Attention bool
 }
 
 type overviewData struct {
@@ -115,8 +119,10 @@ type overviewData struct {
 	Broken    int
 	// Rollouts are the apps' rollouts under way.
 	Rollouts []rolloutNote
-	// FailingBackups counts the nodes whose backups fail.
+	// FailingBackups counts the nodes whose backups fail; AppStates are
+	// each app's problems, by name.
 	FailingBackups int
+	AppStates      map[string]appState
 	// Clustered says there is more than one node.
 	Clustered bool
 	// The tenants' page's filter: Show is all, attention, unprotected,
@@ -249,52 +255,27 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 			slices.SortFunc(apps, func(a, b api.App) int { return strings.Compare(a.Name, b.Name) })
 			for _, app := range apps {
 				data.Apps = append(data.Apps, app.Name)
-				ro := app.Rollout
-				if ro == nil || !ro.Active() {
-					continue
-				}
-				note := rolloutNote{App: app.Name, Paused: ro.State == store.RolloutPaused}
-				view := rolloutOf(app, tenants, events, now)
-				switch {
-				case view != nil && len(view.Blockers) > 0:
-					note.Blocked = true
-					note.Text = fmt.Sprintf("'s rollout of revision %d is blocked: its next wave (%s) waits for %s, not healthy on it", ro.ToRevision, strings.ToLower(waveName(ro.Wave)), strings.Join(view.Blockers, ", "))
-					// The tenant that blocks says so too.
-					for i := range data.Attention {
-						if slices.Contains(view.Blockers, data.Attention[i].Subject) && !data.Attention[i].Node {
-							data.Attention[i].Text += fmt.Sprintf("; it blocks %s's rollout of revision %d", app.Name, ro.ToRevision)
-							data.Attention[i].Fixes = append(data.Attention[i].Fixes, fix{"The rollout", "/apps/" + url.PathEscape(app.Name) + "#rollout"})
-						}
-					}
-				case note.Paused:
-					note.Text = fmt.Sprintf("'s rollout of revision %d is paused", ro.ToRevision)
-					if ro.Reason != "" {
-						note.Text += ": " + ro.Reason
-					}
-				default:
-					note.Text = fmt.Sprintf(" rolls out revision %d: wave %d of %d, for %s", ro.ToRevision, ro.Wave, rolloutWaves, ago(now, ro.WaveStarted))
-				}
-				data.Rollouts = append(data.Rollouts, note)
 			}
-			// The same failure in several of an app's tenants is the app's.
-			memories := appMemories(apps, tenants, events, now)
-			for _, name := range slices.Sorted(maps.Keys(memories)) {
-				m := memories[name]
-				data.Attention = append(data.Attention, notice{App: true, Subject: name, Href: "/apps/" + url.PathEscape(name), Text: m.Text(),
-					Fixes: []fix{{"Raise " + name + "'s memory limit", m.Href()}}})
-				for i := range data.Attention {
-					if n := &data.Attention[i]; !n.Node && !n.App && m.Hit[n.Subject] > 0 && strings.Contains(n.Text, "memory") {
-						n.Fixes = append(n.Fixes, fix{"Raise " + name + "'s, for all its tenants", m.Href()})
-					}
-				}
-			}
+			data.Attention, data.Rollouts, data.AppStates = joinApps(data.Attention, apps, tenants, events, now)
 		}
 	}
 	data.Show, data.Query, data.ByName = tenantFilter(r)
 	attention := map[string]int{}
 	for _, n := range data.Attention {
-		if !n.Node && !n.App {
-			attention[n.Subject] = map[bool]int{true: 0, false: 1}[n.Bad]
+		if n.Node || n.App {
+			continue
+		}
+		attention[n.Subject] = map[bool]int{true: 0, false: 1}[n.Bad]
+		reasons := n.Reasons
+		for _, sub := range n.Subs {
+			if strings.HasPrefix(sub.Text, "It blocks ") {
+				reasons = append(reasons, "blocks its app's rollout")
+			}
+		}
+		for i := range data.Tenants {
+			if data.Tenants[i].Spec.Name == n.Subject {
+				data.Tenants[i].Reason, data.Tenants[i].ReasonBad, data.Tenants[i].Attention = strings.Join(reasons, "; "), n.Bad, true
+			}
 		}
 	}
 	data.Shown, data.Counts = filterTenants(data.Tenants, data.Show, data.Query, data.ByName, clustered, attention)
@@ -302,8 +283,9 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 }
 
 // triage is what needs attention in the cluster, as the overview says it,
-// and how many nodes' backups fail: for the side bar's counts on any page.
-func (s *Server) triage(nodes api.Nodes, tenants []api.Tenant, use clusterUse) ([]notice, int) {
+// how many nodes' backups fail, and how many apps are broken: for the side
+// bar's counts on any page.
+func (s *Server) triage(nodes api.Nodes, tenants []api.Tenant, use clusterUse, apps []api.App, events []store.Event) ([]notice, int, int) {
 	now := s.now()
 	clustered := len(nodes.Nodes) > 1
 	var views []nodeView
@@ -322,7 +304,19 @@ func (s *Server) triage(nodes api.Nodes, tenants []api.Tenant, use clusterUse) (
 		}
 		rows = append(rows, row)
 	}
-	return attentionOf(views, rows, clustered, now), failingNodes(use)
+	notices, _, states := joinApps(attentionOf(views, rows, clustered, now), apps, tenants, events, now)
+	return notices, failingNodes(use), badApps(states)
+}
+
+// badApps counts the apps something is wrong with.
+func badApps(states map[string]appState) int {
+	n := 0
+	for _, state := range states {
+		if state.Bad {
+			n++
+		}
+	}
+	return n
 }
 
 // failingNodes counts the nodes whose backups fail.
@@ -334,6 +328,104 @@ func failingNodes(use clusterUse) int {
 		}
 	}
 	return n
+}
+
+// appState is what is wrong with an app: its rollout blocked, its
+// tenants out of memory; Bad when either is.
+type appState struct {
+	Blockers   []string
+	ToRevision int64
+	Memory     *appMemory
+	Bad        bool
+}
+
+// joinApps puts what apps say into the notices of the tenants they explain:
+// a blocked rollout and an app-wide memory cause are said under the broken
+// tenant, once, red as it is, so every red row is one counted thing. An
+// app-wide cause that explains no broken tenant stays its own at-risk row.
+// It returns the notices, the rollouts under way that are not blocked, and
+// each app's state.
+func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []store.Event, now time.Time) ([]notice, []rolloutNote, map[string]appState) {
+	states := map[string]appState{}
+	var notes []rolloutNote
+	find := func(name string) *notice {
+		for i := range notices {
+			if !notices[i].Node && !notices[i].App && notices[i].Subject == name {
+				return &notices[i]
+			}
+		}
+		return nil
+	}
+	for _, app := range apps {
+		state := appState{}
+		appHref := "/apps/" + url.PathEscape(app.Name)
+		if m := appMemoryOf(app, tenants, events, now); m != nil {
+			state.Memory = m
+			sub := sub{Bad: m.Bad, Text: app.Name + "'s limit is likely too low" + m.Text() + ".", Fixes: []fix{{"Raise " + app.Name + "'s memory limit (review)", m.Href()}}}
+			if ex := m.Exceptions(); ex != "" {
+				sub.Text += " Its change would not reach every tenant: " + ex + "."
+			}
+			placed := false
+			for _, name := range m.HitNames() {
+				if n := find(name); n != nil && n.Bad && !placed {
+					n.Subs = append(n.Subs, sub)
+					placed = true
+				}
+			}
+			if !placed {
+				notices = append(notices, notice{App: true, Subject: app.Name, Href: appHref, Text: m.Text(), Fixes: sub.Fixes})
+			}
+		}
+		if ro := app.Rollout; ro != nil && ro.Active() {
+			view := rolloutOf(app, tenants, events, now)
+			if view != nil && len(view.Blockers) > 0 {
+				state.Blockers, state.ToRevision = view.Blockers, ro.ToRevision
+				for _, name := range view.Blockers {
+					if n := find(name); n != nil {
+						n.Subs = append(n.Subs, sub{Bad: true, Text: fmt.Sprintf("It blocks %s's rollout of revision %d: the next wave (%s) waits for it.", app.Name, ro.ToRevision, strings.ToLower(waveName(ro.Wave))),
+							Fixes: []fix{{"The rollout", appHref + "#rollout"}}})
+					}
+				}
+			} else {
+				note := rolloutNote{App: app.Name, Paused: ro.State == store.RolloutPaused}
+				if note.Paused {
+					note.Text = fmt.Sprintf("'s rollout of revision %d is paused", ro.ToRevision)
+					if ro.Reason != "" {
+						note.Text += ": " + ro.Reason
+					}
+				} else {
+					note.Text = fmt.Sprintf(" rolls out revision %d: %s, for %s", ro.ToRevision, strings.ToLower(waveName(max(ro.Wave-1, 0))), ago(now, ro.WaveStarted))
+				}
+				notes = append(notes, note)
+			}
+		}
+		state.Bad = len(state.Blockers) > 0 || (state.Memory != nil && state.Memory.Bad)
+		states[app.Name] = state
+	}
+	// A broken tenant the app's limit explains leads with the app's fix;
+	// its own limit is the last resort.
+	for i := range notices {
+		n := &notices[i]
+		for _, s := range n.Subs {
+			if len(s.Fixes) > 0 && strings.Contains(s.Fixes[0].Label, "memory limit (review)") {
+				n.Fixes = slices.DeleteFunc(n.Fixes, func(f fix) bool { return f.Label == "Raise its memory limit" })
+				n.Fixes = append(n.Fixes, fix{"Only this tenant: raise its limit", raiseMemory(tenantNamed(tenants, n.Subject))})
+			}
+		}
+	}
+	return notices, notes, states
+}
+
+// tenantNamed is the tenant of that name among tenants.
+func tenantNamed(tenants []api.Tenant, name string) api.Tenant {
+	for _, t := range tenants {
+		if t.Spec.Name == name {
+			return t
+		}
+	}
+	var t api.Tenant
+	t.Spec.Name = name
+	return t
 }
 
 // rolloutWaves is how many waves a rollout moves in: canaries, a tenth,
@@ -372,13 +464,15 @@ func (s *Server) appContext(ctx context.Context, r *http.Request, t api.Tenant, 
 			}
 		}
 	}
-	if m := appMemoryOf(apps[i], tenants, events, now); m != nil && m.Hit[t.Spec.Name] > 0 {
+	// The app's limit is said to be the cause only of a tenant that uses it,
+	// ran out of memory, and is broken now: not of one merely starting.
+	if m := appMemoryOf(apps[i], tenants, events, now); m != nil && m.Hit[t.Spec.Name] > 0 && data.Broken {
 		data.AppMemory = m
 	}
 }
 
 // tenantFilters are the tenants' page's filters, in order.
-var tenantFilters = []string{"all", "attention", "unprotected", "suspended", "archived"}
+var tenantFilters = []string{"all", "broken", "risk", "attention", "unprotected", "suspended", "archived"}
 
 // tenantFilter reads the tenants' page's filter from its address.
 func tenantFilter(r *http.Request) (show, query string, byName bool) {
@@ -426,6 +520,8 @@ func filterTenants(rows []tenantRow, show, query string, byName, clustered bool,
 		in := map[string]bool{
 			"all":         true,
 			"attention":   hasKey2(attention, row.Spec.Name),
+			"broken":      hasKey2(attention, row.Spec.Name) && attention[row.Spec.Name] == 0,
+			"risk":        hasKey2(attention, row.Spec.Name) && attention[row.Spec.Name] == 1,
 			"unprotected": row.Unprotected(clustered) && !row.Spec.Suspended,
 			"suspended":   row.Spec.Suspended && !row.Archived(),
 			"archived":    row.Archived(),
@@ -577,7 +673,7 @@ func eventShown(e store.Event, show string) bool {
 	case "people":
 		return byPeople(e)
 	}
-	return byPeople(e) || failureEvent(e.Action)
+	return byPeople(e) || failureEvent(e.Action) || e.Action == "app.rolled-out"
 }
 
 // shownEvents keeps the events show lets through, at most n.
@@ -709,7 +805,7 @@ func (s *Server) funcs() template.FuncMap {
 			return ""
 		},
 		"filterLabel": func(name string) string {
-			return map[string]string{"all": "All", "attention": "Needs attention", "unprotected": "Without a ready copy", "suspended": "Suspended", "archived": "Archived"}[name]
+			return map[string]string{"all": "All", "broken": "Broken", "risk": "At risk", "attention": "Needs attention", "unprotected": "Without a ready copy", "suspended": "Suspended", "archived": "Archived"}[name]
 		},
 		"node":   nodeHref,
 		"plural": plural,

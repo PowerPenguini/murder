@@ -111,10 +111,10 @@ func TestRemovingAccessNeedsTheName(t *testing.T) {
 func TestPhoneMenuCountsItsOwnPage(t *testing.T) {
 	cluster := NewDemoCluster()
 	server := newServerOf(t, cluster)
-	_, page := get(t, server.URL+"/apps")
+	_, page := get(t, server.URL+"/events")
 	summary := between(page, `<details class="navmenu" id="navmenu">`, "</summary>")
 	if strings.Contains(summary, `class="count"`) || !strings.Contains(summary, `class="elsewhere"`) {
-		t.Fatalf("apps' menu: %s", summary)
+		t.Fatalf("events' menu: %s", summary)
 	}
 	_, page = get(t, server.URL+"/tenants")
 	summary = between(page, `<details class="navmenu" id="navmenu">`, "</summary>")

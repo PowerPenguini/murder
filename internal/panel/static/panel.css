@@ -674,3 +674,17 @@ div.logs > div.error:has(> .ts) { padding-left: calc(9ch + var(--s2)); }
 }
 /* A measure's limit sits under it, the same in every tile. */
 .statgroup .stat .v small { display: block; margin-top: 2px; }
+
+/* What a notice explains or causes, under it. */
+.subline { margin-top: var(--s2); padding-left: var(--s3); box-shadow: inset 2px 0 0 var(--frame); color: var(--soft); }
+.subline.bad { box-shadow: inset 2px 0 0 var(--bad); color: var(--fg); }
+.subline .fixes { margin-top: var(--s1); }
+
+/* Why a row needs attention, under its name. */
+.reason { margin-top: 2px; font-size: 12.5px; color: var(--soft); white-space: normal; }
+.reason.bad { color: var(--bad); font-weight: 500; }
+.reason .st::before { margin-right: 6px; }
+table#tenants td.l-main { white-space: normal; }
+table#tenants td.l-main > a, table#tenants td.l-main > .dim { white-space: nowrap; }
+.proposed { display: inline-block; margin-left: var(--s3); padding: 1px 6px; border: 1px solid var(--soft); font-size: 12px; color: var(--fg); }
+.proposed-notice .actions { margin-top: var(--s3); }

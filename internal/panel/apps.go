@@ -58,6 +58,8 @@ type appsData struct {
 	Bars []meter
 	// Name and File are a new app's form, kept when it was refused.
 	Name, File string
+	// States are what is wrong with each app, by name.
+	States map[string]appState
 }
 
 func (s *Server) apps(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +74,26 @@ func (s *Server) appsPage(w http.ResponseWriter, r *http.Request, data appsData,
 		s.fail(w, r, err)
 		return
 	}
-	slices.SortFunc(apps, func(a, b api.App) int { return strings.Compare(a.Name, b.Name) })
+	var tenants []api.Tenant
+	var events []store.Event
+	_ = all(
+		func() (err error) { tenants, err = s.backend.List(ctx); return },
+		func() (err error) {
+			events, err = s.backend.Events(ctx, store.EventQuery{Limit: activityEvents})
+			return
+		},
+	)
+	_, _, data.States = joinApps(nil, apps, tenants, events, s.now())
+	// The broken first, then by name.
+	slices.SortFunc(apps, func(a, b api.App) int {
+		if x, y := data.States[a.Name].Bad, data.States[b.Name].Bad; x != y {
+			if x {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
 	data.Apps = apps
 	most := 0
 	for _, app := range apps {
@@ -642,8 +663,10 @@ type settingsData struct {
 	Reviewing bool
 	// Token binds the save to the values reviewed.
 	Token string
-	// Suggest says a value proposed by the link that led here.
-	Suggest string
+	// Suggest says a value proposed by the link that led here; SuggestApp
+	// the app's limit, when it is likely the better fix.
+	Suggest    string
+	SuggestApp *appMemory
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -681,6 +704,23 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 	data.Fields = settingFields(t, appSpec, form)
 	if r.Method == http.MethodGet && form.MemoryMB != formOf(t).MemoryMB {
 		data.Suggest = "Proposed: memory " + memory(atoi(form.MemoryMB)) + " as a tenant override, up from " + memory(t.Spec.Limits.MemoryMB) + ". Nothing changes until you review and save it."
+		var tenants []api.Tenant
+		var events []store.Event
+		if all(
+			func() (err error) { tenants, err = s.backend.List(ctx); return },
+			func() (err error) {
+				events, err = s.backend.Events(ctx, store.EventQuery{App: t.App, Limit: activityEvents})
+				return
+			},
+		) == nil {
+			for _, app := range apps {
+				if app.Name == t.App {
+					if m := appMemoryOf(app, tenants, events, s.now()); m != nil && m.Hit[t.Spec.Name] > 0 {
+						data.SuggestApp = m
+					}
+				}
+			}
+		}
 	}
 	data.Env = envRows(appSpec, t.Overrides.Env)
 	if r.FormValue("do") == "review" {

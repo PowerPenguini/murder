@@ -51,20 +51,20 @@ func (d *DemoCluster) demoApps() {
 		web.LatestAt = time.Now().Add(-18 * time.Minute)
 		// A rollout of revision 3 is on its second wave.
 		web.Rollout = &store.Rollout{App: "web", ToRevision: 3, State: store.RolloutRunning, Wave: 2,
-			WaveStarted: time.Now().Add(-40 * time.Second), StartedAt: time.Now().Add(-3 * time.Minute), UpdatedAt: time.Now().Add(-40 * time.Second), Actor: "root"}
+			WaveStarted: time.Now().Add(-4*time.Minute - 30*time.Second), StartedAt: time.Now().Add(-10 * time.Minute), UpdatedAt: time.Now().Add(-4*time.Minute - 30*time.Second), Actor: "root"}
 		d.apps["web"] = web
 	}
 	// Its tenants, as that rollout left them: two canaries moved in the
 	// first wave, baltic-freight in the second and broke; three wait on
 	// revision 2, and test-staging is held there.
-	started := time.Now().Add(-3 * time.Minute)
+	started := time.Now().Add(-10 * time.Minute)
 	for name, moved := range map[string]int{"atlas": 1, "acme-logistics": 1, "baltic-freight": 2} {
 		t := d.tenants[name]
 		t.BeforeRevision, t.Canary = 2, moved == 1
 		d.tenants[name] = t
 		at := started
 		if moved == 2 {
-			at = time.Now().Add(-40 * time.Second)
+			at = time.Now().Add(-4*time.Minute - 30*time.Second)
 		}
 		d.events = append(d.events, store.Event{At: at, Actor: "murder (rollout)", Action: "app.rolled-out", Tenant: name, App: "web", Detail: "wave " + strconv.Itoa(moved) + ": revision 2 → 3"})
 	}
