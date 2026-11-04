@@ -318,7 +318,7 @@ func noListing(next http.Handler) http.Handler {
 func secure(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self' data:; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self' data:; script-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		// Not no-referrer: browsers then send forms with "Origin: null",
 		// and the panel could not tell its own from others'.
@@ -376,7 +376,9 @@ type page struct {
 	Done, Problem string
 	// Edits says apps and tenants' settings may be edited.
 	Edits bool
-	Data  any
+	// Alerts count what is broken, for the side bar.
+	Alerts navAlerts
+	Data   any
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, section string, data any) {
@@ -411,12 +413,29 @@ func (s *Server) renderWith(w http.ResponseWriter, r *http.Request, name, title,
 // what their last action did.
 func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section string, nodes api.Nodes, data any) page {
 	p := page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Edits: s.Apps != nil, Data: data}
+	p.Alerts = s.alertsFor(r, nodes, data)
 	// A page following the cluster leaves what an action did to the page
 	// it was meant for.
 	if r.Header.Get("X-Murder-Live") == "" {
 		p.Done, p.Problem = takeFlash(w, r)
 	}
 	return p
+}
+
+// alertsFor counts what is broken in the cluster, for the side bar: from
+// the tenants a page read already, or asked for.
+func (s *Server) alertsFor(r *http.Request, nodes api.Nodes, data any) navAlerts {
+	var tenants []api.Tenant
+	if d, ok := data.(overviewData); ok {
+		for _, row := range d.Tenants {
+			tenants = append(tenants, row.Tenant)
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		tenants, _ = s.backend.List(ctx)
+	}
+	return alertsOf(nodes.Nodes, tenants, s.now())
 }
 
 func (s *Server) write(w http.ResponseWriter, name string, p page, status int) {

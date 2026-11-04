@@ -58,6 +58,17 @@ func TestAttention(t *testing.T) {
 	if !got[0].Bad || !got[1].Bad || got[2].Bad {
 		t.Fatalf("the broken are not first: %+v", got)
 	}
+	// A tenant with several things wrong is one notice, saying them all,
+	// with a way to fix each; a copy still catching up is a risk too.
+	both := tenant("both", &reconcile.Status{Phase: "running"}, false)
+	both.Use = full.Use
+	got = attentionOf(nil, []tenantRow{both}, true, now)
+	if len(got) != 1 || !got[0].Bad || !strings.Contains(got[0].Text, "is unhealthy") || !strings.Contains(got[0].Text, "; uses 240 MB of its 256 MB") || !strings.Contains(got[0].Text, "still catching up") {
+		t.Fatalf("one tenant, several causes: %+v", got)
+	}
+	if len(got[0].Fixes) != 2 || got[0].Fixes[0].Href != "/tenants/both/logs" || got[0].Fixes[1].Href != "/tenants/both/settings#memory" {
+		t.Fatalf("fixes: %+v", got[0].Fixes)
+	}
 }
 
 // The overview says what needs attention; a tenant's page says what is
@@ -72,7 +83,7 @@ func TestAttentionOnThePages(t *testing.T) {
 	server := httptest.NewServer(s.Handler())
 	defer server.Close()
 	_, page := get(t, server.URL+"/")
-	if !strings.Contains(page, `<ul class="attention">`) || !strings.Contains(page, "hel-1</a> failed") || !strings.Contains(page, "baltic-freight</a> is unhealthy") {
+	if !strings.Contains(page, `<ul class="attention">`) || !strings.Contains(page, "hel-1</a> failed") || !strings.Contains(page, "baltic-freight</a> is unhealthy") || !strings.Contains(page, "web</a> rolls out revision 3") {
 		t.Fatalf("the overview does not say what needs attention:\n%s", page)
 	}
 	_, page = get(t, server.URL+"/tenants/baltic-freight")

@@ -81,7 +81,7 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 		done = name + " runs again"
 	case "roll":
 		_, err = agent.Roll(ctx, name)
-		done = name + " gets a new container"
+		done = name + " is restarting in a new container, its data kept: its state shows when it is healthy"
 	case "move":
 		// A move outlives the request: a browser that stops waiting, or
 		// a panel that restarts, would otherwise have it undone.
@@ -165,6 +165,7 @@ type logsData struct {
 	Tenant string
 	Lines  string
 	Tail   int
+	Head   tenantHead
 }
 
 // ansi matches terminal escapes, which a page shows as noise.
@@ -178,8 +179,14 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	data, err := s.Actions(s.actor(userOf(r))).Logs(ctx, name, tail)
-	if err != nil {
+	var data []byte
+	var t api.Tenant
+	var nodes api.Nodes
+	if err := all(
+		func() (err error) { data, err = s.Actions(s.actor(userOf(r))).Logs(ctx, name, tail); return },
+		func() (err error) { t, err = s.backend.Get(ctx, name); return },
+		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
+	); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -187,5 +194,6 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	if len(data) > logBytes {
 		data = data[len(data)-logBytes:]
 	}
-	s.render(w, r, "logs", name+" logs", "tenants", logsData{Tenant: name, Lines: ansi.ReplaceAllString(string(data), ""), Tail: tail})
+	logs := logsData{Tenant: name, Lines: ansi.ReplaceAllString(string(data), ""), Tail: tail, Head: s.headOf(t, nodes, "logs")}
+	s.write(w, "logs", s.pageFor(w, r, name+" · logs", "tenants", nodes, logs), http.StatusOK)
 }

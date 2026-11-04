@@ -67,3 +67,13 @@ func logLines(output string) []logLine {
 	}
 	return out
 }
+
+// failures are the actions that tell of something that broke.
+var failures = map[string]bool{
+	"node.failed": true, "node.failed-over": true, "tenant.failed-over": true, "tenant.restarted": true,
+	"tenant.move-cancelled": true, "rollout.paused": true, "rollout.rolled-back": true, "rollout.restored": true,
+	"backup.failed": true,
+}
+
+// failureEvent says an event tells of something that broke.
+func failureEvent(action string) bool { return failures[action] }

@@ -23,13 +23,13 @@ func TestUsePages(t *testing.T) {
 		t.Fatalf("the overview lacks the nodes' memory:\n%s", page)
 	}
 	_, page = get(t, server.URL+"/tenants")
-	for _, want := range []string{" MB</span>", "Requests/min"} {
+	for _, want := range []string{" MB <span class=\"dim\">of 256 MB</span>", "Requests a minute"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the tenants' page lacks %q:\n%s", want, page)
 		}
 	}
 	_, page = get(t, server.URL+"/tenants/baltic-freight")
-	for _, want := range []string{"Use, last 24 hours", "limit 256 MB", "Response time, 95th percentile", `class="linechart"`, ">Data</div>", "1.4 GB <small>of 10 GB</small>"} {
+	for _, want := range []string{"Use, last 24 hours", "limit 256 MB", "Response time, 95th percentile", `class="chart"`, ">Data</div>", "1.4 GB <small>of 10 GB</small>"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the tenant's page lacks %q:\n%s", want, page)
 		}

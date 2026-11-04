@@ -57,7 +57,6 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 		}
 	}
 	moving := tenant("kowalski-trans", "web", "nbg-1", "fsn-1", true, running(0))
-	moving.ReplicaNext = "hel-1"
 	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 3, LastExit: "exit 137 (most likely out of memory) 4m ago", Generation: 2, CheckedAt: now.Add(-3 * time.Second)})
 	syncing := tenant("nordwind", "web", "fsn-1", "nbg-1", false, running(0))
 	suspended := tenant("test-staging", "web", "fsn-1", "nbg-1", true, &reconcile.Status{Phase: "stopped", Generation: 5, CheckedAt: now.Add(-6 * time.Second)})
@@ -68,7 +67,7 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 		tenant("atlas", "web", "fsn-1", "nbg-1", true, running(0)),
 		tenant("acme-logistics", "web", "fsn-1", "nbg-1", true, running(1)),
 		unhealthy, moving, syncing, suspended, archived,
-		tenant("vistula-cargo", "web", "nbg-1", "fsn-1", true, running(0)),
+		tenant("vistula-cargo", "web", "nbg-1", "fsn-1", false, running(0)),
 	}, nil
 }
 
@@ -85,7 +84,7 @@ func (d Demo) Get(ctx context.Context, name string) (api.Tenant, error) {
 func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, error) {
 	now := d.now()
 	all := []store.Event{
-		{ID: 214, At: now.Add(-50 * time.Second), Actor: "murder", Action: "tenant.replica", Tenant: "kowalski-trans", App: "web", Detail: "copy moves from fsn-1 to hel-1, which keeps fewer"},
+		{ID: 214, At: now.Add(-50 * time.Second), Actor: "murder", Action: "tenant.replica", Tenant: "vistula-cargo", App: "web", Detail: "a new copy on fsn-1, as hel-1 failed"},
 		{ID: 213, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "node.failed-over", Detail: "hel-1: 2 tenants run from their replicas"},
 		{ID: 212, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "vistula-cargo", App: "web", Detail: "hel-1 → nbg-1"},
 		{ID: 211, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "nordwind", App: "web", Detail: "hel-1 → fsn-1"},

@@ -1,52 +1,206 @@
 // Murder panel: the page follows the cluster. Every few seconds it asks
-// for itself again and puts in the new content, unless someone is at
-// work on it (typing, a choice made, a file chosen, a menu open, text
-// selected, a form sent and not yet answered), or it shows something once
-// (a secret), or it holds still (logs), or is hidden.
+// for itself again and puts in the new content, and says how fresh what
+// it shows is: updated a moment ago, paused while someone is at work on it
+// (typing, a choice made, a menu open, text selected, a form sent), or that
+// the node it asks does not answer, so what it shows is old. A page that
+// holds something being edited (an app's spec, settings) puts in only its
+// parts marked data-live; logs hold still unless followed.
 "use strict";
 (() => {
-  const main = document.getElementById("live");
-  if (!main) return;
-  const indicator = document.querySelector(".live");
-  const busy = () =>
-    document.hidden ||
-    // A sent form's button says "Working…" until the answer replaces the
-    // page: putting in fresh content would bring the button back.
-    document.querySelector(".once, [data-still], details[open], button[data-label]") ||
-    (document.activeElement && document.activeElement.closest("form")) ||
-    [...document.querySelectorAll("input[type=text], input[type=search], input[type=number]")].some((input) => input.value !== "" && input.defaultValue !== input.value) ||
-    [...document.querySelectorAll("input[type=file]")].some((input) => input.files.length > 0) ||
-    [...document.querySelectorAll("select")].some((select) => select.selectedIndex > 0 && !select.options[select.selectedIndex].defaultSelected) ||
-    String(getSelection()) !== "";
-  let timer;
-  const tick = async () => {
-    if (busy()) return;
-    try {
-      const response = await fetch(location.href, { credentials: "same-origin", headers: { "X-Murder-Live": "1" } });
-      // Signed out, the session ended, or what the page shows is gone (a
-      // job of a panel that restarted, a purged tenant): it stops following,
-      // keeping what it showed last.
-      if (response.redirected || response.status === 401 || response.status === 404) {
-        clearInterval(timer);
-        if (indicator) indicator.classList.add("off");
-        return;
+  const live = document.getElementById("live");
+  if (!live) return;
+  const state = document.getElementById("livestate");
+  const text = state && state.querySelector(".livetext");
+  const node = (state && state.dataset.node) || "the node";
+  const every = 5000;
+  // When what the page shows was read, by this browser's clock.
+  let readAt = Date.now();
+  let failures = 0, lostWhy = "", stopped = "", timer = 0, asking = false;
+
+  // A page holding an edit (an app's spec, settings, logs) puts in only
+  // its parts marked data-live, so the edit is never replaced.
+  const partial = () => !!document.querySelector("[data-still]");
+  const selectChanged = (select) => {
+    const initial = [...select.options].findIndex((option) => option.defaultSelected);
+    return select.selectedIndex !== (initial < 0 ? 0 : initial);
+  };
+  const editing = () => {
+    const active = document.activeElement;
+    if (active && active.closest("#main form") && active.matches("input, select, textarea")) return true;
+    return [...document.querySelectorAll("#main input[type=text], #main input[type=number], #main input[type=search], #main textarea")].some((input) => input.value !== input.defaultValue) ||
+      [...document.querySelectorAll("#main input[type=file]")].some((input) => input.files.length > 0) ||
+      [...document.querySelectorAll("#main select")].some(selectChanged);
+  };
+  // Why the page does not follow the cluster now; "" if it does.
+  const pausedBy = () => {
+    if (document.querySelector(".once")) return "Paused while a secret shows";
+    if (document.querySelector("button[data-label]")) return "Paused while your action runs";
+    if (document.querySelector("#main details[open]:not(.event), .side details[open]")) return "Paused while a menu is open";
+    if (document.querySelector("details.event[open]")) return "Paused while an event is open";
+    if (document.querySelector(".readout.at")) return "Paused while you read a chart";
+    if (partial()) return "";
+    if (editing()) return "Paused while you edit";
+    if (String(getSelection()) !== "") return "Paused while text is selected";
+    return "";
+  };
+
+  const age = (ms) => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m";
+    return Math.floor(s / 3600) + "h";
+  };
+  const clock = (at) => new Date(at).toISOString().slice(11, 19) + " UTC";
+
+  // The banner that says the page shows old data, at the top of the page.
+  const banner = () => {
+    let bar = document.getElementById("stale-banner");
+    const main = document.getElementById("main");
+    if (!lostWhy) {
+      if (bar) bar.remove();
+      document.body.classList.remove("stale");
+      return;
+    }
+    document.body.classList.add("stale");
+    if (!bar && main) {
+      bar = document.createElement("div");
+      bar.id = "stale-banner";
+      bar.className = "notice bad stale-banner";
+      bar.setAttribute("role", "alert");
+      main.prepend(bar);
+    }
+    if (!bar) return;
+    bar.replaceChildren();
+    const lead = document.createElement("span");
+    lead.className = "lead-in";
+    lead.textContent = "Can't reach " + node + ". ";
+    bar.append(lead, document.createTextNode(lostWhy + " This page shows what it said at " + clock(readAt) + ", " + age(Date.now() - readAt) + " ago: greyed values may be out of date. "));
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "link";
+    retry.textContent = "Try again now";
+    retry.addEventListener("click", () => tick(true));
+    bar.append(retry);
+  };
+
+  const say = () => {
+    if (!state || !text) return;
+    state.classList.remove("on", "paused", "lost", "off");
+    text.replaceChildren();
+    if (stopped) {
+      state.classList.add("off");
+      if (stopped === "signed out") {
+        text.append("Signed out. ");
+        const link = document.createElement("a");
+        link.href = "/login";
+        link.textContent = "Sign in";
+        text.append(link);
+      } else {
+        text.textContent = stopped;
       }
-      if (!response.ok) return;
+      return;
+    }
+    if (lostWhy) {
+      state.classList.add("lost");
+      text.textContent = "Can't reach " + node + ", " + age(Date.now() - readAt) + " old ";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "link";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", () => tick(true));
+      text.append(retry);
+      return;
+    }
+    const paused = pausedBy();
+    if (paused) {
+      state.classList.add("paused");
+      text.textContent = paused + ", " + age(Date.now() - readAt) + " old";
+      return;
+    }
+    state.classList.add("on");
+    text.textContent = (partial() && !document.querySelector("[data-live]") ? "Holds still, read " : "Live, updated ") + age(Date.now() - readAt) + " ago";
+  };
+
+  const stop = (why) => {
+    stopped = why;
+    clearInterval(timer);
+    say();
+  };
+
+  // Puts the fresh page in: all of it, or only its live parts on a page
+  // that holds an edit.
+  const put = (page) => {
+    for (const id of ["menu", "navmenu"]) {
+      const fresh = page.getElementById(id), old = document.getElementById(id);
+      if (!fresh || !old) continue;
+      if (id === "navmenu") {
+        const summary = fresh.querySelector("summary"), list = fresh.querySelector(".navlist");
+        if (summary) old.querySelector("summary").replaceWith(summary);
+        if (list && !old.open) old.querySelector(".navlist").replaceWith(list);
+      } else {
+        old.replaceChildren(...fresh.childNodes);
+      }
+    }
+    document.title = page.title;
+    const fresh = page.getElementById("live");
+    if (!fresh) return;
+    if (document.querySelector("[data-still]")) {
+      for (const part of document.querySelectorAll("[data-live][id]")) {
+        const next = fresh.querySelector("#" + CSS.escape(part.id));
+        if (next && !part.contains(document.activeElement) && !part.querySelector("details[open], button[data-label]")) part.replaceWith(next);
+      }
+      return;
+    }
+    // What an action did is shown once, not again.
+    for (const notice of fresh.querySelectorAll(".notice")) notice.remove();
+    const into = fresh.querySelector("main") || fresh;
+    for (const notice of [...live.querySelectorAll(".notice:not(.stale-banner)")].reverse()) into.prepend(notice);
+    // Events left open stay open.
+    const open = new Set([...live.querySelectorAll("details.event[open]")].map((d) => d.dataset.id));
+    live.replaceChildren(...fresh.childNodes);
+    for (const d of live.querySelectorAll("details.event")) if (open.has(d.dataset.id)) d.open = true;
+  };
+
+  const tick = async (now) => {
+    if (stopped || asking || document.hidden) return;
+    if (!now && pausedBy()) return say();
+    asking = true;
+    const abort = new AbortController();
+    const late = setTimeout(() => abort.abort(), 8000);
+    try {
+      const response = await fetch(location.href, { credentials: "same-origin", headers: { "X-Murder-Live": "1" }, signal: abort.signal, cache: "no-store" });
+      if (response.redirected || response.status === 401) return stop("signed out");
+      if (response.status === 404) return stop("This page is gone: it was purged, renamed or ended");
       const page = new DOMParser().parseFromString(await response.text(), "text/html");
-      const fresh = page.getElementById("live");
-      if (!fresh || busy()) return;
-      // What an action did is shown once, not again.
-      for (const notice of fresh.querySelectorAll(".notice")) notice.remove();
-      const into = fresh.querySelector("main") || fresh;
-      for (const notice of [...main.querySelectorAll(".notice")].reverse()) into.prepend(notice);
-      main.replaceChildren(...fresh.childNodes);
-    } catch {
-      // The next tick tries again.
+      if (!response.ok) {
+        const said = page.querySelector("h1");
+        throw new Error(said ? said.textContent.trim() + "." : "It answered " + response.status + ".");
+      }
+      if (!now && pausedBy()) return;
+      put(page);
+      readAt = Date.now();
+      failures = 0;
+      lostWhy = "";
+    } catch (error) {
+      failures++;
+      // One slow answer is not yet a lost node.
+      if (failures >= 2 || now) lostWhy = error.name === "AbortError" ? "It did not answer within 8 seconds." : (error.message && error.message !== "Failed to fetch" ? error.message : "The connection failed.");
+    } finally {
+      clearTimeout(late);
+      asking = false;
+      banner();
+      say();
     }
   };
-  timer = setInterval(tick, 5000);
+  window.murderLive = { tick: () => tick(true) };
+
+  timer = setInterval(tick, every);
+  setInterval(() => { say(); if (lostWhy) banner(); }, 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+  say();
+
   // A menu closes on a click elsewhere, or Escape, as menus do.
-  const menus = () => document.querySelectorAll("details[open]:has(> .pop)");
+  const menus = () => document.querySelectorAll("details[open]:has(> .pop), details.navmenu[open]");
   document.addEventListener("click", (event) => {
     for (const menu of menus()) if (!menu.contains(event.target)) menu.open = false;
   });

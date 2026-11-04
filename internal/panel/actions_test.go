@@ -108,14 +108,14 @@ func TestActingOnTenants(t *testing.T) {
 	if response, err := client.Do(live); err == nil {
 		page, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		if strings.Contains(string(page), `class="notice">moved<`) {
+		if strings.Contains(string(page), `class="notice" role="status">moved<`) {
 			t.Fatal("a live fetch took the notice")
 		}
 	}
 	if response, err := client.Get(server.URL + "/"); err == nil {
 		page, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		if !strings.Contains(string(page), `class="notice">moved<`) {
+		if !strings.Contains(string(page), `class="notice" role="status">moved<`) {
 			t.Fatal("the notice was lost")
 		}
 	}

@@ -44,9 +44,30 @@ func main() {
 		}
 		log.Info("an invitation", "url", url+"/enroll#"+people.Invite("ewa"))
 	}
-	log.Info("the demo panel serves", "url", url)
-	if err := http.ListenAndServe(*listen, server.Handler()); err != nil {
+	log.Info("the demo panel serves", "url", url, "connection lost", url+"/?demo=offline", "signed out", url+"/?demo=signedout")
+	if err := http.ListenAndServe(*listen, demoStates(server.Handler())); err != nil {
 		log.Error("serve", "error", err)
 		os.Exit(1)
 	}
+}
+
+// demoStates lets a page show what it does when the node it follows stops
+// answering, or its session ends: with ?demo=offline (or signedout) in its
+// address, the page loads, and its following of the cluster then fails so.
+func demoStates(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Murder-Live") != "" {
+			switch r.URL.Query().Get("demo") {
+			case "offline":
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusGatewayTimeout)
+				_, _ = w.Write([]byte("<!doctype html><title>murder</title><h1>The agent took too long to answer</h1>"))
+				return
+			case "signedout":
+				http.Error(w, "sign in first", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

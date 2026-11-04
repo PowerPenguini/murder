@@ -1,6 +1,6 @@
 {{define "content"}}{{$d := .Data}}
 <h1>Access</h1>
-<p class="lead">Who signs in, and which devices reach the panel through its tunnel.</p>
+<p class="lead">Who signs in, and which devices reach the panel through its WireGuard tunnel. Everyone here has the same rights.</p>
 
 {{with $d.Problem}}<div class="notice bad">{{.}}</div>{{end}}
 {{with $d.Done}}<div class="notice">{{.}}</div>{{end}}
@@ -37,8 +37,7 @@
   <div class="head">
     <h2>People</h2>
     <div class="row">
-      {{if $d.Me}}<form method="post" action="/access" class="row"><input type="hidden" name="do" value="codes"><button type="submit">New recovery codes</button></form>{{end}}
-      <details>
+      <details class="drop end">
         <summary class="button">Invite</summary>
         <div class="pop">
           <form method="post" action="/access" class="stack"><input type="hidden" name="do" value="invite">
@@ -50,28 +49,39 @@
       </details>
     </div>
   </div>
-  <table>
-    <thead><tr><th>Name</th><th>Passkeys</th><th class="num">Recovery codes</th><th class="hide-narrow">Added</th><th class="end"></th></tr></thead>
+  <table class="list">
+    <thead><tr><th>Name</th><th>Passkeys</th><th class="num">Recovery codes</th><th class="hide-narrow">Added</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
     <tbody>
-    {{range $d.People}}
+    {{range $p := $d.People}}
       <tr>
-        <td>{{.Name}}{{if eq .Name $d.Me}} <span class="dim">you</span>{{end}}</td>
-        <td>{{if .Passkeys}}<span class="keys">{{range .Passkeys}}<span>{{.Label}} <span class="dim">{{if .UsedAt.IsZero}}never used{{else}}{{ago .UsedAt}} ago{{end}}</span></span>{{end}}</span>{{else}}<span class="dim">invited</span>{{end}}</td>
-        <td class="num">{{.Recovery}}</td>
+        <td class="l-main">{{.Name}}{{if eq .Name $d.Me}} <span class="dim">you</span>{{end}}</td>
+        <td class="l-sub" data-label="Passkeys">{{if .Passkeys}}<span class="keys">{{range .Passkeys}}<span>{{.Label}} <span class="dim">{{if .UsedAt.IsZero}}never used{{else}}used {{ago .UsedAt}} ago{{end}}</span></span>{{end}}</span>{{else}}<span class="st warn">invited</span> <span class="dim">no passkey yet</span>{{end}}</td>
+        <td class="num l-sub" data-label="Recovery codes">{{if and .Passkeys (eq .Recovery 0)}}<span class="st warn">0</span> <span class="dim">a lost passkey locks {{if eq .Name $d.Me}}you{{else}}them{{end}} out</span>{{else}}{{.Recovery}}{{end}}</td>
         <td class="dim hide-narrow">{{ago .CreatedAt}} ago, by {{.CreatedBy}}</td>
-        <td class="end">
+        <td class="end l-side">
           <details class="menu">
             <summary aria-label="what to do with {{.Name}}">⋯</summary>
             <div class="pop">
-              {{if or (eq .Name $d.Me) (not .Passkeys)}}<form method="post" action="/access" class="row"><input type="hidden" name="do" value="invite"><input type="hidden" name="name" value="{{.Name}}"><button type="submit">{{if eq .Name $d.Me}}Add a passkey{{else}}Invite again{{end}}</button></form>{{end}}
-              {{range .Passkeys}}<form method="post" action="/access" class="row"><input type="hidden" name="do" value="remove-passkey"><input type="hidden" name="id" value="{{.ID}}"><button type="submit" class="danger" title="remove this passkey">Remove passkey {{.Label}}</button></form>{{end}}
-              {{if ne .Name $d.Me}}<form method="post" action="/access" class="row"><input type="hidden" name="do" value="remove-person"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="danger">Remove {{.Name}}</button></form>{{end}}
+              {{if or (eq .Name $d.Me) (not .Passkeys)}}<form method="post" action="/access" class="stack"><input type="hidden" name="do" value="invite"><input type="hidden" name="name" value="{{.Name}}">
+                <p class="hint">{{if eq .Name $d.Me}}A link, shown once, that adds a passkey of yours on another device.{{else}}A new link for {{.Name}}, valid 24 hours; the old one stops working.{{end}}</p>
+                <div><button type="submit">{{if eq .Name $d.Me}}Add a passkey{{else}}Invite {{.Name}} again{{end}}</button></div></form>{{end}}
+              {{if and (eq .Name $d.Me) $d.CanCodes}}<form method="post" action="/access" class="stack"><input type="hidden" name="do" value="codes">
+                <p class="hint">Ten codes, shown once; each adds a passkey should you lose yours. Your old codes stop working.</p>
+                <div><button type="submit">Make new recovery codes</button></div></form>{{end}}
+              {{range .Passkeys}}{{$name := passkeyName .Label $p.Name}}<form method="post" action="/access" class="stack"><input type="hidden" name="do" value="remove-passkey"><input type="hidden" name="id" value="{{.ID}}">
+                <p class="hint">Removing passkey {{$name}} stops it signing {{if eq $p.Name $d.Me}}you{{else}}{{$p.Name}}{{end}} in{{if eq (len $p.Passkeys) 1}}; it is the only one, so {{if eq $p.Name $d.Me}}you{{else}}{{$p.Name}}{{end}} then need{{if ne $p.Name $d.Me}}s{{end}} a recovery code or an invitation{{end}}. Type its name.</p>
+                <input type="text" name="confirm" placeholder="{{$name}}" data-confirm="{{$name}}" aria-label="type {{$name}} to confirm" autocomplete="off" spellcheck="false" required>
+                <div><button type="submit" class="danger">Remove passkey {{$name}}</button></div></form>{{end}}
+              {{if ne .Name $d.Me}}<form method="post" action="/access" class="stack"><input type="hidden" name="do" value="remove-person"><input type="hidden" name="name" value="{{.Name}}">
+                <p class="hint">{{.Name}} can no longer sign in, and is signed out now. Type their name.</p>
+                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+                <div><button type="submit" class="danger">Remove {{.Name}}</button></div></form>{{end}}
             </div>
           </details>
         </td>
       </tr>
     {{else}}
-      <tr><td colspan="5" class="empty">No one signs in yet.</td></tr>
+      <tr><td colspan="5" class="empty l-main">No one signs in yet.</td></tr>
     {{end}}
     </tbody>
   </table>
@@ -80,7 +90,7 @@
 <section>
   <div class="head">
     <h2>Devices</h2>
-    <details>
+    <details class="drop end">
       <summary class="button">Add a device</summary>
       <div class="pop">
         <form method="post" action="/access" class="stack"><input type="hidden" name="do" value="add-device">
@@ -91,23 +101,26 @@
       </div>
     </details>
   </div>
-  <table>
-    <thead><tr><th>Name</th><th>Address</th><th class="hide-narrow">Added</th><th class="end"></th></tr></thead>
+  <table class="list">
+    <thead><tr><th>Name</th><th>Tunnel address</th><th class="hide-narrow">Added</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
     <tbody>
     {{range $d.Devices}}
       <tr>
-        <td>{{.Name}}</td>
-        <td class="mono dim">{{.Address}}</td>
+        <td class="l-main">{{.Name}}</td>
+        <td class="mono dim l-sub">{{.Address}}</td>
         <td class="dim hide-narrow">{{ago .CreatedAt}} ago, by {{.CreatedBy}}</td>
-        <td class="end">
+        <td class="end l-side">
           <details class="menu">
             <summary aria-label="what to do with {{.Name}}">⋯</summary>
-            <div class="pop"><form method="post" action="/access" class="row"><input type="hidden" name="do" value="remove-device"><input type="hidden" name="name" value="{{.Name}}"><button type="submit" class="danger">Remove {{.Name}}</button></form></div>
+            <div class="pop"><form method="post" action="/access" class="stack"><input type="hidden" name="do" value="remove-device"><input type="hidden" name="name" value="{{.Name}}">
+              <p class="hint">{{.Name}} no longer reaches the panel through the tunnel: its configuration stops working. Type its name.</p>
+              <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" autocomplete="off" spellcheck="false" required>
+              <div><button type="submit" class="danger">Remove {{.Name}}</button></div></form></div>
           </details>
         </td>
       </tr>
     {{else}}
-      <tr><td colspan="4" class="empty">No device yet.</td></tr>
+      <tr><td colspan="4" class="empty l-main">No device yet.</td></tr>
     {{end}}
     </tbody>
   </table>

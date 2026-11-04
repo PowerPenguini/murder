@@ -3,37 +3,37 @@
 {{with $d.Release}}<p class="{{if $d.Mixed}}problem bad{{else}}lead{{end}}">{{.}}</p>{{end}}
 
 <section class="near">
-  <table>
-    <thead><tr><th>Node</th><th>State</th><th class="hide-narrow">Release</th><th class="hide-narrow">Up</th><th class="hide-narrow">Tunnel</th><th class="end"></th></tr></thead>
+  <table class="list">
+    <thead><tr><th>Node</th><th>State</th><th class="hide-narrow">Release</th><th class="hide-narrow">Up for</th><th class="hide-narrow">Tunnel address</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
     <tbody>
     {{range $d.Nodes}}{{$n := .}}
-      <tr>
-        <td>{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}{{if eq .Name $d.Self}} <span class="dim">· this node</span>{{end}}</td>
-        <td><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
-        <td class="mono dim hide-narrow">{{if .Version}}{{.Version}} · {{.Schema}}{{else}}—{{end}}</td>
-        <td class="dim hide-narrow">{{if .Started.IsZero}}—{{else}}{{ago .Started}}{{end}}</td>
-        <td class="mono dim hide-narrow">{{with .Tunnel}}{{.Address}}{{else}}—{{end}}</td>
-        <td class="end">
+      <tr id="node-{{.Name}}">
+        <td class="l-main">{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}{{if eq .Name $d.Self}} <span class="dim">· this node</span>{{end}}</td>
+        <td class="l-sub"><span class="st {{.State.Kind}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
+        <td class="mono dim hide-narrow">{{if .Version}}{{.Version}} · schema {{.Schema}}{{else}}not known{{end}}</td>
+        <td class="dim hide-narrow">{{if .Started.IsZero}}not known{{else}}{{ago .Started}}{{end}}</td>
+        <td class="mono dim hide-narrow">{{with .Tunnel}}{{.Address}}{{else}}none{{end}}</td>
+        <td class="end l-side">
           <details class="menu">
             <summary aria-label="what to do with {{.Name}}">⋯</summary>
             <div class="pop">
               {{if and .Answers .Targets}}
               <form method="post" class="stack"><input type="hidden" name="do" value="drain"><input type="hidden" name="node" value="{{.Name}}">
                 <label class="field">Drain to <select name="to" aria-label="to" required><option value="" selected disabled>choose a node</option>{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
-                <span class="hint">Moves every tenant of {{.Name}} there, one after the other.</span>
-                <div><button type="submit">Drain</button></div>
+                <p class="hint">Moves every tenant of {{.Name}} there, one after the other, each with its data.</p>
+                <div><button type="submit">Drain {{.Name}}</button></div>
               </form>
               {{end}}
               {{if and (not .Answers) (not .Failed)}}
               <form method="post" class="stack"><input type="hidden" name="do" value="failover"><input type="hidden" name="node" value="{{.Name}}">
-                <span class="hint">Only once you made sure it is powered off: its tenants must not run twice. Type its name.</span>
+                <p class="hint">Only once you made sure it is powered off: its tenants must never run twice. Their copies take over. Type its name to confirm.</p>
                 <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
-                <div><button type="submit" class="danger">It is off — fail it over</button></div>
+                <div><button type="submit" class="danger">It is off: fail it over</button></div>
               </form>
               {{end}}
               {{if ne .Name $d.Self}}
               <form method="post" class="stack"><input type="hidden" name="do" value="remove"><input type="hidden" name="node" value="{{.Name}}">
-                <span class="hint">Once it runs no tenant and keeps no copy. Type its name.</span>
+                <p class="hint">Only once it runs no tenant and keeps no copy: the cluster forgets it. Type its name to remove it.</p>
                 <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
                 <div><button type="submit" class="danger">Remove from the cluster</button></div>
               </form>
@@ -63,7 +63,7 @@
     <button type="submit"{{if $d.Busy}} disabled{{end}}>Balance</button>
   </form>
   {{else}}
-  <p class="lead">No node runs two tenants more than another.</p>
+  <p class="lead">Tenant counts are balanced: no node runs two more than another.</p>
   {{end}}
 </section>
 {{end}}
@@ -110,18 +110,18 @@
 
 <section>
   <div class="head"><h2>Jobs</h2></div>
-  <table>
-    <thead><tr><th>Began</th><th>Job</th><th>By</th><th>State</th></tr></thead>
+  <table class="list rows">
+    <thead><tr><th>Began</th><th>Job</th><th class="hide-narrow">By</th><th>State</th></tr></thead>
     <tbody>
     {{range $d.Jobs}}
       <tr>
-        <td class="when">{{ago .Started}}</td>
-        <td><a href="/jobs/{{.ID}}">{{.Title}}</a></td>
-        <td class="dim">{{.By}}</td>
-        <td>{{if not .Done}}<span class="st warn">running</span>{{else if .Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}</td>
+        <td class="when hide-narrow">{{ago .Started}} ago</td>
+        <td class="l-main"><a class="row-link" href="/jobs/{{.ID}}">{{.Title}}</a></td>
+        <td class="dim hide-narrow">{{.By}}</td>
+        <td class="l-side">{{if not .Done}}<span class="st warn">running</span>{{else if .Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}</td>
       </tr>
     {{else}}
-      <tr><td colspan="4" class="empty">None yet. Jobs live in this node's panel until it restarts.</td></tr>
+      <tr><td colspan="4" class="empty l-main">None yet. Jobs live in this node's panel until it restarts.</td></tr>
     {{end}}
     </tbody>
   </table>

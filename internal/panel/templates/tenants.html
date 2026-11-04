@@ -1,48 +1,57 @@
 {{define "content"}}{{$d := .Data}}
-<h1>Tenants</h1>
-<p class="lead">{{$d.Live}} live{{if ne $d.Live $d.Serving}}, {{$d.Serving}} serving{{end}} · {{$d.Healthy}} healthy{{if $d.Unprotected}} · {{$d.Unprotected}} without a copy that could take over{{end}}</p>
+<div class="head page-title">
+  <h1>Tenants</h1>
+  {{if and .Acts $d.Apps}}
+  <details class="drop end">
+    <summary class="button primary">New tenant</summary>
+    <div class="pop">
+      <form method="post" action="/tenants" class="stack">
+        <label class="field">Name <input type="text" name="name" placeholder="acme" required maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end" autocomplete="off" spellcheck="false"></label>
+        <label class="field">App <select name="app">{{range $d.Apps}}<option>{{.}}</option>{{end}}</select></label>
+        {{if gt (len $d.Nodes) 1}}<label class="field">Node <select name="node"><option value="auto" selected>the one running the fewest</option>{{range $d.Nodes}}{{if and .Answers (not .Failed)}}<option>{{.Name}}</option>{{end}}{{end}}</select></label>{{end}}
+        <p class="hint">It answers at its name under the cluster's base domain.</p>
+        <div><button type="submit" class="primary">Create</button></div>
+      </form>
+    </div>
+  </details>
+  {{end}}
+</div>
+<p class="lead">{{$d.Live}} live{{if ne $d.Live $d.Serving}}, {{$d.Serving}} serving{{end}} · {{$d.Healthy}} healthy{{if $d.Unprotected}} · <a href="{{query "show" "unprotected"}}">{{$d.Unprotected}} without a ready copy</a>{{end}}</p>
 
 <section class="near">
-  <div class="head">
-    <input type="search" class="short" placeholder="Filter" aria-label="filter tenants" data-filter="tenants" autocomplete="off">
+  <form method="get" action="/tenants" class="filters" role="search">
+    <nav class="seg" aria-label="show">
+      {{range $f := list "all" "attention" "unprotected" "suspended" "archived"}}<a href="{{query "show" $f "q" $d.Query "sort" (sortName $d.ByName)}}"{{if eq $f $d.Show}} class="on" aria-current="true"{{end}}>{{filterLabel $f}} <span class="n">{{index $d.Counts $f}}</span></a>{{end}}
+    </nav>
     <div class="row">
-      {{if and .Acts $d.Apps}}
-      <details>
-        <summary class="button">New tenant</summary>
-        <div class="pop">
-          <form method="post" action="/tenants" class="stack">
-            <label class="field">Name <input type="text" name="name" placeholder="acme" aria-label="tenant name" required maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end" autocomplete="off" spellcheck="false"></label>
-            <label class="field">App <select name="app" aria-label="app">{{range $d.Apps}}<option>{{.}}</option>{{end}}</select></label>
-            {{if gt (len $d.Nodes) 1}}<label class="field">Node <select name="node" aria-label="node"><option value="auto" selected>the one running the fewest</option>{{range $d.Nodes}}{{if and .Answers (not .Failed)}}<option>{{.Name}}</option>{{end}}{{end}}</select></label>{{end}}
-            <span class="hint">Its address is name.{{"{"}}base domain{{"}"}}.</span>
-            <div><button type="submit" class="primary">Create</button></div>
-          </form>
-        </div>
-      </details>
-      {{end}}
+      {{if ne $d.Show "all"}}<input type="hidden" name="show" value="{{$d.Show}}">{{end}}
+      {{if $d.ByName}}<input type="hidden" name="sort" value="name">{{end}}
+      <input type="search" name="q" value="{{$d.Query}}" class="short" placeholder="Name, app or node" aria-label="filter tenants by name, app or node" autocomplete="off" data-filter="tenants">
+      <button type="submit">Filter</button>
+      {{if or $d.Query (ne $d.Show "all")}}<a href="{{query "sort" (sortName $d.ByName)}}" class="dim">Clear</a>{{end}}
     </div>
-  </div>
-  <div class="scroll">
-  <table id="tenants" class="rows tight">
-    <thead><tr><th>Tenant</th><th>State</th><th>Memory</th><th>CPU</th><th class="num">Requests/min</th><th>Runs on</th><th>Copy</th></tr></thead>
+  </form>
+  <p class="count-line dim" id="tenants-count">{{if or $d.Query (ne $d.Show "all")}}{{len $d.Shown}} of {{len $d.Tenants}} match{{else}}{{len $d.Tenants}} tenants{{end}}, {{if $d.ByName}}by name · <a href="{{query "show" $d.Show "q" $d.Query}}">problems first</a>{{else}}problems first · <a href="{{query "show" $d.Show "q" $d.Query "sort" "name"}}">by name</a>{{end}}</p>
+  <table id="tenants" class="list rows">
+    <thead><tr><th>Tenant</th><th>State</th><th>Memory, used of limit</th><th>CPU, cores</th><th class="num">Requests a minute</th><th>Runs on</th><th>Copy</th></tr></thead>
     <tbody>
-    {{range $d.Tenants}}
+    {{range $d.Shown}}
       <tr>
-        <td title="of app {{.App}}"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
-        <td><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
+        <td class="l-main"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a> <span class="dim small">{{.App}}</span></td>
+        <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         {{with .Use}}
-        <td class="barcell"><div class="barline">{{template "bar" .Memory}}<span class="num">{{.MemoryText}}</span></div></td>
-        <td class="barcell"><div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div></td>
-        <td class="num">{{.Requests}}</td>
-        {{else}}<td class="faint">—</td><td class="faint">—</td><td class="num faint">—</td>{{end}}
-        <td>{{if .Archived}}<span class="faint">{{.Node}}</span>{{else}}{{.Node}}{{end}}</td>
-        <td>{{template "copy" .}}</td>
+        <td class="barcell l-sub" data-label="Memory"><div class="barline">{{template "bar" .Memory}}<span class="num{{if ge .Memory.Width 90.0}} red{{end}}">{{.MemoryText}}{{with .MemoryLimit}} <span class="dim">of {{.}}</span>{{end}}</span></div></td>
+        <td class="barcell hide-narrow"><div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div></td>
+        <td class="num hide-narrow">{{.Requests}}</td>
+        {{else}}<td class="faint l-sub" data-label="Memory">{{if .Archived}}not running{{else}}not measured{{end}}</td><td class="faint hide-narrow">none</td><td class="num faint hide-narrow">none</td>{{end}}
+        <td class="hide-narrow">{{if .Archived}}<span class="faint">{{.Node}}</span>{{else}}{{.Node}}{{end}}</td>
+        <td class="l-sub{{if not (or (eq .Replica.Kind "warn") (eq .Replica.Kind "bad"))}} hide-narrow{{end}}" data-label="Copy">{{template "copy" .}}</td>
       </tr>
     {{else}}
-      <tr><td colspan="9" class="empty">No tenants yet. Create one of an app: “New tenant” above.</td></tr>
+      <tr><td colspan="7" class="empty l-main">{{if $d.Tenants}}No tenants match. <a href="{{query "sort" (sortName $d.ByName)}}">Clear the filter</a>{{else}}No tenants yet. Make one of an app with New tenant, above.{{end}}</td></tr>
     {{end}}
     </tbody>
   </table>
-  </div>
+  <p class="empty" id="tenants-none" hidden>No tenants match. Clear the filter to see them all.</p>
 </section>
 {{end}}

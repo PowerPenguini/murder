@@ -1,38 +1,36 @@
 {{define "content"}}{{$d := .Data}}
-<div class="head">
+<div class="head page-title">
   <h1>Apps</h1>
+  <a href="#new-app" class="button primary">New app</a>
 </div>
-<p class="lead">Specs their tenants share; a change rolls out to every one.</p>
+<p class="lead">The specs their tenants share. A change rolls out to every tenant of the app, in waves.</p>
 
 <section class="near">
-  <table>
-    <thead><tr><th>App</th><th class="hide-narrow">Image</th><th>Live tenants</th><th class="hide-narrow">Changed</th></tr></thead>
+  <table class="list rows">
+    <thead><tr><th>App</th><th>State</th><th class="hide-narrow">Image</th><th class="num">Live tenants</th><th class="hide-narrow">Changed</th></tr></thead>
     <tbody>
     {{range $i, $a := $d.Apps}}{{with $a}}
       <tr>
-        <td><a href="/apps/{{.Name}}">{{.Name}}</a></td>
-        <td class="mono dim hide-narrow" title="{{.Spec.Image}}">{{short .Spec.Image}}{{if .Latest}} <a href="/apps/{{.Name}}" class="tag">newer image</a>{{end}}</td>
-        <td class="barcell"><div class="barline"><svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{(index $d.Bars $i).Width}}" height="6" fill="#b0b0b0"/></svg><span class="num">{{len .Tenants}}</span></div></td>
+        <td class="l-main"><a class="row-link" href="/apps/{{.Name}}">{{.Name}}</a>{{if .Revision}} <span class="dim small">revision {{.Revision}}</span>{{end}}</td>
+        <td class="l-side">{{with .Rollout}}{{if eq .State "running"}}<span class="st busy">rolling out</span>{{else if eq .State "paused"}}<span class="st warn">rollout paused</span>{{else if $a.Latest}}<span class="st warn">update waiting</span>{{else}}<span class="st ok">current</span>{{end}}{{else}}{{if $a.Latest}}<span class="st warn">update waiting</span>{{else}}<span class="st ok">current</span>{{end}}{{end}}</td>
+        <td class="mono dim hide-narrow" title="{{.Spec.Image}}">{{short .Spec.Image}}</td>
+        <td class="num l-sub" data-label="Live tenants">{{len .Tenants}}</td>
         <td class="when hide-narrow">{{ago .UpdatedAt}} ago</td>
       </tr>
     {{end}}{{else}}
-      <tr><td colspan="4" class="empty">No app yet.</td></tr>
+      <tr><td colspan="5" class="empty l-main">No app yet. Make one below: its tenants share its spec.</td></tr>
     {{end}}
     </tbody>
   </table>
 </section>
 
-<section>
-  <details {{if $d.Name}}open{{end}}>
-    <summary class="button">New app</summary>
-    <div class="panel">
-      <form method="post" action="/apps" class="stack">
-        <label class="field">Name <input type="text" name="name" value="{{$d.Name}}" placeholder="web" aria-label="the app's name" autocomplete="off" spellcheck="false" required class="short" maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end"></label>
-        <label class="field"><span>Spec, as an app file of <code>murder app apply</code></span>
-          <textarea name="file" rows="10" spellcheck="false" aria-label="the app's spec">{{$d.File}}</textarea></label>
-        <div><button type="submit" class="primary">Create the app</button></div>
-      </form>
-    </div>
-  </details>
+<section id="new-app">
+  <div class="head"><h2>New app</h2></div>
+  <form method="post" action="/apps" class="stack panel">
+    <label class="field">Name <input type="text" name="name" value="{{$d.Name}}" placeholder="web" autocomplete="off" spellcheck="false" required class="short" maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end"></label>
+    <label class="field">Spec, as a file of <code>murder app apply</code>
+      <textarea name="file" rows="10" spellcheck="false">{{$d.File}}</textarea></label>
+    <div><button type="submit" class="primary">Create the app</button></div>
+  </form>
 </section>
 {{end}}

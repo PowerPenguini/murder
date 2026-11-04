@@ -499,6 +499,7 @@ type secretRow struct {
 }
 
 type settingsData struct {
+	Head    tenantHead
 	Tenant  api.Tenant
 	Form    settingsForm
 	Apps    []string
@@ -525,6 +526,11 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 		return
 	}
 	data := settingsData{Tenant: t, Form: form}
+	if nodes, err := s.backend.Nodes(ctx); err == nil {
+		data.Head = s.headOf(t, nodes, "settings")
+	} else {
+		data.Head = s.headOf(t, api.Nodes{}, "settings")
+	}
 	for _, app := range apps {
 		data.Apps = append(data.Apps, app.Name)
 	}
