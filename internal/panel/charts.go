@@ -141,6 +141,17 @@ func activityOf(events []store.Event, now time.Time, span, bucket time.Duration,
 func hourLabel(t time.Time) string { return t.UTC().Format("15:04") }
 func dayLabel(t time.Time) string  { return t.UTC().Format("Jan 2") }
 
+// dateLabel says a moment with its day: "Nov 4 14:05".
+func dateLabel(t time.Time) string { return t.UTC().Format("Jan 2 15:04") }
+
+// spanText says a chart's span: "hour", "6 hours", "24 hours".
+func spanText(span time.Duration) string {
+	if span == time.Hour {
+		return "hour"
+	}
+	return strconv.Itoa(int(span/time.Hour)) + " hours"
+}
+
 // lineChart is one measure over the kept day: a line per series (two at
 // most, the second dashed), and its limit if it has one.
 type lineChart struct {
@@ -155,6 +166,51 @@ type lineChart struct {
 	From, Mid       string
 	Empty           bool
 	Points, Summary string
+	// Start and End bound its time; Marks are moments marked on it.
+	Start, End time.Time
+	Marks      []mark
+}
+
+// mark is a moment on a chart: a restart, or a change, with its event.
+type mark struct {
+	X          float64
+	Kind, Text string
+}
+
+// marksOf places events on a chart: restarts, and changes of what runs.
+func (c lineChart) marksOf(events []store.Event) []mark {
+	var out []mark
+	for _, e := range events {
+		if e.At.Before(c.Start) || !e.At.Before(c.End) {
+			continue
+		}
+		kind := ""
+		switch e.Action {
+		case "tenant.restarted", "tenant.failed-over":
+			kind = "restart"
+		case "tenant.rolled", "tenant.updated", "app.rolled-out", "tenant.moved", "tenant.resumed", "rollout.rolled-back", "rollout.restored":
+			kind = "change"
+		default:
+			continue
+		}
+		x := chartWidth * e.At.Sub(c.Start).Seconds() / c.End.Sub(c.Start).Seconds()
+		out = append(out, mark{X: round1(x), Kind: kind, Text: dateLabel(e.At) + " " + actionText(e.Action)})
+	}
+	return out
+}
+
+// Restarts and Changes count its marks of each kind.
+func (c lineChart) Restarts() int { return c.count("restart") }
+func (c lineChart) Changes() int  { return c.count("change") }
+
+func (c lineChart) count(kind string) int {
+	n := 0
+	for _, m := range c.Marks {
+		if m.Kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 type lineSeries struct {
@@ -183,11 +239,13 @@ type sample struct {
 // in. limit is drawn as a level when positive; format says a value, for
 // the axis, the readout and the last value; bytes says values are in
 // bytes, so the scale's top is a round number of their unit.
-func newLineChart(title string, labels []string, samples []sample, limit float64, now time.Time, step time.Duration, format func(float64) string, bytes bool) lineChart {
+func newLineChart(title string, labels []string, samples []sample, limit float64, now time.Time, step, span time.Duration, format func(float64) string, bytes bool) lineChart {
 	chart := lineChart{Title: title, Empty: len(samples) == 0}
 	end := now.Truncate(step).Add(step)
-	start := end.Add(-24 * time.Hour)
-	chart.From, chart.Mid = hourLabel(start), hourLabel(start.Add(12*time.Hour))
+	start := end.Add(-span)
+	chart.Start, chart.End = start, end
+	// The axis's start says its date; the readout says each moment's.
+	chart.From, chart.Mid = dateLabel(start), hourLabel(start.Add(span/2))
 	highest, peak, peakAt := 0.0, math.Inf(-1), time.Time{}
 	for _, s := range samples {
 		if s.At.Before(start) {
@@ -266,12 +324,12 @@ func newLineChart(title string, labels []string, samples []sample, limit float64
 		if s.At.Before(start) {
 			continue
 		}
-		points = append(points, append([]any{round1(x(s.At.Add(step / 2))), hourLabel(s.At)}, anyOf(say(s))...))
+		points = append(points, append([]any{round1(x(s.At.Add(step / 2))), dateLabel(s.At)}, anyOf(say(s))...))
 	}
 	chart.Points = jsonOf(points)
 	if len(samples) > 0 {
 		chart.Now = strings.Join(say(samples[len(samples)-1]), " · ")
-		chart.Summary = fmt.Sprintf("%s, the last 24 hours: now %s", title, chart.Now)
+		chart.Summary = fmt.Sprintf("%s, the last %s: now %s", title, spanText(span), chart.Now)
 		if !peakAt.IsZero() {
 			chart.Summary += fmt.Sprintf("; highest %s %s at %s UTC", format(peak), labels[0], hourLabel(peakAt))
 		}

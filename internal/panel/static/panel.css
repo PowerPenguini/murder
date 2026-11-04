@@ -367,7 +367,7 @@ figure.chart .ctitle { font-weight: 600; }
 figure.chart .readout { color: var(--soft); text-align: right; min-height: 20px; }
 figure.chart .readout.at { color: var(--fg); }
 .plotwrap { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--s2); }
-.yaxis { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; font-size: 11px; line-height: 1; color: var(--dim); min-width: 24px; }
+.yaxis { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; font-size: 11px; line-height: 1; color: var(--dim); width: 52px; white-space: nowrap; }
 .plot { position: relative; height: 120px; touch-action: pan-y; cursor: crosshair; }
 .plot:focus-visible { outline-offset: 4px; }
 .plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
@@ -523,8 +523,9 @@ a.strong:hover { text-decoration: underline; }
 .diff > div:last-child { padding-bottom: var(--s2); }
 .diff .ln { color: var(--faint); text-align: right; padding-right: var(--s2); user-select: none; }
 .diff .op { text-align: center; user-select: none; }
-.diff .in { background: #1a1a1a; color: var(--fg); font-weight: 600; }
-.diff .out { color: var(--faint); text-decoration: line-through; text-decoration-color: #555; }
+.diff .in { background: #1c1c1c; color: var(--fg); font-weight: 600; box-shadow: inset 2px 0 0 var(--fg); }
+.diff .out { background: #0c0c0c; color: var(--soft); box-shadow: inset 2px 0 0 #555; }
+.diff .op { font-weight: 600; }
 .diff .gap { color: var(--faint); padding-left: 100px; }
 
 /* ── a rollout's waves, as a sequence ── */
@@ -633,3 +634,31 @@ input.phone-toggle + label.showall { display: none; }
 }
 .notice.attached { margin-top: calc(-1 * var(--s2)); }
 ul.grouped { list-style: none; margin: var(--s3) 0 0; padding: var(--s3) var(--pad-x); background: var(--raised); border: 1px solid var(--rule); display: grid; gap: var(--s1); font-size: 13px; }
+
+/* ── a tenant's measures, in two groups: use, then protection ── */
+.statgroups { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 2fr); gap: var(--s6); }
+.statgroup h2.caps { margin-bottom: var(--s3); }
+.statgroup.use .stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.statgroup.protect .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.statgroup.protect { padding-left: var(--s5); border-left: 1px solid var(--rule); }
+@media (max-width: 1279px) {
+  .statgroups { grid-template-columns: 1fr; gap: var(--s5); }
+  .statgroup.protect { padding-left: 0; border-left: 0; }
+  .statgroup.use .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .statgroup.use .stats, .statgroup.protect .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── one spacing rule: a heading to its content 12, a lead to the next
+   block 16, a notice to what it explains 8, sections 48 ── */
+.head { margin-bottom: var(--s3); }
+.lead + section, .pagehead + section, .lead + .notice, .lead + .problem, h1 + .notice { margin-top: var(--s4); }
+section.near { margin-top: var(--s4); }
+.notice { margin-bottom: var(--s4); }
+.spaced, .notice.spaced, .problem.spaced, .hint.spaced { margin-top: var(--s3); }
+.notice.attached { margin-top: var(--s2); margin-bottom: 0; }
+.count-line { margin: 0 0 var(--s2); }
+.logview .count-line + .hint { margin: 0 0 var(--s2); }
+.review-box { margin-top: 0; }
+table.rollout-table td .st, table.list td.l-sub .st { white-space: normal; }

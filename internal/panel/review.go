@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"regexp"
 	"context"
 	"fmt"
 	"maps"
@@ -26,9 +27,14 @@ type diffLine struct {
 	// Op is " ", "-" or "+".
 	Op   string
 	Text string
+	// Short is Text with long digests cut, "" when it has none.
+	Short string
 	// Old and New are its line numbers, 0 where it has none.
 	Old, New int
 }
+
+// digest is a long image digest, shown cut with its whole on demand.
+var digest = regexp.MustCompile(`sha256:[0-9a-f]{64}`)
 
 // lineDiff is the change from a to b, line by line, the longest common
 // run kept. Specs are short, so the plain quadratic way does.
@@ -53,13 +59,13 @@ func lineDiff(a, b string) []diffLine {
 	for i < n || j < m {
 		switch {
 		case i < n && j < m && x[i] == y[j]:
-			out = append(out, diffLine{" ", x[i], i + 1, j + 1})
+			out = append(out, diffLine{Op: " ", Text: x[i], Old: i + 1, New: j + 1})
 			i, j = i+1, j+1
 		case i < n && (j == m || lcs[i+1][j] >= lcs[i][j+1]):
-			out = append(out, diffLine{"-", x[i], i + 1, 0})
+			out = append(out, diffLine{Op: "-", Text: x[i], Old: i + 1})
 			i++
 		default:
-			out = append(out, diffLine{"+", y[j], 0, j + 1})
+			out = append(out, diffLine{Op: "+", Text: y[j], New: j + 1})
 			j++
 		}
 	}
@@ -139,8 +145,9 @@ type reviewData struct {
 	Held          []string
 	Archived      []string
 	// Overridden are the tenants whose own settings win over a changed
-	// field.
+	// field; Whole the others, which take the spec whole.
 	Overridden int
+	Whole      []reviewTenant
 }
 
 // waveNames say each wave as the rollout's plan does.
@@ -227,6 +234,11 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 	}
 	data.Changed = data.Added+data.Removed > 0
 	data.Diff = changedOnly(all, 3)
+	for i := range data.Diff {
+		if short := digest.ReplaceAllStringFunc(data.Diff[i].Text, func(d string) string { return d[:len("sha256:")+12] + "…" }); short != data.Diff[i].Text {
+			data.Diff[i].Short = short
+		}
+	}
 	var live []api.Tenant
 	slices.SortFunc(tenants, func(a, b api.Tenant) int { return strings.Compare(a.Spec.Name, b.Spec.Name) })
 	for _, t := range tenants {
@@ -251,6 +263,8 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 		rt := reviewTenant{Name: t.Spec.Name, State: tenantState(t), Overrides: overridesOf(t.Overrides), Canary: t.Canary, Wave: waveOf[t.Spec.Name]}
 		if len(rt.Overrides) > 0 {
 			data.Overridden++
+		} else {
+			data.Whole = append(data.Whole, rt)
 		}
 		data.Tenants = append(data.Tenants, rt)
 	}

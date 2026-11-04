@@ -283,7 +283,7 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 				data.Attention = append(data.Attention, notice{App: true, Subject: name, Href: "/apps/" + url.PathEscape(name), Text: m.Text(),
 					Fixes: []fix{{"Raise " + name + "'s memory limit", m.Href()}}})
 				for i := range data.Attention {
-					if n := &data.Attention[i]; !n.Node && !n.App && m.Hit[n.Subject] > 0 {
+					if n := &data.Attention[i]; !n.Node && !n.App && m.Hit[n.Subject] > 0 && strings.Contains(n.Text, "memory") {
 						n.Fixes = append(n.Fixes, fix{"Raise " + name + "'s, for all its tenants", m.Href()})
 					}
 				}
@@ -499,7 +499,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	var cluster clusterUse
 	if err := all(
 		// An archived tenant is measured no more: it has no day to show.
-		func() error { use = s.tenantUsage(ctx, name); return nil },
+		func() error { use = s.tenantUsage(ctx, name, r.URL.Query().Get("range")); return nil },
 		func() error { cluster = s.usageNow(ctx); return nil },
 		func() (err error) { t, err = s.backend.Get(ctx, name); return },
 		func() (err error) {
@@ -538,6 +538,11 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	}
 	s.appContext(ctx, r, t, &data)
 	data.Operation = operationOf(t, events, s.now())
+	if use != nil {
+		for i := range use.Charts {
+			use.Charts[i].Marks = use.Charts[i].marksOf(events)
+		}
+	}
 	// While its new container starts, what was wrong was of the old one.
 	if op := data.Operation; op != nil && op.Kind == "busy" && data.Problem != "" {
 		data.Problem = "Before: " + data.Problem
@@ -673,11 +678,12 @@ func (s *Server) funcs() template.FuncMap {
 		"nodeActs": func(n api.NodeState, self bool, targets, tenants []string, from string) nodeActs {
 			return nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, Tenants: tenants, From: from}
 		},
-		"every":    every,
-		"groups":   groupEvents,
-		"lower":    strings.ToLower,
-		"wavename": waveName,
-		"sub":      func(a, b int) int { return a - b },
+		"every":     every,
+		"marksJSON": func(marks []mark) string { return jsonOf(marks) },
+		"groups":    groupEvents,
+		"lower":     strings.ToLower,
+		"wavename":  waveName,
+		"sub":       func(a, b int) int { return a - b },
 		"others": func(n api.Nodes) string {
 			var out []string
 			for _, node := range n.Nodes {

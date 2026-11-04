@@ -58,7 +58,7 @@
       <tr>
         <td class="l-main">{{.Name}}{{if eq .Name $d.Me}} <span class="dim">you</span>{{end}}</td>
         <td class="l-sub" data-label="Passkeys">{{if .Passkeys}}<span class="keys">{{range .Passkeys}}<span>{{.Label}} <span class="dim">{{if .UsedAt.IsZero}}never used{{else}}used {{ago .UsedAt}} ago{{end}}</span></span>{{end}}</span>{{else}}<span class="st warn">invited</span> <span class="dim">no passkey yet</span>{{end}}</td>
-        <td class="num l-sub" data-label="Recovery codes">{{if and .Passkeys (eq .Recovery 0)}}<span class="st warn">0</span> <span class="dim">a lost passkey locks {{if eq .Name $d.Me}}you{{else}}them{{end}} out</span>{{else}}{{.Recovery}}{{end}}</td>
+        <td class="num l-sub" data-label="Recovery codes">{{if and .Passkeys (eq .Recovery 0)}}<span class="st warn">0</span><span class="dim">: a lost passkey locks {{if eq .Name $d.Me}}you{{else}}{{.Name}}{{end}} out</span>{{else}}{{.Recovery}}{{end}}</td>
         <td class="dim hide-narrow">{{ago .CreatedAt}} ago, by {{.CreatedBy}}</td>
         <td class="end l-side">
           <details class="menu">

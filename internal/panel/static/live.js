@@ -138,7 +138,7 @@
       return;
     }
     state.classList.add("on");
-    text.textContent = (partial() && !document.querySelector("[data-live]") ? "Holds still, read " : "Live, updated ") + age(Date.now() - readAt) + " ago";
+    text.textContent = (partial() && !document.querySelector("[data-live]") ? "Automatic updates paused, read " : "Live, updated ") + age(Date.now() - readAt) + " ago";
   };
 
   const stop = (why) => {

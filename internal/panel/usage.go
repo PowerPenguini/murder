@@ -27,6 +27,8 @@ const usageStep = 5 * time.Minute
 // tenantUsage is a tenant's day, drawn.
 type tenantUsage struct {
 	Charts []lineChart
+	// Range is the span shown: 1h, 6h or 24h; Span says it.
+	Range, Span string
 	// Memory is what it uses now against its limit, with its CPU; the
 	// rest its requests a minute, errors among them, and the 95th
 	// percentile of their response time, in its last minute.
@@ -40,12 +42,22 @@ type tenantUsage struct {
 	DataText, DataLimit string
 }
 
-func (s *Server) tenantUsage(ctx context.Context, name string) *tenantUsage {
+// chartSpans are the spans a tenant's charts show, and the step of each.
+var chartSpans = map[string]struct {
+	Span, Step time.Duration
+}{"1h": {time.Hour, time.Minute}, "6h": {6 * time.Hour, usageStep}, "24h": {24 * time.Hour, usageStep}}
+
+func (s *Server) tenantUsage(ctx context.Context, name, rangeName string) *tenantUsage {
+	shape, ok := chartSpans[rangeName]
+	if !ok {
+		shape = chartSpans["24h"]
+	}
+	span, step := shape.Span, shape.Step
 	measured, ok := s.backend.(Usage)
 	if !ok {
 		return nil
 	}
-	series, err := measured.TenantUsage(ctx, name, usageStep)
+	series, err := measured.TenantUsage(ctx, name, step)
 	if err != nil {
 		return nil
 	}
@@ -67,25 +79,29 @@ func (s *Server) tenantUsage(ctx context.Context, name string) *tenantUsage {
 	answered := func(p usage.Point) bool { return p.Requests > 0 }
 	perSecond := func(n int64, p usage.Point) float64 { return float64(n) / float64(p.CPURead*60) }
 	u := &tenantUsage{Charts: []lineChart{
-		newLineChart("CPU, cores", []string{"cores"}, pick(cpuRead, func(p usage.Point) []float64 { return []float64{p.CPU} }), series.Now.CPULimit, now, usageStep, cores, false),
-		newLineChart("Memory", []string{"used"}, pick(read, func(p usage.Point) []float64 { return []float64{float64(p.Memory)} }), float64(series.Now.MemoryLimit), now, usageStep, size, true),
+		newLineChart("CPU, cores", []string{"cores"}, pick(cpuRead, func(p usage.Point) []float64 { return []float64{p.CPU} }), series.Now.CPULimit, now, step, span, cores, false),
+		newLineChart("Memory", []string{"used"}, pick(read, func(p usage.Point) []float64 { return []float64{float64(p.Memory)} }), float64(series.Now.MemoryLimit), now, step, span, size, true),
 		newLineChart("Requests, a minute", []string{"requests", "errors"}, pick(counted, func(p usage.Point) []float64 {
 			minutes := float64(p.Minutes)
 			return []float64{float64(p.Requests) / minutes, float64(p.Errors) / minutes}
-		}), 0, now, usageStep, rate, false),
-		newLineChart("Response time, 95th percentile", []string{"p95"}, pick(answered, func(p usage.Point) []float64 { return []float64{p.P95} }), 0, now, usageStep, wait, false),
+		}), 0, now, step, span, rate, false),
+		newLineChart("Response time, 95th percentile", []string{"p95"}, pick(answered, func(p usage.Point) []float64 { return []float64{p.P95} }), 0, now, step, span, wait, false),
 		newLineChart("Network", []string{"in", "out"}, pick(cpuRead, func(p usage.Point) []float64 {
 			return []float64{perSecond(p.NetRx, p), perSecond(p.NetTx, p)}
-		}), 0, now, usageStep, throughput, true),
+		}), 0, now, step, span, throughput, true),
 		newLineChart("Disk", []string{"read", "written"}, pick(cpuRead, func(p usage.Point) []float64 {
 			return []float64{perSecond(p.DiskRead, p), perSecond(p.DiskWrite, p)}
-		}), 0, now, usageStep, throughput, true),
+		}), 0, now, step, span, throughput, true),
 	}}
 	// Errors are drawn in the colour of what is wrong only while they are:
 	// more than one request in a hundred.
 	u.ErrorsBad = series.Now.Requests > 0 && float64(series.Now.Errors)/float64(series.Now.Requests) > errorShare
 	if u.ErrorsBad && len(u.Charts[2].Series) > 1 {
 		u.Charts[2].Series[1].Stroke = inkBad
+	}
+	u.Range, u.Span = rangeName, spanText(span)
+	if _, ok := chartSpans[rangeName]; !ok {
+		u.Range = "24h"
 	}
 	u.Memory = tenantUse{MemoryText: size(float64(series.Now.Memory)), CPUText: cores(series.Now.CPU)}
 	if limit := series.Now.CPULimit; limit > 0 {

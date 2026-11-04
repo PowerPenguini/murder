@@ -46,13 +46,13 @@
     <div class="head spaced"><h2>Environment</h2><span class="dim">what {{$t.Spec.Name}} gets</span></div>
     <table class="kv env list">
       <tbody>
-      {{range $d.Env}}<tr><td class="mono l-main">{{.Key}}</td><td class="mono l-sub{{if not .Own}} dim{{end}}">{{.Value}}</td><td class="dim small end l-side">{{if .Own}}its own{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}from app {{$t.App}}{{end}}</td></tr>{{else}}<tr><td colspan="3" class="empty l-main">None.</td></tr>{{end}}
+      {{range $d.Env}}<tr><td class="mono l-main">{{.Key}}</td><td class="mono l-sub{{if not .Own}} dim{{end}}">{{.Value}}</td><td class="dim small end l-side">{{if .Own}}Tenant override{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}Inherited from {{$t.App}}{{end}}</td></tr>{{else}}<tr><td colspan="3" class="empty l-main">None.</td></tr>{{end}}
       </tbody>
     </table>
-    <label class="field">Its own variables
+    <label class="field">Environment overrides
       <textarea name="env" rows="{{add1 (lines $f.Env)}}" spellcheck="false">{{$f.Env}}</textarea>
       <span class="hint">NAME=value, a line each; one the app also sets is replaced for {{$t.Spec.Name}} only. Leading and trailing spaces are dropped: to keep them, or for several lines, quote the value as "a\nb".</span></label>
-    <label class="field">Its own secrets
+    <label class="field">Secret overrides
       <textarea name="secrets" rows="{{add1 (lines $f.Secrets)}}" spellcheck="false">{{$f.Secrets}}</textarea>
       <span class="hint">NAME [kind [length]], a line each; kind is hex, base64 or password. Made once, kept encrypted, never shown. They add to the app's.</span></label>
     <label class="field">App <select name="app">{{range $d.Apps}}<option {{if eq . $f.App}}selected{{end}}>{{.}}</option>{{end}}</select>
@@ -74,7 +74,7 @@
 </section>
 
 <section>
-  <div class="head"><h2>All its secrets</h2></div>
+  <div class="head"><h2>Secrets</h2><span class="dim">inherited and overridden</span></div>
   <table class="list">
     <thead><tr><th>Name</th><th>Kind</th><th>Source</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
     <tbody>
@@ -82,7 +82,7 @@
       <tr>
         <td class="mono l-main">{{.Name}}</td>
         <td class="dim l-sub" data-label="Kind">{{.Kind}}{{if .Bytes}}, {{.Bytes}} bytes{{end}}</td>
-        <td class="dim l-sub" data-label="Source">{{if .Own}}its own{{else}}app {{$t.App}}{{end}}</td>
+        <td class="dim l-sub" data-label="Source">{{if .Own}}Tenant override{{else}}Inherited from {{$t.App}}{{end}}</td>
         <td class="end l-side">
           {{if not $t.Archived}}
           <details class="menu-text">

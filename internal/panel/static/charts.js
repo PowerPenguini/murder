@@ -3,6 +3,9 @@
 // this script the caption says the latest values.
 "use strict";
 (() => {
+  // The charts of one group share their cursor: a moment read on one is
+  // read on all, so a rise in memory lines up with errors and response.
+  const groups = new Map();
   const arm = (figure) => {
     if (figure.dataset.armed) return;
     figure.dataset.armed = "1";
@@ -22,11 +25,18 @@
     plot.setAttribute("aria-label", title + ": the arrow keys step through its moments");
     plot.setAttribute("aria-valuemin", "0");
     plot.setAttribute("aria-valuemax", String(points.length - 1));
+    let marks = [];
+    try {
+      marks = JSON.parse(figure.dataset.marks || "[]") || [];
+    } catch {}
     let at = -1;
-    const show = (i) => {
+    const group = figure.closest(".charts");
+    const peers = () => (group && groups.get(group)) || [];
+    const show = (i, quiet) => {
       at = Math.max(0, Math.min(points.length - 1, i));
       const [x, when, ...values] = points[at];
-      readout.textContent = when + " UTC · " + values.join(" · ");
+      const near = marks.filter((m) => Math.abs(m.X - x) <= 12).map((m) => m.Text);
+      readout.textContent = when + " UTC · " + values.join(" · ") + (near.length ? " · " + near.join(", ") : "");
       readout.classList.add("at");
       plot.setAttribute("aria-valuenow", String(at));
       plot.setAttribute("aria-valuetext", readout.textContent);
@@ -35,12 +45,14 @@
         cursor.setAttribute("x2", x);
         cursor.setAttribute("visibility", "visible");
       }
+      if (!quiet) for (const peer of peers()) if (peer.figure !== figure) peer.atX(x);
     };
-    const rest = () => {
+    const rest = (quiet) => {
       at = -1;
       readout.textContent = readout.dataset.rest || "";
       readout.classList.remove("at");
       if (cursor) cursor.setAttribute("visibility", "hidden");
+      if (!quiet) for (const peer of peers()) if (peer.figure !== figure) peer.rest(true);
     };
     // The point nearest a place along the plot, from 0 to 1000.
     const nearest = (x) => {
@@ -53,10 +65,14 @@
       if (box.width === 0) return;
       show(nearest(((event.clientX - box.left) / box.width) * 1000));
     };
+    if (group) {
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push({ figure, atX: (x) => show(nearest(x), true), rest: (quiet) => rest(quiet) });
+    }
     plot.addEventListener("pointermove", fromEvent);
     plot.addEventListener("pointerdown", fromEvent);
     plot.addEventListener("pointerleave", (event) => { if (event.pointerType === "mouse" && document.activeElement !== plot) rest(); });
-    plot.addEventListener("blur", rest);
+    plot.addEventListener("blur", () => rest());
     plot.addEventListener("keydown", (event) => {
       const step = { ArrowLeft: -1, ArrowRight: 1, PageUp: -12, PageDown: 12 }[event.key];
       if (step) {

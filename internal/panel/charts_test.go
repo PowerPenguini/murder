@@ -58,7 +58,7 @@ func TestLineChart(t *testing.T) {
 		samples = append(samples, sample{At: end.Add(-time.Duration(i) * step), Values: []float64{float64(i), 1}})
 	}
 	slices.SortFunc(samples, func(a, b sample) int { return a.At.Compare(b.At) })
-	chart := newLineChart("Memory", []string{"used", "errors"}, samples, 20, now, step, func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }, false)
+	chart := newLineChart("Memory", []string{"used", "errors"}, samples, 20, now, step, 24*time.Hour, func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }, false)
 	if len(chart.Series) != 2 || strings.Count(chart.Series[0].Line, "M") != 2 || strings.Count(chart.Series[0].Area, "Z") != 2 {
 		t.Fatalf("a gap did not break the line: %+v", chart.Series[0])
 	}
@@ -72,7 +72,7 @@ func TestLineChart(t *testing.T) {
 	if chart.Limit == nil || chart.Limit.Label != "limit 20" || chart.Top != "20" {
 		t.Fatalf("chart: limit %+v, top %q", chart.Limit, chart.Top)
 	}
-	if last := points[7]; chart.Now != "1 used · 1 errors" || last[1] != "17:15" || last[2] != "1 used" || last[3] != "1 errors" {
+	if last := points[7]; chart.Now != "1 used · 1 errors" || last[1] != "Nov 2 17:15" || last[2] != "1 used" || last[3] != "1 errors" {
 		t.Fatalf("now %q, last point %v", chart.Now, points[7])
 	}
 	// The limit at 20 is the highest value and a round one: the top.
@@ -82,7 +82,7 @@ func TestLineChart(t *testing.T) {
 	if !strings.Contains(chart.Summary, "highest 10 used at 16:30 UTC") {
 		t.Fatalf("summary %q", chart.Summary)
 	}
-	if empty := newLineChart("CPU", []string{"cores"}, nil, 0, now, step, cores, false); !empty.Empty {
+	if empty := newLineChart("CPU", []string{"cores"}, nil, 0, now, step, 24*time.Hour, cores, false); !empty.Empty {
 		t.Fatal("a chart of nothing is not empty")
 	}
 }
@@ -127,8 +127,27 @@ func TestUnits(t *testing.T) {
 func TestALoneStepIsDrawn(t *testing.T) {
 	now := time.Date(2026, 11, 2, 17, 23, 0, 0, time.UTC)
 	step := 5 * time.Minute
-	chart := newLineChart("CPU", []string{"cores"}, []sample{{At: now.Truncate(step).Add(-step), Values: []float64{1}}}, 0, now, step, cores, false)
+	chart := newLineChart("CPU", []string{"cores"}, []sample{{At: now.Truncate(step).Add(-step), Values: []float64{1}}}, 0, now, step, 24*time.Hour, cores, false)
 	if line := chart.Series[0].Line; strings.Count(line, "M") != 1 || strings.Count(line, "L") != 1 {
 		t.Fatalf("a lone step: %q", line)
+	}
+}
+
+// A chart of the last hour marks the restarts and changes in it.
+func TestChartSpanAndMarks(t *testing.T) {
+	now := time.Date(2026, 11, 2, 17, 23, 0, 0, time.UTC)
+	var samples []sample
+	for i := 1; i <= 120; i++ {
+		samples = append(samples, sample{At: now.Truncate(time.Minute).Add(-time.Duration(121-i) * time.Minute), Values: []float64{1}})
+	}
+	chart := newLineChart("CPU", []string{"cores"}, samples, 0, now, time.Minute, time.Hour, cores, false)
+	var points [][]any
+	_ = json.Unmarshal([]byte(chart.Points), &points)
+	if len(points) < 59 || len(points) > 61 || chart.From != "Nov 2 16:24" || !strings.Contains(chart.Summary, "the last hour") {
+		t.Fatalf("%d points from %s: %s", len(points), chart.From, chart.Summary)
+	}
+	marks := chart.marksOf([]store.Event{{At: now.Add(-10 * time.Minute), Action: "tenant.restarted"}, {At: now.Add(-2 * time.Hour), Action: "tenant.rolled"}, {At: now.Add(-5 * time.Minute), Action: "tenant.rolled"}})
+	if len(marks) != 2 || marks[0].Kind != "restart" || marks[1].Kind != "change" {
+		t.Fatalf("marks %+v", marks)
 	}
 }

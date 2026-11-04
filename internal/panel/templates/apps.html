@@ -1,7 +1,6 @@
 {{define "content"}}{{$d := .Data}}
 <div class="head page-title">
   <h1>Apps</h1>
-  <a href="#new-app" class="button primary">New app</a>
 </div>
 <p class="lead">The specs their tenants share. A change rolls out to every tenant of the app, in waves.</p>
 
@@ -25,12 +24,14 @@
 </section>
 
 <section id="new-app">
-  <div class="head"><h2>New app</h2></div>
-  <form method="post" action="/apps" class="stack panel">
-    <label class="field">Name <input type="text" name="name" value="{{$d.Name}}" placeholder="web" autocomplete="off" spellcheck="false" required class="short" maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end"></label>
-    <label class="field">Spec, as a file of <code>murder app apply</code>
-      <textarea name="file" rows="10" spellcheck="false">{{$d.File}}</textarea></label>
-    <div><button type="submit" class="primary">Create the app</button></div>
-  </form>
+  <details class="newapp"{{if $d.Name}} open{{end}}>
+    <summary class="button primary">New app</summary>
+    <form method="post" action="/apps" class="stack panel spaced">
+      <label class="field">Name <input type="text" name="name" value="{{$d.Name}}" placeholder="web" autocomplete="off" spellcheck="false" required class="short" maxlength="63" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" title="lowercase letters, digits and hyphens, a letter or digit at each end"></label>
+      <label class="field">Spec (the same file <code>murder app apply</code> takes)
+        <textarea name="file" rows="10" spellcheck="false">{{$d.File}}</textarea></label>
+      <div><button type="submit" class="primary">Create the app</button></div>
+    </form>
+  </details>
 </section>
 {{end}}

@@ -59,7 +59,7 @@ or the arrow keys move along it), the plot, and its axes as HTML. */}}
 {{define "swatch"}}<svg class="glyph" viewBox="0 0 16 10" aria-hidden="true"><line x1="0" y1="5" x2="16" y2="5" stroke="{{.Stroke}}" stroke-width="2"{{if .Dashed}} stroke-dasharray="4 3"{{end}}/></svg>{{end}}
 
 {{define "line"}}
-<figure class="chart" data-points="{{.Points}}">
+<figure class="chart" data-points="{{.Points}}" data-marks="{{marksJSON .Marks}}">
   <figcaption><span class="ctitle">{{.Title}}</span>{{with .Now}}<span class="readout" aria-live="polite" data-rest="now {{.}}">now {{.}}</span>{{end}}</figcaption>
   {{if .Empty}}<p class="empty">Not measured yet: the agent measures every 15 seconds, and keeps the day since it started.</p>{{else}}
   <p class="sr">{{.Summary}}</p>
@@ -71,13 +71,14 @@ or the arrow keys move along it), the plot, and its axes as HTML. */}}
         <line x1="0" y1="50" x2="1000" y2="50" stroke="#151515" stroke-width="1" vector-effect="non-scaling-stroke"/>
         {{with .Limit}}<line x1="0" y1="{{.Y}}" x2="1000" y2="{{.Y}}" stroke="{{if .Hot}}#ff5147{{else}}#6a6a6a{{end}}" stroke-width="1" vector-effect="non-scaling-stroke" stroke-dasharray="5 4"/>{{end}}
         {{range .Series}}<path d="{{.Area}}" fill="{{.Stroke}}" fill-opacity="0.07"/><path d="{{.Line}}" fill="none" stroke="{{.Stroke}}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"{{if .Dashed}} stroke-dasharray="5 3"{{end}}/>{{end}}
+        {{range .Marks}}<line x1="{{.X}}" x2="{{.X}}" y1="0" y2="100" stroke="{{if eq .Kind "restart"}}#8f8f8f{{else}}#ececec{{end}}" stroke-width="1" vector-effect="non-scaling-stroke" stroke-dasharray="{{if eq .Kind "restart"}}2 3{{else}}6 3{{end}}" opacity="0.7"/>{{end}}
         <line x1="0" y1="99.5" x2="1000" y2="99.5" stroke="#333" stroke-width="1" vector-effect="non-scaling-stroke"/>
         <line class="cursor" x1="0" x2="0" y1="0" y2="100" stroke="#ececec" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
       </svg>
     </div>
     <div class="xaxis" aria-hidden="true"><span>{{.From}} UTC</span><span>{{.Mid}}</span><span>now</span></div>
   </div>
-  {{if or (gt (len .Series) 1) .Limit}}<div class="legend">{{range .Series}}<span>{{template "swatch" .}}{{.Label}}</span>{{end}}{{with .Limit}}<span{{if .Hot}} class="bad"{{end}}><svg class="glyph" viewBox="0 0 16 10" aria-hidden="true"><line x1="0" y1="5" x2="16" y2="5" stroke="{{if .Hot}}#ff5147{{else}}#8f8f8f{{end}}" stroke-width="1.5" stroke-dasharray="4 3"/></svg>{{.Label}}</span>{{end}}</div>{{end}}
+  {{if or (gt (len .Series) 1) .Limit .Marks}}<div class="legend">{{range .Series}}<span>{{template "swatch" .}}{{.Label}}</span>{{end}}{{with .Limit}}<span{{if .Hot}} class="bad"{{end}}><svg class="glyph" viewBox="0 0 16 10" aria-hidden="true"><line x1="0" y1="5" x2="16" y2="5" stroke="{{if .Hot}}#ff5147{{else}}#8f8f8f{{end}}" stroke-width="1.5" stroke-dasharray="4 3"/></svg>{{.Label}}</span>{{end}}{{with .Restarts}}<span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><line x1="5" y1="0" x2="5" y2="10" stroke="#8f8f8f" stroke-width="1.5" stroke-dasharray="2 2"/></svg>{{plural . "restart" "restarts"}}</span>{{end}}{{with .Changes}}<span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><line x1="5" y1="0" x2="5" y2="10" stroke="#ececec" stroke-width="1.5" stroke-dasharray="4 2"/></svg>{{plural . "change" "changes"}}</span>{{end}}{{if .Marks}}<a href="#events" class="dim">their events</a>{{end}}</div>{{end}}
   {{end}}
 </figure>
 {{end}}
@@ -108,7 +109,7 @@ its pages beside it, what can be done to it, and where it runs. */}}
       {{end}}
       {{if .Targets}}
       <details class="drop">
-        <summary class="button">Move</summary>
+        <summary class="button" aria-label="Move {{$t.Spec.Name}}">Move</summary>
         <div class="pop">
           <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="move">
             <label class="field">To <select name="to">{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
@@ -120,7 +121,7 @@ its pages beside it, what can be done to it, and where it runs. */}}
       {{end}}
     {{end}}
     <details class="drop">
-      <summary class="button">More</summary>
+      <summary class="button" aria-label="More for {{$t.Spec.Name}}">More</summary>
       <div class="pop">
         {{if $t.Archived}}
         <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="purge">

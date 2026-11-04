@@ -9,7 +9,7 @@
   <div class="head"><h2>What changes</h2>{{if $d.Changed}}<span class="dim num">{{plural $d.Removed "line" "lines"}} out, {{plural $d.Added "line" "lines"}} in</span>{{end}}</div>
   {{if $d.Changed}}
   <div class="diff" role="table" aria-label="the change, line by line">
-    {{range $d.Diff}}{{if eq .Op ""}}<div class="gap" role="row"><span role="cell">…</span></div>{{else}}<div class="{{if eq .Op "+"}}in{{else if eq .Op "-"}}out{{end}}" role="row"><span class="ln" role="cell">{{if .Old}}{{.Old}}{{end}}</span><span class="ln" role="cell">{{if .New}}{{.New}}{{end}}</span><span class="op" role="cell" aria-label="{{if eq .Op "+"}}added{{else if eq .Op "-"}}removed{{else}}kept{{end}}">{{.Op}}</span><span class="tx" role="cell">{{.Text}}</span></div>{{end}}{{end}}
+    {{range $d.Diff}}{{if eq .Op ""}}<div class="gap" role="row"><span role="cell">…</span></div>{{else}}<div class="{{if eq .Op "+"}}in{{else if eq .Op "-"}}out{{end}}" role="row"><span class="ln" role="cell">{{if .Old}}{{.Old}}{{end}}</span><span class="ln" role="cell">{{if .New}}{{.New}}{{end}}</span><span class="op" role="cell" aria-label="{{if eq .Op "+"}}added{{else if eq .Op "-"}}removed{{else}}kept{{end}}">{{.Op}}</span><span class="tx" role="cell"{{if .Short}} title="{{.Text}}"{{end}}>{{if .Short}}{{.Short}}{{else}}{{.Text}}{{end}}</span></div>{{end}}{{end}}
   </div>
   {{else}}
   <p class="calm">Nothing changes: the spec is the one {{$a.Name}} runs.</p>
@@ -18,22 +18,23 @@
 
 {{if $d.Changed}}
 <section>
-  <div class="head"><h2>Who it reaches</h2><span class="dim">{{plural (len $d.Tenants) "live tenant" "live tenants"}}{{with $d.Held}}, {{len .}} held{{end}}</span></div>
+  <div class="head"><h2>Affected tenants</h2><span class="dim">{{plural (len $d.Tenants) "live tenant" "live tenants"}}{{with $d.Held}}, {{len .}} held{{end}}</span></div>
   {{if $d.Tenants}}
   <table class="list">
-    <thead><tr><th>Tenant</th><th>State</th><th>Wave</th><th>Keeps its own</th></tr></thead>
+    <thead><tr><th>Tenant</th><th>State</th><th>Wave</th><th>Overrides</th></tr></thead>
     <tbody>
-    {{range $d.Tenants}}
+    {{range $d.Tenants}}{{if .Overrides}}
       <tr>
         <td class="l-main"><a href="/tenants/{{.Name}}">{{.Name}}</a>{{if .Canary}} <span class="dim">canary</span>{{end}}</td>
         <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         <td class="num l-sub" data-label="Wave">{{.Wave}}</td>
-        <td class="l-sub" data-label="Keeps">{{with .Overrides}}{{range $i, $o := .}}{{if $i}}, {{end}}<span class="mono">{{$o}}</span>{{end}}{{else}}<span class="dim">nothing: takes the app's spec whole</span>{{end}}</td>
+        <td class="l-sub" data-label="Overrides">{{range $i, $o := .Overrides}}{{if $i}}, {{end}}<span class="mono">{{$o}}</span>{{end}}</td>
       </tr>
-    {{end}}
+    {{end}}{{end}}
+    {{with $d.Whole}}<tr><td class="l-main" colspan="3">{{plural (len .) "tenant" "tenants"}} with no overrides: {{range $i, $w := .}}{{if $i}}, {{end}}<a href="/tenants/{{$w.Name}}">{{$w.Name}}</a>{{if $w.Canary}} <span class="dim">canary</span>{{end}}{{if ne $w.State.Kind "ok"}} <span class="st {{$w.State.Kind}}">{{$w.State.Label}}</span>{{end}}{{end}}</td><td class="l-sub" data-label="Overrides"><span class="dim">No overrides: each takes the spec whole</span></td></tr>{{end}}
     </tbody>
   </table>
-  {{if $d.Overridden}}<p class="hint spaced">What a tenant keeps of its own wins over the app's spec: a change to those fields does not reach it.</p>{{end}}
+  {{if $d.Overridden}}<p class="hint spaced">A tenant's override wins over the app's spec: a change to an overridden field does not reach that tenant. Each tenant's wave is in the plan below.</p>{{end}}
   {{else}}<p class="calm">No live tenant runs it: the change is stored, and new tenants take it.</p>{{end}}
   {{with $d.Held}}<p class="hint spaced">Held, and left out until released: {{range $i, $h := .}}{{if $i}}, {{end}}<a href="/tenants/{{$h}}">{{$h}}</a>{{end}}.</p>{{end}}
   {{with $d.Archived}}<p class="hint spaced">Archived, and run it once restored: {{range $i, $h := .}}{{if $i}}, {{end}}{{$h}}{{end}}.</p>{{end}}

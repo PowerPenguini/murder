@@ -55,7 +55,7 @@
         </dl></details></td>
       </tr>
     {{else}}
-      <tr><td colspan="7" class="empty l-main">{{if $d.Tenants}}No tenants match. <a href="{{query "sort" (sortName $d.ByName)}}">Clear the filter</a>{{else}}No tenants yet. Make one of an app with New tenant, above.{{end}}</td></tr>
+      <tr><td colspan="7" class="empty l-main">{{if $d.Tenants}}No tenants match. <a href="{{query "sort" (sortName $d.ByName)}}">Clear the filter</a>.{{else}}No tenants yet. Make one of an app with New tenant, above.{{end}}</td></tr>
     {{end}}
     </tbody>
   </table>
