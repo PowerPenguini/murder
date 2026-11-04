@@ -69,8 +69,12 @@ func TestAnUploadMayWaitForItsTenant(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	fmt.Fprint(conn, "hello")
-	if response, err = http.ReadResponse(reader, nil); err != nil {
-		t.Fatal(err)
+	// The backend may ask for the body too, its 100 Continue passed on
+	// after the edge's own: a client takes any number of them.
+	for response.StatusCode == http.StatusContinue {
+		if response, err = http.ReadResponse(reader, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	got, _ := io.ReadAll(response.Body)
 	response.Body.Close()
