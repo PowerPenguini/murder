@@ -10,10 +10,10 @@ tenant, its detail), then who. A row opens on its whole record. */}}
     <tr>
       <td class="when l-side"><time datetime="{{iso .At}}" title="{{utc .At}}">{{ago .At}}</time></td>
       <td class="l-main">
-        <details class="event" data-id="{{.ID}}">
+        <details class="event" data-id="{{.ID}}" id="ev-{{.ID}}">
           {{if .Group}}
           <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{if eq (len .Tenants) 1}}<a href="/tenants/{{index .Tenants 0}}">{{index .Tenants 0}}</a> {{.Predicate}}, {{len .Group}} times{{else if .Tenants}}{{len .Tenants}} tenants {{.PredicatePlural}}, {{len .Group}} times{{else}}{{action .Action}}, {{len .Group}} times{{end}}</span><span class="detail">{{with .Detail}}{{.}} · {{end}}{{if eq (ago .Oldest.At) (ago .At)}}{{ago .At}} ago{{else}}{{ago .Oldest.At}} to {{ago .At}} ago{{end}}<span class="phone-inline"> · by {{.Actor}}</span></span></summary>
-          <ul class="grouped">{{range .Group}}<li><span class="num">{{utc .At}}</span>{{with .Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{end}} <span class="dim">#{{.ID}}</span></li>{{end}}</ul>
+          <ul class="grouped">{{range .Group}}<li id="ev-{{.ID}}"><span class="num">{{utc .At}}</span>{{with .Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{end}} <span class="dim">#{{.ID}}</span></li>{{end}}</ul>
           {{else}}
           <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{with .Predicate}}<a href="/tenants/{{$e.Tenant}}">{{$e.Tenant}}</a> {{.}}{{else}}{{with $e.Node}}<a href="{{node .}}">{{.}}</a>{{$e.NodePredicate}}{{else}}{{with $e.AppPredicate}}<a href="/apps/{{$e.App}}">{{$e.App}}</a>{{.}}{{else}}{{action $e.Action}}{{with $e.Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{else}}{{with $e.App}} <a href="/apps/{{.}}" class="dim">app {{.}}</a>{{end}}{{end}}{{end}}{{end}}{{end}}</span><span class="detail">{{if $e.Node}}{{with $e.NodeDetail}}{{.}}<span class="phone-inline"> · </span>{{end}}{{else}}{{with .Detail}}{{.}}<span class="phone-inline"> · </span>{{end}}{{end}}<span class="phone-inline">by {{$e.Actor}}</span></span></summary>
           <dl class="pairs">
@@ -71,14 +71,14 @@ or the arrow keys move along it), the plot, and its axes as HTML. */}}
         <line x1="0" y1="50" x2="1000" y2="50" stroke="#151515" stroke-width="1" vector-effect="non-scaling-stroke"/>
         {{with .Limit}}<line x1="0" y1="{{.Y}}" x2="1000" y2="{{.Y}}" stroke="{{if .Hot}}#ff5147{{else}}#6a6a6a{{end}}" stroke-width="1" vector-effect="non-scaling-stroke" stroke-dasharray="5 4"/>{{end}}
         {{range .Series}}<path d="{{.Area}}" fill="{{.Stroke}}" fill-opacity="0.07"/><path d="{{.Line}}" fill="none" stroke="{{.Stroke}}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"{{if .Dashed}} stroke-dasharray="5 3"{{end}}/>{{end}}
-        {{range .Marks}}<line x1="{{.X}}" x2="{{.X}}" y1="{{if eq .Kind "restart"}}86{{else}}80{{end}}" y2="100" stroke="{{if eq .Kind "restart"}}#9a9a9a{{else}}#ececec{{end}}" stroke-width="{{if eq .Kind "restart"}}1.5{{else}}2{{end}}" vector-effect="non-scaling-stroke"/>{{end}}
         <line x1="0" y1="99.5" x2="1000" y2="99.5" stroke="#333" stroke-width="1" vector-effect="non-scaling-stroke"/>
         <line class="cursor" x1="0" x2="0" y1="0" y2="100" stroke="#ececec" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
       </svg>
     </div>
+    {{with .Marks}}<svg class="lane" viewBox="0 0 1000 8" preserveAspectRatio="none" role="group" aria-label="restarts and changes">{{range .}}<a href="{{.Href}}" aria-label="{{.Text}}"><title>{{.Text}}</title><rect x="{{.X}}" y="0" width="6" height="8" fill="{{if eq .Kind "restart"}}#8f8f8f{{else}}none{{end}}" stroke="#8f8f8f" stroke-width="1" vector-effect="non-scaling-stroke" transform="translate(-3 0)"/></a>{{end}}</svg>{{end}}
     <div class="xaxis" aria-hidden="true"><span>{{.From}} UTC</span><span>{{.Mid}}</span><span>now</span></div>
   </div>
-  {{if or (gt (len .Series) 1) .Limit .Marks}}<div class="legend">{{range .Series}}<span>{{template "swatch" .}}{{.Label}}</span>{{end}}{{with .Limit}}<span{{if .Hot}} class="bad"{{end}}><svg class="glyph" viewBox="0 0 16 10" aria-hidden="true"><line x1="0" y1="5" x2="16" y2="5" stroke="{{if .Hot}}#ff5147{{else}}#8f8f8f{{end}}" stroke-width="1.5" stroke-dasharray="4 3"/></svg>{{.Label}}</span>{{end}}{{with .Restarts}}<span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><line x1="5" y1="4" x2="5" y2="10" stroke="#9a9a9a" stroke-width="1.5"/></svg>{{plural . "restart" "restarts"}}</span>{{end}}{{with .Changes}}<span><svg class="glyph" viewBox="0 0 10 10" aria-hidden="true"><line x1="5" y1="2" x2="5" y2="10" stroke="#ececec" stroke-width="2"/></svg>{{plural . "change" "changes"}}</span>{{end}}{{if .Marks}}<a href="#events" class="dim">their events</a>{{end}}</div>{{end}}
+  {{if or (gt (len .Series) 1) .Limit}}<div class="legend">{{range .Series}}<span>{{template "swatch" .}}{{.Label}}</span>{{end}}{{with .Limit}}<span{{if .Hot}} class="bad"{{end}}><svg class="glyph" viewBox="0 0 16 10" aria-hidden="true"><line x1="0" y1="5" x2="16" y2="5" stroke="{{if .Hot}}#ff5147{{else}}#8f8f8f{{end}}" stroke-width="1.5" stroke-dasharray="4 3"/></svg>{{.Label}}</span>{{end}}</div>{{end}}
   {{end}}
 </figure>
 {{end}}

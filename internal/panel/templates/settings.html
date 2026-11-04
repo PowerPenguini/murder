@@ -44,9 +44,10 @@
     </table>
 
     <div class="head spaced"><h2>Environment</h2><span class="dim">what {{$t.Spec.Name}} gets</span></div>
-    <table class="kv env list">
+    <table class="env list">
+      <thead><tr><th>Variable</th><th>In effect</th><th>Source</th></tr></thead>
       <tbody>
-      {{range $d.Env}}<tr><td class="mono l-main">{{.Key}}</td><td class="mono l-sub{{if not .Own}} dim{{end}}">{{.Value}}</td><td class="dim small end l-side">{{if .Own}}Tenant override{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}Inherited from {{$t.App}}{{end}}</td></tr>{{else}}<tr><td colspan="3" class="empty l-main">None.</td></tr>{{end}}
+      {{range $d.Env}}<tr><td class="mono l-main">{{.Key}}</td><td class="mono l-sub" data-label="In effect">{{.Value}}</td><td class="dim l-sub" data-label="Source">{{if .Own}}Tenant override{{if .FromApp}}, over the app's <span class="mono">{{.App}}</span>{{end}}{{else}}Inherited from {{$t.App}}{{end}}</td></tr>{{else}}<tr><td colspan="3" class="empty l-main">None.</td></tr>{{end}}
       </tbody>
     </table>
     <label class="field">Environment overrides

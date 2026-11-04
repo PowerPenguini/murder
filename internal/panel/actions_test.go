@@ -91,7 +91,7 @@ func TestActingOnTenants(t *testing.T) {
 	}
 	// A move, and a tenant made.
 	// A move goes on after the page is back: the page says it began.
-	if _, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"move"}, "to": {"nbg-1"}}, server.URL); !strings.Contains(body, "moves to nbg-1") {
+	if _, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"move"}, "to": {"nbg-1"}}, server.URL); !strings.Contains(body, "moves to nbg-1") && !strings.Contains(body, "Moved to nbg-1") {
 		t.Fatalf("after a move began:\n%s", body)
 	}
 	for i := 0; ; i++ {

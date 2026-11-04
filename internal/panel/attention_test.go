@@ -87,7 +87,7 @@ func TestAttentionOnThePages(t *testing.T) {
 		t.Fatalf("the overview does not say what needs attention:\n%s", page)
 	}
 	_, page = get(t, server.URL+"/tenants/baltic-freight")
-	if !strings.Contains(page, `class="problem bad"`) || !strings.Contains(page, "It is unhealthy") || !strings.Contains(page, "Raise its memory limit") {
+	if !strings.Contains(page, `class="nrow bad"`) || !strings.Contains(page, "It is unhealthy") || !strings.Contains(page, "Raise web's memory limit (review)") || !strings.Contains(page, "Only this tenant: raise its limit") {
 		t.Fatalf("the tenant's page does not say what is wrong:\n%s", page)
 	}
 	// A dangerous action's button waits for the name typed.

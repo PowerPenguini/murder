@@ -1,8 +1,8 @@
 package panel
 
 import (
-	"regexp"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"

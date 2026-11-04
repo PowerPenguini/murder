@@ -306,7 +306,8 @@ func TestOperationIsFollowed(t *testing.T) {
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	_, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}}, server.URL)
-	if !strings.Contains(body, `class="opline"`) || !strings.Contains(body, "its new container is starting") {
+	// One line says it: no flash, no "It is starting" box beside it.
+	if !strings.Contains(body, "its new container is starting") || strings.Contains(body, "is restarting in a new container") || strings.Contains(body, "It is starting") {
 		t.Fatalf("after a restart:\n%s", body)
 	}
 	// Settled, it says so.

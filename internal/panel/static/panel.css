@@ -400,7 +400,7 @@ details.event dl.pairs { margin-top: var(--s3); padding: var(--s3) var(--pad-x);
   .side {
     position: sticky; top: 0; z-index: 30; width: auto; height: auto; overflow: visible;
     flex-direction: row; align-items: center; gap: var(--s3); padding: 6px var(--s4);
-    background: rgba(0, 0, 0, 0.92); border-bottom: 1px solid var(--rule);
+    background: var(--bg); border-bottom: 1px solid var(--rule);
   }
   .brand { padding: 0; }
   .brand img { height: 24px; }
@@ -636,11 +636,11 @@ input.phone-toggle + label.showall { display: none; }
 ul.grouped { list-style: none; margin: var(--s3) 0 0; padding: var(--s3) var(--pad-x); background: var(--raised); border: 1px solid var(--rule); display: grid; gap: var(--s1); font-size: 13px; }
 
 /* ── a tenant's measures, in two groups: use, then protection ── */
-.statgroups { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 2fr); gap: var(--s6); }
+.statgroups { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 2fr); gap: var(--s7); }
 .statgroup h2.caps { margin-bottom: var(--s3); }
 .statgroup.use .stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .statgroup.protect .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.statgroup.protect { padding-left: var(--s5); border-left: 1px solid var(--rule); }
+.statgroup.protect { padding-left: 0; }
 @media (max-width: 1279px) {
   .statgroups { grid-template-columns: 1fr; gap: var(--s5); }
   .statgroup.protect { padding-left: 0; border-left: 0; }
@@ -688,3 +688,35 @@ table#tenants td.l-main { white-space: normal; }
 table#tenants td.l-main > a, table#tenants td.l-main > .dim { white-space: nowrap; }
 .proposed { display: inline-block; margin-left: var(--s3); padding: 1px 6px; border: 1px solid var(--soft); font-size: 12px; color: var(--fg); }
 .proposed-notice .actions { margin-top: var(--s3); }
+
+/* ── a page's notices: one area, one style, the wrong first ── */
+.notices { display: grid; gap: 1px; margin: var(--s4) 0 0; background: var(--bg); }
+.nrow { padding: var(--pad-y) var(--pad-x); background: var(--raised); box-shadow: inset 2px 0 0 var(--soft); }
+.nrow.bad { background: var(--bad-wash); box-shadow: inset 2px 0 0 var(--bad); }
+.nrow .lead-in { font-weight: 600; }
+.nrow.bad .lead-in { color: var(--bad); }
+.nrow .fixes { margin-top: var(--s2); }
+.nrow .fixes a { color: var(--fg); font-weight: 600; }
+
+/* Restarts and changes: a lane under the plot, quiet, each a link. */
+svg.lane { grid-column: 2; display: block; width: 100%; height: 8px; margin-top: 4px; overflow: visible; }
+svg.lane a:hover rect, svg.lane a:focus rect { stroke: var(--fg); }
+.marks-legend { margin: 0 var(--s4) 0 auto; }
+.rollout-head form { margin-left: var(--s3); }
+.red-text-inline { color: var(--bad); }
+.rollback { margin-top: var(--s4); }
+.rollback .small, .rollout-actions .small { text-transform: none; }
+@media (max-width: 760px) {
+  /* A chart's title on its line, its value under it at a fixed height:
+     nothing moves while a point is read. */
+  figure.chart figcaption { display: grid; gap: 2px; }
+  figure.chart .readout { text-align: left; min-height: 2.8em; }
+  .marks-legend { flex-basis: 100%; margin: 0; }
+}
+/* A heading inside a form keeps the same 12 px to its content. */
+form.stack > .head { margin-bottom: calc(var(--s3) - var(--s4)); }
+
+/* One notice style everywhere: a left rule and a fill, red for wrong. */
+.notice, .problem { border: 0; box-shadow: inset 2px 0 0 var(--soft); background: var(--raised); }
+.notice.bad, .problem.bad { border: 0; box-shadow: inset 2px 0 0 var(--bad); background: var(--bad-wash); }
+.problem { max-width: none; }

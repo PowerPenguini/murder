@@ -639,13 +639,18 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 			use.Charts[i].Marks = use.Charts[i].marksOf(events)
 		}
 	}
-	// While its new container starts, what was wrong was of the old one.
-	if op := data.Operation; op != nil && op.Kind == "busy" && data.Broken {
-		data.Problem = "Before: " + data.Problem
-		data.Broken = false
+	// While the new container a person asked for starts, the operation
+	// line says it all: what was wrong was of the old one.
+	if op := data.Operation; op != nil && op.Kind == "busy" {
+		data.Problem, data.Broken, data.AppMemory = "", false, nil
 	}
 	data.Head = s.headOf(t, nodes, "overview")
-	s.write(w, "tenant", s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data), http.StatusOK)
+	p := s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data)
+	// What the action did is said by the operation line, not twice.
+	if data.Operation != nil && s.now().Sub(data.Operation.Event.At) < time.Minute {
+		p.Done = ""
+	}
+	s.write(w, "tenant", p, http.StatusOK)
 }
 
 type eventsData struct {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -175,6 +176,8 @@ type lineChart struct {
 type mark struct {
 	X          float64
 	Kind, Text string
+	// Href is its event's record.
+	Href string
 }
 
 // marksOf places events on a chart: restarts, and changes of what runs.
@@ -194,7 +197,8 @@ func (c lineChart) marksOf(events []store.Event) []mark {
 			continue
 		}
 		x := chartWidth * e.At.Sub(c.Start).Seconds() / c.End.Sub(c.Start).Seconds()
-		out = append(out, mark{X: round1(x), Kind: kind, Text: dateLabel(e.At) + " " + actionText(e.Action)})
+		out = append(out, mark{X: round1(x), Kind: kind, Text: dateLabel(e.At) + " " + actionText(e.Action),
+			Href: "/events?tenant=" + url.QueryEscape(e.Tenant) + "&show=all#ev-" + strconv.FormatInt(e.ID, 10)})
 	}
 	return out
 }
