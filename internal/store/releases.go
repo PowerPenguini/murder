@@ -72,13 +72,19 @@ func (s *SQLite) Revisions(app string) ([]Revision, error) {
 }
 
 func (s *SQLite) RestoreRevision(app string, revision int64, cond AppIf, allAtOnce bool, actor string) (AppChange, error) {
+	return s.RestoreRevisionFirst(app, revision, cond, allAtOnce, nil, actor)
+}
+
+// RestoreRevisionFirst is RestoreRevision, the tenants first named moving
+// at once as its first wave (App.First).
+func (s *SQLite) RestoreRevisionFirst(app string, revision int64, cond AppIf, allAtOnce bool, first []string, actor string) (AppChange, error) {
 	revisions, err := s.Revisions(app)
 	if err != nil {
 		return AppChange{}, err
 	}
 	for _, kept := range revisions {
 		if kept.Revision == revision {
-			return s.putApp(App{Name: app, Spec: kept.Spec, Tag: kept.Tag, AllAtOnce: allAtOnce}, cond, revision, actor)
+			return s.putApp(App{Name: app, Spec: kept.Spec, Tag: kept.Tag, AllAtOnce: allAtOnce, First: first}, cond, revision, actor)
 		}
 	}
 	return AppChange{}, fmt.Errorf("app %s keeps no revision %d: %w", app, revision, ErrNotFound)

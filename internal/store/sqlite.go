@@ -1078,6 +1078,31 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 				return err
 			}
 			detail += fmt.Sprintf("; rolls out in waves to %d tenants", len(result.Tenants))
+			// The tenants asked to go first move now, as the first wave.
+			var first []string
+			for _, name := range slices.Sorted(slices.Values(app.First)) {
+				if slices.Contains(result.Tenants, name) && !slices.Contains(first, name) {
+					first = append(first, name)
+				}
+			}
+			if len(first) > 0 {
+				for _, name := range first {
+					from := current.tenants[name].AppRevision
+					if from == 0 {
+						from = oldRevision
+					}
+					if err := tx.Exec(`UPDATE tenants SET before_revision = app_revision, app_revision = 0, moved_on = node, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+						return err
+					}
+					if err := event(tx, now, actor, "app.rolled-out", name, app.Name, fmt.Sprintf("wave 1, first: revision %d → %d", from, revision)); err != nil {
+						return err
+					}
+				}
+				if err := tx.Exec(`UPDATE rollouts SET wave = 1, epoch = epoch + 1 WHERE app = ?`, app.Name); err != nil {
+					return err
+				}
+				detail += "; first, now: " + strings.Join(first, ", ")
+			}
 		case rolling && !waves:
 			if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = 'replaced by a change rolled out at once', updated_at = ?, epoch = epoch + 1 WHERE app = ? AND state IN ('running', 'paused')`, stamp, app.Name); err != nil {
 				return err

@@ -83,8 +83,18 @@ func (d *DemoCluster) Events(_ context.Context, query store.EventQuery) ([]store
 type demoActor struct {
 	*DemoCluster
 	actor string
-	// atOnce has an app change move every tenant now, not in waves.
+	// atOnce has an app change move every tenant now, not in waves; first
+	// names tenants that move at once, as its first wave.
 	atOnce bool
+	first  []string
+}
+
+// AppsFirst is the actor, but an app change in waves it makes moves the
+// tenants named first, as the agent's client's First.
+func (a *demoActor) AppsFirst(names []string) AppAgent {
+	copied := *a
+	copied.first = names
+	return &copied
 }
 
 // AppsAtOnce is the actor, but an app change it makes moves every tenant

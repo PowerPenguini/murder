@@ -61,7 +61,12 @@ type App struct {
 	LatestAt time.Time `json:"latestAt,omitzero"`
 	// AllAtOnce, given to PutAppIf, moves every tenant to the change now
 	// instead of in waves.
-	AllAtOnce bool      `json:"-"`
+	AllAtOnce bool `json:"-"`
+	// First, given to PutAppIf for a change in waves, names tenants that
+	// move at once, as its first wave, in the same write: say the broken
+	// ones a fix is for. The driver then judges them as it judges a wave,
+	// and moves the rest in waves after them.
+	First     []string  `json:"-"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -315,6 +320,7 @@ type Store interface {
 	// RestoreRevision stores one of the app's revisions again, as its
 	// newest, as PutAppIf would.
 	RestoreRevision(app string, revision int64, cond AppIf, allAtOnce bool, actor string) (AppChange, error)
+	RestoreRevisionFirst(app string, revision int64, cond AppIf, allAtOnce bool, first []string, actor string) (AppChange, error)
 
 	// Rollouts and Rollout read the apps' newest rollouts; the rest moves
 	// them on (see rollouts.go).

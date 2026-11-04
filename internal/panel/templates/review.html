@@ -3,8 +3,23 @@
 <h1>{{$d.Title}}</h1>
 <p class="lead">Nothing has changed yet. Look it over; rolling it out stores revision {{next $a.Revision}} of {{$a.Name}}.</p>
 <div data-still hidden></div>
-{{with $a.Rollout}}{{if .Active}}<div class="notice spaced">{{if $d.Blocked}}<span class="lead-in">A rollout of revision {{.ToRevision}} is blocked at {{$d.AtWave}} by {{range $i, $b := $d.Blocked}}{{if $i}}, {{end}}{{$b}}{{end}}.</span>{{else}}<span class="lead-in">A rollout of revision {{.ToRevision}} runs, at {{$d.AtWave}}.</span>{{end}} This change replaces it: the new one starts again with the canaries, and tenants it moved stay on revision {{.ToRevision}} until their wave.
+{{if and $d.Changed $d.Restart}}
+<section class="near" id="pace">
+  <form method="post" action="/apps/{{$a.Name}}#pace" class="pace-form" data-autosubmit>
+    <input type="hidden" name="do" value="{{$d.ReviewDo}}"><input type="hidden" name="updated" value="{{$d.Updated}}">
+    {{if eq $d.Do "save"}}<input type="hidden" name="file" value="{{$d.File}}">{{end}}
+    {{if eq $d.Do "restore"}}<input type="hidden" name="revision" value="{{$d.Revision}}">{{end}}
+    <fieldset class="pace">
+      <legend>How it reaches the {{plural (len $d.Restart) "tenant" "tenants"}} it restarts</legend>
+      {{range $d.Paces}}<label class="check"><input type="radio" name="pace" value="{{.Value}}"{{if eq .Value $d.Pace}} checked{{end}}> <span>{{.Label}}{{if .Default}} <span class="dim">(proposed)</span>{{end}}</span></label>{{end}}
+      <div class="row"><button type="submit" class="small js-hide">Show this plan</button><span class="hint">The page below describes the pace chosen here.</span></div>
+    </fieldset>
+  </form>
+</section>
+{{end}}
+{{with $a.Rollout}}{{if .Active}}<div class="notice spaced">{{if $d.Blocked}}<span class="lead-in">A rollout of revision {{.ToRevision}} is blocked at {{$d.AtWave}} by {{range $i, $b := $d.Blocked}}{{if $i}}, {{end}}{{$b}}{{end}}.</span>{{else}}<span class="lead-in">A rollout of revision {{.ToRevision}} runs, at {{$d.AtWave}}.</span>{{end}} This change replaces it{{if eq $d.Pace "now"}} and ends it: every tenant it restarts takes the new revision now, those it moved too{{else if eq $d.Pace "first"}}: {{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} {{if eq (len $d.Broken) 1}}moves{{else}}move{{end}} now, then the rest in waves; tenants it moved stay on revision {{.ToRevision}} until their wave{{else}}: the new one starts again with the canaries, and tenants it moved stay on revision {{.ToRevision}} until their wave{{end}}.
   {{if and (eq $d.Do "restore") $d.Moved}}<p class="flat spaced">Or abort that rollout instead: it takes the {{plural (len $d.Moved) "tenant" "tenants"}} it moved ({{range $i, $m := $d.Moved}}{{if $i}}, {{end}}{{$m}}{{end}}) back to the revision each ran before, now, and stores no new revision. <a href="/apps/{{$a.Name}}#rollout">Abort, on {{$a.Name}}'s page</a></p>{{end}}</div>{{end}}{{end}}
+{{if and $d.ImageTenants (not $d.NewImage)}}<div class="notice{{if eq $d.Pace "now"}} bad{{end}} spaced" id="images"><span class="lead-in">{{plural (len $d.ImageTenants) "tenant also takes" "tenants also take"}} a new image with it:</span> {{range $i, $n := $d.ImageTenants}}{{if $i}}, {{end}}{{$n}}{{end}} ({{$d.ImageChange}}), as {{if eq (len $d.ImageTenants) 1}}it runs{{else}}they run{{end}} an older revision.{{if eq $d.Pace "now"}} Every tenant now gives {{if eq (len $d.ImageTenants) 1}}it{{else}}them{{end}} that image at once, with no wave to prove it first.{{else}} {{if eq (len $d.ImageTenants) 1}}It takes{{else}}They take{{end}} it in {{if eq (len $d.ImageTenants) 1}}its{{else}}their{{end}} wave, once the one before stayed healthy.{{end}}</div>{{end}}
 
 <section class="near">
   <div class="head"><h2>What changes</h2>{{if $d.Changed}}<span class="dim num">{{plural $d.Removed "line" "lines"}} out, {{plural $d.Added "line" "lines"}} in</span>{{end}}</div>
@@ -52,13 +67,18 @@
   {{with $d.Archived}}<p class="hint spaced">Left out while archived: {{range $i, $h := .}}{{if $i}}, {{end}}{{$h}}{{end}}.</p>{{end}}
 </section>
 
-{{if $d.Waves}}
-<section>
-  <div class="head"><h2>How it rolls out</h2></div>
+{{if $d.Restart}}
+<section id="plan">
+  <div class="head"><h2>How it rolls out</h2><span class="dim">{{if eq $d.Pace "now"}}every tenant now{{else if eq $d.Pace "first"}}{{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} now, the rest in waves{{else}}in waves{{end}}</span></div>
+  {{if eq $d.Pace "now"}}
+  <div class="notice{{if $d.ImageTenants}} bad{{end}}"><p class="flat"><span class="lead-in">Together, now:</span> {{range $i, $t := $d.Restart}}{{if $i}}, {{end}}{{$t.Name}}{{end}} restart at once, each answering no request for the few seconds it starts.{{with $d.Join}} {{range $i, $t := .}}{{if $i}}, {{end}}{{$t.Name}}{{end}} take the revision and keep their containers.{{end}}</p>
+    <p class="flat spaced">No health gate: nothing waits to see one healthy before the next, so a change that breaks them breaks them all.</p></div>
+  {{else}}
   <ol class="waves plan">
     {{range $i, $w := $d.Waves}}<li class="next"><span class="wn">{{add1 $i}}. {{$w.Name}}</span><span class="wc">{{range $j, $n := $w.Tenants}}{{if $j}}, {{end}}{{$n}}{{end}}</span></li>{{end}}
   </ol>
-  <p class="hint spaced">Each wave moves once the one before has stayed healthy: two minutes for canaries, a minute after. A tenant not healthy within 5 minutes of its move pauses the rollout; you can then resume, abort, or restore their data.</p>
+  <p class="hint spaced">{{if eq $d.Pace "first"}}{{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} move{{if eq (len $d.Broken) 1}}s{{end}} as you roll it out. Each wave after moves once the one before has stayed healthy: two minutes for the first, a minute after.{{else}}Each wave moves once the one before has stayed healthy: two minutes for canaries, a minute after.{{end}} A tenant not healthy within 5 minutes of its move pauses the rollout; you can then resume, abort, or restore their data.</p>
+  {{end}}
 </section>
 {{end}}
 
@@ -73,12 +93,8 @@
     <input type="hidden" name="updated" value="{{$d.Updated}}">
     {{if eq $d.Do "save"}}<input type="hidden" name="file" value="{{$d.File}}">{{end}}
     {{if eq $d.Do "restore"}}<input type="hidden" name="revision" value="{{$d.Revision}}">{{end}}
-    {{if and $d.Changed $d.Restart}}<fieldset class="pace">
-      <legend>How it reaches them</legend>
-      <label class="check"><input type="radio" name="pace" value="waves"{{if eq $d.Pace "waves"}} checked{{end}}> In waves, the canaries first: each wave moves once the one before has stayed healthy.{{with $d.BrokenWave}} {{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}}, broken now, moves with {{lower .}}.{{end}}</label>
-      <label class="check"><input type="radio" name="pace" value="now"{{if eq $d.Pace "now"}} checked{{end}}> To every tenant now: {{if eq (len $d.Restart) 1}}it restarts{{else}}the {{len $d.Restart}} restart at once{{end}}, for a few seconds each. No wave waits to see one healthy before the next: a change that breaks them breaks them all.</label>
-    </fieldset>{{end}}
-    {{if $d.Changed}}<button type="submit" name="do" value="{{$d.Do}}" class="primary">{{if not $d.Tenants}}Store the change{{else if not $d.Restart}}Store revision {{next $a.Revision}}: no tenant restarts{{else if eq $d.Do "restore"}}Return {{plural (len $d.Restart) "tenant" "tenants"}} to revision {{$d.Revision}}{{else}}Roll out to {{plural (len $d.Restart) "tenant" "tenants"}}{{end}}</button>{{end}}
+    {{if and $d.Changed $d.Restart}}<input type="hidden" name="pace" value="{{$d.Pace}}">{{if eq $d.Pace "first"}}<input type="hidden" name="first" value="{{range $i, $b := $d.Broken}}{{if $i}},{{end}}{{$b}}{{end}}">{{end}}{{end}}
+    {{if $d.Changed}}<button type="submit" name="do" value="{{$d.Do}}" class="primary">{{if not $d.Tenants}}Store the change{{else if not $d.Restart}}Store revision {{next $a.Revision}}: no tenant restarts{{else if eq $d.Pace "now"}}{{if eq $d.Do "restore"}}Return {{plural (len $d.Restart) "tenant" "tenants"}} to revision {{$d.Revision}} now{{else}}Restart {{plural (len $d.Restart) "tenant" "tenants"}} now{{end}}{{else if eq $d.Pace "first"}}Restart {{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} now, the rest in waves{{else if eq $d.Do "restore"}}Return {{plural (len $d.Restart) "tenant" "tenants"}} to revision {{$d.Revision}} in waves{{else}}Roll out to {{plural (len $d.Restart) "tenant" "tenants"}} in waves{{end}}</button>{{end}}
     {{if eq $d.Do "save"}}<button type="submit" name="do" value="edit">Back to editing</button>{{else}}<a href="/apps/{{$a.Name}}" class="button">Back to {{$a.Name}}</a>{{end}}
   </form>
 </section>

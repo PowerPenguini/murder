@@ -42,14 +42,29 @@ type AppAgent interface {
 // paced is the agent an app change asked for goes through: one that moves
 // every tenant at once when the review chose "now", else in waves.
 func paced(agent AppAgent, r *http.Request) AppAgent {
-	if r.FormValue("pace") != "now" {
-		return agent
-	}
-	switch a := agent.(type) {
-	case interface{ AtOnce() *api.Client }:
-		return a.AtOnce()
-	case interface{ AppsAtOnce() AppAgent }:
-		return a.AppsAtOnce()
+	switch r.FormValue("pace") {
+	case "now":
+		switch a := agent.(type) {
+		case interface{ AtOnce() *api.Client }:
+			return a.AtOnce()
+		case interface{ AppsAtOnce() AppAgent }:
+			return a.AppsAtOnce()
+		}
+	case "first":
+		// The tenants the review named; the store moves only those the
+		// change reaches.
+		var first []string
+		for _, name := range strings.Split(r.FormValue("first"), ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				first = append(first, name)
+			}
+		}
+		switch a := agent.(type) {
+		case interface{ First([]string) *api.Client }:
+			return a.First(first)
+		case interface{ AppsFirst([]string) AppAgent }:
+			return a.AppsFirst(first)
+		}
 	}
 	return agent
 }
@@ -176,6 +191,8 @@ func appOutcome(name string, applied api.AppApplied) string {
 		message = "app " + name + " is unchanged"
 	case len(applied.Tenants) == 0:
 		message = "app " + name + " is changed; no live tenant runs it"
+	case applied.Rollout && applied.App.Rollout != nil && applied.App.Rollout.Wave > 0:
+		message = fmt.Sprintf("app %s is changed; it rolls out to %d tenants: the first now, the rest in waves", name, len(applied.Tenants))
 	case applied.Rollout:
 		message = fmt.Sprintf("app %s is changed; it rolls out in waves to %d tenants", name, len(applied.Tenants))
 	default:

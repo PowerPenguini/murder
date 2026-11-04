@@ -110,7 +110,7 @@ func (s *Server) restoreRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	change, err := s.store.RestoreRevision(r.PathValue("name"), revision, cond, atOnce(r), actor(r))
+	change, err := s.store.RestoreRevisionFirst(r.PathValue("name"), revision, cond, atOnce(r), first(r), actor(r))
 	if err != nil {
 		writeError(w, err)
 		return

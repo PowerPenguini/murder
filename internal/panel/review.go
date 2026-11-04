@@ -174,10 +174,53 @@ type reviewData struct {
 	Restart, Join, Unchanged []reviewTenant
 	Groups                   []reviewGroup
 	// Broken are the restarting tenants broken now, BrokenWave the wave
-	// the first moves in; Pace is the pace proposed: now or waves.
+	// the first moves in with the waves.
 	Broken     []string
 	BrokenWave string
-	Pace       string
+	// Pace is the pace the page describes: waves, first (the broken now,
+	// the rest in waves) or now; Paces those offered, the default marked.
+	// ImageTenants are the restarting tenants whose image changes too,
+	// ImageChange how (the first of them).
+	Pace         string
+	Paces        []paceOption
+	ImageTenants []string
+	ImageChange  string
+	// ReviewDo is the action that shows this review again, for another
+	// pace.
+	ReviewDo string
+}
+
+// paceOption is one way a change can reach its tenants.
+type paceOption struct {
+	Value, Label string
+	Default      bool
+}
+
+// pacesOf are the paces a change can take, and the one proposed: the safe
+// one. Every tenant at once is never proposed when an image changes with
+// it; the broken tenants first, then the rest in waves, is proposed for a
+// change that reaches a broken tenant without a new image for it.
+// A broken tenant that would take a new image with it is not rushed: the
+// image is not proven, so waves are proposed.
+func pacesOf(restart, broken, images []string) ([]paceOption, string) {
+	proposed := "waves"
+	others := len(broken) > 0 && len(broken) < len(restart)
+	brokenImage := slices.ContainsFunc(broken, func(name string) bool { return slices.Contains(images, name) })
+	switch {
+	case others && !brokenImage:
+		proposed = "first"
+	case len(broken) > 0 && len(images) == 0:
+		proposed = "now"
+	}
+	paces := []paceOption{{Value: "waves", Label: "In waves"}}
+	if others {
+		paces = append(paces, paceOption{Value: "first", Label: strings.Join(broken, ", ") + " now, the rest in waves"})
+	}
+	paces = append(paces, paceOption{Value: "now", Label: "Every tenant now"})
+	for i := range paces {
+		paces[i].Default = paces[i].Value == proposed
+	}
+	return paces, proposed
 }
 
 // imageOf is the image a spec's file names.
@@ -384,11 +427,40 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request, app api.App, dat
 	}
 	order := map[string]int{"restart": 0, "join": 1, "unchanged": 2}
 	slices.SortStableFunc(data.Groups, func(a, b reviewGroup) int { return order[a.Kind] - order[b.Kind] })
-	// A change of settings, not of the image, to a tenant broken now: at
-	// once is proposed, so the fix reaches it without waiting for waves.
-	data.Pace = "waves"
-	if data.NewImage == "" && len(data.Broken) > 0 {
-		data.Pace = "now"
+	// Which tenants take a new image with it: their own composed result
+	// says, not this diff (a tenant still on an older revision takes the
+	// newer image with a limits fix).
+	var restartNames []string
+	for _, rt := range data.Restart {
+		restartNames = append(restartNames, rt.Name)
+		for _, c := range rt.Scope.Changes {
+			if c.Key == "image" {
+				data.ImageTenants = append(data.ImageTenants, rt.Name)
+				if data.ImageChange == "" {
+					data.ImageChange = c.From + " → " + c.To
+				}
+			}
+		}
+	}
+	var proposed string
+	data.Paces, proposed = pacesOf(restartNames, data.Broken, data.ImageTenants)
+	data.Pace = proposed
+	if asked := r.FormValue("pace"); slices.ContainsFunc(data.Paces, func(p paceOption) bool { return p.Value == asked }) {
+		data.Pace = asked
+	}
+	data.ReviewDo = map[string]string{"save": "review", "restore": "review-restore", "update": "review-update"}[data.Do]
+	// The plan the page shows is the pace's.
+	switch data.Pace {
+	case "now":
+		data.Waves = nil
+	case "first":
+		var pending []store.Record
+		for _, t := range moving {
+			if !slices.Contains(data.Broken, t.Spec.Name) {
+				pending = append(pending, store.Record{Spec: t.Spec, Canary: t.Canary})
+			}
+		}
+		data.Waves = append([]wave{{Name: "First, now", Tenants: data.Broken}}, planFrom(1, len(moving), len(data.Broken), pending)...)
 	}
 	s.render(w, r, "review", "Review "+app.Name, "apps", data)
 }

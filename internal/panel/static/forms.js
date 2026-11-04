@@ -277,4 +277,10 @@
   };
   target();
   window.addEventListener("hashchange", target);
+  // A form that only chooses what the page shows (a review's pace) shows
+  // it as soon as it is chosen; without this script, its button does.
+  for (const form of document.querySelectorAll("form[data-autosubmit]")) {
+    for (const hide of form.querySelectorAll(".js-hide")) hide.hidden = true;
+    form.addEventListener("change", () => form.requestSubmit());
+  }
 })();

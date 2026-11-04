@@ -221,6 +221,14 @@ textarea { display: block; width: 100%; padding: var(--pad-y) var(--pad-x); font
 input[type=file] { color: var(--dim); font: inherit; font-size: 13px; }
 input[type=file]::file-selector-button { background: transparent; color: var(--fg); border: 1px solid var(--frame); padding: 6px var(--s3); font: inherit; font-size: 13px; margin-right: 10px; cursor: pointer; }
 input[type=checkbox] { accent-color: var(--fg); width: 16px; height: 16px; margin: 0; flex: none; }
+/* Radios in the one grey ramp, drawn, not the browser's colour: a ring,
+   a white dot when chosen, the focus ring as everywhere. */
+input[type=radio] { appearance: none; -webkit-appearance: none; width: 16px; height: 16px; margin: 1px 0 0; flex: none; border: 1.5px solid var(--soft); border-radius: 50%; background: transparent; display: inline-grid; place-content: center; cursor: pointer; }
+input[type=radio]::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--fg); transform: scale(0); }
+input[type=radio]:checked { border-color: var(--fg); }
+input[type=radio]:checked::before { transform: scale(1); }
+input[type=radio]:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+.pace-form fieldset.pace { margin: 0; }
 form.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); }
 label.field { display: grid; gap: 6px; color: var(--soft); font-size: 13px; font-weight: 500; }
 label.field > input, label.field > select { justify-self: start; }

@@ -72,3 +72,26 @@ func TestPreviousContainersLines(t *testing.T) {
 		t.Fatalf("the previous lines of a tenant elsewhere: %v", err)
 	}
 }
+
+// An app change in waves can name tenants to move at once, first, through
+// the API: ?first=a,b.
+func TestAnAppChangeMovesSomeFirst(t *testing.T) {
+	f := withApp(t)
+	ctx := context.Background()
+	for _, name := range []string{"a", "b"} {
+		if _, err := f.client.Create(ctx, tenantOf(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := appSpec()
+	next.Limits.MemoryMB = 512
+	applied, err := f.client.First([]string{"b"}).PutApp(ctx, "web", next)
+	if err != nil || !applied.Rollout {
+		t.Fatalf("applied %+v, %v", applied, err)
+	}
+	b, _ := f.store.Get("b")
+	a, _ := f.store.Get("a")
+	if b.AppRevision != 0 || b.BeforeRevision == 0 || a.AppRevision == 0 {
+		t.Fatalf("a %+v / b %+v", a, b)
+	}
+}

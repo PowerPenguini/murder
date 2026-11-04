@@ -447,3 +447,46 @@ func TestAPendingRestoreHoldsChangesAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A change in waves can move some tenants at once, as its first wave, in
+// the same write: the rest wait for the waves after it. A held tenant, or
+// one the change does not reach, is not moved.
+func TestSomeTenantsGoFirst(t *testing.T) {
+	st, _ := openNew(t, options())
+	if _, err := st.PutApp(App{Name: "web", Spec: appSpec()}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a", "b", "c", "h"} {
+		if _, err := st.Create(NewTenant{Name: name, App: "web"}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hold := true
+	if _, err := st.SetFlags("h", nil, &hold, "test"); err != nil {
+		t.Fatal(err)
+	}
+	next := appSpec()
+	next.Image = otherImage
+	change, err := st.PutApp(App{Name: "web", Spec: next, First: []string{"b", "h", "nobody"}}, "bob")
+	if err != nil || !change.Rollout {
+		t.Fatalf("change %+v, %v", change, err)
+	}
+	rollout, err := st.Rollout("web")
+	if err != nil || rollout.Wave != 1 || rollout.State != RolloutRunning {
+		t.Fatalf("rollout %+v, %v", rollout, err)
+	}
+	b, _ := st.Get("b")
+	if b.AppRevision != 0 || b.BeforeRevision != 1 || b.Spec.Image != otherImage || b.Generation != 2 {
+		t.Fatalf("b went first: %+v", b)
+	}
+	for _, name := range []string{"a", "c", "h"} {
+		record, _ := st.Get(name)
+		if record.AppRevision != 1 || record.Spec.Image != image {
+			t.Fatalf("%s moved with b: %+v", name, record)
+		}
+	}
+	events, _ := st.Events(EventQuery{Tenant: "b"})
+	if len(events) == 0 || !strings.Contains(events[0].Detail, "wave 1, first: revision 1 → 2") {
+		t.Fatalf("b's events: %+v", events)
+	}
+}

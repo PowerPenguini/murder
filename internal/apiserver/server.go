@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -276,7 +277,7 @@ func (s *Server) storeApp(w http.ResponseWriter, r *http.Request, name string, a
 		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
 		return
 	}
-	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app, Tag: tag, Latest: latest, AllAtOnce: atOnce(r)}, cond, actor(r))
+	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app, Tag: tag, Latest: latest, AllAtOnce: atOnce(r), First: first(r)}, cond, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -328,6 +329,18 @@ func (s *Server) pinTag(ctx context.Context, tag string, strict bool) (string, s
 // atOnce reports whether a request moves every tenant to an app's change
 // now (?rollout=now), not in waves.
 func atOnce(r *http.Request) bool { return r.URL.Query().Get("rollout") == "now" }
+
+// first names the tenants an app change in waves moves at once, as its
+// first wave: ?first=a,b.
+func first(r *http.Request) []string {
+	var names []string
+	for _, name := range strings.Split(r.URL.Query().Get("first"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
 
 // writeAppChange answers with a stored app and the tenants it rolls out to.
 func (s *Server) writeAppChange(w http.ResponseWriter, change store.AppChange, note string) {

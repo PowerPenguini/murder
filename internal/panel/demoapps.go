@@ -223,6 +223,20 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 	if waves && len(applied.Tenants) > 0 {
 		applied.Rollout = true
 		stored.Rollout = &store.Rollout{App: name, ToRevision: stored.Revision, State: store.RolloutRunning, WaveStarted: now, StartedAt: now, UpdatedAt: now, Actor: a.actor + " via murder-panel"}
+		// As the store does: those asked to go first move now, as wave 1.
+		for _, tenant := range a.liveTenantsOf(name) {
+			t := a.tenants[tenant]
+			if !slices.Contains(a.first, tenant) || t.Hold || t.AppRevision == 0 {
+				continue
+			}
+			composed := spec.Compose(app, tenant, t.Overrides)
+			composed.Suspended = t.Spec.Suspended
+			from := t.AppRevision
+			t.BeforeRevision, t.AppRevision = from, 0
+			a.moveTenant(&t, composed, "wave 1, first: revision "+strconv.FormatInt(from, 10)+" → "+strconv.FormatInt(stored.Revision, 10))
+			a.tenants[tenant] = t
+			stored.Rollout.Wave = 1
+		}
 	}
 	a.apps[name] = stored
 	stored.Tenants = a.liveTenantsOf(name)

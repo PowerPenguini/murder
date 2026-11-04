@@ -34,18 +34,34 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	file := between(page, `aria-label="the app's spec">`, "</textarea>")
 	changed := strings.Replace(file, "memoryMB: 256", "memoryMB: 512", 1)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review"}, "file": {changed}, "updated": {updated}}, server.URL)
-	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", "Canaries", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked at A tenth by baltic-freight",
+	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked at A tenth by baltic-freight",
 		// Only the tenants whose spec changes restart, and are counted:
 		// atlas keeps its own memory, so the change leaves it.
-		"5 restart · 1 unchanged · 1 held, left out", "Roll out to 5 tenants", "Memory 256 MB → 512 MB", "Unchanged: memory stays 768 MB",
-		// A settings change to a broken tenant: at once is proposed.
-		`name="pace" value="now" checked`, "the 5 restart at once"} {
+		"5 restart · 1 unchanged · 1 held, left out", "Memory 256 MB → 512 MB", "Unchanged: memory stays 768 MB",
+		// A memory fix for the broken baltic-freight, whose own change is
+		// memory only: it now, the rest in waves, is proposed; three
+		// tenants on revision 2 take revision 3's image with it, named.
+		`name="pace" value="first" checked`, "baltic-freight now, the rest in waves <span class=\"dim\">(proposed)</span>",
+		"3 tenants also take a new image with it:</span> kowalski-trans, nordwind, vistula-cargo",
+		`<span class="wn">1. First, now</span><span class="wc">baltic-freight</span>`, "Restart baltic-freight now, the rest in waves",
+		`name="first" value="baltic-freight"`, `name="pace" value="first">`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the review lacks %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(between(body, "How it rolls out", "Its data"), "atlas") {
-		t.Fatalf("atlas, which the change leaves, is in its waves:\n%s", body)
+	if strings.Contains(between(body, "How it rolls out", "Its data"), "atlas") || strings.Contains(body, `value="now" checked`) {
+		t.Fatalf("atlas in its waves, or every tenant now proposed:\n%s", body)
+	}
+	// Each pace's page describes that pace, and only it.
+	_, waves := submit(t, client, server, "/apps/web", url.Values{"do": {"review"}, "file": {changed}, "updated": {updated}, "pace": {"waves"}}, server.URL)
+	if !strings.Contains(waves, `<span class="wn">1. Canaries</span>`) || !strings.Contains(waves, "Roll out to 5 tenants in waves") || strings.Contains(waves, "Together, now") || strings.Contains(waves, "First, now") {
+		t.Fatalf("the waves review:\n%s", waves)
+	}
+	_, now := submit(t, client, server, "/apps/web", url.Values{"do": {"review"}, "file": {changed}, "updated": {updated}, "pace": {"now"}}, server.URL)
+	if !strings.Contains(now, "Together, now:</span> acme-logistics, baltic-freight, kowalski-trans, nordwind, vistula-cargo restart at once") || !strings.Contains(now, "No health gate") ||
+		!strings.Contains(now, "Restart 5 tenants now") || strings.Contains(now, `class="waves plan"`) || strings.Contains(now, "starts again with the canaries") ||
+		!strings.Contains(now, "Every tenant now gives them that image at once") {
+		t.Fatalf("the now review:\n%s", now)
 	}
 	if app, _ := agent.App(ctx, "web"); app.Revision != 3 {
 		t.Fatalf("a review stored the change: revision %d", app.Revision)
@@ -636,7 +652,8 @@ func TestFiguresAndScopesAgree(t *testing.T) {
 	}
 	updated := between(page, `name="updated" value="`, `"`)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review-update"}, "updated": {updated}}, server.URL)
-	if !strings.Contains(body, "6 restart · 1 held, left out") || !strings.Contains(body, "Roll out to 6 tenants") {
+	// A newer image: waves are proposed, even for the broken tenant.
+	if !strings.Contains(body, "6 restart · 1 held, left out") || !strings.Contains(body, "Roll out to 6 tenants in waves") || !strings.Contains(body, `value="waves" checked`) {
 		t.Fatalf("the update's scope in its review:\n%s", body)
 	}
 }
@@ -825,5 +842,52 @@ func TestSettingsAsOneForm(t *testing.T) {
 	_, body = submit(t, client, server, "/tenants/acme-logistics/settings", url.Values{"do": {"save"}, "reviewed": {token}, "generation": {strconv.FormatInt(acme.Generation, 10)}, "app": {"web"}, "flags": {"1"}, "hold": {"on"}, "canary": {"on"}}, server.URL)
 	if now, _ := cluster.Get(ctx, "acme-logistics"); !now.Hold || now.Status == nil || now.Status.Phase == "starting" || strings.Contains(body, "new container") {
 		t.Fatalf("after holding: hold %v, %+v:\n%s", now.Hold, now.Status, body)
+	}
+}
+
+// The pace proposed is the safe one: never every tenant at once when an
+// image changes with it; the broken first when their change is a fix.
+func TestPacesProposed(t *testing.T) {
+	for _, c := range []struct {
+		restart, broken, images []string
+		want                    string
+		offered                 int
+	}{
+		{[]string{"a", "b", "c"}, []string{"b"}, []string{"c"}, "first", 3},
+		{[]string{"a", "b", "c"}, []string{"b"}, []string{"b", "c"}, "waves", 3},
+		{[]string{"a", "b"}, nil, nil, "waves", 2},
+		{[]string{"b"}, []string{"b"}, nil, "now", 2},
+		{[]string{"b"}, []string{"b"}, []string{"b"}, "waves", 2},
+	} {
+		paces, got := pacesOf(c.restart, c.broken, c.images)
+		if got != c.want || len(paces) != c.offered {
+			t.Errorf("%+v: %q of %d", c, got, len(paces))
+		}
+	}
+}
+
+// The proposed pace, rolled out: the broken tenant moves now, the rest
+// wait for their waves; no other tenant restarts.
+func TestTheBrokenFirstPace(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	_, page := get(t, server.URL+"/apps/web?memoryMB=512")
+	updated := between(page, `name="updated" value="`, `"`)
+	file := between(page, `aria-label="the app's spec">`, "</textarea>")
+	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"save"}, "file": {file}, "updated": {updated}, "pace": {"first"}, "first": {"baltic-freight"}}, server.URL)
+	if !strings.Contains(body, "the first now, the rest in waves") {
+		t.Fatalf("after rolling out:\n%s", body)
+	}
+	ctx := context.Background()
+	baltic, _ := cluster.Get(ctx, "baltic-freight")
+	if baltic.Spec.Limits.MemoryMB != 512 || baltic.AppRevision != 0 {
+		t.Fatalf("baltic-freight: %+v", baltic)
+	}
+	for _, name := range []string{"kowalski-trans", "nordwind", "vistula-cargo", "acme-logistics"} {
+		if tenant, _ := cluster.Get(ctx, name); tenant.Spec.Limits.MemoryMB == 512 || tenant.Status.Phase == "starting" {
+			t.Fatalf("%s moved with it: %+v", name, tenant.Spec.Limits)
+		}
+	}
+	if app, _ := cluster.AsApps("t").App(ctx, "web"); app.Rollout == nil || app.Rollout.Wave != 1 || app.Rollout.ToRevision != 4 {
+		t.Fatalf("the rollout: %+v", app.Rollout)
 	}
 }

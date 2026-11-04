@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,8 +25,10 @@ type Client struct {
 	base string
 	// Actor, if set, names the person the client acts for in the audit log.
 	Actor string
-	// atOnce moves every tenant to an app change at once (AtOnce).
+	// atOnce moves every tenant to an app change at once (AtOnce); first
+	// those named, as its first wave (First).
 	atOnce bool
+	first  []string
 }
 
 // NewClient returns a client for the agent listening on socket.
@@ -192,16 +195,31 @@ func (c *Client) AtOnce() *Client {
 	return &copied
 }
 
+// First is the client, but an app change in waves it makes moves the
+// tenants named at once, as its first wave, and the rest in waves.
+func (c *Client) First(tenants []string) *Client {
+	copied := *c
+	copied.first = slices.Clone(tenants)
+	return &copied
+}
+
 // rollout adds to an app change's path that it moves every tenant at once,
-// when the client says so.
+// or some first, when the client says so.
 func (c *Client) rollout(path string) string {
-	if !c.atOnce {
-		return path
+	add := func(query string) {
+		if strings.Contains(path, "?") {
+			path += "&" + query
+		} else {
+			path += "?" + query
+		}
 	}
-	if strings.Contains(path, "?") {
-		return path + "&rollout=now"
+	if c.atOnce {
+		add("rollout=now")
 	}
-	return path + "?rollout=now"
+	if len(c.first) > 0 {
+		add("first=" + url.QueryEscape(strings.Join(c.first, ",")))
+	}
+	return path
 }
 
 // RolloutAction pauses, resumes, aborts or promotes an app's rollout.
