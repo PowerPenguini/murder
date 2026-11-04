@@ -20,11 +20,11 @@
 
 <section class="near">
   <form method="get" action="/tenants" class="filters" role="search">
-    <nav class="seg" aria-label="show">
+    <nav class="seg desktop-only" aria-label="show">
       {{range $f := list "all" "attention" "unprotected" "suspended" "archived"}}<a href="{{query "show" $f "q" $d.Query "sort" (sortName $d.ByName)}}"{{if eq $f $d.Show}} class="on" aria-current="true"{{end}}>{{filterLabel $f}} <span class="n">{{index $d.Counts $f}}</span></a>{{end}}
     </nav>
     <div class="row">
-      {{if ne $d.Show "all"}}<input type="hidden" name="show" value="{{$d.Show}}">{{end}}
+      <label class="phone-only field-inline"><span class="sr">Show</span><select name="show">{{range $f := list "all" "attention" "unprotected" "suspended" "archived"}}<option value="{{$f}}"{{if eq $f $d.Show}} selected{{end}}>{{filterLabel $f}} ({{index $d.Counts $f}})</option>{{end}}</select></label>
       {{if $d.ByName}}<input type="hidden" name="sort" value="name">{{end}}
       <input type="search" name="q" value="{{$d.Query}}" class="short" placeholder="Name, app or node" aria-label="filter tenants by name, app or node" autocomplete="off" data-filter="tenants">
       <button type="submit">Filter</button>
@@ -46,6 +46,13 @@
         {{else}}<td class="faint l-sub" data-label="Memory">{{if .Archived}}not running{{else}}not measured{{end}}</td><td class="faint hide-narrow hide-mid">none</td><td class="num faint hide-narrow hide-wide">none</td>{{end}}
         <td class="hide-narrow">{{if .Archived}}<span class="faint">{{.Node}}</span>{{else}}{{.Node}}{{end}}</td>
         <td class="l-sub{{if not (or (eq .Replica.Kind "warn") (eq .Replica.Kind "bad"))}} hide-narrow{{end}}" data-label="Copy">{{template "copy" .}}</td>
+        <td class="l-more"><details class="rowmore"><summary>Details</summary><dl class="pairs">
+          <dt>App</dt><dd>{{.App}}</dd>
+          <dt>Runs on</dt><dd>{{if .Archived}}nowhere, archived{{else}}{{.Node}}{{end}}</dd>
+          <dt>Copy</dt><dd>{{template "copy" .}}</dd>
+          {{with .Use}}<dt>CPU</dt><dd class="num">{{.CPUText}} cores</dd><dt>Requests/min</dt><dd class="num">{{.Requests}}</dd>{{end}}
+          {{with .Backup}}<dt>Newest backup</dt><dd>{{if .None}}none yet{{else}}{{ago .Last}} ago{{end}}{{if .Failing}}, last try failed{{end}}</dd>{{end}}
+        </dl></details></td>
       </tr>
     {{else}}
       <tr><td colspan="7" class="empty l-main">{{if $d.Tenants}}No tenants match. <a href="{{query "sort" (sortName $d.ByName)}}">Clear the filter</a>{{else}}No tenants yet. Make one of an app with New tenant, above.{{end}}</td></tr>

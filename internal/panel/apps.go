@@ -167,8 +167,10 @@ type appData struct {
 	// Rollout is its rollout under way, if one is.
 	Rollout *rolloutView
 	// EditorProblem is what is wrong with the spec in the editor, said
-	// beside it.
+	// beside it; EditorLine its line, 0 if none.
 	EditorProblem string
+	EditorLine    int
+	EditorLead    string
 	// Rows are its tenants, with their state.
 	Rows []tenantRow
 	// Memory says its tenants run out of memory; Proposed that the editor
@@ -253,9 +255,16 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request, data appData, p
 		s.fail(w, r, err)
 		return
 	}
-	// What is wrong with the spec is said beside the editor.
+	// What is wrong with the spec is said beside the editor, in plain
+	// words, with its line.
 	if data.File != "" && problem != "" {
-		data.EditorProblem, problem = problem, ""
+		data.EditorLead = "Not taken."
+		data.EditorProblem = problem
+		if strings.HasPrefix(problem, "the spec") {
+			data.EditorLead = "Specification has errors."
+			data.EditorProblem, data.EditorLine = specProblem(problem, data.File)
+		}
+		problem = ""
 	}
 	s.renderWith(w, r, "app", data.App.Name, "apps", data, problem, status)
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -131,11 +132,11 @@ func (f fakeBackend) Events(ctx context.Context, query store.EventQuery) ([]stor
 func TestTheEventsPage(t *testing.T) {
 	var events []store.Event
 	for id := int64(150); id > 0; id-- {
-		events = append(events, store.Event{ID: id, At: demoNow, Actor: "root", Action: "tenant.created", Detail: "<b>bold</b>"})
+		events = append(events, store.Event{ID: id, At: demoNow, Actor: "root", Action: "tenant.created", Detail: "<b>bold</b> " + strconv.FormatInt(id, 10)})
 	}
 	server := newTestServer(t, fakeBackend{Demo: Demo{Now: demoNow}, events: events})
 	_, body := get(t, server.URL+"/events")
-	if !strings.Contains(body, "before=51") || strings.Contains(body, "<b>bold</b>") || !strings.Contains(body, "&lt;b&gt;bold&lt;/b&gt;") {
+	if !strings.Contains(body, "before=51") || strings.Contains(body, "<b>bold</b>") || !strings.Contains(body, "&lt;b&gt;bold&lt;/b&gt; 150") {
 		t.Fatalf("events page:\n%s", body)
 	}
 	_, older := get(t, server.URL+"/events?before=51")

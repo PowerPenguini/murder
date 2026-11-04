@@ -37,6 +37,10 @@
           {{if .MemoryMB}}<div class="small dim">{{mem .MemoryMB}} reserved by limits</div>{{end}}</td>
         <td class="num">{{.Tenants}} <span class="dim">· {{plural .Copies "copy" "copies"}}</span></td>
         <td class="mono dim hide-narrow hide-mid">{{addrs .NodeState}}</td>
+        <td class="l-more"><details class="rowmore"><summary>Details</summary><dl class="pairs">
+          <dt>Runs</dt><dd>{{plural .Tenants "tenant" "tenants"}}, keeps {{plural .Copies "copy" "copies"}}</dd>
+          <dt>Public address</dt><dd class="mono">{{addrs .NodeState}}</dd>
+        </dl></details></td>
       </tr>
     {{end}}
     </tbody>

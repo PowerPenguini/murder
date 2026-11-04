@@ -67,7 +67,7 @@ func TestRolloutProgress(t *testing.T) {
 		t.Fatalf("moved a wave without the name: wave %d", app.Rollout.Wave)
 	}
 	_, page := get(t, server.URL+"/apps/web")
-	for _, want := range []string{`<li class="done"><span class="wn">Canaries</span>`, `<li class="now"><span class="wn">A tenth</span>`, "moved, not healthy: blocks the next wave", "waits for wave 3", "stays: it is held", "Half (kowalski-trans) moves once baltic-freight is healthy", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
+	for _, want := range []string{`<li class="done"><span class="wn">Canaries</span>`, `<li class="now"><span class="wn">A tenth</span>`, "moved, not healthy: blocks the next wave", "waits for half", "stays: it is held", "Half (kowalski-trans) moves once baltic-freight is healthy", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, page)
 		}
@@ -293,5 +293,15 @@ func TestClusterResilienceAndBackups(t *testing.T) {
 	}
 	if !strings.Contains(body, "backed up</h2>") || !strings.Contains(body, `<span class="st ok">backed up</span>`) || !strings.Contains(body, "Its whole output") {
 		t.Fatalf("the backup job:\n%s", body)
+	}
+}
+
+func TestSpecProblemsInPlainWords(t *testing.T) {
+	file := "image: web:1\nport: eighty\nhelthPath: /\n"
+	if text, line := specProblem("the spec: yaml: unmarshal errors:\n  line 2: cannot unmarshal !!str `eighty` into int", file); text != `Line 2 (port): a whole number is needed here, not "eighty"` || line != 2 {
+		t.Fatalf("%q %d", text, line)
+	}
+	if text, line := specProblem("the spec: yaml: unmarshal errors:\n  line 3: field helthPath not found in type spec.Tenant", file); !strings.HasPrefix(text, `Line 3: "helthPath" is not a setting`) || line != 3 {
+		t.Fatalf("%q %d", text, line)
 	}
 }

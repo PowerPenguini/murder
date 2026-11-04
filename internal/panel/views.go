@@ -674,6 +674,7 @@ func (s *Server) funcs() template.FuncMap {
 			return nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, Tenants: tenants, From: from}
 		},
 		"every":    every,
+		"groups":   groupEvents,
 		"lower":    strings.ToLower,
 		"wavename": waveName,
 		"sub":      func(a, b int) int { return a - b },

@@ -58,10 +58,62 @@
     }
     arm();
   });
+  // On a phone a menu opens as a sheet at the foot of the screen: it gets
+  // a title and a Close button, the page behind it is inert while it is
+  // open, so focus stays in it, and focus goes back to its button after.
+  const phone = matchMedia("(max-width: 760px)");
+  let sheet = null, inerted = [];
+  const release = () => {
+    for (const element of inerted) element.inert = false;
+    inerted = [];
+  };
+  const asSheet = (details) => {
+    const pop = details.querySelector(":scope > .pop");
+    const summary = details.querySelector(":scope > summary");
+    if (!pop || !summary) return;
+    if (!pop.querySelector(":scope > .sheet-head")) {
+      const head = document.createElement("div");
+      head.className = "sheet-head";
+      const title = document.createElement("span");
+      title.className = "sheet-title";
+      title.textContent = summary.getAttribute("aria-label") || summary.textContent.trim();
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "sheet-close";
+      close.textContent = "Close";
+      close.addEventListener("click", () => { details.open = false; });
+      head.append(title, close);
+      pop.prepend(head);
+      pop.setAttribute("role", "dialog");
+      pop.setAttribute("aria-label", title.textContent);
+    }
+    release();
+    summary.inert = true;
+    inerted.push(summary);
+    for (let node = details; node && node !== document.body; node = node.parentElement) {
+      for (const sibling of node.parentElement ? node.parentElement.children : []) {
+        if (sibling !== node && !sibling.inert && sibling.tagName !== "SCRIPT") {
+          sibling.inert = true;
+          inerted.push(sibling);
+        }
+      }
+    }
+    sheet = details;
+  };
   document.addEventListener("toggle", (event) => {
     const details = event.target;
-    if (!(details instanceof HTMLDetailsElement) || !details.open) return;
-    const field = details.querySelector("input:not([type=hidden]), select, textarea");
+    if (!(details instanceof HTMLDetailsElement)) return;
+    if (!details.open) {
+      if (details === sheet) {
+        release();
+        sheet = null;
+        const summary = details.querySelector(":scope > summary");
+        if (summary) summary.focus();
+      }
+      return;
+    }
+    if (phone.matches && details.querySelector(":scope > .pop")) asSheet(details);
+    const field = details.querySelector(".pop input:not([type=hidden]), .pop select, .pop textarea") || details.querySelector(".pop button:not(.sheet-close)");
     if (field) field.focus();
   }, true);
   arm();
@@ -80,6 +132,28 @@
         button.textContent = "Copy failed: select the text";
       }
       setTimeout(() => { button.textContent = label; }, 2400);
+    });
+  }
+  // A page that comes back with a problem beside a field goes to it, and
+  // puts the caret on the line it names.
+  const problem = document.querySelector("[data-focus]");
+  if (problem) {
+    const field = document.querySelector("textarea[data-line]");
+    if (field) {
+      const line = Number(field.dataset.line), lines = field.value.split("\n");
+      const at = lines.slice(0, Math.max(0, line - 1)).join("\n").length + (line > 1 ? 1 : 0);
+      field.focus();
+      field.setSelectionRange(at, at + (lines[line - 1] || "").length);
+    }
+    problem.scrollIntoView({ block: "center" });
+    if (!field) problem.focus();
+  }
+  // A draft is not lost by leaving the page by mistake.
+  for (const draft of document.querySelectorAll("[data-draft]")) {
+    let sending = false;
+    draft.form.addEventListener("submit", () => { sending = true; });
+    addEventListener("beforeunload", (event) => {
+      if (!sending && draft.value !== draft.defaultValue) event.preventDefault();
     });
   }
   // Logs open at their newest line, at the end.

@@ -11,21 +11,8 @@
     {{range .Steps}}<li class="{{.State}}"><span class="wn">{{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{if eq .State "done"}}moved{{else if eq .State "now"}}moving, watched{{else if eq .State "paused"}}paused{{else}}waits{{end}}</span></li>{{end}}
   </ol>
   <div class="notice{{if or .Blockers (eq .State "paused")}} bad{{end}} spaced">{{if .Blockers}}<span class="lead-in">Blocked by {{range $i, $b := .Blockers}}{{if $i}}, {{end}}<a href="/tenants/{{$b}}">{{$b}}</a>{{end}}.</span> {{end}}{{.Waits}}{{with .Before}}<p class="flat spaced">{{.}} Fix the cause, and the rollout goes on; or abort it to put every tenant back on the revision before.</p>{{end}}</div>
-  <table class="list rows">
-    <thead><tr><th>Tenant</th><th>Health</th><th>Revision</th><th>Wave</th><th>Result</th></tr></thead>
-    <tbody>
-    {{range .Rows}}
-      <tr id="r-{{.Name}}">
-        <td class="l-main"><a class="row-link" href="/tenants/{{.Name}}">{{.Name}}</a></td>
-        <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
-        <td class="num l-sub" data-label="Revision">{{if .Moved}}{{.From}} → {{.To}}{{else if .Held}}{{.From}}, held{{else if eq .From .To}}{{.To}}{{else}}{{.From}}, to {{.To}}{{end}}</td>
-        <td class="hide-narrow">{{if .Wave}}{{.Wave}}{{else}}<span class="faint">none</span>{{end}}</td>
-        <td class="l-sub" data-label="Result">{{if .Blocks}}<span class="st bad">moved, not healthy: blocks the next wave</span>{{else if .Moved}}moved, healthy{{else if .Held}}<span class="dim">stays: it is held</span>{{else if eq .From .To}}<span class="dim">ran it already</span>{{else}}<span class="dim">waits for wave {{.Wave}}</span>{{end}}</td>
-      </tr>
-    {{end}}
-    </tbody>
-  </table>
-  <div class="actions spaced">
+  <div class="actions spaced rollout-actions">
+    <span class="dim small">Go on</span>
     {{if eq .State "running"}}<form method="post" class="row"><input type="hidden" name="do" value="pause"><button type="submit">Pause</button></form>
     <details class="drop">
       <summary class="button">Move the next wave now</summary>
@@ -39,6 +26,7 @@
       </div>
     </details>
     {{else}}<form method="post" class="row"><input type="hidden" name="do" value="resume"><button type="submit" class="primary">Resume the rollout</button></form>{{end}}
+    <span class="dim small takeback">Take back</span>
     <details class="drop">
       <summary class="button">Abort</summary>
       <div class="pop">
@@ -60,6 +48,21 @@
       </div>
     </details>
   </div>
+  <input type="checkbox" id="allrows" class="sr phone-toggle"><label for="allrows" class="phone-only showall">Show all {{len .Rows}} tenants, not only those to look at</label>
+  <table class="list rows rollout-table">
+    <thead><tr><th>Tenant</th><th>Health</th><th>Runs revision</th><th>Wave</th><th>Result</th></tr></thead>
+    <tbody>
+    {{range .Rows}}
+      <tr id="r-{{.Name}}"{{if not (or .Blocks (eq .State.Kind "bad") (eq .State.Kind "warn"))}} class="calm"{{end}}>
+        <td class="l-main"><a class="row-link" href="/tenants/{{.Name}}">{{.Name}}</a></td>
+        <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
+        <td class="l-sub" data-label="Runs">{{if .Moved}}{{.To}} <span class="dim">(from {{.From}})</span>{{else if .Held}}<span class="dim">{{.From}}, held</span>{{else if eq .From .To}}{{.To}}{{else}}<span class="dim">{{.From}}</span>{{end}}</td>
+        <td class="hide-narrow">{{if .Wave}}{{wavename (sub .Wave 1)}}{{else}}<span class="faint">none</span>{{end}}</td>
+        <td class="l-sub" data-label="Result">{{if .Blocks}}<span class="st bad">moved, not healthy: blocks the next wave</span>{{else if .Moved}}moved, healthy{{else if .Held}}<span class="dim">stays: it is held</span>{{else if eq .From .To}}<span class="dim">ran it already</span>{{else}}<span class="dim">waits for {{lower (wavename (sub .Wave 1))}}</span>{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
 </section>
 {{else}}{{if $d.Restoring}}
 <section class="near" id="rollout" data-live>
@@ -106,31 +109,31 @@
     <input type="hidden" name="do" value="review">
     <input type="hidden" name="updated" value="{{$d.Updated}}">
     {{with $d.Proposed}}<div class="notice flat" role="status">{{.}}</div>{{end}}
-    {{with $d.EditorProblem}}<div class="notice bad flat" role="alert" id="spec-problem"><span class="lead-in">The spec is not taken.</span> {{.}}</div>{{end}}
-    <textarea name="file" rows="{{add1 (lines $d.File)}}" spellcheck="false" aria-label="the app's spec"{{if $d.EditorProblem}} aria-invalid="true" aria-describedby="spec-problem"{{end}}>{{$d.File}}</textarea>
+    <textarea name="file" rows="{{add1 (lines $d.File)}}" spellcheck="false" data-draft aria-label="the app's spec"{{if $d.EditorProblem}} aria-invalid="true" aria-describedby="spec-problem"{{end}}{{with $d.EditorLine}} data-line="{{.}}"{{end}}>{{$d.File}}</textarea>
+    {{with $d.EditorProblem}}<div class="notice bad flat attached" role="alert" id="spec-problem" tabindex="-1" data-focus><span class="lead-in">{{$d.EditorLead}}</span> {{.}}. Your text is kept above.</div>{{end}}
     <div class="row"><button type="submit" class="primary">Review changes</button>
       <span class="hint">Shows what changes, the tenants it reaches and its waves. Nothing changes until you roll it out there.</span></div>
   </form>
 </section>
 
-<section id="tenants" data-live>
+{{if or (not $d.Rollout) $d.Archived}}<section id="tenants" data-live>
   <div class="head"><h2>Tenants</h2></div>
   <table class="list rows">
     <thead><tr><th>Tenant</th><th>State</th><th>Runs on</th><th>Revision</th><th>Rollouts</th></tr></thead>
     <tbody>
-    {{range $d.Rows}}
+    {{range $d.Rows}}{{if or (not $d.Rollout) .Archived}}
       <tr>
         <td class="l-main"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a></td>
         <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         <td class="hide-narrow">{{if .Archived}}<span class="faint">nowhere</span>{{else}}{{.Node}}{{end}}</td>
         <td class="num hide-narrow">{{if .AppRevision}}{{.AppRevision}}{{else}}{{$a.Revision}}{{end}}</td>
         <td class="l-sub" data-label="Rollouts">{{if .Canary}}canary: first{{else if .Hold}}held: stays{{else if .Archived}}<span class="dim">archived</span>{{else}}<span class="dim">with the others</span>{{end}}</td>
-      </tr>
+      </tr>{{end}}
     {{else}}<tr><td colspan="5" class="empty l-main">No tenant runs it.</td></tr>{{end}}
     </tbody>
   </table>
   {{if $d.Archived}}<p class="hint spaced">Archived tenants run the app's spec once restored, and keep it from being deleted.</p>{{end}}
-</section>
+</section>{{end}}
 
 <section>
   <div class="head"><h2>Revisions</h2></div>

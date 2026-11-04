@@ -1,7 +1,7 @@
 {{define "content"}}{{$d := .Data}}
 <h1>Events</h1>
 <p class="lead">The audit log, newest first: what operators did, and what broke. Open an event for its exact time and whole record.</p>
-<form class="filters" method="get" action="/events">
+<form class="filters events-filters" method="get" action="/events">
   <label class="field">Tenant <input type="search" name="tenant" value="{{$d.Tenant}}" placeholder="any" list="tenant-names" autocomplete="off" class="short"></label>
   <label class="field">App <input type="search" name="app" value="{{$d.App}}" placeholder="any" list="app-names" autocomplete="off" class="short"></label>
   <label class="field">Show <select name="show">

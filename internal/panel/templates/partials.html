@@ -6,12 +6,16 @@ tenant, its detail), then who. A row opens on its whole record. */}}
 <table class="list events">
   <thead><tr><th class="when">When</th><th>Event</th><th class="hide-narrow">By</th></tr></thead>
   <tbody>
-  {{range .}}
+  {{range $e := groups .}}
     <tr>
       <td class="when l-side"><time datetime="{{iso .At}}" title="{{utc .At}}">{{ago .At}}</time></td>
       <td class="l-main">
         <details class="event" data-id="{{.ID}}">
-          <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{action .Action}}</span>{{with .Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{else}}{{with .App}} <a href="/apps/{{.}}" class="dim">app {{.}}</a>{{end}}{{end}}{{with .Detail}}<span class="detail">{{.}}</span>{{end}}</summary>
+          {{if .Group}}
+          <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{if eq (len .Tenants) 1}}<a href="/tenants/{{index .Tenants 0}}">{{index .Tenants 0}}</a> {{.Predicate}}, {{len .Group}} times{{else if .Tenants}}{{len .Tenants}} tenants {{.PredicatePlural}}, {{len .Group}} times{{else}}{{action .Action}}, {{len .Group}} times{{end}}</span><span class="detail">{{with .Detail}}{{.}} · {{end}}{{ago .Oldest.At}} to {{ago .At}} ago<span class="phone-inline"> · by {{.Actor}}</span></span></summary>
+          <ul class="grouped">{{range .Group}}<li><span class="num">{{utc .At}}</span>{{with .Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{end}} <span class="dim">#{{.ID}}</span></li>{{end}}</ul>
+          {{else}}
+          <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{with .Predicate}}<a href="/tenants/{{$e.Tenant}}">{{$e.Tenant}}</a> {{.}}{{else}}{{with $e.Node}}<a href="{{node .}}">{{.}}</a>{{$e.NodePredicate}}{{else}}{{with $e.AppPredicate}}<a href="/apps/{{$e.App}}">{{$e.App}}</a>{{.}}{{else}}{{action $e.Action}}{{with $e.Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{else}}{{with $e.App}} <a href="/apps/{{.}}" class="dim">app {{.}}</a>{{end}}{{end}}{{end}}{{end}}{{end}}</span><span class="detail">{{if $e.Node}}{{with $e.NodeDetail}}{{.}}<span class="phone-inline"> · </span>{{end}}{{else}}{{with .Detail}}{{.}}<span class="phone-inline"> · </span>{{end}}{{end}}<span class="phone-inline">by {{$e.Actor}}</span></span></summary>
           <dl class="pairs">
             <dt>At</dt><dd class="num">{{utc .At}}</dd>
             <dt>By</dt><dd>{{.Actor}}</dd>
@@ -21,6 +25,7 @@ tenant, its detail), then who. A row opens on its whole record. */}}
             {{with .Detail}}<dt>Detail</dt><dd>{{.}}</dd>{{end}}
             <dt>Record</dt><dd class="num">#{{.ID}}</dd>
           </dl>
+          {{end}}
         </details>
       </td>
       <td class="by hide-narrow">{{.Actor}}</td>

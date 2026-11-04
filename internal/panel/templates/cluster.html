@@ -22,6 +22,12 @@
         <td class="mono dim hide-narrow">{{if .Version}}{{.Version}} · schema {{.Schema}}{{else}}not known{{end}}</td>
         <td class="dim hide-narrow">{{if .Started.IsZero}}not known{{else}}{{ago .Started}}{{end}}</td>
         <td class="mono dim hide-narrow">{{with .Tunnel}}{{.Address}}{{else}}none{{end}}</td>
+        <td class="l-more"><details class="rowmore"><summary>Details</summary><dl class="pairs">
+          <dt>Release</dt><dd class="mono">{{if .Version}}{{.Version}}, schema {{.Schema}}{{else}}not known{{end}}</dd>
+          <dt>Up for</dt><dd>{{if .Started.IsZero}}not known{{else}}{{ago .Started}}{{end}}</dd>
+          <dt>Tunnel</dt><dd class="mono">{{with .Tunnel}}{{.Address}}{{else}}none{{end}}</dd>
+          <dt>Runs</dt><dd>{{plural (len .Runs) "tenant" "tenants"}}</dd>
+        </dl></details></td>
         <td class="end l-side">
           <details class="menu">
             <summary aria-label="what to do with {{.Name}}">⋯</summary>

@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -88,3 +89,123 @@ var failures = map[string]bool{
 
 // failureEvent says an event tells of something that broke.
 func failureEvent(action string) bool { return failures[action] }
+
+// predicates say a tenant's event after its name: "atlas was suspended".
+var predicates = map[string]string{
+	"tenant.created": "was created", "tenant.updated": "had its settings changed", "tenant.rolled": "got a new container",
+	"tenant.suspended": "was suspended", "tenant.resumed": "was resumed", "tenant.archived": "was archived", "tenant.restored": "was restored",
+	"tenant.purged": "was purged", "tenant.moving": "is moving", "tenant.moved": "was moved", "tenant.move-cancelled": "had its move undone",
+	"tenant.failed-over": "failed over to its copy", "tenant.restarted": "restarted after it exited", "tenant.replica": "had its copy placed",
+	"tenant.replica-moving": "has its copy moving", "tenant.replica-ready": "has its copy ready", "app.rolled-out": "took its app's new revision",
+	"secret.rotated": "had a secret given a new value", "tenant.flags": "had its rollout flags changed",
+}
+
+// eventRow is one row of an events table: an event, or a run of the same
+// event one after the other, newest first.
+type eventRow struct {
+	store.Event
+	// Group are the events of a run, Event the newest of them; nil for
+	// one event alone.
+	Group []store.Event
+	// Tenants names the tenants of a run.
+	Tenants []string
+}
+
+// Predicate says the event after its tenant's name, "" for one without.
+func (r eventRow) Predicate() string {
+	if r.Tenant == "" {
+		return ""
+	}
+	return predicates[r.Action]
+}
+
+// plurals say a run's predicate of several tenants.
+var plurals = map[string]string{
+	"tenant.restarted": "restarted after they exited", "tenant.failed-over": "failed over to their copies", "tenant.rolled": "got new containers",
+	"tenant.replica": "had their copies placed", "tenant.replica-ready": "have their copies ready", "app.rolled-out": "took their app's new revision",
+	"tenant.moved": "were moved", "tenant.created": "were created", "tenant.updated": "had their settings changed",
+}
+
+// PredicatePlural says a run's event after "N tenants".
+func (r eventRow) PredicatePlural() string {
+	if p, ok := plurals[r.Action]; ok {
+		return p
+	}
+	return actionText(r.Action)
+}
+
+// nodePredicates say a node's event after its name.
+var nodePredicates = map[string]string{
+	"node.failed-over": "'s tenants failed over to their copies", "node.failed": " failed", "node.back": " is back", "node.away": " is restarting",
+	"node.upgraded": " was upgraded", "node.upgrading": " is upgrading", "node.joined": " joined the cluster", "node.removed": " was removed from the cluster",
+}
+
+// Node is the node a node's event is about, from its detail ("hel-1: 2
+// tenants...", "fsn-1 to a10e..."), and NodePredicate what it says of it;
+// both "" for other events.
+func (r eventRow) Node() string {
+	if _, ok := nodePredicates[r.Action]; !ok || r.Detail == "" {
+		return ""
+	}
+	name, _, _ := strings.Cut(r.Detail, " ")
+	return strings.TrimSuffix(name, ":")
+}
+
+func (r eventRow) NodePredicate() string { return nodePredicates[r.Action] }
+
+// NodeDetail is its detail without the node's name.
+func (r eventRow) NodeDetail() string {
+	_, rest, _ := strings.Cut(r.Detail, " ")
+	return rest
+}
+
+// appPredicates say an app's event after its name.
+var appPredicates = map[string]string{
+	"app.created": " was created", "app.updated": "'s spec changed", "app.deleted": " was deleted",
+	"rollout.pause": "'s rollout was paused", "rollout.resume": "'s rollout went on", "rollout.abort": "'s rollout was aborted",
+	"rollout.promote": "'s next wave was moved early", "rollout.restored": "'s tenants went back with their data", "rollout.paused": "'s rollout paused itself",
+	"rollout.rolled-back": "'s tenants went back to the revision before",
+}
+
+// AppPredicate says an app's event after its name; "" for other events.
+func (r eventRow) AppPredicate() string {
+	if r.Tenant != "" || r.App == "" {
+		return ""
+	}
+	return appPredicates[r.Action]
+}
+
+// Oldest is the oldest event of a run.
+func (r eventRow) Oldest() store.Event {
+	if len(r.Group) == 0 {
+		return r.Event
+	}
+	return r.Group[len(r.Group)-1]
+}
+
+// groupEvents puts runs of the same action, said the same way, into one
+// row each: the cluster's own keeping and repeated failures read as one
+// line, which opens on each of them.
+func groupEvents(events []store.Event) []eventRow {
+	var rows []eventRow
+	for _, e := range events {
+		if n := len(rows); n > 0 {
+			last := &rows[n-1]
+			if last.Action == e.Action && last.Detail == e.Detail && byPeople(last.Event) == byPeople(e) && last.Actor == e.Actor {
+				if last.Group == nil {
+					last.Group = []store.Event{last.Event}
+					if last.Tenant != "" {
+						last.Tenants = []string{last.Tenant}
+					}
+				}
+				last.Group = append(last.Group, e)
+				if e.Tenant != "" && !slices.Contains(last.Tenants, e.Tenant) {
+					last.Tenants = append(last.Tenants, e.Tenant)
+				}
+				continue
+			}
+		}
+		rows = append(rows, eventRow{Event: e})
+	}
+	return rows
+}
