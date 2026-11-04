@@ -120,7 +120,15 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	for at := end.Add(-24 * time.Hour).Add(step); at.Before(end); at = at.Add(step) {
 		series.Points = append(series.Points, demoPoint(name, limits.MemoryMB, limits.CPUs, at, step))
 	}
-	last := series.Points[len(series.Points)-1]
+	// The newest step reads as the cluster's use report does for the
+	// last minute, so the tenants list, the overview and this page give
+	// the same numbers.
+	m := demoPoint(name, limits.MemoryMB, limits.CPUs, now.Truncate(time.Minute).Add(-time.Minute), time.Minute)
+	k := int64(step / time.Minute)
+	newest := &series.Points[len(series.Points)-1]
+	newest.CPU, newest.Memory, newest.P95 = m.CPU, m.Memory, m.P95
+	newest.Requests, newest.Errors, newest.NetRx, newest.NetTx = m.Requests*k, m.Errors*k, m.NetRx*k, m.NetTx*k
+	last := *newest
 	series.Now = usage.Now{At: last.At, CPU: last.CPU, Memory: last.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
 		DiskUsed: int64(limits.DiskGB) << 30 / 7, DiskLimit: int64(limits.DiskGB) << 30, Requests: last.Requests / int64(step.Minutes()), Errors: last.Errors / int64(step.Minutes()), P95: last.P95}
 	return series, nil

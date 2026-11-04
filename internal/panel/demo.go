@@ -50,7 +50,7 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 	}
 	tenant := func(name, app, node, replica string, ready bool, status *reconcile.Status) api.Tenant {
 		return api.Tenant{
-			Spec: spec.Tenant{Name: name, Image: "sha256:c23c323553d0a47eedff01b1cfb4a83a8f9b1b03f7f75a454c9ebf1391201156", Port: 8080, HealthPath: "/health", DataPath: "/data", User: "1000:1000",
+			Spec: spec.Tenant{Name: name, Image: "ghcr.io/example/web@sha256:c23c323553d0a47eedff01b1cfb4a83a8f9b1b03f7f75a454c9ebf1391201156", Port: 8080, HealthPath: "/health", DataPath: "/data", User: "1000:1000",
 				Env: map[string]string{"DATA_DIR": "/data", "TZ": "Europe/Warsaw"}, Secrets: spec.Secrets{"SESSION_KEY": {Kind: "hex"}},
 				Limits: spec.Limits{MemoryMB: 256, CPUs: 1, PIDs: 256, DiskGB: 10}},
 			App: app, Node: node, Replica: replica, ReplicaReady: ready, ReplicaSyncedAt: now.Add(-9 * time.Second),
@@ -93,10 +93,12 @@ func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, 
 		{ID: 212, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "vistula-cargo", App: "web", Detail: "hel-1 → nbg-1"},
 		{ID: 211, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "nordwind", App: "web", Detail: "hel-1 → fsn-1"},
 		{ID: 210, At: now.Add(-48 * time.Minute), Actor: "jan via murder-panel", Action: "tenant.suspended", Tenant: "test-staging", App: "web"},
-		{ID: 209, At: now.Add(-3 * time.Hour), Actor: "root", Action: "app.updated", App: "web", Detail: "image sha256:c23c323553d0"},
+		{ID: 209, At: now.Add(-3 * time.Hour), Actor: "root", Action: "app.updated", App: "web", Detail: "image ghcr.io/example/web@sha256:c23c323553d0"},
 		{ID: 208, At: now.Add(-3 * time.Hour), Actor: "root", Action: "tenant.rolled", Tenant: "atlas", App: "web"},
 		{ID: 207, At: now.Add(-26 * time.Hour), Actor: "root", Action: "node.upgraded", Detail: "fsn-1 to a10e3bfb8220"},
-		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "anna via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "web"},
+		// What the drain the panel was stopped in did (SeedDemoJobs).
+		{At: now.Add(-26*time.Hour + 20*time.Second), Actor: "jan via murder-panel", Action: "tenant.moved", Tenant: "atlas", App: "web", Detail: "nbg-1 → fsn-1"},
+		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "jan via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "web"},
 	}
 	all = withHistory(all, now)
 	var out []store.Event
@@ -159,8 +161,8 @@ func SeedDemoJobs(path string, now time.Time) error {
 	}
 	records := []jobRecord{
 		{ID: "5eedd8a1n0000001", Title: "Drain nbg-1 to fsn-1", By: "jan (panel)", Kind: JobDrain, Started: now.Add(-26 * time.Hour),
-			Output: "move atlas to fsn-1\natlas moved\nmove nordwind to fsn-1\n"},
-		{ID: "5eedbac0000002", Title: "Back up the tenants of nbg-1", By: "anna (panel)", Kind: JobBackups, Started: now.Add(-27 * time.Hour), Ended: now.Add(-27*time.Hour + 40*time.Second),
+			Output: "move atlas to fsn-1\natlas moved\nmove kowalski-trans to fsn-1\n"},
+		{ID: "5eedbac0000002", Title: "Back up the tenants of nbg-1", By: "jan (panel)", Kind: JobBackups, Started: now.Add(-27 * time.Hour), Ended: now.Add(-27*time.Hour + 40*time.Second),
 			Output: "baltic-freight: backups/baltic-freight/" + now.Add(-27*time.Hour).UTC().Format("20060102T150405Z") + ".db.zst\nkowalski-trans: failed: put: 403 Forbidden\n", Failed: "1 of 2 backups failed"},
 	}
 	data, err := json.Marshal(records)

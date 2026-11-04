@@ -5,7 +5,9 @@ import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 const base = process.argv[2] || "http://127.0.0.1:7480";
 const paths = ["/", "/tenants", "/tenants?show=attention", "/tenants/baltic-freight", "/tenants/acme-logistics", "/tenants/baltic-freight/logs",
-  "/tenants/atlas/settings", "/apps", "/apps/web", "/events", "/events?show=all", "/cluster", "/access", "/nodes/hel-1", "/nodes/fsn-1"];
+  "/tenants/atlas/settings", "/apps", "/apps/web", "/events", "/events?show=all", "/cluster", "/access", "/nodes/hel-1", "/nodes/fsn-1",
+  "/tenants/baltic-freight/settings?memoryMB=512", "/apps/web?memoryMB=512", "/tenants?show=broken", "/tenants/baltic-freight?range=1h",
+  "/cluster?tenant=kowalski-trans&at=2026-11-04+09:00", "/jobs/5eedd8a1n0000001", "/nodes/nbg-1"];
 const widths = [390, 1024, 1280, 1440];
 const port = 9800 + Math.floor(Math.random() * 90);
 const profile = `/tmp/widthcheck-${port}`;

@@ -281,6 +281,16 @@ func (d *DemoAccess) Seed() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := time.Now()
+	// jan set the cluster up; anna was invited by jan an hour ago and
+	// has no passkey yet, so everything done so far is jan's or root's.
+	if u, ok := d.users["jan"]; ok {
+		u.CreatedAt, u.CreatedBy = now.Add(-20*24*time.Hour), "root"
+		d.users["jan"] = u
+	}
+	if u, ok := d.users["anna"]; ok {
+		u.CreatedAt, u.CreatedBy = now.Add(-time.Hour), "jan (panel)"
+		d.users["anna"] = u
+	}
 	d.passkeys["demo-laptop"] = store.Passkey{ID: "demo-laptop", User: "jan", Label: "laptop", CreatedAt: now.Add(-20 * 24 * time.Hour), UsedAt: now.Add(-2 * time.Hour)}
 	d.passkeys["demo-phone"] = store.Passkey{ID: "demo-phone", User: "jan", Label: "phone", CreatedAt: now.Add(-20 * 24 * time.Hour)}
 	for i, name := range []string{"jan-laptop", "jan-phone"} {
