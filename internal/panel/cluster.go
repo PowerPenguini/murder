@@ -266,9 +266,106 @@ type clusterData struct {
 	Backups  []nodeBackupRow
 	Reported bool
 	Failing  []tenantBackup
-	// Tenant is a tenant to show the restore of, the first of this node.
-	Tenant string
+	// Tenant is a tenant to show the restore of: the one asked for, or one
+	// whose backups fail, or one of this node; RestoreAt its newest
+	// backup's time and RestoreNode the node it runs on, to run it there.
+	Tenant, RestoreNode string
+	RestoreAt           time.Time
+	// Asked says the tenant was asked for, from its page.
+	Asked bool
+	// Resilience says whether the cluster takes changes, what one more
+	// node down would do, and how its copies stand.
+	Resilience []fact
 }
+
+// fact is one line of a summary: what is so, and its weight.
+type fact struct {
+	Kind, Text string
+	// Href and Link point at what it is about, if anything.
+	Href, Link string
+}
+
+// resilienceOf sums up what the cluster can take: its voters, whether a
+// majority answers, what one more loss would do, and its copies.
+func resilienceOf(status *clusterStatus, nodes api.Nodes, tenants []api.Tenant, now time.Time) []fact {
+	voters := len(nodes.Nodes)
+	var members []string
+	if status != nil && len(status.Members) > 0 {
+		voters = len(status.Members)
+		members = status.Members
+	} else {
+		for _, n := range nodes.Nodes {
+			members = append(members, n.Name)
+		}
+	}
+	answering := 0
+	var gone []string
+	for _, n := range nodes.Nodes {
+		if !slices.Contains(members, n.Name) {
+			continue
+		}
+		if n.Answers && !n.Failed() {
+			answering++
+		} else {
+			gone = append(gone, n.Name)
+		}
+	}
+	majority := voters/2 + 1
+	var out []fact
+	leads := ""
+	if nodes.Leader != "" {
+		leads = ", and " + nodes.Leader + " leads"
+	}
+	if answering >= majority {
+		out = append(out, fact{Kind: "ok", Text: fmt.Sprintf("Changes go through: %d of %d voters answer; a majority is %d%s.", answering, voters, majority, leads)})
+	} else {
+		out = append(out, fact{Kind: "bad", Text: fmt.Sprintf("Changes stop: only %d of %d voters answer, and a majority is %d. Tenants keep serving, but nothing can be changed until another node answers.", answering, voters, majority)})
+	}
+	if answering >= majority {
+		if answering-1 >= majority {
+			out = append(out, fact{Kind: "ok", Text: "One more node down: the cluster still takes changes, and its tenants fail over to their copies."})
+		} else {
+			text := "One more node down would stop all changes (tenants keep serving): the cluster has no node to spare."
+			if len(gone) > 0 {
+				text += " " + strings.Join(gone, ", ") + " still " + map[bool]string{true: "counts", false: "count"}[len(gone) == 1] + " as a voter: replace it, or remove it once it runs and keeps nothing."
+			}
+			out = append(out, fact{Kind: "warn", Text: text})
+		}
+	}
+	live, ready := 0, 0
+	var catching []string
+	var oldest time.Time
+	for _, t := range tenants {
+		if t.Archived() || t.Spec.Suspended {
+			continue
+		}
+		live++
+		if t.ReplicaReady {
+			ready++
+			continue
+		}
+		catching = append(catching, t.Spec.Name)
+		if !t.ReplicaSyncedAt.IsZero() && (oldest.IsZero() || t.ReplicaSyncedAt.Before(oldest)) {
+			oldest = t.ReplicaSyncedAt
+		}
+	}
+	slices.Sort(catching)
+	switch {
+	case len(nodes.Nodes) < 2:
+	case len(catching) == 0:
+		out = append(out, fact{Kind: "ok", Text: fmt.Sprintf("Every one of the %d serving tenants has a ready copy on another node.", live)})
+	default:
+		text := fmt.Sprintf("%d of %d serving tenants have a ready copy; %s %s still catching up", ready, live, joinAnd(catching), map[bool]string{true: "is", false: "are"}[len(catching) == 1])
+		if !oldest.IsZero() {
+			text += ", last sent " + ago(now, oldest) + " ago"
+		}
+		out = append(out, fact{Kind: "warn", Text: text + ": if the node one of them runs on fails now, that tenant stops.", Href: "/tenants?show=unprotected", Link: "Those tenants"})
+	}
+	return out
+}
+
+// clusterStatus is the Raft view the summary reads: the voters by name.
+type clusterStatus struct{ Members []string }
 
 // nodeBackupRow is a node's line in the backups' table.
 type nodeBackupRow struct {
@@ -352,13 +449,36 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		if b.Bad() {
 			data.Failing = append(data.Failing, tenantBackup{Tenant: name, backupView: b})
 		}
-		if data.Tenant == "" && use.Backups[name].Node == nodes.Self {
+	}
+	asked := r.URL.Query().Get("tenant")
+	if _, ok := use.Backups[asked]; ok {
+		data.Tenant, data.Asked = asked, true
+	}
+	for _, f := range data.Failing {
+		if data.Tenant == "" {
+			data.Tenant = f.Tenant
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(use.Backups)) {
+		if data.Tenant == "" && !archived[name] {
 			data.Tenant = name
 		}
+	}
+	if b, ok := use.Backups[data.Tenant]; ok {
+		data.RestoreAt, data.RestoreNode = b.Last, b.Node
 	}
 	if data.Tenant == "" {
 		data.Tenant = "TENANT"
 	}
+	var status *clusterStatus
+	if st, err := agent.ClusterStatus(ctx); err == nil {
+		status = &clusterStatus{}
+		for _, m := range st.Members {
+			status.Members = append(status.Members, m.Name)
+		}
+	}
+	tenants, _ := s.backend.List(ctx)
+	data.Resilience = resilienceOf(status, nodes, tenants, s.now())
 	data.Jobs, data.Busy = s.Jobs.all(), s.Jobs.Busy()
 	if data.Busy != nil && data.Busy.Kind == JobUpgrade {
 		data.Upgrading = data.Busy
@@ -616,7 +736,34 @@ func uploadError(err error) error {
 	return fmt.Errorf("the upload broke off: %w", err)
 }
 
-type jobData struct{ Job *Job }
+type jobData struct {
+	Job *Job
+	// Results are a backup job's, tenant by tenant; Succeeded and Failed
+	// count them.
+	Results           []jobResult
+	Succeeded, Failed int
+}
+
+// jobResult is one tenant's line of a backup job.
+type jobResult struct {
+	Name, Detail string
+	Failed       bool
+}
+
+// backupResults reads a backup job's output, "tenant: key" or "tenant:
+// failed: why" a line.
+func backupResults(output string) []jobResult {
+	var out []jobResult
+	for _, line := range strings.Split(output, "\n") {
+		name, rest, ok := strings.Cut(line, ": ")
+		if !ok || name == "failed" || strings.TrimSpace(name) == "" {
+			continue
+		}
+		why, failed := strings.CutPrefix(rest, "failed: ")
+		out = append(out, jobResult{Name: name, Detail: why, Failed: failed})
+	}
+	return out
+}
 
 func (s *Server) jobPage(w http.ResponseWriter, r *http.Request) {
 	job := s.Jobs.find(r.PathValue("id"))
@@ -624,7 +771,18 @@ func (s *Server) jobPage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, &api.Error{Status: http.StatusNotFound, Message: "no such job on this node's panel: jobs are kept by the panel that began them, until it restarts"})
 		return
 	}
-	s.render(w, r, "job", job.Title, "cluster", jobData{Job: job})
+	data := jobData{Job: job}
+	if job.Kind == JobBackups {
+		data.Results = backupResults(job.Output())
+		for _, result := range data.Results {
+			if result.Failed {
+				data.Failed++
+			} else {
+				data.Succeeded++
+			}
+		}
+	}
+	s.render(w, r, "job", job.Title, "cluster", data)
 }
 
 // releaseOf says which release the nodes that answered run: one, or that
@@ -656,4 +814,15 @@ func releaseOf(nodes []nodeRow) (string, bool) {
 		parts = append(parts, strings.Join(runs[release], ", ")+" run "+release)
 	}
 	return "The nodes run different releases: " + strings.Join(parts, "; ") + ". An upgrade that stopped leaves them so: run it again to finish it.", true
+}
+
+// joinAnd says a list as people do: "a", "a and b", "a, b and c".
+func joinAnd(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }

@@ -147,6 +147,8 @@ type backupView struct {
 	// Failing says its last try failed; Stale that its newest is older
 	// than two runs; None that it has none yet.
 	Failing, Stale, None bool
+	// Error says why its last try failed, when its node said.
+	Error string
 }
 
 // Bad says something is wrong with its backups.
@@ -167,7 +169,7 @@ type nodeBackups struct {
 }
 
 func backupOf(node string, b usage.Backup, every time.Duration, now time.Time) backupView {
-	v := backupView{Node: node, Last: b.Last, Every: every, Failing: b.Failing, None: b.Last.IsZero()}
+	v := backupView{Node: node, Last: b.Last, Every: every, Failing: b.Failing, None: b.Last.IsZero(), Error: b.Error}
 	v.Stale = every > 0 && !b.Last.IsZero() && now.Sub(b.Last) > 2*every
 	return v
 }

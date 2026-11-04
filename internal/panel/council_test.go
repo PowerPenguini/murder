@@ -266,3 +266,32 @@ func TestOperationIsFollowed(t *testing.T) {
 		t.Fatalf("after it settled:\n%s", page)
 	}
 }
+
+// The cluster says what it can take, why a backup failed, and how to
+// restore the tenant asked about; a backup job ends in a table.
+func TestClusterResilienceAndBackups(t *testing.T) {
+	cluster := NewDemoCluster()
+	cluster.Pace = 0
+	server := newServerOf(t, cluster)
+	_, page := get(t, server.URL+"/cluster?tenant=kowalski-trans")
+	for _, want := range []string{"Changes go through: 2 of 3 voters answer; a majority is 2", "One more node down would stop all changes", "nordwind and vistula-cargo are still catching up",
+		"Why, as nbg-1 said", "403 Forbidden", "sudo murder backups now", "How to restore kowalski-trans", "backups restore kowalski-trans -at 20", `open id="restore"`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the cluster page lacks %q:\n%s", want, page)
+		}
+	}
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	response, _ := submit(t, client, server, "/cluster", url.Values{"do": {"backups"}}, server.URL)
+	var body string
+	for i := 0; i < 100; i++ {
+		_, body = get(t, response.Request.URL.String())
+		if strings.Contains(body, ">done<") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(body, "backed up</h2>") || !strings.Contains(body, `<span class="st ok">backed up</span>`) || !strings.Contains(body, "Its whole output") {
+		t.Fatalf("the backup job:\n%s", body)
+	}
+}

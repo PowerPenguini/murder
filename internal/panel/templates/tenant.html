@@ -20,7 +20,7 @@
     <div class="stat"><div class="caps">Copy</div><div class="v">{{template "copy" $d.Row}}</div>
       {{if and $t.Replica $t.ReplicaReady (not $t.ReplicaSyncedAt.IsZero)}}<div class="dim small">matched {{ago $t.ReplicaSyncedAt}} ago</div>{{end}}</div>
     {{if $d.BackupsKnown}}<div class="stat"><div class="caps">Newest backup</div><div class="v">{{if $d.Row.Backup}}{{template "backup" $d.Row}}{{else}}<span class="dim">none</span>{{end}}</div>
-      <div class="dim small">{{with $d.Row.Backup}}every {{every .Every}} · {{end}}<a href="/cluster#backups">how to restore</a></div></div>{{end}}
+      <div class="dim small">{{with $d.Row.Backup}}{{if .Failing}}{{with .Error}}<span class="red-text" title="{{.}}">{{.}}</span><br>{{end}}{{end}}every {{every .Every}} · {{end}}<a href="/cluster?tenant={{$t.Spec.Name}}#restore">how to restore</a></div></div>{{end}}
   </div>
 </section>
 

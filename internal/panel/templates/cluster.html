@@ -2,6 +2,15 @@
 <h1>Cluster</h1>
 {{with $d.Release}}<p class="{{if $d.Mixed}}problem bad{{else}}lead{{end}}">{{.}}</p>{{end}}
 
+{{with $d.Resilience}}
+<section class="near" aria-labelledby="resilience-h">
+  <h2 id="resilience-h" class="sr">What the cluster can take</h2>
+  <ul class="attention facts">
+    {{range .}}<li{{if eq .Kind "bad"}} class="broken"{{end}}><span class="st {{.Kind}}"></span><div>{{.Text}}{{with .Href}} <a href="{{.}}">Show them</a>{{end}}</div></li>{{end}}
+  </ul>
+</section>
+{{end}}
+
 <section class="near">
   <table class="list">
     <thead><tr><th>Node</th><th>State</th><th class="hide-narrow">Release</th><th class="hide-narrow">Up for</th><th class="hide-narrow">Tunnel address</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
@@ -65,7 +74,7 @@
   <div class="head"><h2>Backups</h2><span class="dim">encrypted, to S3, by each node of its own tenants</span></div>
   {{if $d.Reported}}
   <table class="list">
-    <thead><tr><th>Node</th><th>State</th><th>Runs</th><th class="num">Tenants</th><th>Oldest newest backup</th><th class="hide-narrow">Cluster's state</th></tr></thead>
+    <thead><tr><th>Node</th><th>State</th><th>Runs</th><th class="num">Tenants</th><th>Oldest latest backup</th><th class="hide-narrow">Cluster's state</th></tr></thead>
     <tbody>
     {{range $d.Backups}}
       <tr>
@@ -85,21 +94,26 @@
   </table>
   {{with $d.Failing}}
   <ul class="attention spaced">
-    {{range .}}<li{{if .Failing}} class="broken"{{end}}><span class="st {{if .Failing}}bad{{else}}warn{{end}}"></span><div><a href="/tenants/{{.Tenant}}" class="subject">{{.Tenant}}</a> {{if .Failing}}its last backup failed{{if not .None}}; the newest is {{ago .Last}} old{{end}}{{else}}its newest backup is {{ago .Last}} old, though they run every {{every .Every}}{{end}}. <span class="dim">On {{.Node}}: its agent's log says why (journalctl -u murder-agent).</span></div></li>{{end}}
+    {{range $f := .}}<li{{if .Failing}} class="broken"{{end}}><span class="st {{if .Failing}}bad{{else}}warn{{end}}"></span><div><a href="/tenants/{{.Tenant}}" class="subject">{{.Tenant}}</a>{{if .Failing}}'s last backup failed{{if not .None}}; the newest is {{ago .Last}} old{{end}}{{else}}'s newest backup is {{ago .Last}} old, though they run every {{every .Every}}{{end}}.
+      {{with .Error}}<p class="flat small spaced">Why, as {{$f.Node}} said: <span class="mono">{{.}}</span></p>{{else}}{{if .Failing}}<p class="flat small spaced dim">Its node did not say why: its agent's log does (<code>journalctl -u murder-agent</code> on {{.Node}}).</p>{{end}}{{end}}
+      <span class="fixes">{{if eq .Node $.Data.Self}}<span class="dim">Back it up again with "Back up {{.Node}}'s tenants now", below.</span>{{else}}<span class="dim">Back it up again on {{.Node}}: <code>sudo murder backups now</code>, or from {{.Node}}'s panel.</span>{{end}}<a href="/cluster?tenant={{.Tenant}}#backups">How to restore it</a></span>
+    </div></li>{{end}}
   </ul>
   {{end}}
   {{else}}
   <p class="calm">No node reports backups: they are set up in each node's config (<code>backups:</code>), then <code>sudo murder backups setup</code>.</p>
   {{end}}
-  <details class="howto spaced">
-    <summary>How to restore a tenant from its backup</summary>
+  <details class="howto spaced"{{if $d.Asked}} open{{end}} id="restore">
+    <summary>How to restore {{if ne $d.Tenant "TENANT"}}{{$d.Tenant}}{{else}}a tenant{{end}} from its backup</summary>
     <div class="panel">
-      <p class="flat">A restore puts a backup in place of a tenant's data, on the node that runs it. The panel does not do it: it needs the backups' private key, which stays off the cluster. On that node:</p>
-      <pre class="secret">sudo murder backups list {{$d.Tenant}}
-sudo murder tenant archive {{$d.Tenant}}
-sudo murder backups restore {{$d.Tenant}} -at 2026-11-01T18:50:55Z -identity key.txt
-sudo murder tenant restore {{$d.Tenant}}</pre>
-      <p class="hint">Archiving stops it while its data is replaced; what it had stays aside, unmounted, until you remove it. Pick the time from the list.</p>
+      <p class="flat">A restore puts a backup in place of a tenant's data, on the node that runs it. The panel does not run it: it needs the backups' private key, which stays off the cluster. {{if $d.RestoreNode}}On {{$d.RestoreNode}}, which runs {{$d.Tenant}}:{{else}}On the node that runs it:{{end}}</p>
+      <ol class="steps">
+        <li>List its backups, and pick the time to go back to{{if not $d.RestoreAt.IsZero}} (its newest is from {{utc $d.RestoreAt}}){{end}}: <pre class="secret">sudo murder backups list {{$d.Tenant}}</pre></li>
+        <li>Archive it, so nothing writes to its data meanwhile: <pre class="secret">sudo murder tenant archive {{$d.Tenant}}</pre></li>
+        <li>Restore its data as of that time, with the key: <pre class="secret">sudo murder backups restore {{$d.Tenant}} -at {{if $d.RestoreAt.IsZero}}TIME{{else}}{{iso $d.RestoreAt}}{{end}} -identity key.txt</pre></li>
+        <li>Run it again, then check its page here: <pre class="secret">sudo murder tenant restore {{$d.Tenant}}</pre></li>
+      </ol>
+      <p class="hint">What it had stays beside it, unmounted (<code>murder-replaced-…</code>), until you remove it. For another tenant, open it from its page's "how to restore".</p>
     </div>
   </details>
 </section>

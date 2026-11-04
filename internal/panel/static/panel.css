@@ -584,3 +584,5 @@ details.howto .panel { margin-top: var(--s3); display: grid; gap: var(--s3); }
 
 .opline, .rolloutline { margin: var(--s4) 0 0; padding: var(--s2) var(--pad-x); border: 1px solid var(--frame); font-size: 13.5px; }
 .rolloutline:has(.st.bad) { border-color: #4a1712; background: var(--bad-wash); }
+.red-text { color: var(--bad); display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+ol.steps pre.secret { margin-top: var(--s1); }

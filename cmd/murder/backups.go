@@ -373,7 +373,7 @@ func (a *agentBackups) useReport() *measure.Backups {
 	status := a.Scheduler.Status()
 	out := &measure.Backups{Ready: status.Ready, Every: int(status.Every / time.Second), Tenants: map[string]measure.Backup{}}
 	for name, failing := range status.Failing {
-		out.Tenants[name] = measure.Backup{Last: status.Last[name], Failing: failing}
+		out.Tenants[name] = measure.Backup{Last: status.Last[name], Failing: failing, Error: status.Why[name]}
 	}
 	for name, last := range status.Last {
 		if _, ok := out.Tenants[name]; !ok {

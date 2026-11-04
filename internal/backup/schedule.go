@@ -100,6 +100,8 @@ type Scheduler struct {
 	// its last try failed, for /metrics.
 	last    map[string]time.Time
 	failing map[string]bool
+	// why is why each failing tenant's last backup failed.
+	why map[string]string
 	// stateTried is whether this node, leading, backed the state up since
 	// it last led; stateLast is when that last worked, stateFailing
 	// whether its last try failed.
@@ -128,7 +130,7 @@ func NewScheduler(c SchedulerConfig) *Scheduler {
 	}
 	return &Scheduler{
 		state: c.State, leader: leader, every: c.Every, verify: c.VerifyEvery, log: c.Log, exclusive: c.Exclusive, hold: c.Hold,
-		running: make(chan struct{}, 1), last: map[string]time.Time{}, failing: map[string]bool{},
+		running: make(chan struct{}, 1), last: map[string]time.Time{}, failing: map[string]bool{}, why: map[string]string{},
 		identityFile: c.IdentityFile, setUp: c.SetUp,
 	}
 }
@@ -375,6 +377,13 @@ func (a *Scheduler) run(ctx context.Context, force bool) []Result {
 		made, err := a.backups.BackUp(ctx, name, a.data.Dataset(name))
 		result := Result{Tenant: name, Key: made.Key, Size: made.Size}
 		a.record(name, made.At, err != nil)
+		a.mu.Lock()
+		if err != nil {
+			a.why[name] = err.Error()
+		} else {
+			delete(a.why, name)
+		}
+		a.mu.Unlock()
 		if err != nil {
 			result.Error = err.Error()
 			a.log.Error("back a tenant up", "tenant", name, "error", err)
@@ -491,10 +500,12 @@ func (a *Scheduler) verifyAll(ctx context.Context) {
 // up, how often they run, each tenant's newest that worked and whether
 // its last failed, and, on the leader, the same of the cluster's state.
 type Status struct {
-	Ready        bool
-	Every        time.Duration
-	Last         map[string]time.Time
-	Failing      map[string]bool
+	Ready   bool
+	Every   time.Duration
+	Last    map[string]time.Time
+	Failing map[string]bool
+	// Why says why each failing tenant's last backup failed.
+	Why          map[string]string
 	StateTried   bool
 	StateLast    time.Time
 	StateFailing bool
@@ -504,7 +515,7 @@ type Status struct {
 func (a *Scheduler) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return Status{Ready: a.up, Every: a.every, Last: maps.Clone(a.last), Failing: maps.Clone(a.failing),
+	return Status{Ready: a.up, Every: a.every, Last: maps.Clone(a.last), Failing: maps.Clone(a.failing), Why: maps.Clone(a.why),
 		StateTried: a.stateTried, StateLast: a.stateLast, StateFailing: a.stateFailing}
 }
 

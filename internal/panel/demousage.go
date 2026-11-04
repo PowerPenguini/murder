@@ -89,7 +89,7 @@ func (d *DemoCluster) Usage(ctx context.Context) (api.UsageReport, error) {
 			_, _ = h.Write([]byte(t.Spec.Name))
 			backup := usage.Backup{Last: now.Add(-time.Duration(4+h.Sum32()%50) * time.Minute)}
 			if t.Spec.Name == "kowalski-trans" {
-				backup = usage.Backup{Last: now.Add(-3*time.Hour - 12*time.Minute), Failing: true}
+				backup = usage.Backup{Last: now.Add(-3*time.Hour - 12*time.Minute), Failing: true, Error: "put backups/kowalski-trans/20261104T1300Z.db.zst: 403 Forbidden: the bucket refused the upload (access key without s3:PutObject?)"}
 			}
 			if t.Archived() {
 				backup.Last = t.ArchivedAt

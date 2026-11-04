@@ -131,6 +131,8 @@ type Backups struct {
 type Backup struct {
 	Last    time.Time `json:"last,omitzero"`
 	Failing bool      `json:"failing,omitempty"`
+	// Error says why the last try failed, when the node knows.
+	Error string `json:"error,omitempty"`
 }
 
 // Series is a tenant's use over the kept day, in steps.
