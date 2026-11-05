@@ -119,8 +119,9 @@ func secretFields(app spec.Tenant, stored, draft spec.Secrets) []secretField {
 type settingChange struct {
 	Field, From, To string
 	// Risk says the change leaves it without a limit the others have;
-	// FromRisk that it runs without one now.
-	Risk, FromRisk bool
+	// FromRisk that it runs without one now; FromFull that its data fills
+	// the one it has now.
+	Risk, FromRisk, FromFull bool
 }
 
 // settingFields are a tenant's fields, from its app's spec and its form.
@@ -168,10 +169,9 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map
 				} else if disk.Least > 0 {
 					f.Note += ", twice its data"
 				}
-				switch {
-				case full:
-					f.Note += "; now " + nbsp(l.Said) + ", which its " + nbsp(size(float64(disk.Used))) + " of data fills"
-				case disk.Used > 0:
+				// A full disk's red line above says its data and the limit
+				// it fills: the caption only suggests.
+				if !full && disk.Used > 0 {
 					f.Note += "; its data: " + nbsp(size(float64(disk.Used)))
 				}
 			}
@@ -221,7 +221,7 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 	was := formOf(t)
 	var out []settingChange
 	if form.App != was.App {
-		out = append(out, settingChange{"App", was.App, form.App + ": its whole spec changes", false, false})
+		out = append(out, settingChange{"App", was.App, form.App + ": its whole spec changes", false, false, false})
 	}
 	say := func(own, unit string, appValue string) string {
 		if own == "" {
@@ -233,7 +233,7 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 		return own + unit + ", tenant override"
 	}
 	if was.Image != form.Image {
-		out = append(out, settingChange{"Image", say(was.Image, "", imageDigest(app.Image)), say(form.Image, "", imageDigest(app.Image)), false, false})
+		out = append(out, settingChange{"Image", say(was.Image, "", imageDigest(app.Image)), say(form.Image, "", imageDigest(app.Image)), false, false, false})
 	}
 	// Its limits as every page says them, now and with the form's values.
 	afterOwn, _ := form.overrides()
@@ -242,7 +242,7 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 	for i, n := range now {
 		a := then[i]
 		if n.Value != a.Value || n.From != a.From {
-			out = append(out, settingChange{n.Label, n.WithSource(), a.WithSource(), a.Risk, n.Risk})
+			out = append(out, settingChange{n.Label, n.WithSource(), a.WithSource(), a.Risk, n.Risk, false})
 		}
 	}
 	before, _ := was.overrides()
@@ -264,25 +264,25 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 			if appHas {
 				to = appValue + ", inherited from " + t.App
 			}
-			out = append(out, settingChange{"Environment " + key, old + ", tenant override", to, false, false})
+			out = append(out, settingChange{"Environment " + key, old + ", tenant override", to, false, false, false})
 		case !had && has:
 			from := "unset"
 			if appHas {
 				from = appValue + ", inherited from " + t.App
 			}
-			out = append(out, settingChange{"Environment " + key, from, next + ", tenant override", false, false})
+			out = append(out, settingChange{"Environment " + key, from, next + ", tenant override", false, false, false})
 		case had && has && old != next:
-			out = append(out, settingChange{"Environment " + key, old, next, false, false})
+			out = append(out, settingChange{"Environment " + key, old, next, false, false, false})
 		}
 	}
 	for _, key := range slices.Sorted(maps.Keys(after.Secrets)) {
 		if _, had := before.Secrets[key]; !had {
-			out = append(out, settingChange{"Secret " + key, "none of its own", "made once, " + after.Secrets[key].Kind, false, false})
+			out = append(out, settingChange{"Secret " + key, "none of its own", "made once, " + after.Secrets[key].Kind, false, false, false})
 		}
 	}
 	for _, key := range slices.Sorted(maps.Keys(before.Secrets)) {
 		if _, has := after.Secrets[key]; !has {
-			out = append(out, settingChange{"Secret " + key, "tenant override", "dropped: the app's, if it has one", false, false})
+			out = append(out, settingChange{"Secret " + key, "tenant override", "dropped: the app's, if it has one", false, false, false})
 		}
 	}
 	flag := func(on string, yes, no string) string {
@@ -292,10 +292,10 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 		return no
 	}
 	if form.Flags && form.Canary != was.Canary {
-		out = append(out, settingChange{"Canary", flag(was.Canary, "yes", "no"), flag(form.Canary, "yes: takes "+t.App+"'s changes first", "no: with the others"), false, false})
+		out = append(out, settingChange{"Canary", flag(was.Canary, "yes", "no"), flag(form.Canary, "yes: takes "+t.App+"'s changes first", "no: with the others"), false, false, false})
 	}
 	if form.Flags && form.Hold != was.Hold {
-		out = append(out, settingChange{"Held", flag(was.Hold, "yes", "no"), flag(form.Hold, "yes: stays on the revision it runs", "no: follows "+t.App+" again"), false, false})
+		out = append(out, settingChange{"Held", flag(was.Hold, "yes", "no"), flag(form.Hold, "yes: stays on the revision it runs", "no: follows "+t.App+" again"), false, false, false})
 	}
 	return out
 }

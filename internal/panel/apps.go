@@ -989,6 +989,11 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 	if r.FormValue("do") == "review" {
 		data.Reviewing = true
 		data.Review = settingChanges(t, appSpec, form, limited)
+		for i := range data.Review {
+			if data.Review[i].Field == "Disk" && data.Disk.Full() {
+				data.Review[i].FromFull = true
+			}
+		}
 		data.DiskShort = data.Disk.Short(t.Spec.Name, diskAfter(t, appSpec, form))
 		data.Token = reviewToken(t.Spec.Name, form)
 		data.Live = form.diskOnly(t)

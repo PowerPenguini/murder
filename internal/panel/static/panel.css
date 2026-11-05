@@ -763,6 +763,8 @@ table#tenants td.l-main > a, table#tenants td.l-main > .dim { white-space: nowra
 
 /* ── a page's notices: one area, one style, the wrong first ── */
 .notices { display: grid; gap: var(--s4); margin: var(--s4) 0 0; background: var(--bg); }
+/* A page's notice under a tenant's head stands as its Overview's notices do. */
+#tenant-head + .notice { margin-top: var(--s4); }
 .nrow { padding: var(--pad-y) var(--pad-x); background: var(--raised); box-shadow: inset 2px 0 0 var(--soft); }
 .nrow.bad { background: var(--bad-wash); box-shadow: inset 2px 0 0 var(--bad); }
 .nrow .lead-in { font-weight: 600; }

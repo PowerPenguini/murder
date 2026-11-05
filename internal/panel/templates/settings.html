@@ -35,10 +35,10 @@
     {{else}}
     <h2>Review {{plural (len $d.Review) "change" "changes"}} to {{$t.Spec.Name}}</h2>
     {{with $d.Fixes}}<p class="summary-line">{{.}}.</p>{{end}}
-    {{with $d.DiskShort}}<div class="notice bad" role="alert"><p class="flat"><span class="lead-in">{{.}}.</span></p>{{with $d.Disk.Suggest}}<p class="flat spaced">Give it at least {{$d.Disk.Least}} GB, twice its data{{if $d.Disk.Others}}; the other tenants have {{$d.Disk.Others}} GB{{end}}.</p>{{end}}</div>{{end}}
+    {{with $d.DiskShort}}<div class="notice bad" role="alert"><p class="flat"><span class="lead-in">{{.}}.</span></p>{{with $d.Disk.Suggest}}<p class="flat spaced">{{.}} GB is {{if eq . $d.Disk.Others}}what the other tenants have{{else}}twice its data{{end}}: it leaves room to grow.</p>{{end}}</div>{{end}}
     <table class="list changes">
       <thead><tr><th>Setting</th><th>Now</th><th>After</th></tr></thead>
-      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{if .FromRisk}}<span class="st warn">{{names .From}}</span>{{else}}{{names .From}}{{end}}</td><td class="l-sub" data-label="After">{{if .Risk}}<span class="st warn">{{names .To}}</span>{{else}}{{names .To}}{{end}}</td></tr>{{end}}</tbody>
+      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{if .FromFull}}<span class="st bad">{{names .From}}</span><span class="risk-why bad">Its data fills it.</span>{{else if .FromRisk}}<span class="st warn">{{names .From}}</span>{{else}}{{names .From}}{{end}}</td><td class="l-sub" data-label="After">{{if .Risk}}<span class="st warn">{{names .To}}</span>{{else}}{{names .To}}{{end}}</td></tr>{{end}}</tbody>
     </table>
     {{if $d.DiskShort}}
     <div class="actions">{{with $d.Disk.Suggest}}<input type="hidden" name="suggest" value="{{.}}"><button type="submit" name="do" value="usedisk" class="primary">Use {{.}} GB instead</button>{{end}}<button type="submit" name="do" value="edit" formnovalidate>Keep editing</button></div>

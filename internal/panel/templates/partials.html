@@ -170,7 +170,7 @@ its pages beside it, what can be done to it, and where it runs. */}}
     </details>
   </div>
   {{end}}
-  <p class="lead">App <a href="/apps/{{$t.App}}">{{$t.App}}</a>{{if $t.Archived}} · archived {{ago $t.ArchivedAt}} ago{{else}} · runs on <a href="{{node $t.Node}}">{{$t.Node}}</a>{{end}} · <a href="{{$t.URL}}" class="nowrap">{{$t.Host}}</a>{{if $t.Canary}} · <span class="dim">canary</span>{{end}}{{if $t.Hold}} · <span class="dim">held on revision {{$t.AppRevision}}</span>{{end}}</p>
+  <p class="lead">App <a href="/apps/{{$t.App}}">{{$t.App}}</a>{{if $t.Archived}} · archived {{ago $t.ArchivedAt}} ago{{else}} · runs on <a href="{{node $t.Node}}">{{$t.Node}}</a>{{end}} · <a href="{{$t.URL}}" class="nowrap">{{$t.Host}}</a>{{if $t.Canary}} · <span class="dim">canary</span>{{end}}{{if $t.Hold}} · <span class="dim">{{if $t.AppRevision}}held on revision {{$t.AppRevision}}{{else}}held: takes no app changes{{end}}</span>{{end}}</p>
 </header>
 {{end}}
 

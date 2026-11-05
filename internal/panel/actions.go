@@ -332,7 +332,12 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		data = data[len(data)-logBytes:]
 	}
 	q := r.URL.Query()
-	logs := logsData{Tenant: name, Tail: tail, Head: s.withApps(ctx, r, s.headOf(t, nodes, "logs")), Level: q.Get("level"), Query: strings.TrimSpace(q.Get("q")),
+	head := s.withApps(ctx, r, s.headOf(t, nodes, "logs"))
+	// Its state as its other tabs say it: one that cannot write says so.
+	if u, ok := s.usageNow(ctx).Tenants[t.Spec.Name]; ok {
+		head.State = writable(head.State, &u)
+	}
+	logs := logsData{Tenant: name, Tail: tail, Head: head, Level: q.Get("level"), Query: strings.TrimSpace(q.Get("q")),
 		Follow: q.Get("follow") != "", ReadAt: s.now()}
 	if logs.Level != "warn" && logs.Level != "error" {
 		logs.Level = "all"

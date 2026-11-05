@@ -86,7 +86,7 @@
     <div><dt>Data at</dt><dd class="mono">{{if $t.Spec.DataPath}}{{$t.Spec.DataPath}}{{else}}none{{end}}</dd></div>
     <div><dt>Runs as</dt><dd class="mono">{{$t.Spec.User}}</dd></div>
     <div><dt>Root file system</dt><dd>{{if $t.Spec.WritableRoot}}writable{{else}}read-only{{end}}</dd></div>
-    {{range $d.Limits}}<div><dt>{{.Heading}}</dt><dd class="num">{{if .Risk}}<span class="st warn">{{.Short}}</span>{{else}}{{.Short}}{{end}}{{if eq .From "node"}} <span class="dim">node default, <span class="nowrap">{{.Node}}</span></span>{{else if eq .From "none"}} <span class="dim">no default on <span class="nowrap">{{.Node}}</span></span>{{end}}</dd></div>{{end}}
+    {{range $d.Limits}}<div><dt>{{.Heading}}</dt><dd class="num">{{if and (eq .Key "disk") $d.DiskFull}}<span class="st bad">{{.Short}}</span> <span class="red-text-inline">its data fills it</span>{{else if .Risk}}<span class="st warn">{{.Short}}</span>{{else}}{{.Short}}{{end}}{{if eq .From "node"}} <span class="dim">node default, <span class="nowrap">{{.Node}}</span></span>{{else if eq .From "none"}} <span class="dim">no default on <span class="nowrap">{{.Node}}</span></span>{{end}}</dd></div>{{end}}
     <div><dt>Generation</dt><dd class="num">{{$t.Generation}}</dd></div>
   </dl>
 </section>

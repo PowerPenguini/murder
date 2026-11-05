@@ -125,11 +125,12 @@ func (l limitInEffect) WithSource() string {
 	return l.InEffect()
 }
 
-// Short says it for a figure: its value, or "none", or "not known".
+// Short says it for a figure: its value, or "no limit" (as the reviews
+// say it), or "not known".
 func (l limitInEffect) Short() string {
 	switch l.From {
 	case fromNone:
-		return "none"
+		return "no limit"
 	case fromUnknown:
 		return "not known"
 	}
