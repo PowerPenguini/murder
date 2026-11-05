@@ -124,6 +124,12 @@ upgrade thawing changes, once every node runs the new release. If a node
 still shows no key a minute after the upgrade, check its agent's log
 ("register this node's identity key").
 
+**From a release before tenants' own domains** (schema 17), the
+upgrade adds the domains' tables. The leader checks and orders nothing
+for domains until every node runs schema 18 or later, so finish the
+upgrade before adding domains: until then, the leader asks the nodes
+which release they run at each of its passes.
+
 From a release in which the agent served the edge itself, the first
 upgrade has a short gap, once: install `murder-edge.service`, install the
 binary, `systemctl restart murder-agent` (which frees ports 80 and 443) and
@@ -159,6 +165,87 @@ lost disk, and starting from an empty database would remove every tenant.
 Likewise `murder init` makes no master key for a database that exists: its
 secrets are sealed with the original key, which no new one opens; restore
 that key from its copy offline.
+
+## Give a tenant its own domain
+
+A tenant answers at `<tenant>.<baseDomain>`. It may also have host names
+of its own, such as a customer's `app.customer.com`, with a certificate
+the cluster orders and renews:
+
+```bash
+sudo murder tenant domain add acme app.customer.com   # prints the DNS record to create
+sudo murder tenant domain list acme                   # state, DNS record, certificate, why
+sudo murder tenant domain check acme app.customer.com # check its DNS now, after changing it
+sudo murder tenant domain remove acme app.customer.com -yes
+```
+
+The panel's tenant page does the same (Domains). A name is kept in lower
+case, as IDNA's ASCII form (`bücher.example` is `xn--bcher-kva.example`),
+without a trailing dot. It is refused when it is a URL, has a port or a
+wildcard (give each name of its own), is an address or a single label, is
+a public suffix (`co.uk`), or is the base domain or below it. A name is one
+tenant's, and a tenant has 20 at most. Domains go with their tenant
+through moves, failovers, archiving and restoring, and the cluster's
+backups; purging the tenant releases them.
+
+**DNS.** At the domain's DNS provider, point the name at the cluster:
+
+- a name below a zone's apex (`app.customer.com`): a CNAME to the
+  tenant's own name, `acme.<baseDomain>`. It follows the nodes as
+  `cluster.dns` keeps the wildcard records;
+- a zone's apex (`customer.com`), which may have no CNAME: A and AAAA
+  records with the nodes' public addresses (`cluster.publicAddresses`), or
+  the provider's ALIAS or ANAME record to `acme.<baseDomain>`. These are
+  kept by hand: change them when a node is replaced.
+
+`domain add` and the panel print the records to create.
+
+**What happens.** The leader checks the name's DNS at once: a CNAME that
+leads to `acme.<baseDomain>` or to the base domain, or addresses that are
+all the nodes' public ones (outside a cluster, or without
+`publicAddresses`: those `acme.<baseDomain>` has). A name that does not
+point at the cluster yet is checked again after a minute, then less and
+less often, an hour apart at most (`check` asks at once). No CA is asked
+for a name that does not point here: its rate limits count failures. Once
+it does, every edge routes the name to the tenant, exactly as its own
+name (moves, holds, 503s for a suspended tenant), and the leader orders
+its certificate from `edge.tls.ca` (Let's Encrypt by default) with the
+HTTP-01 challenge: every node's edge answers it on port 80, so the
+customer's DNS provider needs no API. The certificate is renewed 30 days
+before it expires; the old one is served until the new one is there. A
+failed order is tried again after 5 minutes, then less and less often,
+6 hours apart at most. Plain HTTP for a domain with its certificate goes
+to HTTPS; before it has one, port 80 answers 503.
+
+The states, in `domain list` and the panel: `verifying` (not checked yet),
+`pending` (its DNS does not point at the cluster, said why; with
+`edge.tls` not `acme`, no certificate is ordered), `issuing`, `active`,
+`renewing` (due, or a renewal failed: the certificate is still served
+until it expires) and `failed` (the CA refused it, said why, with the next
+attempt). Each change is in the audit log (`domain.added`,
+`domain.verified`, `domain.pending`, `domain.issued`, `domain.renewed`,
+`domain.failed`, `domain.removed`). On the leader, `/metrics` has
+`murder_domain_state`, `murder_domain_certificate_expiry_timestamp_seconds`
+and `murder_domain_failing` for each domain: alert on an expiry less than
+20 days away, or on a domain failing for a day.
+
+What it needs:
+
+- `edge.tls.mode: acme` with `email` (the account's contact): the same
+  CA as the wildcard. With `internal` or `off`, domains are checked and
+  routed, without certificates (plain HTTP when TLS is off).
+- Port 80 open to the internet on every node the name leads to: the CA
+  asks any of them, from several places. Keep it open in the provider's
+  firewall (`test/hetzner` opens 80 and 443). The edge listens on
+  `edge.http` (`:80`) already; the leader checks that every node's edge
+  answers a challenge, at its private address and that port, before the
+  CA is asked.
+- Every node on a release with schema 18: the leader orders nothing until
+  every node runs one, so a rolling upgrade finishes first.
+
+The cluster has one ACME account per CA, made with the first order, its
+key sealed with the master key in the state: every leader uses it.
+TLS-ALPN-01 is not used.
 
 ## Back up and restore
 

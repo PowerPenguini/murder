@@ -18,6 +18,7 @@ git tag v0.1.0 && git push origin v0.1.0
 ```bash
 go test ./...                                   # unit tests
 go test -tags docker -count=1 ./integration     # full tenant lifecycle on the local Docker engine
+go test -tags 'docker pebble' -count=1 -run Pebble ./integration   # a tenant's domain's certificate from Pebble
 test/vm/go-test.sh ./internal/volume            # ZFS driver tests inside a throwaway VM
 make -C test/hetzner up deploy cluster smoke TOKEN_FILE=path   # a real cluster on Hetzner Cloud
 make -C test/hetzner down                       # delete it (servers bill by the hour)
@@ -38,3 +39,14 @@ through Murder's real components:
 - restart the agent and adopt the container;
 - suspend and resume;
 - archive, restore with the data, purge.
+
+**What the Pebble test does:** it runs Pebble (Let's Encrypt's ACME test
+server) and pebble-challtestsrv (its DNS, every name at the loopback) in
+Docker on the host's network, and a tenant on Docker as above. It adds a
+domain through the API, and a pass of the leader's manager checks its DNS,
+orders its certificate, which Pebble validates over HTTP-01 at the edge's
+plain port, and stores it. The edge, following the agent's routes, serves
+it by SNI (checked against Pebble's root), the request reaches the tenant
+over HTTPS, and plain HTTP redirects. A second manager, as a new leader,
+then renews it with the account the state holds, and the edge serves the
+new certificate; removing the domain stops routing it.

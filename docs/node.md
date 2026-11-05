@@ -30,12 +30,16 @@ Every server runs the same processes: `murder agent`, `murder edge` and, if want
   the agent lets a container replacement under way finish first, also in a
   pass `murder reconcile` started, so no tenant is left without one.
 - **Edge proxy.** `murder edge`, a process of its own, routes
-  `<tenant>.<baseDomain>` to the tenant's container. It
+  `<tenant>.<baseDomain>`, and a tenant's own domains once they point at
+  the cluster, to the tenant's container. It
   streams responses (server-sent events) and replaces any client-sent
   `X-Forwarded-*` headers. Over HTTPS it adds `Strict-Transport-Security` (one
   year) unless the app sets its own. TLS is `off`, `internal` (a local CA, for testing) or
   `acme`, which gets a wildcard certificate through DNS-01 from Hetzner Cloud DNS
-  or Namecheap. It holds no state: the agent hands it the routes as soon as
+  or Namecheap; a tenant's own domain is served with its own certificate,
+  chosen by the name the client asks for (SNI), its key opened with the
+  master key. On port 80 it answers ACME HTTP-01 challenges for tenants'
+  domains, and sends the rest to HTTPS. It holds no state: the agent hands it the routes as soon as
   they change, and it keeps the last ones (also on disk, `edge.routes`), so
   it serves while the agent restarts or is down. An edge started anew, as
   after a reboot, holds requests for tenants until the agent confirms

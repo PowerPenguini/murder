@@ -79,7 +79,10 @@ follows an app's rollout: pause, resume, promote, abort it, or restore
 its tenants with their data from before they moved, losing what they wrote
 since (abort and restore with the app's name typed). A tenant's settings page changes its app, image, env,
 own secrets and limits, whether it is a canary or held out of rollouts,
-and gives a secret a new value. Secrets' values are never shown.
+and gives a secret a new value. A tenant's page has a Domains box: its
+own host names, each with its state, the DNS record to create and its
+certificate; one is added after a review that shows the name as it is
+kept and the record, and removed with its name typed. Secrets' values are never shown.
 Sessions last 12 hours; signing in and out is in
 the audit log. Should everyone lose everything, `murder admin invite` on a
 node starts over.
@@ -228,3 +231,12 @@ Each stage is one PR, reviewed and tested before the next.
    /v1/apps/NAME/revisions/N/restore?if=`). Both are refused over a change
    made since the page was read. The Apps page marks apps with a newer
    image.
+8. **Domains:** a tenant's page lists its own domains in a boxed table
+   (state in words, red only when getting the certificate fails or it
+   expired; what its DNS shows and when it is checked again; the record to
+   create; until when the certificate runs). "Review" shows what adding a
+   name does and the DNS record, before anything is stored; the add
+   carries a token bound to the reviewed name, so another is refused. A
+   name that cannot be a domain is said beside the form, as typed.
+   Removing needs the name typed; "Check its DNS now" has the leader look
+   at once.

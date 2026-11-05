@@ -38,6 +38,22 @@
   root-only (`0700`) directory, and ZFS datasets are created with `setuid=off`
   and `devices=off`. A setuid file a tenant writes there is useless to host
   users.
+- **Tenants' own domains.** Only those who use the API (root, the
+  socket's group, people of the panel) add a domain to a tenant. A domain
+  is routed only once its DNS was seen to point at the cluster, and the
+  leader asks a CA only for such a name: adding someone else's name gives
+  nothing until they point it here. The replicated state holds each
+  domain's certificate chain, in the clear, and its private key sealed
+  with the master key (AES-256-GCM, bound to the domain's name), and the
+  cluster's ACME account key, sealed alike. They are in every copy of the
+  state and every backup of it, as tenants' secrets are, and a master key
+  rotation seals them again in the same change. Each edge opens the keys
+  with the master key file, which it now reads outside a cluster too, and
+  keeps them in memory only; the routes it saves on disk (`edge.routes`)
+  hold them sealed. The HTTP-01 key authorizations every edge answers are
+  public by design and expire within 15 minutes. Removing a domain, or
+  purging its tenant, deletes its certificate and key from the state;
+  certificates are not revoked.
 - **Docker's `userns-remap` is not supported.** The data owner is the
   container user's numeric id on the host, which remapping would change.
 - **Nodes prove who they are with keys of their own.** Nodes talk over
