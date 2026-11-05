@@ -170,6 +170,15 @@ type tenantUse struct {
 // DiskFull says its data is at or over its disk limit: it cannot write.
 func (u tenantUse) DiskFull() bool { return u.DiskLimit > 0 && u.DiskUsed >= u.DiskLimit }
 
+// Data is its data's size against its disk limit; DataText and DataLimit
+// say them ("2 GB", "2 GB"): for a list's row of a tenant that cannot
+// write, as its page's Data figure does.
+func (u tenantUse) Data() meter { return meterOf(int(u.DiskUsed>>20), int(u.DiskLimit>>20)) }
+
+func (u tenantUse) DataText() string { return size(float64(u.DiskUsed)) }
+
+func (u tenantUse) DataLimit() string { return size(float64(u.DiskLimit)) }
+
 // clusterUse is the cluster's use now, by node and by tenant, and how its
 // backups go; empty maps when the backend measures none, or did not
 // answer.

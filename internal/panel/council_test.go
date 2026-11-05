@@ -1443,7 +1443,8 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 	}
 	_, list := get(t, server.URL+"/tenants")
 	row := between(list, `href="/tenants/atlas">atlas</a>`, "</tr>")
-	if !strings.Contains(list, "· 4 healthy") || !strings.Contains(row, `<span class="st bad">cannot write</span>`) || !strings.Contains(row, `class="barcell l-sub phone-only" data-label="Data"`) {
+	if !strings.Contains(list, "· 4 healthy") || !strings.Contains(row, `<span class="st bad">cannot write</span>`) || !strings.Contains(said(row), `class="barcell l-sub phone-only" data-label="Data"`) ||
+		!strings.Contains(said(row), `<span class="num red">2 GB <span class="dim of">of 2 GB</span></span>`) || !strings.Contains(list, "</html>") {
 		t.Fatalf("the tenants list counts atlas healthy:\n%s\n%s", between(list, `<p class="lead">`, "</p>"), row)
 	}
 	if !strings.Contains(between(page, `<div class="title">`, "</div>"), `<span class="st bad">cannot write</span>`) {
