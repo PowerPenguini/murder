@@ -37,7 +37,14 @@ Every server runs the same processes: `murder agent`, `murder edge` and, if want
   `acme`, which gets a wildcard certificate through DNS-01 from Hetzner Cloud DNS
   or Namecheap. It holds no state: the agent hands it the routes as soon as
   they change, and it keeps the last ones (also on disk, `edge.routes`), so
-  it serves while the agent restarts or is down. A request costs it little:
+  it serves while the agent restarts or is down. An edge started anew, as
+  after a reboot, holds requests for tenants until the agent confirms
+  routes, for at most `edge.routesHold` (15 s; 0 holds none): the saved
+  routes are those of before it stopped, and a tenant may have failed over
+  or moved since. In a cluster the agent names routes only once its node
+  has caught up with the cluster. If the agent does not answer in time,
+  the saved routes serve, and from then on every request at once. An edge
+  that takes over from another, in an upgrade, holds nothing. A request costs it little:
   routes are one lookup in memory, its reverse proxies are shared and lend
   copy buffers from a pool, connections to tenants and to other nodes' edges
   stay open (one HTTP/2 connection to each other edge is kept warm and

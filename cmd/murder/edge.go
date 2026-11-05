@@ -83,6 +83,12 @@ func runEdge(args []string) error {
 		table.Restore(saved)
 	}
 	proxy := edge.NewProxy(cfg.BaseDomain, table, log)
+	// Started anew, as after a reboot, the saved routes may be out of
+	// date: requests wait a little for the agent's. Taking over from an
+	// edge, they are the routes it served until now.
+	if !upgrader.HasParent() {
+		proxy.HoldUnconfirmed(cfg.Edge.RoutesHold.Duration)
+	}
 	// In a cluster, requests for tenants of other nodes go on to their
 	// edges, proven part of the cluster by a certificate derived from the
 	// master key; this edge takes theirs on its relay port.
@@ -275,8 +281,15 @@ func followRoutes(ctx context.Context, client *api.Client, table *edge.LiveTable
 	failing := false
 	for ctx.Err() == nil {
 		version := table.Load().Version
+		// Until the agent has confirmed routes, it is asked for its own at
+		// once, not for a change from those restored from disk: requests
+		// may be waiting for them.
+		after := version
+		if table.Updated().IsZero() {
+			after = ""
+		}
 		request, cancel := context.WithTimeout(ctx, 2*routesPoll)
-		got, err := client.Routes(request, version)
+		got, err := client.Routes(request, after)
 		cancel()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -291,7 +304,10 @@ func followRoutes(ctx context.Context, client *api.Client, table *edge.LiveTable
 				return
 			case <-time.After(delay):
 			}
-			delay = min(2*delay, 10*time.Second)
+			// Asked again every second until the agent first answers.
+			if !table.Updated().IsZero() {
+				delay = min(2*delay, 10*time.Second)
+			}
 			continue
 		}
 		if failing {

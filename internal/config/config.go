@@ -311,6 +311,11 @@ type Edge struct {
 	// Routes keeps the last routes the edge got from the agent, so an edge
 	// started while the agent is down serves all the same.
 	Routes string `yaml:"routes"`
+	// RoutesHold is how long an edge started with those routes, as after a
+	// reboot, holds requests for tenants until the agent confirms routes,
+	// which may have changed while the node was down: past it, the saved
+	// routes serve. Zero serves them at once.
+	RoutesHold Duration `yaml:"routesHold"`
 	// PIDFile names the edge's process; an upgrade replaces the process,
 	// and systemd follows it there.
 	PIDFile string `yaml:"pidFile"`
@@ -366,7 +371,7 @@ func Parse(data []byte) (Agent, error) {
 		Firewall:      FirewallNftables,
 		Edge: Edge{
 			HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/murder/certs"},
-			Routes: "/var/lib/murder/edge-routes.json", PIDFile: "/run/murder-edge/edge.pid", Drain: Duration{30 * time.Second}, RelayPort: 7402,
+			Routes: "/var/lib/murder/edge-routes.json", PIDFile: "/run/murder-edge/edge.pid", Drain: Duration{30 * time.Second}, RoutesHold: Duration{15 * time.Second}, RelayPort: 7402,
 		},
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
@@ -544,6 +549,9 @@ func (a Agent) Validate() error {
 	}
 	if a.Edge.Drain.Duration < 0 {
 		problems = append(problems, "edge.drain must not be negative")
+	}
+	if a.Edge.RoutesHold.Duration < 0 || a.Edge.RoutesHold.Duration > time.Minute {
+		problems = append(problems, "edge.routesHold must be 0-60s")
 	}
 	for _, problem := range a.Defaults.Problems() {
 		problems = append(problems, "defaults: "+problem)

@@ -1355,3 +1355,75 @@ func metaKeys(t *testing.T, path string) []string {
 	}
 	return keys
 }
+
+// lockedBuffer is a log several goroutines write.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestARefusedNodeIsLoggedWithoutFlooding(t *testing.T) {
+	logs := &lockedBuffer{}
+	member := newNodeWith(t, "fsn-1", func(n *node) { n.log = logs })
+	if err := member.cluster.Bootstrap(ctx(t), "alice", false); err != nil {
+		t.Fatal(err)
+	}
+	cluster := member.store.Cluster()
+	// A node with the master key that is no member: it tries again and
+	// again, as a removed node does.
+	stranger := newNode(t, "fsn-9")
+	stranger.cluster.credentials.servers.Store(nil)
+	client := clientOf(stranger.cluster.credentials, cluster)
+	for range 5 {
+		if got := status(t, client, http.MethodGet, "https://"+member.address+"/cluster/v1/ping", nil); got != http.StatusForbidden {
+			t.Fatalf("a stranger's ping: %d", got)
+		}
+		if got := status(t, client, http.MethodPut, "https://"+member.address+"/cluster/v1/node/binary", nil); got != http.StatusForbidden {
+			t.Fatalf("a stranger's binary: %d", got)
+		}
+		if !raftRefused(t, stranger.cluster.credentials, cluster, member.address) {
+			t.Fatal("Raft took a stranger")
+		}
+		if !raftRefused(t, stranger.cluster.credentials, "another", member.address) {
+			t.Fatal("Raft took another cluster")
+		}
+	}
+	var lines []string
+	eventually(t, "the refusals are logged", func() bool {
+		lines = nil
+		for line := range strings.SplitSeq(logs.String(), "\n") {
+			if strings.Contains(line, "refused") {
+				lines = append(lines, line)
+			}
+		}
+		return len(lines) >= 3
+	})
+	for _, message := range []string{
+		`msg="refused a request of a node that is not a member"`,
+		`msg="refused a Raft connection of a node that is not a member"`,
+		`msg="refused a Raft connection of another cluster"`,
+	} {
+		var found []string
+		for _, line := range lines {
+			if strings.Contains(line, message) {
+				found = append(found, line)
+			}
+		}
+		// Once, for all five tries, and the two requests alike.
+		if len(found) != 1 || !strings.Contains(found[0], "level=WARN") || !strings.Contains(found[0], "node=fsn-9") {
+			t.Errorf("%s logged as %q", message, found)
+		}
+	}
+}

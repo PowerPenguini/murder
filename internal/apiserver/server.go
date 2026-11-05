@@ -44,6 +44,10 @@ type Server struct {
 	// as the edge's for new routes, end at once.
 	stopping chan struct{}
 	stopOnce sync.Once
+	// caughtUp is closed once this node, in a cluster, has caught up with
+	// it since it started.
+	caughtUp     chan struct{}
+	caughtUpOnce sync.Once
 	// upgrader installs new binaries on this node; nil if it takes none.
 	upgrader Upgrader
 	// relayPort is where the edges of a cluster pass requests on.
@@ -67,8 +71,13 @@ type Server struct {
 
 // NewServer returns the API server.
 func NewServer(st store.Store, reconciler *reconcile.Reconciler, rt runtime.Runtime, key *secrets.Key, log *slog.Logger) *Server {
-	return &Server{store: st, reconciler: reconciler, runtime: rt, key: key, log: log, stopping: make(chan struct{})}
+	return &Server{store: st, reconciler: reconciler, runtime: rt, key: key, log: log, stopping: make(chan struct{}), caughtUp: make(chan struct{})}
 }
+
+// CaughtUp says this node has caught up with its cluster since it
+// started: from then on the routes it names are the cluster's, not what it
+// had before it went down.
+func (s *Server) CaughtUp() { s.caughtUpOnce.Do(func() { close(s.caughtUp) }) }
 
 // WithRelayPort routes to tenants of other nodes through their edges'
 // relay port.

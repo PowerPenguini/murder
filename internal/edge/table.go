@@ -42,9 +42,15 @@ type LiveTable struct {
 	// before a restart.
 	ready   atomic.Bool
 	updated atomic.Int64
-	// changed is closed, and replaced, whenever the table is replaced.
-	mu      sync.Mutex
-	changed chan struct{}
+	// restored is when a saved table was restored, in Unix nanoseconds;
+	// zero if none was.
+	restored atomic.Int64
+	// changed is closed, and replaced, whenever the table is replaced;
+	// confirmed is closed once the agent first confirms a table.
+	mu          sync.Mutex
+	changed     chan struct{}
+	confirmed   chan struct{}
+	confirmOnce sync.Once
 }
 
 // Watch returns a channel closed when the table is next replaced.
@@ -88,7 +94,7 @@ func (l *LiveTable) Load() Table {
 func (l *LiveTable) Set(table Table) {
 	l.table.Store(&table)
 	l.ready.Store(true)
-	l.updated.Store(time.Now().UnixNano())
+	l.confirm()
 	l.replaced()
 }
 
@@ -97,7 +103,34 @@ func (l *LiveTable) Set(table Table) {
 func (l *LiveTable) Restore(table Table) {
 	l.table.Store(&table)
 	l.ready.Store(true)
+	l.restored.Store(time.Now().UnixNano())
 	l.replaced()
+}
+
+// Unconfirmed reports whether the table is one restored from disk that
+// the agent has not confirmed yet, since when, and a channel closed once
+// it confirms one.
+func (l *LiveTable) Unconfirmed() (since time.Time, confirmed <-chan struct{}, ok bool) {
+	at := l.restored.Load()
+	if at == 0 || l.updated.Load() != 0 {
+		return time.Time{}, nil, false
+	}
+	return time.Unix(0, at), l.confirmedChan(), true
+}
+
+func (l *LiveTable) confirmedChan() chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.confirmed == nil {
+		l.confirmed = make(chan struct{})
+	}
+	return l.confirmed
+}
+
+// confirm notes that the agent confirmed the table as it is now.
+func (l *LiveTable) confirm() {
+	l.updated.Store(time.Now().UnixNano())
+	l.confirmOnce.Do(func() { close(l.confirmedChan()) })
 }
 
 // Ready reports whether the table holds routes the agent gave: until then,
@@ -113,7 +146,7 @@ func (l *LiveTable) Updated() time.Time {
 }
 
 // Touch notes that the agent confirmed the table as it is.
-func (l *LiveTable) Touch() { l.updated.Store(time.Now().UnixNano()) }
+func (l *LiveTable) Touch() { l.confirm() }
 
 // LoadTable reads a table SaveTable wrote; a missing file is no table.
 func LoadTable(path string) (Table, bool, error) {

@@ -71,6 +71,10 @@ type Proxy struct {
 	// holdMoving is how long a request for a tenant that is moving waits
 	// for it.
 	holdMoving time.Duration
+	// holdUnconfirmed is how long, after routes were restored from disk,
+	// requests for tenants wait for the agent to confirm them; zero holds
+	// none.
+	holdUnconfirmed time.Duration
 	// local passes requests to tenants on this node, forward to other
 	// nodes' edges (nil outside a cluster), relayed takes requests other
 	// edges passed on.
@@ -482,6 +486,66 @@ func (p *Proxy) warming(r *http.Request) bool {
 	return !tenant
 }
 
+// HoldUnconfirmed holds requests for tenants, on an edge that started
+// with routes saved on disk, until the agent confirms routes, for at most
+// hold after they were restored.
+//
+// The saved routes are those the edge had when it stopped. After a reboot
+// they may lead a tenant to where it no longer runs: it failed over or
+// moved while the node was down, and its container here is not started
+// again. The agent answers once its node has caught up with the cluster,
+// a few seconds after it starts. Requests wait for that, not longer than
+// hold: if the agent does not answer by then, the saved routes serve, as
+// they do whenever the agent is down, and so does every request after.
+// An edge that takes over from another (an upgrade) holds nothing: the
+// routes it restored are the ones the old edge served until then.
+func (p *Proxy) HoldUnconfirmed(hold time.Duration) *Proxy {
+	p.holdUnconfirmed = hold
+	return p
+}
+
+// unconfirmed is routes that may be ones restored from disk, which the
+// agent has not confirmed yet.
+type unconfirmed interface {
+	Unconfirmed() (since time.Time, confirmed <-chan struct{}, ok bool)
+}
+
+// awaitConfirmed holds a request until the agent has confirmed the routes
+// restored from disk, or holdUnconfirmed after they were restored. It
+// reports false when too many requests are held already: the request is
+// then refused for now rather than sent where the saved routes say, which
+// may be where the tenant no longer runs.
+func (p *Proxy) awaitConfirmed(r *http.Request) bool {
+	if p.holdUnconfirmed <= 0 {
+		return true
+	}
+	routes, ok := p.routes.(unconfirmed)
+	if !ok {
+		return true
+	}
+	since, confirmed, ok := routes.Unconfirmed()
+	if !ok {
+		return true
+	}
+	wait := time.Until(since.Add(p.holdUnconfirmed))
+	if wait <= 0 {
+		return true
+	}
+	release, held := p.hold()
+	defer release()
+	if !held {
+		return false
+	}
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	select {
+	case <-confirmed:
+	case <-deadline.C:
+	case <-r.Context().Done():
+	}
+	return true
+}
+
 // route looks a tenant up, waiting while it moves, unless too many
 // requests are held already.
 func (p *Proxy) route(r *http.Request, tenant string) (Route, bool) {
@@ -524,6 +588,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, relayed bool) {
 	if !ok {
 		p.stats.Unrouted()
 		http.Error(w, "unknown host", http.StatusNotFound)
+		return
+	}
+	if !p.awaitConfirmed(r) {
+		p.stats.Unrouted()
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "this server is starting; try again shortly", http.StatusServiceUnavailable)
 		return
 	}
 	route, ok := p.route(r, tenant)

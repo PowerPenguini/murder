@@ -55,7 +55,12 @@
     member's `node.key`. That covers a node removed from the cluster, a
     copy of `/etc/murder`, and a cluster restored from a backup. Such a
     party is refused the state, writes, Raft, binary installs, moves and
-    copies, whatever name its certificate gives. A node joins only with
+    copies, whatever name its certificate gives. Each refusal is a
+    warning in the refusing agent's log, naming the peer's address and
+    the node its certificate names, and why: the first at once, then at
+    most one a minute for each reason and node, with how many were left
+    out (`suppressed`), as a refused node tries again every second or so.
+    A node joins only with
     an invitation, which admits its name and identity key for an hour.
     The invitation names the inviting node and its identity key. The new
     host sends the secret, and takes the master key and the members' keys,

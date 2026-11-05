@@ -79,12 +79,13 @@ func testEdgeUpgrade(t *testing.T, secure bool) {
 	address, plainAddress := freePort(t), freePort(t)
 	pidFile := filepath.Join(dir, "edge.pid")
 	configPath := filepath.Join(dir, "agent.yaml")
-	// No agent runs: the edge serves the saved routes.
-	edgeConfig := fmt.Sprintf(`{http: %q, routes: %s, pidFile: %s, drain: 10s}`, address, routes, pidFile)
+	// No agent runs: the first edge serves the saved routes once it has
+	// held requests for routesHold; the edge that takes over holds none.
+	edgeConfig := fmt.Sprintf(`{http: %q, routes: %s, routesHold: 1s, pidFile: %s, drain: 10s}`, address, routes, pidFile)
 	scheme := "http"
 	if secure {
 		scheme = "https"
-		edgeConfig = fmt.Sprintf(`{http: %q, https: %q, tls: {mode: internal, storage: %s}, routes: %s, pidFile: %s, drain: 10s}`, plainAddress, address, filepath.Join(dir, "certs"), routes, pidFile)
+		edgeConfig = fmt.Sprintf(`{http: %q, https: %q, tls: {mode: internal, storage: %s}, routes: %s, routesHold: 1s, pidFile: %s, drain: 10s}`, plainAddress, address, filepath.Join(dir, "certs"), routes, pidFile)
 	}
 	config := fmt.Sprintf(`baseDomain: example.test
 socket: %s
@@ -348,5 +349,45 @@ func TestTheEdgeGivesUpOnABodyThatStopped(t *testing.T) {
 			t.Errorf("HTTP/2 %v: a slow body: %v", http2, err)
 		}
 		server.Close()
+	}
+}
+
+// An edge started with saved routes asks the agent for its own at once,
+// not for a change from them: requests wait for them. The same routes
+// confirm the saved ones.
+func TestTheEdgeConfirmsItsSavedRoutesAtOnce(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "murder.db")
+	if err := store.Init(database, "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(database, store.Options{NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: func(string, string, spec.Secret) (string, error) { return "x", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := apiserver.NewServer(st, nil, nil, nil, log)
+	agent := httptest.NewServer(server.Handler())
+	// The long poll under way ends with the agent.
+	defer agent.Close()
+	defer server.Stop()
+	table := &edge.LiveTable{}
+	table.Restore(edge.NewTable(nil)) // what the agent has too
+	_, confirmed, unconfirmed := table.Unconfirmed()
+	if !unconfirmed {
+		t.Fatal("the saved routes count as confirmed")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		followRoutes(ctx, api.NewClientURL(agent.URL), table, filepath.Join(dir, "edge-routes.json"), log)
+	}()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-confirmed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the agent did not confirm the saved routes at once")
 	}
 }

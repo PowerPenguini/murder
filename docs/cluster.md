@@ -105,7 +105,11 @@ those who only have the master key (see [Security](security.md)).
   voters.
   A leader asked to remove itself hands leadership over first, and the
   next leader removes it. Every request the removed node makes afterwards
-  is refused, and its Raft connections are closed within seconds.
+  is refused, and its Raft connections are closed within seconds. The
+  members log each refusal as a warning, at most once a minute for each
+  reason and node. A removed node's agent stops at once: it does not
+  mark itself away (see Reboots below) in a cluster it no longer belongs
+  to.
 - **A cluster from before identity keys** keeps working through a rolling
   upgrade. A node the state holds no key for is taken by its name and the
   master key, as before. Each node on a release with keys registers its
@@ -258,7 +262,14 @@ Other rules:
   nodes, itself included, so a leader that is itself cut off powers no one
   off.
 - **Reboots:** an agent that stops cleanly, as for a reboot, marks its node
-  away for 10 minutes, and its node is not powered off meanwhile.
+  away for 10 minutes, and its node is not powered off meanwhile. The
+  mark goes through the leader; a stop does not wait for it longer than
+  5 s, so an agent cut off from the leader still stops promptly (its node
+  is then not marked). After the reboot the agent names routes to its
+  edge only once it has caught up with the cluster, and the edge holds
+  requests until then (`edge.routesHold`, 15 s): its saved routes are
+  from before the node went down, and may lead to a tenant that failed
+  over or moved since.
 - **Wrong server:** the Hetzner server must have the node's private
   address. A wrong name never powers off, or confirms off, another machine.
 - **Last-moment check:** if the node answers again before its tenants move,

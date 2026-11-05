@@ -218,7 +218,9 @@ dead. Then the leader:
   off. Without this rule, it would power off the others one after another.
 - **Act on a node that is away** (`awayUntil`). An agent that stops cleanly,
   as for a reboot, marks its node away for 10 minutes, and clears the mark
-  once it is back and caught up. An agent that crashes leaves no mark.
+  once it is back and caught up. An agent that crashes leaves no mark,
+  nor does one that cannot reach the leader within 5 s as it stops, or
+  whose node is no longer a member.
 - **Act while changes are frozen for an upgrade.** `murder upgrade`
   restarts agents on purpose.
 - **Act without a configured provider.** The operator then runs

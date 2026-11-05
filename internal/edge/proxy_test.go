@@ -516,3 +516,103 @@ func TestSharedTLSWaitsForTheEdgesCA(t *testing.T) {
 		t.Fatalf("with the edge's CA: %v", err)
 	}
 }
+
+// An edge started with routes saved on disk holds requests until the
+// agent confirms routes, which may have changed while it was down, for at
+// most a while: then the saved routes serve.
+func TestRestoredRoutesWaitForTheAgentsAWhile(t *testing.T) {
+	backend := func(name string) string {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, name)
+		}))
+		t.Cleanup(server.Close)
+		return strings.TrimPrefix(server.URL, "http://")
+	}
+	before, after := backend("before"), backend("after")
+	get := func(proxy *httptest.Server) (string, time.Duration) {
+		t.Helper()
+		start := time.Now()
+		request, _ := http.NewRequest(http.MethodGet, proxy.URL, nil)
+		request.Host = "acme.example.com"
+		response, err := proxy.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return string(body), time.Since(start)
+	}
+	saved := NewTable(map[string]Route{"acme": {Backend: before}})
+
+	t.Run("confirmed", func(t *testing.T) {
+		table := &LiveTable{}
+		table.Restore(saved)
+		proxy := httptest.NewServer(NewProxy("example.com", table, quietLog()).HoldUnconfirmed(10 * time.Second))
+		defer proxy.Close()
+		// The agent answers while the request waits: the tenant moved.
+		time.AfterFunc(200*time.Millisecond, func() { table.Set(NewTable(map[string]Route{"acme": {Backend: after}})) })
+		if body, took := get(proxy); body != "after" || took < 150*time.Millisecond || took > 5*time.Second {
+			t.Fatalf("served by %q after %v", body, took)
+		}
+		// Confirmed, nothing waits.
+		if body, took := get(proxy); body != "after" || took > 5*time.Second {
+			t.Fatalf("then served by %q after %v", body, took)
+		}
+	})
+	t.Run("the same routes confirmed", func(t *testing.T) {
+		table := &LiveTable{}
+		table.Restore(saved)
+		proxy := httptest.NewServer(NewProxy("example.com", table, quietLog()).HoldUnconfirmed(10 * time.Second))
+		defer proxy.Close()
+		time.AfterFunc(200*time.Millisecond, table.Touch)
+		if body, took := get(proxy); body != "before" || took < 150*time.Millisecond || took > 5*time.Second {
+			t.Fatalf("served by %q after %v", body, took)
+		}
+	})
+	t.Run("no answer", func(t *testing.T) {
+		// The agent is down: the saved routes serve once the hold is
+		// over, and from then on at once.
+		table := &LiveTable{}
+		table.Restore(saved)
+		proxy := httptest.NewServer(NewProxy("example.com", table, quietLog()).HoldUnconfirmed(300 * time.Millisecond))
+		defer proxy.Close()
+		if body, took := get(proxy); body != "before" || took < 250*time.Millisecond || took > 5*time.Second {
+			t.Fatalf("served by %q after %v", body, took)
+		}
+		if body, took := get(proxy); body != "before" || took > 5*time.Second {
+			t.Fatalf("then served by %q after %v", body, took)
+		}
+	})
+	t.Run("too many held", func(t *testing.T) {
+		// With every place to hold a request taken, one more is refused
+		// for now, not sent where the saved routes say.
+		table := &LiveTable{}
+		table.Restore(saved)
+		handler := NewProxy("example.com", table, quietLog()).HoldUnconfirmed(10 * time.Second)
+		for range cap(handler.held) {
+			handler.held <- struct{}{}
+		}
+		proxy := httptest.NewServer(handler)
+		defer proxy.Close()
+		request, _ := http.NewRequest(http.MethodGet, proxy.URL, nil)
+		request.Host = "acme.example.com"
+		response, err := proxy.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") == "" {
+			t.Fatalf("answered %d, Retry-After %q", response.StatusCode, response.Header.Get("Retry-After"))
+		}
+	})
+	t.Run("no hold", func(t *testing.T) {
+		// As for an edge that took over from another.
+		table := &LiveTable{}
+		table.Restore(saved)
+		proxy := httptest.NewServer(NewProxy("example.com", table, quietLog()))
+		defer proxy.Close()
+		if body, took := get(proxy); body != "before" || took > 5*time.Second {
+			t.Fatalf("served by %q after %v", body, took)
+		}
+	})
+}
