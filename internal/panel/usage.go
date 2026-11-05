@@ -41,8 +41,10 @@ type tenantUsage struct {
 	// Data is its data's size against its disk limit, if both are known.
 	Data                *meter
 	DataText, DataLimit string
-	// DataUnread says its data's size is not read yet.
+	// DataUnread says its data's size is not read yet. Full says its data
+	// fills its disk limit, as Full's sentence says.
 	DataUnread bool
+	Full       string
 }
 
 // chartSpans are the spans a tenant's charts show, and the step of each.
@@ -135,6 +137,9 @@ func (s *Server) tenantUsage(ctx context.Context, name, rangeName string) *tenan
 		if used == 0 {
 			u.DataText, u.DataUnread = "not measured yet", true
 		}
+		if full := (tenantUse{DiskUsed: used, DiskLimit: series.Now.DiskLimit}); full.DiskFull() {
+			u.Full = diskFullText(full)
+		}
 		if limit := series.Now.DiskLimit; limit > 0 {
 			m := meterOf(int(used>>20), int(limit>>20))
 			u.Data = &m
@@ -157,7 +162,13 @@ type tenantUse struct {
 	Requests            string
 	// MemoryLimit says the limit, "" if none.
 	MemoryLimit string
+	// DiskUsed and DiskLimit are its data's size and limit in bytes (-1
+	// not measured; 0 limit: none).
+	DiskUsed, DiskLimit int64
 }
+
+// DiskFull says its data is at or over its disk limit: it cannot write.
+func (u tenantUse) DiskFull() bool { return u.DiskLimit > 0 && u.DiskUsed >= u.DiskLimit }
 
 // clusterUse is the cluster's use now, by node and by tenant, and how its
 // backups go; empty maps when the backend measures none, or did not
@@ -278,7 +289,7 @@ func (s *Server) usageNow(ctx context.Context, archived ...map[string]bool) clus
 			Memory: meterOf(int(used>>20), int(h.MemoryTotal>>20)), MemoryText: size(float64(used)) + " of " + size(float64(h.MemoryTotal)),
 		}
 		for name, t := range n.Tenants {
-			tu := tenantUse{MemoryText: size(float64(t.Memory)), CPUText: cores(t.CPU), Requests: rate(float64(t.Requests))}
+			tu := tenantUse{MemoryText: size(float64(t.Memory)), CPUText: cores(t.CPU), Requests: rate(float64(t.Requests)), DiskUsed: t.DiskUsed, DiskLimit: t.DiskLimit}
 			if t.MemoryLimit > 0 {
 				tu.Memory = meterOf(int(t.Memory>>20), int(t.MemoryLimit>>20))
 				tu.MemoryLimit = size(float64(t.MemoryLimit))

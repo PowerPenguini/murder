@@ -460,6 +460,16 @@ func (s *Server) appContext(ctx context.Context, r *http.Request, t api.Tenant, 
 	if !t.Spec.Suspended {
 		missing, field := risks(data.Limits)
 		data.Unlimited, data.RiskField = strings.Join(missing, ", "), field
+		// What the others have, for one limit missing: what to set.
+		if len(missing) == 1 {
+			for _, d := range limitDefs {
+				if d.key == missing[0] {
+					if v := othersHave(t, tenants, d.key); v > 0 {
+						data.RiskOthers = d.said(v)
+					}
+				}
+			}
+		}
 	}
 	i := slices.IndexFunc(apps, func(a api.App) bool { return a.Name == t.App })
 	if i < 0 {
@@ -613,12 +623,18 @@ type tenantData struct {
 	Place   *rolloutRow
 	// Unchanged says why the rollout leaves it as it runs, when it does.
 	Unchanged string
+	// DiskFull says its data fills its disk limit ("cannot write: its
+	// data, 1.4 GB, fills its 1 GB disk limit"), "" if not.
+	DiskFull string
 	// Limits are the limits it runs with, as every page says them;
 	// Unlimited names those it runs without that others have ("disk"), and
 	// RiskField the settings row of the first.
 	Limits    []limitInEffect
 	Unlimited string
 	RiskField string
+	// RiskOthers is the value the other tenants have of the one limit it
+	// runs without ("10 GB").
+	RiskOthers string
 	// AppMemory says its app's tenants run out of memory, if they do.
 	AppMemory *appMemory
 	// Operation is what a person did to it lately, and how it went; Me is
@@ -703,6 +719,14 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	if use != nil {
 		for i := range use.Charts {
 			use.Charts[i].Marks = use.Charts[i].marksOf(events)
+		}
+	}
+	// A container that cannot write is not "done": its data fills its
+	// disk limit.
+	if use != nil && use.Full != "" {
+		data.DiskFull = use.Full
+		if op := data.Operation; op != nil && op.Kind == "ok" {
+			op.State, op.Kind = "it runs, but "+use.Full, "bad"
 		}
 	}
 	// While the new container a person asked for starts, the operation

@@ -79,7 +79,7 @@ func (d *DemoCluster) Usage(ctx context.Context) (api.UsageReport, error) {
 			at := now.Truncate(time.Minute).Add(-time.Minute)
 			p := demoPoint(t.Spec.Name, limits.MemoryMB, demoCores(limits.CPUs), at, time.Minute, d.demoMemory(t.Spec.Name, limits.MemoryMB, at.Add(time.Minute)))
 			r.Tenants[t.Spec.Name] = usage.Now{At: p.At, CPU: p.CPU, Memory: p.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
-				NetRx: p.NetRx, NetTx: p.NetTx, DiskUsed: demoData, Requests: p.Requests, Errors: p.Errors, P95: p.P95}
+				NetRx: p.NetRx, NetTx: p.NetTx, DiskUsed: demoData, DiskLimit: int64(limits.DiskGB) << 30, Requests: p.Requests, Errors: p.Errors, P95: p.P95}
 			memory += p.Memory
 			cpu += p.CPU
 		}

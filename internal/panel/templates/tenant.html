@@ -1,7 +1,7 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}
 {{template "tenant-head" $d.Head}}
 {{template "page-notices" .}}
-{{if or $d.Problem $d.Operation $d.Place $d.Outcome $d.Unlimited}}
+{{if or $d.Problem $d.Operation $d.Place $d.Outcome $d.Unlimited $d.DiskFull}}
 <div class="notices" aria-label="what is wrong with {{$t.Spec.Name}}, and what is happening">
   {{with $d.Problem}}<div class="nrow{{if $d.Broken}} bad{{end}}" role="{{if $d.Broken}}alert{{else}}status{{end}}">
     <p class="nhead"><strong>{{.}}</strong></p>
@@ -10,7 +10,8 @@
     {{if or $d.Evidence $d.AppMemory}}<details class="evidence"><summary>Evidence{{if $d.AppMemory}} and affected tenants{{end}}</summary><div class="evbody">{{range $d.Evidence}}<p>{{.}}</p>{{end}}{{with $d.AppMemory}}<p>{{.Evidence}}</p>{{if and $d.MemoryHigh $.Edits}}<p class="fixes"><a href="{{raise $t}}">Only this tenant: raise its limit</a></p>{{end}}{{end}}</div></details>{{end}}
   </div>{{end}}
   {{with $d.Place}}{{$r := $d.Rollout}}<div class="nrow{{if .Blocks}} bad{{end}}">{{if .Blocks}}<span class="lead-in">It blocks {{$t.App}}'s rollout</span> of revision {{.To}}: {{blocked $r.Rollout $r.Blockers}}{{else if .Moved}}{{if and $d.StartingNow (not $d.Operation)}}Starting{{else}}Rolling out{{end}}: it moved from revision {{.From}} to {{.To}} in {{waveSaid .Wave .WaveName}}.{{else if .Held}}Held on revision {{.From}} while {{$t.App}} rolls out revision {{.To}}.{{else if ne .From .To}}Rolling out: it runs revision {{.From}} and moves to {{.To}} in {{waveSaid .Wave .WaveName}}.{{else if $d.Unchanged}}{{$d.Unchanged}}{{else}}{{$t.App}}'s revision {{.To}} changes nothing for {{$t.Spec.Name}}: it kept its container.{{end}} <a href="/apps/{{$t.App}}#r-{{.Name}}">Its place in the rollout</a></div>{{end}}
-  {{with $d.Unlimited}}<div class="nrow" role="status"><p class="flat"><span class="st warn"></span> <span class="lead-in">It runs with no {{.}} limit</span>, which the other tenants have: it can take what they need.</p>{{if $.Edits}}<div class="nacts"><a href="{{setLimit $t.Spec.Name $d.RiskField}}" class="button small">Set its {{.}} limit</a></div>{{end}}</div>{{end}}
+  {{with $d.DiskFull}}<div class="nrow bad" role="alert"><p class="nhead"><strong>It {{.}}.</strong></p><p class="cause">Requests that write fail until its limit is raised, or data is removed.</p>{{if $.Edits}}<div class="nacts"><a href="{{setLimit $t.Spec.Name "diskGB"}}" class="button primary">Raise its disk limit</a></div>{{end}}</div>{{end}}
+  {{with $d.Unlimited}}<div class="nrow" role="status"><p class="flat"><span class="st warn"></span> <span class="lead-in">It runs with no {{.}} limit</span>{{with $d.RiskOthers}}: the other tenants have {{.}}{{else}}, which the other tenants have{{end}}. Without one, it can take what they need.</p>{{if $.Edits}}<div class="nacts"><a href="{{setLimit $t.Spec.Name $d.RiskField}}" class="button small">Set its {{.}} limit</a></div>{{end}}</div>{{end}}
   {{with $d.Outcome}}<div class="nrow{{if eq (.KindFor $t.Spec.Name) "bad"}} bad{{end}}" role="status"><span class="lead-in">{{$t.App}}'s revision {{.Revision}}{{with .Change}} ({{.}}){{end}}</span> reached it, by {{if same .Event.Actor $d.Me}}you{{else}}{{who .Event.Actor}}{{end}} {{ago .Event.At}} ago: {{.For $t.Spec.Name}}. <a href="/apps/{{$t.App}}#outcome">All {{len .Reached}} on {{$t.App}}</a></div>{{end}}
   {{with $d.Operation}}<div class="nrow{{if eq .Kind "bad"}} bad{{end}}" role="status" id="operation"><span class="lead-in">{{.Said}}</span> by {{if same .Event.Actor $d.Me}}you{{else}}{{who .Event.Actor}}{{end}} {{ago .Event.At}} ago: {{.State}}. <a href="/events?tenant={{$t.Spec.Name}}&amp;show=all">Its events</a>{{if eq .Kind "busy"}} · <a href="/tenants/{{$t.Spec.Name}}/logs?follow=1">Follow its logs</a>{{end}}{{with .From}}{{if $d.Head.Edits}} · <a href="/tenants/{{$t.Spec.Name}}/settings?do=review&amp;app={{.}}#review">Change it back to {{.}}</a>{{end}}{{end}}{{with .Owner}}<span class="op-owner"><span class="st warn"></span>{{.}}</span>{{end}}</div>{{end}}
 </div>
@@ -82,7 +83,7 @@
     <div><dt>Data at</dt><dd class="mono">{{if $t.Spec.DataPath}}{{$t.Spec.DataPath}}{{else}}none{{end}}</dd></div>
     <div><dt>Runs as</dt><dd class="mono">{{$t.Spec.User}}</dd></div>
     <div><dt>Root file system</dt><dd>{{if $t.Spec.WritableRoot}}writable{{else}}read-only{{end}}</dd></div>
-    {{range $d.Limits}}<div><dt>{{.Heading}}</dt><dd class="num">{{if .Risk}}<span class="st warn">{{.Short}}</span>{{else}}{{.Short}}{{end}}{{if eq .From "node"}} <span class="dim">node default</span>{{else if eq .From "none"}} <span class="dim">no default on {{.Node}}</span>{{end}}</dd></div>{{end}}
+    {{range $d.Limits}}<div><dt>{{.Heading}}</dt><dd class="num">{{if .Risk}}<span class="st warn">{{.Short}}</span>{{else}}{{.Short}}{{end}}{{if eq .From "node"}} <span class="dim">node default, <span class="nowrap">{{.Node}}</span></span>{{else if eq .From "none"}} <span class="dim">no default on <span class="nowrap">{{.Node}}</span></span>{{end}}</dd></div>{{end}}
     <div><dt>Generation</dt><dd class="num">{{$t.Generation}}</dd></div>
   </dl>
 </section>

@@ -199,16 +199,38 @@
   // A page that comes back with a problem beside a field goes to it, and
   // puts the caret on the line it names.
   const problem = document.querySelector("[data-focus]");
-  if (problem) {
+  // Its landing runs once the page has loaded and the browser has jumped
+  // to the address's #fragment, which would take the focus away again: the
+  // field's table heading and its row in view, the caret in the field.
+  const land = () => {
     const field = document.querySelector("textarea[data-line]");
     if (field) {
       const line = Number(field.dataset.line), lines = field.value.split("\n");
       const at = lines.slice(0, Math.max(0, line - 1)).join("\n").length + (line > 1 ? 1 : 0);
       field.focus();
       field.setSelectionRange(at, at + (lines[line - 1] || "").length);
+      problem.scrollIntoView({ block: "center" });
+      return;
     }
-    problem.scrollIntoView({ block: "center" });
-    if (!field) problem.focus();
+    const row = problem.closest("tr");
+    const table = row && row.closest("table");
+    const heading = table && table.previousElementSibling && table.previousElementSibling.matches(".head") ? table.previousElementSibling : null;
+    if (heading) {
+      heading.scrollIntoView({ block: "start" });
+      if (row.getBoundingClientRect().bottom > innerHeight - 16) row.scrollIntoView({ block: "center" });
+    } else {
+      problem.scrollIntoView({ block: "center" });
+    }
+    problem.focus({ preventScroll: true });
+    if (problem.select && problem.value) problem.select();
+  };
+  if (problem) {
+    // The script lands it: the browser's own jump to the #fragment, which
+    // may come later and take the focus, is left nothing to jump to. The
+    // fragment stays in the link, for a page without this script.
+    if (location.hash) history.replaceState(history.state, "", location.pathname + location.search);
+    if (document.readyState === "complete") requestAnimationFrame(land);
+    else addEventListener("load", () => requestAnimationFrame(land), { once: true });
   }
   // A form marked as a draft (a tenant's settings) is not lost by leaving
   // the page, or by sending another form of it, without a word: the page

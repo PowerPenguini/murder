@@ -73,6 +73,26 @@ for (const width of [1440, 390]) {
 }
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
 
+// Round 11: "Set its disk limit" lands with the caret in the Disk field,
+// and the row and its table's heading in view below any sticky bar.
+for (const width of [1440, 390]) {
+  await send("Emulation.setDeviceMetricsOverride", { width, height: 844, deviceScaleFactor: 1, mobile: width < 600 });
+  // From the tenant's page, as a person comes: a new page, not a jump
+  // within this one.
+  await go("/tenants/atlas");
+  await go("/tenants/atlas/settings?set=diskGB#diskGB");
+  await sleep(400);
+  const landed = JSON.parse(await ev(`JSON.stringify((() => {
+    const field = document.getElementById("f-diskGB"), row = document.getElementById("diskGB");
+    const head = row.closest("table").previousElementSibling;
+    const bar = document.querySelector(".side"), barBottom = innerWidth <= 760 ? bar.getBoundingClientRect().bottom : 0;
+    const r = row.getBoundingClientRect(), h = head.getBoundingClientRect();
+    return { focus: document.activeElement && document.activeElement.id, value: field.value, rowTop: Math.round(r.top), rowBottom: Math.round(r.bottom), headTop: Math.round(h.top), barBottom: Math.round(barBottom), height: innerHeight };
+  })())`));
+  check(`the disk limit link at ${width}: caret in the field, row and heading in view`, landed.focus === "f-diskGB" && landed.rowTop >= landed.barBottom && landed.rowBottom <= landed.height && landed.headTop >= landed.barBottom, JSON.stringify(landed));
+}
+await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+
 // 1.3: a removed added row is not restored with the draft.
 await go("/tenants/atlas/settings");
 await ev(`(() => { const set = (el, v) => { el.value = v; el.dispatchEvent(new Event("input", {bubbles: true})); }; document.querySelector("[data-add-row=env]").click(); const n = document.querySelectorAll("input[name=envnewname]"); set(n[n.length-1], "TEST_REMOVAL"); set(document.querySelectorAll("input[name=envnewvalue]")[n.length-1], "x"); const rows = document.querySelectorAll("#env tr.add"); rows[rows.length-1].querySelector(".remove-row").click(); sessionStorage.setItem("murder-resume", location.pathname); return 1; })()`);

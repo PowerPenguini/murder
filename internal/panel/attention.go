@@ -143,6 +143,17 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 				n.Fixes = append(n.Fixes, fix{"Logs", href + "/logs"})
 			}
 		}
+		// Its data fills its disk limit: it cannot write. Broken, first.
+		if row.Use != nil && row.Use.DiskFull() {
+			n.Bad = true
+			text := diskFullText(*row.Use)
+			n.Reasons = append([]string{"data fills its disk limit"}, n.Reasons...)
+			texts = append([]string{text}, texts...)
+			causes = append([]cause{{" cannot write: " + strings.TrimPrefix(text, "cannot write: "), itSentence(text)}}, causes...)
+			if n.Primary == nil {
+				n.Primary = &fix{"Raise its disk limit", setLimit(name, "diskGB")}
+			}
+		}
 		if memHigh {
 			// Said once: an exit out of memory says it already.
 			if !slices.ContainsFunc(n.Reasons, func(r string) bool { return strings.HasPrefix(r, "out of memory") }) {
@@ -508,4 +519,10 @@ func setLimit(tenant, field string) string {
 		anchor = "memory"
 	}
 	return "/tenants/" + url.PathEscape(tenant) + "/settings?set=" + field + "#" + anchor
+}
+
+// diskFullText says a tenant's data fills its disk limit: "cannot write:
+// its data, 1.4 GB, fills its 1 GB disk limit".
+func diskFullText(u tenantUse) string {
+	return "cannot write: its data, " + size(float64(u.DiskUsed)) + ", fills its " + size(float64(u.DiskLimit)) + " disk limit"
 }

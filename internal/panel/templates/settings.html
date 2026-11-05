@@ -34,12 +34,15 @@
     <div class="actions"><button type="submit" name="do" value="save" class="danger">Change {{$t.Spec.Name}} to {{.To}}</button>{{if $d.FromMenu}}<a href="/tenants/{{$t.Spec.Name}}" class="button">Back: keep {{.From}}</a>{{else}}<button type="submit" name="do" value="edit" formnovalidate>Keep editing</button>{{end}}</div>
     {{else}}
     <h2>Review {{plural (len $d.Review) "change" "changes"}} to {{$t.Spec.Name}}</h2>
+    {{with $d.DiskShort}}<div class="notice bad" role="alert"><p class="flat"><span class="lead-in">{{.}}.</span></p>{{with $d.Disk.Suggest}}<p class="flat spaced">Give it at least {{$d.Disk.Least}} GB{{if $d.Disk.Others}}; the other tenants have {{$d.Disk.Others}} GB{{end}}.</p>{{end}}</div>{{end}}
     <table class="list changes">
       <thead><tr><th>Setting</th><th>Now</th><th>After</th></tr></thead>
-      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="After">{{.To}}</td></tr>{{end}}</tbody>
+      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="After">{{if .Risk}}<span class="st warn">{{.To}}</span>{{else}}{{.To}}{{end}}</td></tr>{{end}}</tbody>
     </table>
     <p class="hint">{{if $d.Restarts}}Saving gives {{$t.Spec.Name}} a new container{{if $t.Archived}} once it is restored{{else}}: it answers no request for the few seconds it starts{{end}}. Its data stays.{{else}}Rollout flags change no container: they count from {{$t.App}}'s next rollout.{{end}} Exactly these values are saved; to change them, keep editing.</p>
-    <div class="actions"><button type="submit" name="do" value="save" class="primary">{{if $d.Restarts}}Save and restart {{$t.Spec.Name}}{{else}}Save{{end}}</button><button type="submit" name="do" value="edit">Keep editing</button></div>
+    {{if $d.DiskShort}}<p class="hint flat">Saving it stops {{$t.Spec.Name}} writing. Type {{$t.Spec.Name}} to confirm.</p>
+    <input type="text" name="confirm" class="confirm-field" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">{{end}}
+    <div class="actions"><button type="submit" name="do" value="save" class="{{if $d.DiskShort}}danger{{else}}primary{{end}}">{{if $d.Restarts}}Save and restart {{$t.Spec.Name}}{{else}}Save{{end}}</button><button type="submit" name="do" value="edit" formnovalidate>Keep editing</button></div>
     {{end}}
   </form>
 </section>
@@ -63,7 +66,7 @@
           <td class="l-sub dim" data-label="Source">{{.Source}}{{if .Risk}}<span class="risk-why">The other tenants have one: without it, {{$t.Spec.Name}} can take what they need.</span>{{end}}</td>
           <td class="l-sub own" data-label="Override">
             <label class="check own-check"><input type="checkbox" name="own-{{.Name}}" value="on" class="own-switch"{{if .Own}} checked{{end}} aria-label="Override {{.Label}}"><span class="sw" aria-hidden="true">Override</span></label>
-            <span class="own-field"><input type="{{.Kind}}" id="f-{{.Name}}" name="{{.Name}}" value="{{.Value}}"{{with .Inherit}} data-inherit="{{.}}"{{end}}{{if eq .Kind "number"}} min="{{.Min}}" step="{{.Step}}" class="short"{{else}} class="mono-input"{{end}} autocomplete="off" spellcheck="false"{{if .Proposed}} aria-describedby="p-{{.Name}}"{{else if .Empty}} aria-describedby="p-{{.Name}}" aria-invalid="true" data-focus{{else if .Open}} data-focus{{end}}>{{if eq .Kind "number"}} <span class="dim small">{{.Unit}}</span>{{end}}</span>{{if .Proposed}}<span class="caption" id="p-{{.Name}}">{{if .Own}}proposed; {{.Effective}} now{{else}}proposed: inherit again{{end}}</span>{{else if .Empty}}<span class="caption red" id="p-{{.Name}}">Give a value, or turn Override off</span>{{end}}
+            <span class="own-field"><input type="{{.Kind}}" id="f-{{.Name}}" name="{{.Name}}" value="{{.Value}}"{{with .Inherit}} data-inherit="{{.}}"{{end}}{{if eq .Kind "number"}} min="{{.Min}}" step="{{.Step}}" class="short"{{else}} class="mono-input"{{end}} autocomplete="off" spellcheck="false"{{if .Proposed}} aria-describedby="p-{{.Name}}"{{else if .Empty}} aria-describedby="p-{{.Name}}" aria-invalid="true" data-focus{{else if .Open}} data-focus{{end}}>{{if eq .Kind "number"}} <span class="dim small">{{.Unit}}</span>{{end}}</span>{{if .Proposed}}<span class="caption" id="p-{{.Name}}">{{if .Own}}proposed; {{.Effective}} now{{else}}proposed: inherit again{{end}}</span>{{else if .Empty}}<span class="caption red" id="p-{{.Name}}">Give a value, or turn Override off</span>{{end}}{{with .Note}}<span class="caption">{{.}}</span>{{end}}
           </td>
         </tr>
       {{end}}

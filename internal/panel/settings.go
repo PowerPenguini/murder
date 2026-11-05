@@ -37,6 +37,8 @@ type settingField struct {
 	Inherit string
 	Risk    bool
 	Open    bool
+	// Note says what helps choose its value ("its data: 1.4 GB").
+	Note string
 	// Kind, Step and Min shape the input.
 	Kind, Step, Min string
 }
@@ -113,10 +115,14 @@ func secretFields(app spec.Tenant, stored, draft spec.Secrets) []secretField {
 }
 
 // settingChange is one changed field of a review.
-type settingChange struct{ Field, From, To string }
+type settingChange struct {
+	Field, From, To string
+	// Risk says the change leaves it without a limit the others have.
+	Risk bool
+}
 
 // settingFields are a tenant's fields, from its app's spec and its form.
-func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map[string]bool) []settingField {
+func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map[string]bool, disk diskRoom) []settingField {
 	stored := formOf(t)
 	appSource := "Inherited from " + t.App
 	if stored.Image != "" {
@@ -137,9 +143,29 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map
 		if l.Value > 0 {
 			inherit = strconv.FormatFloat(l.Value, 'f', -1, 64)
 		}
-		out = append(out, settingField{Name: l.Field, Label: l.Label, Unit: shape[l.Field][0], Kind: "number", Step: shape[l.Field][1], Min: "0",
+		f := settingField{Name: l.Field, Label: l.Label, Unit: shape[l.Field][0], Kind: "number", Step: shape[l.Field][1], Min: "0",
 			Own: v[0] != "" || empty || open, Open: open, Value: v[0], Inherit: inherit, Stored: v[1] != "", Proposed: v[0] != v[1] && !empty && !open,
-			Effective: l.Short(), Source: l.Source(), Risk: l.Risk, Empty: empty})
+			Effective: l.Short(), Source: l.Source(), Risk: l.Risk, Empty: empty}
+		if l.Field == "diskGB" {
+			// What the limit must leave it, said beside its value; opened
+			// by a link, it starts at a value that leaves room.
+			if disk.Used > 0 {
+				f.Note = "its data: " + size(float64(disk.Used))
+			}
+			if open && disk.Suggest() > 0 {
+				f.Value, f.Inherit = strconv.Itoa(disk.Suggest()), strconv.Itoa(disk.Suggest())
+				f.Note = "suggested: " + strconv.Itoa(disk.Suggest()) + " GB"
+				if disk.Others > 0 && disk.Suggest() == disk.Others {
+					f.Note += ", as the other tenants have"
+				} else if disk.Least > 0 {
+					f.Note += ", twice its data"
+				}
+				if disk.Used > 0 {
+					f.Note += "; its data: " + size(float64(disk.Used))
+				}
+			}
+		}
+		out = append(out, f)
 	}
 	return out
 }
@@ -180,11 +206,11 @@ func envRows(app spec.Tenant, own, draft map[string]string) []envRow {
 }
 
 // settingChanges says what a form changes of a tenant's settings.
-func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingChange {
+func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited map[string]bool) []settingChange {
 	was := formOf(t)
 	var out []settingChange
 	if form.App != was.App {
-		out = append(out, settingChange{"App", was.App, form.App + ": its whole spec changes"})
+		out = append(out, settingChange{"App", was.App, form.App + ": its whole spec changes", false})
 	}
 	say := func(own, unit string, appValue string) string {
 		if own == "" {
@@ -195,24 +221,17 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 		}
 		return own + unit + ", tenant override"
 	}
-	appImage := imageDigest(app.Image)
-	pairs := []struct {
-		field, unit, before, after, app string
-	}{
-		{"Image", "", was.Image, form.Image, appImage},
-		{"Memory", " MB", was.MemoryMB, form.MemoryMB, strconv.Itoa(app.Limits.MemoryMB)},
-		{"CPUs", "", was.CPUs, form.CPUs, strconv.FormatFloat(app.Limits.CPUs, 'f', -1, 64)},
-		{"Processes", "", was.PIDs, form.PIDs, strconv.Itoa(app.Limits.PIDs)},
-		{"Disk", " GB", was.DiskGB, form.DiskGB, strconv.Itoa(app.Limits.DiskGB)},
+	if was.Image != form.Image {
+		out = append(out, settingChange{"Image", say(was.Image, "", imageDigest(app.Image)), say(form.Image, "", imageDigest(app.Image)), false})
 	}
-	for _, p := range pairs {
-		if p.before != p.after {
-			from, to := say(p.before, p.unit, p.app), say(p.after, p.unit, p.app)
-			// Memory as the panel says it everywhere: 1 GB, not 1024 MB.
-			if p.field == "Memory" {
-				from, to = sayMemory(p.before, p.app, t.App), sayMemory(p.after, p.app, t.App)
-			}
-			out = append(out, settingChange{p.field, from, to})
+	// Its limits as every page says them, now and with the form's values.
+	afterOwn, _ := form.overrides()
+	now := limitsOf(t, limited)
+	then := limitsInEffect(afterOwn.Limits.Or(app.Limits), afterOwn.Limits, t.App, t.Status, t.Node, limited)
+	for i, n := range now {
+		a := then[i]
+		if n.Value != a.Value || n.From != a.From {
+			out = append(out, settingChange{n.Label, n.WithSource(), a.WithSource(), a.Risk})
 		}
 	}
 	before, _ := was.overrides()
@@ -234,25 +253,25 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 			if appHas {
 				to = appValue + ", inherited from " + t.App
 			}
-			out = append(out, settingChange{"Environment " + key, old + ", tenant override", to})
+			out = append(out, settingChange{"Environment " + key, old + ", tenant override", to, false})
 		case !had && has:
 			from := "unset"
 			if appHas {
 				from = appValue + ", inherited from " + t.App
 			}
-			out = append(out, settingChange{"Environment " + key, from, next + ", tenant override"})
+			out = append(out, settingChange{"Environment " + key, from, next + ", tenant override", false})
 		case had && has && old != next:
-			out = append(out, settingChange{"Environment " + key, old, next})
+			out = append(out, settingChange{"Environment " + key, old, next, false})
 		}
 	}
 	for _, key := range slices.Sorted(maps.Keys(after.Secrets)) {
 		if _, had := before.Secrets[key]; !had {
-			out = append(out, settingChange{"Secret " + key, "none of its own", "made once, " + after.Secrets[key].Kind})
+			out = append(out, settingChange{"Secret " + key, "none of its own", "made once, " + after.Secrets[key].Kind, false})
 		}
 	}
 	for _, key := range slices.Sorted(maps.Keys(before.Secrets)) {
 		if _, has := after.Secrets[key]; !has {
-			out = append(out, settingChange{"Secret " + key, "tenant override", "dropped: the app's, if it has one"})
+			out = append(out, settingChange{"Secret " + key, "tenant override", "dropped: the app's, if it has one", false})
 		}
 	}
 	flag := func(on string, yes, no string) string {
@@ -262,10 +281,10 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm) []settingC
 		return no
 	}
 	if form.Flags && form.Canary != was.Canary {
-		out = append(out, settingChange{"Canary", flag(was.Canary, "yes", "no"), flag(form.Canary, "yes: takes "+t.App+"'s changes first", "no: with the others")})
+		out = append(out, settingChange{"Canary", flag(was.Canary, "yes", "no"), flag(form.Canary, "yes: takes "+t.App+"'s changes first", "no: with the others"), false})
 	}
 	if form.Flags && form.Hold != was.Hold {
-		out = append(out, settingChange{"Held", flag(was.Hold, "yes", "no"), flag(form.Hold, "yes: stays on the revision it runs", "no: follows "+t.App+" again")})
+		out = append(out, settingChange{"Held", flag(was.Hold, "yes", "no"), flag(form.Hold, "yes: stays on the revision it runs", "no: follows "+t.App+" again"), false})
 	}
 	return out
 }
@@ -280,18 +299,6 @@ func reviewToken(tenant string, form settingsForm) string {
 		hash.Write([]byte{0})
 	}
 	return hex.EncodeToString(hash.Sum(nil))[:32]
-}
-
-// sayMemory says a memory setting of the review: its own, the app's, or
-// the node's default.
-func sayMemory(own, app, appName string) string {
-	switch {
-	case own != "":
-		return exactMemory(atoi(own)) + ", tenant override"
-	case app == "" || app == "0":
-		return "the node's default"
-	}
-	return exactMemory(atoi(app)) + ", inherited from " + appName
 }
 
 // exactMemory says an amount of memory without rounding it: in GB when

@@ -39,7 +39,7 @@ var limitDefs = []struct {
 	of                func(spec.Limits) float64
 	said              func(float64) string
 }{
-	{"memory", "memoryMB", "Memory", func(l spec.Limits) float64 { return float64(l.MemoryMB) }, func(v float64) string { return memory(int(v)) }},
+	{"memory", "memoryMB", "Memory", func(l spec.Limits) float64 { return float64(l.MemoryMB) }, func(v float64) string { return exactMemory(int(v)) }},
 	{"CPU", "cpus", "CPUs", func(l spec.Limits) float64 { return l.CPUs }, func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }},
 	{"process", "pids", "Processes", func(l spec.Limits) float64 { return float64(l.PIDs) }, func(v float64) string { return strconv.Itoa(int(v)) }},
 	{"disk", "diskGB", "Disk", func(l spec.Limits) float64 { return float64(l.DiskGB) }, func(v float64) string { return strconv.Itoa(int(v)) + " GB" }},
@@ -107,9 +107,22 @@ func (l limitInEffect) InEffect() string {
 	case fromNone:
 		return "no limit (no default on " + l.Node + ")"
 	case fromUnknown:
-		return "the node's default (not known)"
+		return "not known (" + l.Node + " has not said its default)"
 	}
 	return l.Said
+}
+
+// WithSource says it with where it comes from, always, as a settings
+// review does: "768 MB, tenant override", "10 GB, inherited from web",
+// "1 (node default on fsn-1)", "no limit (no default on fsn-1)".
+func (l limitInEffect) WithSource() string {
+	switch l.From {
+	case fromOwn:
+		return l.Said + ", tenant override"
+	case fromApp:
+		return l.Said + ", inherited from " + l.App
+	}
+	return l.InEffect()
 }
 
 // Short says it for a figure: its value, or "none", or "not known".
@@ -157,4 +170,55 @@ func risks(limits []limitInEffect) (keys []string, field string) {
 // Heading names it in a tenant's Container section.
 func (l limitInEffect) Heading() string {
 	return map[string]string{"memory": "Memory limit", "CPU": "CPU limit", "process": "Processes, most", "disk": "Disk limit"}[l.Key]
+}
+
+// othersHave is the value of a limit ("disk", ...) most of the other
+// running tenants run with, 0 if none has one: the larger on a tie.
+func othersHave(t api.Tenant, tenants []api.Tenant, key string) float64 {
+	count := map[float64]int{}
+	for _, o := range tenants {
+		if o.Spec.Name == t.Spec.Name || o.Archived() || o.Spec.Suspended {
+			continue
+		}
+		for _, l := range limitsOf(o, map[string]bool{}) {
+			if l.Key == key && l.Value > 0 {
+				count[l.Value]++
+			}
+		}
+	}
+	best, most := 0.0, 0
+	for v, n := range count {
+		if n > most || n == most && v > best {
+			best, most = v, n
+		}
+	}
+	return best
+}
+
+// diskRoom is what a disk limit must leave a tenant: its data's size in
+// bytes (-1 not measured), what the others have, and a value to suggest:
+// what the others have, or twice its data, whichever is more.
+type diskRoom struct {
+	Used          int64
+	Others, Least int
+}
+
+func diskRoomOf(t api.Tenant, tenants []api.Tenant, used int64) diskRoom {
+	r := diskRoom{Used: used, Others: int(othersHave(t, tenants, "disk"))}
+	if used > 0 {
+		r.Least = int((2*used + (1 << 30) - 1) >> 30)
+	}
+	return r
+}
+
+// Suggest is a disk limit, in GB, that leaves it room: 0 if nothing says.
+func (r diskRoom) Suggest() int { return max(r.Others, r.Least) }
+
+// Short says why a disk limit of gb is too small for its data, "" if it
+// is not (0 is no limit).
+func (r diskRoom) Short(tenant string, gb int) string {
+	if gb <= 0 || r.Used <= 0 || int64(gb)<<30 > r.Used {
+		return ""
+	}
+	return strconv.Itoa(gb) + " GB is less than the " + size(float64(r.Used)) + " " + tenant + " holds: it could no longer write until the limit is raised"
 }

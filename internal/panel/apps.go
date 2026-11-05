@@ -836,6 +836,10 @@ type settingsData struct {
 	// the app's limit, when it is likely the better fix.
 	Suggest    string
 	SuggestApp *appMemory
+	// Disk is what a disk limit must leave it; DiskShort says, in a review,
+	// why the one reviewed is too small.
+	Disk      diskRoom
+	DiskShort string
 	// AppChange is what another app does to it, when the form moves it;
 	// FromMenu says the review was asked from its menu, not an editor.
 	AppChange *appChange
@@ -884,12 +888,15 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 	}
 	// The limits other running tenants have, for its own risks.
 	var limited map[string]bool
-	if all, err := s.backend.List(ctx); err == nil {
-		limited = runningLimits(all)
+	var everyone []api.Tenant
+	if listed, err := s.backend.List(ctx); err == nil {
+		everyone, limited = listed, runningLimits(listed)
 	} else {
 		limited = map[string]bool{}
 	}
-	data.Fields = settingFields(t, appSpec, form, limited)
+	// What a disk limit must leave it: its data, and what the others have.
+	data.Disk = s.diskRoom(ctx, t, everyone)
+	data.Fields = settingFields(t, appSpec, form, limited, data.Disk)
 	if r.Method == http.MethodGet && form.MemoryMB != formOf(t).MemoryMB {
 		data.Suggest = "Proposed: memory " + memory(atoi(form.MemoryMB)) + " as a tenant override, up from " + memory(t.Spec.Limits.MemoryMB) + ". Nothing changes until you review and save it."
 		var tenants []api.Tenant
@@ -935,7 +942,8 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 	}
 	if r.FormValue("do") == "review" {
 		data.Reviewing = true
-		data.Review = settingChanges(t, appSpec, form)
+		data.Review = settingChanges(t, appSpec, form, limited)
+		data.DiskShort = data.Disk.Short(t.Spec.Name, diskAfter(t, appSpec, form))
 		data.Token = reviewToken(t.Spec.Name, form)
 		data.Restarts = form.containerChanged(t)
 	}
@@ -1035,6 +1043,13 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		// Only what was reviewed is saved.
 		if r.FormValue("reviewed") != reviewToken(name, form) {
 			refuse("these are not the values you reviewed: review them again before saving")
+			return
+		}
+		// A disk limit its data already fills stops it writing: its name
+		// typed, as for any change that can stop it serving.
+		if s.diskRoom(ctx, t, nil).Short(name, diskAfter(t, s.appSpecOf(ctx, r, t.App), form)) != "" && strings.TrimSpace(r.FormValue("confirm")) != name {
+			r.Form.Set("do", "review")
+			refuse("type " + name + " to give it a disk limit its data already fills")
 			return
 		}
 		// Another app is a new spec on its data: its name typed, as for
@@ -1225,4 +1240,39 @@ func (d *reviewDrafts) get(app, id string) (string, bool) {
 		return "", false
 	}
 	return draft.file, true
+}
+
+// diskRoom reads what a disk limit must leave tenant t: its data's size, as
+// its node measured it, and what the other tenants of all have.
+func (s *Server) diskRoom(ctx context.Context, t api.Tenant, all []api.Tenant) diskRoom {
+	used := int64(-1)
+	if u, ok := s.usageNow(ctx).Tenants[t.Spec.Name]; ok {
+		used = u.DiskUsed
+	}
+	return diskRoomOf(t, all, used)
+}
+
+// appSpecOf is app's spec, empty if it cannot be read.
+func (s *Server) appSpecOf(ctx context.Context, r *http.Request, app string) spec.Tenant {
+	if apps, err := s.Apps(s.actor(userOf(r))).Apps(ctx); err == nil {
+		for _, a := range apps {
+			if a.Name == app {
+				return a.Spec
+			}
+		}
+	}
+	return spec.Tenant{}
+}
+
+// diskAfter is the disk limit, in GB, the form would give the tenant: its
+// own, else its app's; 0 for none.
+func diskAfter(t api.Tenant, app spec.Tenant, form settingsForm) int {
+	own, _ := form.overrides()
+	if own.Limits.DiskGB > 0 {
+		return own.Limits.DiskGB
+	}
+	if form.App == t.App || form.App == "" {
+		return app.Limits.DiskGB
+	}
+	return 0
 }

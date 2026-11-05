@@ -1091,3 +1091,7 @@ table.changes tr.same td { color: var(--dim); }
 /* On a phone the top bar's status keeps to one line: "Paused · 1s"; its
    reason is in its title, as the whole sentence always is. */
 @media (max-width: 760px) { .livestate .why { display: none; } }
+/* A row or heading reached by the address's #fragment stops clear of a
+   phone's sticky bar. */
+tr[id], .head { scroll-margin-top: var(--s4); }
+@media (max-width: 760px) { tr[id], .head { scroll-margin-top: 72px; } }
