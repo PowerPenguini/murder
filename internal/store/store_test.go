@@ -583,7 +583,7 @@ func TestEventsKeepNoEnvValuesAndShowRollouts(t *testing.T) {
 			t.Fatalf("an env value reached the audit log: %+v", e)
 		}
 	}
-	want := []string{"c tenant.archived ", "b app.rolled-out app changed env", "a tenant.updated overrides: env SMTP_PASSWORD", "a tenant.created overrides: env SMTP_PASSWORD"}
+	want := []string{"c tenant.archived ", "b app.rolled-out app changed env", "a tenant.updated changes: env SMTP_PASSWORD changed; overrides: env SMTP_PASSWORD", "a tenant.created overrides: env SMTP_PASSWORD"}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("events = %q, want %q", lines, want)
 	}
@@ -934,5 +934,22 @@ func TestADroppedSecretKeepsItsValue(t *testing.T) {
 	}
 	if back.Sealed["SESSION"] != value {
 		t.Fatalf("changed back, SESSION is %q, was %q", back.Sealed["SESSION"], value)
+	}
+}
+
+// A settings event says what changed, without env values; a flags event
+// says the flags that changed.
+func TestChangesAreSaid(t *testing.T) {
+	was := spec.Overrides{Env: map[string]string{"TZ": "UTC", "OLD": "1"}, Secrets: map[string]spec.Secret{"KEY": {Kind: "hex"}}, Limits: spec.Limits{DiskGB: 2, MemoryMB: 768}}
+	now := spec.Overrides{Env: map[string]string{"TZ": "Europe/Berlin", "NEW": "2"}, Secrets: map[string]spec.Secret{"API": {Kind: "hex"}}, Limits: spec.Limits{DiskGB: 10}, Image: "ghcr.io/x:2"}
+	want := "image set to ghcr.io/x:2, memory limit back to the app's, disk limit 2 GB → 10 GB, env NEW set, env TZ changed, env OLD removed, secret API added, secret KEY removed"
+	if got := ChangesDetail(was, now); got != want {
+		t.Fatalf("changes = %q, want %q", got, want)
+	}
+	if got := ChangesDetail(was, was); got != "" {
+		t.Fatalf("no change said %q", got)
+	}
+	if got := FlagsDetail(true, false, true, true); got != "held: no → yes" {
+		t.Fatalf("flags = %q", got)
 	}
 }

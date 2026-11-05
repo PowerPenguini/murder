@@ -45,6 +45,8 @@ type tenantUsage struct {
 	// fills its disk limit, as Full's sentence says.
 	DataUnread bool
 	Full       string
+	// DataUsed is its data's size in bytes, as DataText says it.
+	DataUsed int64
 }
 
 // chartSpans are the spans a tenant's charts show, and the step of each.
@@ -132,6 +134,7 @@ func (s *Server) tenantUsage(ctx context.Context, name, rangeName string) *tenan
 		u.Memory.MemoryLimit = size(float64(limit))
 	}
 	if used := series.Now.DiskUsed; used >= 0 {
+		u.DataUsed = used
 		u.DataText = size(float64(used))
 		// Nothing read yet (a new container) is not an empty volume.
 		if used == 0 {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"slices"
@@ -795,7 +796,9 @@ func envValue(value string) string {
 
 // readForm reads a form of at most formLimit, saying so if it is larger.
 func readForm(w http.ResponseWriter, r *http.Request) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, formLimit)
+	if r.PostForm == nil {
+		r.Body = http.MaxBytesReader(w, r.Body, formLimit)
+	}
 	if err := r.ParseForm(); err != nil {
 		status := http.StatusBadRequest
 		if errors.As(err, new(*http.MaxBytesError)) {
@@ -804,7 +807,33 @@ func readForm(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, fmt.Sprintf("the form is not read: %v (at most %d KB)", err, formLimit>>10), status)
 		return false
 	}
+	// A browser sends a form's line breaks as CRLF (a textarea, a hidden
+	// field that holds lines): read as the LF the panel writes, so a value
+	// sent back unchanged is unchanged.
+	for _, values := range []url.Values{r.Form, r.PostForm} {
+		for key, list := range values {
+			for i, v := range list {
+				if strings.ContainsRune(v, '\r') {
+					list[i] = strings.ReplaceAll(strings.ReplaceAll(v, "\r\n", "\n"), "\r", "\n")
+				}
+			}
+			values[key] = list
+		}
+	}
 	return true
+}
+
+// formText reads every form a page posts as readForm does, before its
+// handler: line breaks as LF, wherever the form is read.
+func formText(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			if media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); media == "application/x-www-form-urlencoded" && !readForm(w, r) {
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func hasKey(m map[string]string, key string) bool {
@@ -1112,6 +1141,7 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		// Its container's settings, then its rollout flags, which change
 		// no container.
 		var said []string
+		live := form.diskOnly(t)
 		if form.containerChanged(t) {
 			applied, err := agent.Configure(ctx, name, api.TenantRequest{App: form.App, Overrides: overrides, Generation: form.Generation})
 			if err != nil {
@@ -1123,6 +1153,8 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 				said = append(said, name+"'s settings are unchanged")
 			case applied.Tenant.Archived():
 				said = append(said, name+"'s settings are changed; it runs them once restored")
+			case live:
+				said = append(said, name+"'s disk limit is set on its data: nothing restarted")
 			default:
 				said = append(said, name+"'s settings are changed: it gets a new container")
 			}
@@ -1133,10 +1165,17 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 				refuse(err.Error())
 				return
 			}
-			said = append(said, "it takes rollouts "+map[bool]string{true: "never: it is held", false: map[bool]string{true: "first: it is a canary", false: "with the others"}[canary]}[hold])
+			said = append(said, flagsSaid(name, canary, hold))
 		}
 		if len(said) == 0 {
 			said = append(said, name+"'s settings are unchanged")
+		}
+		// Its disk limit alone: to its Overview, where the save's line says
+		// it was set and nothing restarted, and a full disk's red notice
+		// is gone.
+		if live && !form.flagsChanged(t) && !t.Archived() {
+			http.Redirect(w, r, "/tenants/"+url.PathEscape(name)+"#operation", http.StatusSeeOther)
+			return
 		}
 		// Another app: to its Overview, where the new container is followed.
 		if form.App != t.App {
@@ -1152,7 +1191,7 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", err.Error())
 			return
 		}
-		back("done", fmt.Sprintf("rollout flags saved: %s takes rollouts %s", name, map[bool]string{true: "never: it is held", false: map[bool]string{true: "first: it is a canary", false: "with the others"}[canary]}[hold]))
+		back("done", "rollout flags saved: "+flagsSaid(name, canary, hold))
 	case "rotate":
 		key := r.FormValue("key")
 		if !typed(r.FormValue("confirm"), key) {
@@ -1167,6 +1206,18 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		back("problem", "unknown action")
 	}
+}
+
+// flagsSaid says how a tenant takes its app's rollouts: "atlas is held:
+// it takes no rollouts until released".
+func flagsSaid(name string, canary, hold bool) string {
+	switch {
+	case hold:
+		return name + " is held: it takes no rollouts until released"
+	case canary:
+		return name + " is a canary: it takes rollouts first"
+	}
+	return name + " takes rollouts with the others"
 }
 
 func atoi(s string) int {

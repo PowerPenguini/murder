@@ -797,8 +797,16 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	if use != nil && use.Full != "" {
 		data.DiskFull = use.Full
 		if op := data.Operation; op != nil && op.Kind == "ok" {
-			op.State, op.Kind = "it runs", "warn"
+			op.State, op.Kind = "applied", "warn"
+			if op.Live {
+				op.State = "applied, nothing restarted"
+			}
 		}
+	}
+	// A disk limit raised over the data that filled the one before: it
+	// writes again, and nothing restarted.
+	if op := data.Operation; op != nil && op.Live && op.Kind == "ok" && use != nil && data.DiskFull == "" && op.DiskFrom > 0 && int64(op.DiskFrom)<<30 <= use.DataUsed {
+		op.State = "it can write again, nothing restarted"
 	}
 	// A disk limit its node did not set: it runs with the one it had.
 	if st := t.Status; st != nil {

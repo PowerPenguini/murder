@@ -1344,6 +1344,63 @@ func OverridesDetail(overrides spec.Overrides) string {
 	return "overrides: " + strings.Join(parts, "; ")
 }
 
+// ChangesDetail names what a change of a tenant's overrides changes, as
+// its event says it, without env values: "disk limit 2 GB → 10 GB, env TZ
+// changed, secret API_KEY added". A limit that goes takes the app's again.
+func ChangesDetail(was, now spec.Overrides) string {
+	var parts []string
+	switch {
+	case was.Image == now.Image:
+	case now.Image == "":
+		parts = append(parts, "image back to the app's")
+	case was.Image == "":
+		parts = append(parts, "image set to "+now.Image)
+	default:
+		parts = append(parts, "image "+was.Image+" → "+now.Image)
+	}
+	limit := func(name string, from, to float64, unit string) {
+		said := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) + unit }
+		switch {
+		case from == to:
+		case to == 0:
+			parts = append(parts, name+" back to the app's")
+		case from == 0:
+			parts = append(parts, name+" set to "+said(to))
+		default:
+			parts = append(parts, name+" "+said(from)+" → "+said(to))
+		}
+	}
+	limit("memory limit", float64(was.Limits.MemoryMB), float64(now.Limits.MemoryMB), " MB")
+	limit("CPU limit", was.Limits.CPUs, now.Limits.CPUs, "")
+	limit("process limit", float64(was.Limits.PIDs), float64(now.Limits.PIDs), "")
+	limit("disk limit", float64(was.Limits.DiskGB), float64(now.Limits.DiskGB), " GB")
+	for _, key := range slices.Sorted(maps.Keys(now.Env)) {
+		if old, ok := was.Env[key]; !ok {
+			parts = append(parts, "env "+key+" set")
+		} else if old != now.Env[key] {
+			parts = append(parts, "env "+key+" changed")
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(was.Env)) {
+		if _, ok := now.Env[key]; !ok {
+			parts = append(parts, "env "+key+" removed")
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(now.Secrets)) {
+		if old, ok := was.Secrets[key]; !ok {
+			parts = append(parts, "secret "+key+" added")
+		} else if old != now.Secrets[key] {
+			parts = append(parts, "secret "+key+" changed")
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(was.Secrets)) {
+		if _, ok := now.Secrets[key]; !ok {
+			parts = append(parts, "secret "+key+" removed")
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generation int64, actor string) (Record, bool, error) {
 	overrides = overrides.Normalized()
 	var unchanged Record
@@ -1382,6 +1439,10 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 		detail := OverridesDetail(overrides)
 		if detail == "" {
 			detail = "no overrides"
+		}
+		// What changed first, for a reader of the log: the whole after it.
+		if changes := ChangesDetail(record.Overrides, overrides); changes != "" {
+			detail = "changes: " + changes + "; " + detail
 		}
 		if record.App != app {
 			detail = "app " + record.App + " → " + app + "; " + detail

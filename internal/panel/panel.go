@@ -152,7 +152,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /auth/enroll/finish", s.Auth.enrollFinish)
 		mux.HandleFunc("POST /auth/logout", s.Auth.logout)
 	}
-	mux.Handle("/", s.signedIn(pages))
+	mux.Handle("/", s.signedIn(formText(pages)))
 	// Bounded outermost: a request refused before its body is read still
 	// has its body held to a time, which the server's draining of it
 	// keeps to.

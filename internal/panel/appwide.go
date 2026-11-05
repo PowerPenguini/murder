@@ -206,6 +206,37 @@ type operation struct {
 	// the data's owner differs from the new app's user, while it is not
 	// yet healthy: the review's warning, kept.
 	From, Owner string
+	// Live says it changed the disk limit alone, which its node sets as
+	// it runs: no new container. DiskFrom and DiskTo are the limits, in
+	// GB, before and after (0 the app's).
+	Live             bool
+	DiskFrom, DiskTo int
+}
+
+// diskChange reads a settings event's change of the disk limit alone:
+// "changes: disk limit 2 GB → 10 GB; …". ok is false for any other change,
+// or one with another app.
+func diskChange(detail string) (from, to int, ok bool) {
+	if strings.HasPrefix(detail, "app ") {
+		return 0, 0, false
+	}
+	part, _, _ := strings.Cut(detail, "; ")
+	change, found := strings.CutPrefix(part, "changes: disk limit ")
+	if !found || strings.Contains(change, ", ") {
+		return 0, 0, false
+	}
+	gb := func(s string) int { n, _ := strconv.Atoi(strings.TrimSuffix(s, " GB")); return n }
+	switch {
+	case change == "back to the app's":
+		return 0, 0, true
+	case strings.HasPrefix(change, "set to "):
+		return 0, gb(strings.TrimPrefix(change, "set to ")), true
+	}
+	a, b, found := strings.Cut(change, " → ")
+	if !found {
+		return 0, 0, false
+	}
+	return gb(a), gb(b), true
 }
 
 // operations are the actions whose outcome a tenant's page follows.
@@ -248,6 +279,22 @@ func operationOf(t api.Tenant, events []store.Event, now time.Time) *operation {
 				op.From, op.Said = from, "Changed from app "+from+" to "+t.App
 			}
 		}
+		// A disk limit alone: set on its data as it runs, nothing restarts.
+		if e.Action == "tenant.updated" {
+			if from, to, ok := diskChange(e.Detail); ok {
+				op.Live, op.DiskFrom, op.DiskTo = true, from, to
+				switch {
+				case to == 0:
+					op.Said = "Disk limit back to " + t.App + "'s"
+				case from == 0:
+					op.Said = "Disk limit set to " + strconv.Itoa(to) + " GB"
+				case to > from:
+					op.Said = "Disk limit raised to " + strconv.Itoa(to) + " GB"
+				default:
+					op.Said = "Disk limit lowered to " + strconv.Itoa(to) + " GB"
+				}
+			}
+		}
 		status := t.Status
 		switch {
 		case t.Archived():
@@ -260,6 +307,8 @@ func operationOf(t api.Tenant, events []store.Event, now time.Time) *operation {
 			// Its node has not taken the change up yet: a new container,
 			// or (a disk limit alone) none.
 			op.State, op.Kind = "its node is applying it", "busy"
+		case status.Phase == "running" && status.Healthy && op.Live:
+			op.State, op.Kind = "done: nothing restarted", "ok"
 		case status.Phase == "running" && status.Healthy:
 			op.State, op.Kind = "done: it runs healthy", "ok"
 		case status.Phase == "running":

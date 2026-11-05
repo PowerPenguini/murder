@@ -842,7 +842,7 @@ func TestSettingsAsOneForm(t *testing.T) {
 	env := html.UnescapeString(between(body, `<input type="hidden" name="env" value="`, `"`))
 	save := page(url.Values{"do": {"save"}, "reviewed": {token}, "env": {env}, "flags": {"1"}, "canary": {""}, "hold": {""}})
 	_, body = submit(t, client, server, "/tenants/atlas/settings", save, server.URL)
-	if !strings.Contains(body, "it gets a new container; it takes rollouts with the others") {
+	if !strings.Contains(body, "it gets a new container; atlas takes rollouts with the others") {
 		t.Fatalf("after saving:\n%s", body)
 	}
 	after, _ := cluster.Get(ctx, "atlas")
@@ -1355,11 +1355,15 @@ func TestADiskLimitBelowItsDataIsNotSet(t *testing.T) {
 	}
 	saved := fields(again)
 	saved.Set("do", "save")
-	submit(t, client, server, "/tenants/atlas/settings", saved, server.URL)
+	// Saved, it goes to atlas's Overview, where the save's line says it.
+	_, landed := submit(t, client, server, "/tenants/atlas/settings", saved, server.URL)
+	if op := between(landed, `id="operation"`, "</div>"); !strings.Contains(op, `<span class="lead-in">Disk limit set to 10 GB</span>`) || !strings.Contains(op, "done: nothing restarted") {
+		t.Fatalf("after the save:\n%s", op)
+	}
 	if after, _ := cluster.Get(context.Background(), "atlas"); after.Overrides.Limits.DiskGB != 10 || after.Status.Phase != "running" || after.Status.Generation != after.Generation {
 		t.Fatalf("after a disk limit alone: %+v, status %+v", after.Overrides.Limits, after.Status)
 	}
-	if _, page := get(t, server.URL+"/tenants/atlas"); !strings.Contains(between(page, `id="operation"`, "</div>"), "done: it runs healthy") {
+	if _, page := get(t, server.URL+"/tenants/atlas"); !strings.Contains(between(page, `id="operation"`, "</div>"), "done: nothing restarted") {
 		t.Fatalf("a disk limit set live is not done:\n%s", between(page, `id="operation"`, "</div>"))
 	}
 	// Set behind the panel's back, below its data: its node did not set
@@ -1399,8 +1403,8 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 	}
 	// The red notice says it once; the operation line only records the
 	// save, in grey: never "done".
-	if strings.Contains(page, "done: it runs healthy") || !strings.Contains(page, `<div class="nrow" role="status" id="operation"><span class="lead-in">Settings saved</span> by jan`) ||
-		!strings.Contains(between(page, `id="operation"`, "</div>"), ": it runs. ") {
+	if strings.Contains(page, "done:") || !strings.Contains(page, `<div class="nrow" role="status" id="operation"><span class="lead-in">Disk limit set to 2 GB</span> by jan`) ||
+		!strings.Contains(between(page, `id="operation"`, "</div>"), ": applied, nothing restarted. ") {
 		t.Fatalf("a tenant that cannot write said done:\n%s", between(page, `id="operation"`, "</div>"))
 	}
 	if notices := between(page, `<div class="notices"`, "<section"); strings.Count(notices, "cannot write") != 1 || strings.Index(notices, "It cannot write") > strings.Index(notices, `id="operation"`) {
@@ -1464,8 +1468,69 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 	for _, name := range []string{"generation", "reviewed", "app", "image", "memoryMB", "cpus", "pids", "diskGB", "env", "secrets", "flags", "canary", "hold"} {
 		save.Set(name, html.UnescapeString(between(review, `name="`+name+`" value="`, `"`)))
 	}
-	submit(t, client, server, "/tenants/atlas/settings", save, server.URL)
-	if _, page = get(t, server.URL+"/tenants/atlas"); strings.Contains(page, "cannot write") || !strings.Contains(between(page, `id="operation"`, "</div>"), "done: it runs healthy") {
+	// The save lands on its Overview: the red notice gone, the save's line
+	// saying what it did.
+	if _, page = submit(t, client, server, "/tenants/atlas/settings", save, server.URL); strings.Contains(page, "cannot write") ||
+		!strings.Contains(said(between(page, `id="operation"`, "</div>")), `<span class="lead-in">Disk limit raised to 10 GB</span> by you`) ||
+		!strings.Contains(between(page, `id="operation"`, "</div>"), ": it can write again, nothing restarted. ") {
 		t.Fatalf("raised, atlas:\n%s", between(page, `<div class="notices"`, "<section"))
+	}
+}
+
+// A browser sends a form's line breaks as CRLF. For a tenant with two env
+// overrides and a secret, a review sent back so (as "Use 10 GB instead"
+// does) changes the disk limit alone: nothing restarts; and a save of its
+// Held flag alone saves the flag, and no settings.
+func TestFormsAsABrowserSendsThem(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	atlas, _ := cluster.Get(context.Background(), "atlas")
+	if len(atlas.Overrides.Env) < 2 || len(atlas.Overrides.Secrets) < 1 {
+		t.Fatalf("atlas's overrides: %+v", atlas.Overrides)
+	}
+	crlf := func(values url.Values) url.Values {
+		for key, list := range values {
+			for i, v := range list {
+				list[i] = strings.ReplaceAll(v, "\n", "\r\n")
+			}
+			values[key] = list
+		}
+		return values
+	}
+	// As the review's hidden fields come back from a browser.
+	fieldsOf := func(page string) url.Values {
+		values := url.Values{}
+		for _, name := range []string{"generation", "reviewed", "app", "image", "memoryMB", "cpus", "pids", "diskGB", "env", "secrets", "flags", "canary", "hold", "suggest"} {
+			values.Set(name, html.UnescapeString(between(page, `name="`+name+`" value="`, `"`)))
+		}
+		return crlf(values)
+	}
+	form := crlf(settingsValues(atlas))
+	form.Set("do", "review")
+	form.Set("diskGB", "1")
+	_, small := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	if !strings.Contains(fieldsOf(small).Get("env"), "\r\n") {
+		t.Fatalf("the env sent back has no CRLF: %q", fieldsOf(small).Get("env"))
+	}
+	use := fieldsOf(small)
+	use.Set("do", "usedisk")
+	_, again := submit(t, client, server, "/tenants/atlas/settings", use, server.URL)
+	if !strings.Contains(again, "nothing restarts") || !strings.Contains(again, `class="primary">Save</button>`) || strings.Contains(again, "Save and restart") || !strings.Contains(again, "Review 1 change to atlas") {
+		t.Fatalf("the review sent back with CRLF:\n%s", between(again, "<h2>Review", "</form>"))
+	}
+	// Held alone, its review and its save as a browser sends them.
+	atlas, _ = cluster.Get(context.Background(), "atlas")
+	held := crlf(settingsValues(atlas))
+	held.Set("do", "review")
+	held.Set("hold", "on")
+	_, review := submit(t, client, server, "/tenants/atlas/settings", held, server.URL)
+	save := fieldsOf(review)
+	save.Set("do", "save")
+	_, body := submit(t, client, server, "/tenants/atlas/settings", save, server.URL)
+	if !strings.Contains(body, "atlas is held: it takes no rollouts until released") || strings.Contains(body, "settings are") {
+		t.Fatalf("a Held save sent with CRLF:\n%s", between(body, `role="status"`, "</div>"))
+	}
+	events, _ := cluster.Events(context.Background(), store.EventQuery{Tenant: "atlas"})
+	if after, _ := cluster.Get(context.Background(), "atlas"); !after.Hold || events[0].Action != "tenant.flags" || events[1].Action == "tenant.updated" && events[1].At.After(time.Now().Add(-time.Second)) {
+		t.Fatalf("held %v; the newest events %s, %s: the settings were saved too", after.Hold, events[0].Action, events[1].Action)
 	}
 }

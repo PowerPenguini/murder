@@ -143,6 +143,48 @@ check("two ArrowDowns reached every tenant now, focus kept", after2.pace === "no
 check("the address is a GET review with the pace", after2.url.includes("/apps/web/review?") && after2.url.includes("pace=now") && url1.includes("/apps/web/review?"), after2.url);
 dialogs = 0; await send("Page.reload"); await sleep(1500);
 check("a reload asks nothing and keeps the pace", dialogs === 0 && (await ev(`document.querySelector("input[name=pace]:checked").value`)) === "now");
+// Clicks what selector names, a form's button, and waits for the page it
+// leads to: the browser submits the form itself, as a person's click does.
+const clickAndWait = async (selector) => {
+  const clicked = await ev(`(() => { const b = document.querySelector(${JSON.stringify(selector)}); if (!b) return false; window.__before = 1; b.click(); return true; })()`);
+  if (!clicked) return false;
+  for (let i = 0; i < 60; i++) {
+    await sleep(250);
+    const v = (await send("Runtime.evaluate", { expression: "window.__before === undefined && document.readyState", returnByValue: true })).result?.result?.value;
+    if (v === "complete") break;
+  }
+  await sleep(500);
+  return true;
+};
+const text = (selector) => ev(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); return e ? e.textContent.replace(/\\s+/g, " ").trim() : ""; })()`);
+
+// Round 13: the settings review's forms, submitted by the browser for atlas,
+// which has two env overrides and a secret of its own: the browser sends
+// their lines as CRLF. "Use 10 GB instead" changes the disk limit alone:
+// nothing restarts, a plain Save, and the save lands on its Overview. Held
+// alone saves the flag, not the settings.
+await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+await go("/tenants/atlas/settings");
+await ev(`(() => { const box = document.querySelector("input[name=own-diskGB]"); box.checked = true; box.dispatchEvent(new Event("change", {bubbles: true})); const f = document.getElementById("f-diskGB"); f.value = "1"; f.dispatchEvent(new Event("input", {bubbles: true})); return 1; })()`);
+dialogs = 0;
+await clickAndWait("#settings button.primary[value=review]");
+const small = await text("form.review-box");
+await clickAndWait("button[value=usedisk]");
+const instead = { review: await text("form.review-box"), save: await text("form.review-box button[value=save]") };
+check("Use 10 GB instead, sent by the browser: nothing restarts, a plain Save", small.includes("its node does not set a disk limit below its data") && instead.review.includes("nothing restarts") && instead.save === "Save" && !instead.review.includes("restarts, its data stays"), JSON.stringify(instead));
+await clickAndWait("form.review-box button[value=save]");
+const landed = { path: await ev("location.pathname"), op: await text("#operation") };
+check("the disk limit's save lands on its Overview: set, nothing restarted", landed.path === "/tenants/atlas" && landed.op.startsWith("Disk limit set to 10 GB by you") && landed.op.includes("nothing restarted"), JSON.stringify(landed));
+for (const [hold, said] of [[true, "atlas is held: it takes no rollouts until released"], [false, "atlas is a canary: it takes rollouts first"]]) {
+  await go("/tenants/atlas/settings");
+  await ev(`(() => { const h = document.querySelector("input[name=hold]"); h.checked = ${hold}; h.dispatchEvent(new Event("change", {bubbles: true})); return 1; })()`);
+  await clickAndWait("#settings button.primary[value=review]");
+  const review = await text("form.review-box");
+  await clickAndWait("form.review-box button[value=save]");
+  const flash = await text(".notice[role=status]");
+  check(`Held ${hold ? "on" : "off"} alone, sent by the browser: the flag saved, no settings`, review.includes("Rollout flags change no container") && flash.includes(said) && !flash.includes("settings are"), JSON.stringify({ review: review.slice(0, 160), flash }));
+}
+
 // Round 12: "Raise its disk limit", on a tenant whose data fills its disk
 // limit, lands as "Set" does, from the overview and from its page: the
 // caret in the field, a value that leaves room in it, the row red. Last:
@@ -159,5 +201,15 @@ for (const width of [1440, 390]) {
     check(`"Raise its disk limit" from ${from} at ${width}: caret in the field, 10 in it, the row red and in view`, href.includes("set=diskGB") && inView(raised) && raised.value === "10" && raised.red, JSON.stringify(raised));
   }
 }
+// Round 13: the raise reviewed and saved by the browser lands on the
+// tenant's Overview: the red notice gone, the save's line saying it.
+await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+await go("/tenants/atlas");
+await go("/tenants/atlas/settings?set=diskGB#diskGB");
+await clickAndWait("#settings button.primary[value=review]");
+const raiseReview = await text("form.review-box");
+await clickAndWait("form.review-box button[value=save]");
+const raised = { path: await ev("location.pathname"), op: await text("#operation"), red: await ev(`!!document.querySelector(".notices [role=alert]")`) };
+check("the raise, saved by the browser: on its Overview, it can write again", raiseReview.includes("It lets atlas write again") && raised.path === "/tenants/atlas" && raised.op.startsWith("Disk limit raised to 10 GB by you") && raised.op.includes("it can write again, nothing restarted") && !raised.red, JSON.stringify(raised));
 ws.close(); chrome.kill(); await sleep(500);
 process.exit(results.every(Boolean) ? 0 : 1);

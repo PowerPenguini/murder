@@ -360,6 +360,9 @@ func (a *demoActor) Configure(_ context.Context, name string, request api.Tenant
 	if detail == "" {
 		detail = "no overrides"
 	}
+	if changes := store.ChangesDetail(t.Overrides, request.Overrides.Normalized()); changes != "" {
+		detail = "changes: " + changes + "; " + detail
+	}
 	if request.App != t.App {
 		detail = "app " + t.App + " → " + request.App + "; " + detail
 	}
@@ -507,8 +510,24 @@ func (a *demoActor) RestoreRollout(_ context.Context, name string, tenants []str
 	return api.RolloutRestored{App: app, Tenants: tenants}, nil
 }
 
-func (a *demoActor) SetFlags(_ context.Context, name string, flags api.TenantFlags) (api.Tenant, error) {
-	return a.change(name, "tenant.flags", "", func(t *api.Tenant) error {
+func (a *demoActor) SetFlags(ctx context.Context, name string, flags api.TenantFlags) (api.Tenant, error) {
+	// As the store: nothing changed is not recorded, and the event says
+	// the flags that did change.
+	t, err := a.Get(ctx, name)
+	if err != nil {
+		return t, err
+	}
+	canary, hold := t.Canary, t.Hold
+	if flags.Canary != nil {
+		canary = *flags.Canary
+	}
+	if flags.Hold != nil {
+		hold = *flags.Hold
+	}
+	if canary == t.Canary && hold == t.Hold {
+		return t, nil
+	}
+	return a.change(name, "tenant.flags", store.FlagsDetail(t.Canary, t.Hold, canary, hold), func(t *api.Tenant) error {
 		if flags.Canary != nil {
 			t.Canary = *flags.Canary
 		}

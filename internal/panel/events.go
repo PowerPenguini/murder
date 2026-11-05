@@ -205,6 +205,24 @@ func (r eventRow) AppPredicate() string {
 	return appPredicates[r.Action]
 }
 
+// Brief is its detail in a line: for a change of a tenant's settings,
+// what changed ("disk limit 2 GB → 10 GB"), its whole own set left to the
+// opened record.
+func (r eventRow) Brief() string {
+	if !strings.Contains(r.Detail, "changes: ") {
+		return r.Detail
+	}
+	var parts []string
+	for _, part := range strings.Split(r.Detail, "; ") {
+		if rest, ok := strings.CutPrefix(part, "changes: "); ok {
+			parts = append(parts, rest)
+		} else if !strings.HasPrefix(part, "its own: ") && part != "no overrides" {
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
 // Oldest is the oldest event of a run.
 func (r eventRow) Oldest() store.Event {
 	if len(r.Group) == 0 {

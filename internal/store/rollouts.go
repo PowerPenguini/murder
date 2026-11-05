@@ -428,6 +428,20 @@ func (s *SQLite) Restored(name, image string) error {
 	return err
 }
 
+// FlagsDetail says what a change of a tenant's rollout flags changes:
+// "held: no → yes", "canary: yes → no".
+func FlagsDetail(canary, hold, wantCanary, wantHold bool) string {
+	yes := map[bool]string{true: "yes", false: "no"}
+	var parts []string
+	if canary != wantCanary {
+		parts = append(parts, "canary: "+yes[canary]+" → "+yes[wantCanary])
+	}
+	if hold != wantHold {
+		parts = append(parts, "held: "+yes[hold]+" → "+yes[wantHold])
+	}
+	return strings.Join(parts, ", ")
+}
+
 // SetFlags makes a tenant a canary or not, held or not. A tenant no longer
 // held, while its app rolls nothing out, runs the app's newest revision.
 func (s *SQLite) SetFlags(name string, canary, hold *bool, actor string) (Record, error) {
@@ -456,7 +470,7 @@ func (s *SQLite) SetFlags(name string, canary, hold *bool, actor string) (Record
 				return err
 			}
 		}
-		return event(tx, now, actor, "tenant.flags", name, record.App, fmt.Sprintf("canary %v, hold %v", wantCanary, wantHold))
+		return event(tx, now, actor, "tenant.flags", name, record.App, FlagsDetail(record.Canary, record.Hold, wantCanary, wantHold))
 	})
 	if err == errUnchanged {
 		return s.Get(name)

@@ -327,7 +327,7 @@ func TestARolloutFromThePanel(t *testing.T) {
 	}
 	// A tenant's flags.
 	_, body = submit(t, client, server, "/tenants/atlas/settings", url.Values{"do": {"flags"}, "canary": {"on"}}, server.URL)
-	if !strings.Contains(body, "atlas takes rollouts first: it is a canary") {
+	if !strings.Contains(body, "atlas is a canary: it takes rollouts first") {
 		t.Fatalf("after the flags:\n%s", body)
 	}
 	if tenant, _ := agent.Get(ctx, "atlas"); !tenant.Canary || tenant.Hold {
