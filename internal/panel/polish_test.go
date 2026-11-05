@@ -108,6 +108,9 @@ func TestActionsReturnWhereTheyWereAsked(t *testing.T) {
 		"/tenants/atlas/logs#x":                "/tenants/atlas",
 		"/tenants/atlas/logs\r\nSet-Cookie: x": "/tenants/atlas",
 		"/tenants/atlas%2Flogs":                "/tenants/atlas",
+		"/tenants/atlas%2flogs":                "/tenants/atlas",
+		"/%2F/evil.example":                    "/tenants/atlas",
+		"/TENANTS/atlas/logs":                  "/tenants/atlas",
 		"/apps/web":                            "/tenants/atlas",
 		"javascript:alert(1)":                  "/tenants/atlas",
 	} {
