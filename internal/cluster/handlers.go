@@ -123,16 +123,16 @@ func (c *Cluster) membersOnly(handle http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ours := c.config.Store.Cluster()
 		if theirs := r.Header.Get(clusterHeader); ours == "" || theirs != ours {
-			writeError(w, http.StatusForbidden, fmt.Errorf("node %s belongs to cluster %q, not %q", c.config.Node, ours, theirs))
+			c.refuse(w, r, refusedCluster, fmt.Errorf("node %s belongs to cluster %q, not %q", c.config.Node, ours, theirs))
 			return
 		}
 		name, key, err := peerIdentity(r.TLS)
 		if err != nil {
-			writeError(w, http.StatusForbidden, err)
+			c.refuse(w, r, refusedMember, err)
 			return
 		}
 		if err := c.member(name, key); err != nil {
-			writeError(w, http.StatusForbidden, err)
+			c.refuse(w, r, refusedMember, err)
 			return
 		}
 		handle(w, r)
@@ -157,6 +157,26 @@ func (c *Cluster) membersOrLeaving(handle http.HandlerFunc) http.HandlerFunc {
 		}
 		handle(w, r)
 	}
+}
+
+// Why a request of another node is refused, as the log says it.
+const (
+	refusedCluster  = "refused a request of another cluster"
+	refusedMember   = "refused a request of a node that is not a member"
+	refusedAdmitted = "refused a request of a host no invitation admitted"
+	refusedKey      = "refused a node registering an identity key its certificate does not carry"
+)
+
+// refuse answers a request of another node 403, and says so in the log
+// as a warning: a node refused, such as one removed from the cluster or
+// one whose identity key is not the one pinned, is a fault to look into.
+// Such a node tries again every second or so, so it is said at once, then
+// at most once a minute for each reason and node, with how many were left
+// out.
+func (c *Cluster) refuse(w http.ResponseWriter, r *http.Request, reason string, err error) {
+	name, _, _ := peerIdentity(r.TLS)
+	c.refusals.Warn(c.config.Log, refusedSource(name, r.RemoteAddr), reason, "from", r.RemoteAddr, "node", name, "request", r.Method+" "+r.URL.Path, "error", err)
+	writeError(w, http.StatusForbidden, err)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -221,7 +241,7 @@ func (c *Cluster) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 	}
 	name, key, err := peerIdentity(r.TLS)
 	if err != nil {
-		writeError(w, http.StatusForbidden, err)
+		c.refuse(w, r, refusedMember, err)
 		return
 	}
 	var request identityRequest
@@ -231,7 +251,7 @@ func (c *Cluster) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 	}
 	// A node registers the key it presents, for its own name: none other.
 	if encoded := EncodeKey(key); encoded == "" || request.Key != encoded {
-		writeError(w, http.StatusForbidden, fmt.Errorf("node %s registers only the identity key its certificate carries", name))
+		c.refuse(w, r, refusedKey, fmt.Errorf("node %s registers only the identity key its certificate carries", name))
 		return
 	}
 	err = c.registerHere(r.Context(), name, key)
@@ -329,7 +349,7 @@ func (c *Cluster) handleIndex(w http.ResponseWriter, _ *http.Request) {
 // invitation admitted, or to a member.
 func (c *Cluster) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	if err := c.admitted(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
+		c.refuse(w, r, refusedAdmitted, err)
 		return
 	}
 	name, err := c.config.Store.SnapshotFile()
@@ -564,7 +584,7 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	term := c.raft.CurrentTerm()
 	name, key, err := peerIdentity(r.TLS)
 	if err != nil {
-		writeError(w, http.StatusForbidden, err)
+		c.refuse(w, r, refusedAdmitted, err)
 		return
 	}
 	encoded := EncodeKey(key)
@@ -599,7 +619,7 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// The write checks the same, as part of the replicated change, and
 	// never puts another key in the place of a voter's.
 	if err := c.admitted(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
+		c.refuse(w, r, refusedAdmitted, err)
 		return
 	}
 	if request.Check {
@@ -621,7 +641,7 @@ func (c *Cluster) handleJoin(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrNotLeader) || errors.Is(err, ErrNoLeader):
 			c.moved(w)
 		case errors.Is(err, store.ErrNotAdmitted):
-			writeError(w, http.StatusForbidden, err)
+			c.refuse(w, r, refusedAdmitted, err)
 		case errors.Is(err, store.ErrConflict):
 			writeError(w, http.StatusConflict, err)
 		default:
@@ -959,7 +979,7 @@ func (c *Cluster) replicaSender(w http.ResponseWriter, r *http.Request) (string,
 	}
 	sender, err := peerName(r.TLS)
 	if err != nil {
-		writeError(w, http.StatusForbidden, err)
+		c.refuse(w, r, refusedMember, err)
 		return "", false
 	}
 	return sender, true

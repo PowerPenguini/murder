@@ -378,6 +378,9 @@ func runAgent(args []string) error {
 		if member != nil && !waitCaughtUp(ctx, member, log) {
 			return
 		}
+		// The edge takes this node's routes from now on: they are the
+		// cluster's, not what the node had before it went down.
+		apiHandler.CaughtUp()
 		if member != nil {
 			if err := st.Away(node, time.Time{}); errors.Is(err, store.ErrFrozen) {
 				log.Info("this node is not marked back from a restart while an upgrade freezes changes", "error", err)
@@ -411,13 +414,7 @@ func runAgent(args []string) error {
 	// A clean stop, as for a reboot, marks the node away for a while: the
 	// leader does not power it off for not answering meanwhile.
 	if member != nil && runErr == nil {
-		// During an upgrade the freeze itself keeps the node from being
-		// failed over.
-		if err := st.Away(node, time.Now().Add(awayFor)); errors.Is(err, store.ErrFrozen) {
-			log.Info("this node is not marked away while an upgrade freezes changes", "error", err)
-		} else if err != nil {
-			log.Warn("mark this node away while it restarts", "error", err)
-		}
+		markAway(st, node, time.Now().Add(awayFor), awayTimeout, log)
 	}
 	// Tenant containers keep running while the agent is down or restarting;
 	// only the agent's own listeners stop. A pass, also one an API call
@@ -562,14 +559,54 @@ func keepPublic(ctx context.Context, st *store.SQLite, node string, values []str
 // for not answering: long enough for a reboot.
 const awayFor = 10 * time.Minute
 
+// awayTimeout bounds marking the node away as the agent stops: a node that
+// cannot reach the cluster's leader does not hold its stop for long.
+const awayTimeout = 5 * time.Second
+
+// awayMarker marks a node away; *store.SQLite is one.
+type awayMarker interface {
+	Away(node string, until time.Time) error
+	NodeKey(name string) (key string, ok bool)
+}
+
+// markAway marks node away until until, as its agent stops cleanly. A node
+// the state no longer names, such as one removed from the cluster, is not
+// marked: no leader takes a change from it, and none fails it over. Nor
+// does the stop wait for the mark longer than timeout: the change goes
+// through the leader, which a node cut off from it never reaches; a write
+// still under way then ends as the agent closes its part in the cluster.
+func markAway(st awayMarker, node string, until time.Time, timeout time.Duration, log *slog.Logger) {
+	if _, member := st.NodeKey(node); !member {
+		log.Info("this node is not marked away: it is no member of the cluster")
+		return
+	}
+	done := make(chan error, 1)
+	go func() { done <- st.Away(node, until) }()
+	select {
+	case err := <-done:
+		// During an upgrade the freeze itself keeps the node from being
+		// failed over.
+		if errors.Is(err, store.ErrFrozen) {
+			log.Info("this node is not marked away while an upgrade freezes changes", "error", err)
+		} else if err != nil {
+			log.Warn("mark this node away while it restarts", "error", err)
+		}
+	case <-time.After(timeout):
+		log.Warn("this node could not be marked away in time, as the cluster's leader did not answer; it stops all the same, and may be failed over if it stays down", "timeout", timeout.String())
+	}
+}
+
 // waitCaughtUp returns once this node has applied what the cluster has, or
 // false when ctx ends first.
 func waitCaughtUp(ctx context.Context, member *cluster.Cluster, log *slog.Logger) bool {
 	for attempt := 0; ; attempt++ {
-		err := member.CatchUp()
+		err := member.CatchUpContext(ctx)
 		// A node not yet in a cluster decides alone.
 		if err == nil || errors.Is(err, cluster.ErrNotJoined) {
 			return true
+		}
+		if ctx.Err() != nil {
+			return false
 		}
 		if attempt%10 == 0 {
 			log.Warn("starting no tenants until this node has what the cluster decided", "error", err)

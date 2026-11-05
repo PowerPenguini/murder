@@ -38,6 +38,7 @@ import (
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
 	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/throttle"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 )
 
@@ -147,8 +148,12 @@ type Cluster struct {
 	// joinKeys are the members' identity keys an invitation named, by
 	// name, which this node trusts until it holds the cluster's state.
 	joinKeys atomic.Pointer[map[string]string]
-	// done stops the node's upkeep of its members as it closes.
+	// done stops the node's upkeep of its members as it closes, and ends
+	// what waits on the cluster.
 	done chan struct{}
+	// refusals says which requests of other nodes were refused, without
+	// a line for each time one tries again.
+	refusals throttle.Log
 }
 
 // Start opens the node's log, listens for other nodes and has the store
@@ -534,7 +539,7 @@ func (c *Cluster) commit(batch store.Batch) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+	ctx, cancel := c.bounded(context.Background(), commitTimeout)
 	defer cancel()
 	if batch.LeaderOnly {
 		return c.commitHere(ctx, batch, data)
@@ -602,8 +607,11 @@ func (c *Cluster) commitHere(ctx context.Context, batch store.Batch, data []byte
 // has acknowledged. Every acknowledged change has been applied by the
 // leader: the leader names how far it has applied, once it has confirmed
 // that it still leads, and the node waits until it has applied as far.
-func (c *Cluster) catchUp() error {
-	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+func (c *Cluster) catchUp() error { return c.catchUpWithin(context.Background()) }
+
+// catchUpWithin is catchUp, given up once ctx ends.
+func (c *Cluster) catchUpWithin(parent context.Context) error {
+	ctx, cancel := c.bounded(parent, commitTimeout)
 	defer cancel()
 	var target uint64
 	for {
@@ -636,6 +644,28 @@ func (c *Cluster) catchUp() error {
 // CatchUp returns once this node has applied every change the cluster has
 // acknowledged, such as one another node just made.
 func (c *Cluster) CatchUp() error { return c.catchUp() }
+
+// CatchUpContext is CatchUp, given up once ctx ends: a node that cannot
+// reach the cluster's leader, such as one removed while it was down,
+// would otherwise hold whoever waits for as long as a change may take.
+func (c *Cluster) CatchUpContext(ctx context.Context) error { return c.catchUpWithin(ctx) }
+
+// bounded is ctx, ended after timeout, or as soon as the node closes:
+// nothing waits on a cluster that is gone, such as a write left over as
+// the agent stops.
+func (c *Cluster) bounded(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	if c.done != nil {
+		go func() {
+			select {
+			case <-c.done:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return ctx, cancel
+}
 
 // leaderApplied is the index of the last change the leader applied, which
 // is at least that of every change acknowledged. A new leader first applies

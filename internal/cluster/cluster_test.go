@@ -64,6 +64,8 @@ type node struct {
 	invites Invites
 	// unregistered leaves the node's identity key unregistered.
 	unregistered bool
+	// log takes the node's log; none if nil.
+	log io.Writer
 }
 
 func newNode(t *testing.T, name string) *node {
@@ -90,6 +92,14 @@ func newNodeWith(t *testing.T, name string, set func(*node)) *node {
 	return n
 }
 
+// logTo is where the node logs.
+func (n *node) logTo() io.Writer {
+	if n.log == nil {
+		return io.Discard
+	}
+	return n.log
+}
+
 func (n *node) start() {
 	n.t.Helper()
 	st, err := store.Open(filepath.Join(n.dir, "murder.db"), store.Options{NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: n.key.NewSealed})
@@ -99,7 +109,7 @@ func (n *node) start() {
 	c, err := Start(Config{
 		Node: n.name, Address: n.address, Dir: filepath.Join(n.dir, "raft"),
 		Seeds: n.key.DeriveAll("cluster ca"), Store: st, Replicas: n.replicas, Keys: nodeKeys{n}, Invites: n.invites, unregistered: n.unregistered,
-		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Log:    slog.New(slog.NewTextHandler(n.logTo(), nil)),
 		Fatal:  func(err error) { n.fatal <- err },
 		stable: n.stable,
 		raft: func(config *raft.Config) {
@@ -1824,5 +1834,43 @@ func TestRaftGoingByOtherVotersIsReported(t *testing.T) {
 	}
 	if _, voter := serverAddress(r.GetConfiguration().Configuration(), "c"); voter {
 		t.Fatal("c was added")
+	}
+}
+
+// A node cut off from the leader waits to catch up only while whoever
+// asked waits, and no longer than the node runs: an agent stopping does
+// not wait out a change's timeout.
+func TestCatchingUpEndsWithItsContextAndTheNode(t *testing.T) {
+	nodes := threeNodes(t)
+	cut := nodes[0]
+	if cut.cluster.Leader() {
+		cut = nodes[1]
+	}
+	for _, n := range nodes {
+		if n != cut {
+			n.stop()
+		}
+	}
+	ask, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := cut.cluster.CatchUpContext(ask); err == nil {
+		t.Fatal("caught up without a leader")
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("catching up took %v after its context ended", took)
+	}
+	failed := make(chan error, 1)
+	start = time.Now()
+	go func() { failed <- cut.cluster.CatchUp() }()
+	time.Sleep(300 * time.Millisecond)
+	cut.stop()
+	select {
+	case err := <-failed:
+		if err == nil {
+			t.Fatal("caught up without a leader")
+		}
+	case <-time.After(commitTimeout - time.Second):
+		t.Fatalf("catching up went on after the node closed, %v", time.Since(start))
 	}
 }

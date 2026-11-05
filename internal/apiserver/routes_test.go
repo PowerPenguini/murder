@@ -132,3 +132,43 @@ func TestARouteWaitsWhileItsContainerIsReplaced(t *testing.T) {
 		t.Fatal("the table's version did not change")
 	}
 }
+
+// A node of a cluster names no routes before it has caught up with the
+// cluster since it started: its state may be from before it went down.
+func TestRoutesWaitUntilTheNodeCaughtUp(t *testing.T) {
+	f := newAPIFixture(t)
+	if err := f.store.PutNode(store.Node{Name: f.store.Node(), Address: "10.0.0.1:7400"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.NameCluster("TESTCLUSTER", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.server.WithCluster(catchUpCluster{})
+	routesWait = 200 * time.Millisecond
+	defer func() { routesWait = 25 * time.Second }()
+	start := time.Now()
+	if _, err := f.client.Routes(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "not caught up") || time.Since(start) < 150*time.Millisecond {
+		t.Fatalf("routes of a node that has not caught up, after %v: %v", time.Since(start), err)
+	}
+	// One waiting is answered as soon as the node has caught up.
+	routesWait = 5 * time.Second
+	answered := make(chan error, 1)
+	go func() {
+		_, err := f.client.Routes(context.Background(), "")
+		answered <- err
+	}()
+	select {
+	case err := <-answered:
+		t.Fatalf("answered before the node caught up: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	f.server.CaughtUp()
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no answer once the node caught up")
+	}
+}

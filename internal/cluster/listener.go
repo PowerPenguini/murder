@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
+
+	"github.com/PowerPenguini/murder/internal/throttle"
 )
 
 // handshakeTimeout bounds a TLS handshake, so a peer that never finishes
@@ -51,6 +53,9 @@ type listener struct {
 	// no longer with that key, is closed.
 	mu        sync.Mutex
 	raftConns map[*raftConn]struct{}
+	// refusals says which Raft connections were refused, without a line
+	// for each time a peer tries again.
+	refusals throttle.Log
 }
 
 func listen(address string, credentials *Credentials, cluster func() string, log *slog.Logger) (*listener, error) {
@@ -126,7 +131,9 @@ func (l *listener) route(conn *tls.Conn) {
 		// node belongs to none.
 		theirs, err := readClusterHeader(conn)
 		if ours := l.cluster(); err != nil || ours == "" || theirs != ours {
-			l.log.Debug("refused a Raft connection of another cluster", "from", conn.RemoteAddr().String(), "theirs", theirs, "ours", ours, "error", err)
+			state := conn.ConnectionState()
+			name, _, _ := peerIdentity(&state)
+			l.refusals.Warn(l.log, refusedSource(name, conn.RemoteAddr().String()), "refused a Raft connection of another cluster", "from", conn.RemoteAddr().String(), "node", name, "theirs", theirs, "ours", ours, "error", err)
 			_ = conn.Close()
 			return
 		}
@@ -143,7 +150,7 @@ func (l *listener) route(conn *tls.Conn) {
 			}
 		}
 		if err != nil {
-			l.log.Debug("refused a Raft connection of a node that is not a member", "from", conn.RemoteAddr().String(), "node", name, "error", err)
+			l.refusals.Warn(l.log, refusedSource(name, conn.RemoteAddr().String()), "refused a Raft connection of a node that is not a member", "from", conn.RemoteAddr().String(), "node", name, "error", err)
 			_ = conn.Close()
 			return
 		}
@@ -156,6 +163,19 @@ func (l *listener) route(conn *tls.Conn) {
 	case <-l.done:
 		_ = routed.Close()
 	}
+}
+
+// refusedSource names a refused peer for the log of refusals: by its
+// node name, else by its address without the port, which changes each
+// time it connects.
+func refusedSource(node, address string) string {
+	if node != "" {
+		return node
+	}
+	if host, _, err := net.SplitHostPort(address); err == nil {
+		return host
+	}
+	return address
 }
 
 // raftConn is a Raft connection taken from node, or made to it, with
