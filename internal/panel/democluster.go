@@ -52,9 +52,24 @@ func (d *DemoCluster) List(context.Context) ([]api.Tenant, error) {
 	d.current()
 	var out []api.Tenant
 	for _, t := range d.tenants {
-		out = append(out, t)
+		out = append(out, withLimits(t))
 	}
 	return out, nil
+}
+
+// demoDefaults are the demo nodes' default limits, as a node's
+// configuration has them by default: no disk limit.
+var demoDefaults = spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512}
+
+// withLimits says, as a node's status does, the limits a tenant's
+// container runs with and the node's defaults among them.
+func withLimits(t api.Tenant) api.Tenant {
+	if t.Status != nil && !t.Archived() {
+		status := *t.Status
+		status.Limits, status.Defaults = t.Spec.Limits.Or(demoDefaults), demoDefaults
+		t.Status = &status
+	}
+	return t
 }
 
 func (d *DemoCluster) Get(_ context.Context, name string) (api.Tenant, error) {
@@ -65,7 +80,7 @@ func (d *DemoCluster) Get(_ context.Context, name string) (api.Tenant, error) {
 	if !ok {
 		return t, &api.Error{Status: 404, Message: fmt.Sprintf("tenant %s: not found", name)}
 	}
-	return t, nil
+	return withLimits(t), nil
 }
 
 func (d *DemoCluster) Events(_ context.Context, query store.EventQuery) ([]store.Event, error) {

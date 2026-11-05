@@ -185,7 +185,7 @@ once it is off; remove it once it runs and keeps nothing. */}}
   </form></details>
   {{end}}
   {{if and (not .Self) (or .Tenants .Keeps)}}
-  <p class="hint act-note">Remove from the cluster: once it runs no tenant and keeps no copy (now {{len .Tenants}} and {{.Keeps}}).</p>
+  <p class="hint act-note">Remove from the cluster once it runs no tenant and keeps no copy. Now it runs {{plural (len .Tenants) "tenant" "tenants"}}{{if .Archived}} (and {{.Archived}} archived){{end}} and keeps {{plural .Keeps "copy" "copies"}}.</p>
   {{else if not .Self}}
   <details class="act" name="node-{{.Name}}"><summary><span class="act-name">Remove from the cluster…</span><span class="act-say">It runs and keeps nothing; the cluster forgets it</span></summary>
   {{template "remove-form" .}}</details>

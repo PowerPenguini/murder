@@ -242,20 +242,42 @@ func groupEvents(events []store.Event) []eventRow {
 }
 
 // numberedWave is a rollout's move as events said it before they named
-// their wave: "wave 2: revision 2 → 3".
-var numberedWave = regexp.MustCompile(`^wave (\d+): `)
+// their wave: "wave 2: revision 2 → 3"; namedComma as they said it for a
+// while: "wave 2, a tenth: revision 2 → 3".
+var (
+	numberedWave = regexp.MustCompile(`^wave (\d+): `)
+	namedComma   = regexp.MustCompile(`^wave (\d+), ([^:(]+): `)
+)
 
-// namedWave says an older move with its wave's name, as newer ones are
-// recorded: "wave 2, a tenth: revision 2 → 3". Those rollouts moved no
-// tenant first, so the waves are named from the canaries.
+// namedWave says an older move as newer ones are recorded: "wave 2 (a
+// tenth): revision 2 → 3". Rollouts recorded by number moved no tenant
+// first, so their waves are named from the canaries.
 func namedWave(e store.Event) string {
 	if e.Action != "app.rolled-out" {
 		return e.Detail
 	}
-	m := numberedWave.FindStringSubmatch(e.Detail)
-	if m == nil {
-		return e.Detail
+	if m := numberedWave.FindStringSubmatch(e.Detail); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return store.WaveSaid(n, store.WaveName(n-1)) + ": " + e.Detail[len(m[0]):]
 	}
-	n, _ := strconv.Atoi(m[1])
-	return store.WaveSaid(n, store.WaveName(n-1)) + ": " + e.Detail[len(m[0]):]
+	if m := namedComma.FindStringSubmatch(e.Detail); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		name := m[2]
+		if name == "first now" {
+			name = "first, now"
+		}
+		return store.WaveSaid(n, name) + ": " + e.Detail[len(m[0]):]
+	}
+	return e.Detail
+}
+
+// rolloutBlocked says a blocked wave the one way every page does:
+// "baltic-freight moved in wave 2 (a tenth) and is not healthy, so wave 3
+// (half) waits."
+func rolloutBlocked(r store.Rollout, blockers []string) string {
+	who, verb := strings.Join(blockers, ", "), "is"
+	if len(blockers) > 1 {
+		who, verb = strings.Join(blockers[:len(blockers)-1], ", ")+" and "+blockers[len(blockers)-1], "are"
+	}
+	return who + " moved in " + store.WaveSaid(r.Wave, r.WaveName(r.Wave)) + " and " + verb + " not healthy, so " + store.WaveSaid(r.Wave+1, r.WaveName(r.Wave+1)) + " waits."
 }

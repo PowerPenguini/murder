@@ -68,10 +68,15 @@ type Status struct {
 	// ("uid:gid", the owner most of its data directory's entries have);
 	// empty when its data is empty or could not be read. DataMixed says
 	// some entries have another owner.
-	DataOwner  string    `json:"dataOwner,omitempty"`
-	DataMixed  bool      `json:"dataMixed,omitempty"`
-	Generation int64     `json:"generation"`
-	CheckedAt  time.Time `json:"checkedAt"`
+	DataOwner string `json:"dataOwner,omitempty"`
+	DataMixed bool   `json:"dataMixed,omitempty"`
+	// Limits are those its container runs with: its spec's, and this
+	// node's defaults where its spec sets none. Defaults are the node's,
+	// so a reader can tell which is which (a zero is no limit).
+	Limits     spec.Limits `json:"limits,omitzero"`
+	Defaults   spec.Limits `json:"defaults,omitzero"`
+	Generation int64       `json:"generation"`
+	CheckedAt  time.Time   `json:"checkedAt"`
 }
 
 // Config holds the node-wide settings the reconciler applies to every tenant.

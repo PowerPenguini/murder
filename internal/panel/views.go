@@ -387,7 +387,7 @@ func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []s
 				state.Blockers, state.ToRevision = view.Blockers, ro.ToRevision
 				for _, name := range view.Blockers {
 					if n := find(name); n != nil {
-						text := fmt.Sprintf("It blocks %s's rollout of revision %d: the next wave (%s) waits for it.", app.Name, ro.ToRevision, strings.ToLower(ro.WaveName(ro.Wave+1)))
+						text := fmt.Sprintf("It blocks %s's rollout of revision %d: %s", app.Name, ro.ToRevision, rolloutBlocked(*ro, view.Blockers))
 						n.Subs = append(n.Subs, sub{Bad: true, Short: text, Text: text, Fixes: []fix{{"The rollout", appHref + "#rollout"}}})
 					}
 				}
@@ -453,6 +453,20 @@ func (s *Server) appContext(ctx context.Context, r *http.Request, t api.Tenant, 
 		},
 	) != nil {
 		return
+	}
+	// The limits it runs without that other running tenants have.
+	if !t.Spec.Suspended {
+		limited := map[string]bool{}
+		for _, other := range tenants {
+			if other.Status != nil && !other.Archived() && !other.Spec.Suspended {
+				for _, kind := range limitKinds {
+					if kind.of(other.Status.Limits) > 0 {
+						limited[kind.name] = true
+					}
+				}
+			}
+		}
+		data.Unlimited = strings.Join(unlimited(t, limited), ", ")
 	}
 	i := slices.IndexFunc(apps, func(a api.App) bool { return a.Name == t.App })
 	if i < 0 {
@@ -606,6 +620,8 @@ type tenantData struct {
 	Place   *rolloutRow
 	// Unchanged says why the rollout leaves it as it runs, when it does.
 	Unchanged string
+	// Unlimited names the limits it runs without that others have ("disk").
+	Unlimited string
 	// AppMemory says its app's tenants run out of memory, if they do.
 	AppMemory *appMemory
 	// Operation is what a person did to it lately, and how it went; Me is
@@ -892,6 +908,7 @@ func (s *Server) funcs() template.FuncMap {
 		"imageShort": func(ref string) string { _, short := ImageParts(ref); return short },
 		"breakable":  breakable,
 		"waveSaid":   store.WaveSaid,
+		"blocked":    rolloutBlocked,
 		// A tenant's pages say what an action did under their header, so
 		// the header never moves between states of one page.
 		"headFirst": func(d any) bool {

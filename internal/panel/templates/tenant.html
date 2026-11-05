@@ -1,7 +1,7 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}
 {{template "tenant-head" $d.Head}}
 {{template "page-notices" .}}
-{{if or $d.Problem $d.Operation $d.Place $d.Outcome}}
+{{if or $d.Problem $d.Operation $d.Place $d.Outcome $d.Unlimited}}
 <div class="notices" aria-label="what is wrong with {{$t.Spec.Name}}, and what is happening">
   {{with $d.Problem}}<div class="nrow{{if $d.Broken}} bad{{end}}" role="{{if $d.Broken}}alert{{else}}status{{end}}">
     <p class="nhead"><strong>{{.}}</strong></p>
@@ -9,7 +9,8 @@
     {{if or $d.Broken (and $d.MemoryHigh $.Edits)}}<div class="nacts">{{if and $d.AppMemory $.Edits}}<a href="{{$d.AppMemory.Href}}" class="button primary">Raise {{$t.App}}'s memory limit</a>{{else if and $d.MemoryHigh $.Edits}}<a href="{{raise $t}}" class="button{{if $d.Broken}} primary{{end}}">Raise its memory limit</a>{{end}}{{if $.Acts}}{{if $d.Exited}}<a href="/tenants/{{$t.Spec.Name}}/logs?container=previous">Its last lines before the exit</a>{{else}}<a href="/tenants/{{$t.Spec.Name}}/logs">Read its logs</a>{{end}}{{end}}</div>{{end}}
     {{if or $d.Evidence $d.AppMemory}}<details class="evidence"><summary>Evidence{{if $d.AppMemory}} and affected tenants{{end}}</summary><div class="evbody">{{range $d.Evidence}}<p>{{.}}</p>{{end}}{{with $d.AppMemory}}<p>{{.Evidence}}</p>{{if and $d.MemoryHigh $.Edits}}<p class="fixes"><a href="{{raise $t}}">Only this tenant: raise its limit</a></p>{{end}}{{end}}</div></details>{{end}}
   </div>{{end}}
-  {{with $d.Place}}{{$r := $d.Rollout}}<div class="nrow{{if .Blocks}} bad{{end}}">{{if .Blocks}}<span class="lead-in">It blocks {{$t.App}}'s rollout</span> of revision {{.To}}: it moved in {{waveSaid .Wave .WaveName}} and is not healthy on it, so {{waveSaid (add1 $r.Wave) ($r.WaveName (add1 $r.Wave))}} waits.{{else if .Moved}}{{if $d.StartingNow}}Starting{{else}}Rolling out{{end}}: it moved from revision {{.From}} to {{.To}} in {{waveSaid .Wave .WaveName}}.{{else if .Held}}Held on revision {{.From}} while {{$t.App}} rolls out revision {{.To}}.{{else if ne .From .To}}Rolling out: it runs revision {{.From}} and moves to {{.To}} in {{waveSaid .Wave .WaveName}}.{{else if $d.Unchanged}}{{$d.Unchanged}}{{else}}{{$t.App}}'s revision {{.To}} changes nothing for {{$t.Spec.Name}}: it kept its container.{{end}} <a href="/apps/{{$t.App}}#r-{{.Name}}">Its place in the rollout</a></div>{{end}}
+  {{with $d.Place}}{{$r := $d.Rollout}}<div class="nrow{{if .Blocks}} bad{{end}}">{{if .Blocks}}<span class="lead-in">It blocks {{$t.App}}'s rollout</span> of revision {{.To}}: {{blocked $r.Rollout $r.Blockers}}{{else if .Moved}}{{if $d.StartingNow}}Starting{{else}}Rolling out{{end}}: it moved from revision {{.From}} to {{.To}} in {{waveSaid .Wave .WaveName}}.{{else if .Held}}Held on revision {{.From}} while {{$t.App}} rolls out revision {{.To}}.{{else if ne .From .To}}Rolling out: it runs revision {{.From}} and moves to {{.To}} in {{waveSaid .Wave .WaveName}}.{{else if $d.Unchanged}}{{$d.Unchanged}}{{else}}{{$t.App}}'s revision {{.To}} changes nothing for {{$t.Spec.Name}}: it kept its container.{{end}} <a href="/apps/{{$t.App}}#r-{{.Name}}">Its place in the rollout</a></div>{{end}}
+  {{with $d.Unlimited}}<div class="nrow" role="status"><span class="st warn"></span> <span class="lead-in">It runs with no {{.}} limit</span>, which the other tenants have: it can take what they need. {{if $.Edits}}<a href="/tenants/{{$t.Spec.Name}}/settings#memory">Set its limits</a>{{end}}</div>{{end}}
   {{with $d.Outcome}}<div class="nrow{{if eq (.KindFor $t.Spec.Name) "bad"}} bad{{end}}" role="status"><span class="lead-in">{{$t.App}}'s revision {{.Revision}}{{with .Change}} ({{.}}){{end}}</span> reached it, by {{if same .Event.Actor $d.Me}}you{{else}}{{who .Event.Actor}}{{end}} {{ago .Event.At}} ago: {{.For $t.Spec.Name}}. <a href="/apps/{{$t.App}}#outcome">All {{len .Reached}} on {{$t.App}}</a></div>{{end}}
   {{with $d.Operation}}<div class="nrow{{if eq .Kind "bad"}} bad{{end}}" role="status"><span class="lead-in">{{.Said}}</span> by {{if same .Event.Actor $d.Me}}you{{else}}{{who .Event.Actor}}{{end}} {{ago .Event.At}} ago: {{.State}}. <a href="/events?tenant={{$t.Spec.Name}}&amp;show=all">Its events</a>{{if eq .Kind "busy"}} · <a href="/tenants/{{$t.Spec.Name}}/logs?follow=1">Follow its logs</a>{{end}}{{with .From}}{{if $d.Head.Edits}} · <a href="/tenants/{{$t.Spec.Name}}/settings?do=review&amp;app={{.}}#review">Change it back to {{.}}</a>{{end}}{{end}}{{with .Owner}}<span class="op-owner"><span class="st warn"></span>{{.}}</span>{{end}}</div>{{end}}
 </div>
@@ -81,8 +82,9 @@
     <div><dt>Data at</dt><dd class="mono">{{if $t.Spec.DataPath}}{{$t.Spec.DataPath}}{{else}}none{{end}}</dd></div>
     <div><dt>Runs as</dt><dd class="mono">{{$t.Spec.User}}</dd></div>
     <div><dt>Root file system</dt><dd>{{if $t.Spec.WritableRoot}}writable{{else}}read-only{{end}}</dd></div>
-    <div><dt>Processes, most</dt><dd class="num">{{limit $t.Spec.Limits.PIDs}}</dd></div>
-    <div><dt>Disk limit</dt><dd class="num">{{if $t.Spec.Limits.DiskGB}}{{$t.Spec.Limits.DiskGB}} GB{{else}}none{{end}}</dd></div>
+    {{$l := $t.Spec.Limits}}{{with $t.Status}}{{if .Limits.MemoryMB}}{{$l = .Limits}}{{end}}{{end}}
+    <div><dt>Processes, most</dt><dd class="num">{{if $l.PIDs}}{{limit $l.PIDs}}{{if not $t.Spec.Limits.PIDs}} <span class="dim">node default</span>{{end}}{{else}}<span class="st warn">none</span>{{end}}</dd></div>
+    <div><dt>Disk limit</dt><dd class="num">{{if $l.DiskGB}}{{$l.DiskGB}} GB{{if not $t.Spec.Limits.DiskGB}} <span class="dim">node default</span>{{end}}{{else}}<span class="st warn">none</span>{{end}}</dd></div>
     <div><dt>Generation</dt><dd class="num">{{$t.Generation}}</dd></div>
   </dl>
 </section>

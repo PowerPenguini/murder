@@ -2427,6 +2427,11 @@ func TestStatusSaysWhoWroteTheData(t *testing.T) {
 	if status, _ := f.reconciler.Status("acme"); status.DataOwner != "" {
 		t.Fatalf("empty data said to be written by %q", status.DataOwner)
 	}
+	// The limits it runs with: the fixture's app sets none, so all are the
+	// node's defaults, and said to be.
+	if status, _ := f.reconciler.Status("acme"); status.Limits != (spec.Limits{MemoryMB: 256, CPUs: 0.5, PIDs: 128, DiskGB: 7}) || status.Defaults != status.Limits {
+		t.Fatalf("limits %+v, defaults %+v", status.Limits, status.Defaults)
+	}
 	if err := os.WriteFile(filepath.Join(f.volumes.Root, "acme", "db.sqlite"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}

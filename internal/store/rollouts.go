@@ -60,10 +60,10 @@ func WaveName(w int) string {
 	return "Wave " + strconv.Itoa(w+1)
 }
 
-// WaveSaid names wave w as a sentence does, its name in lower case and
-// without commas: "wave 2, a tenth", "wave 1, first now".
+// WaveSaid names wave w as every sentence and event does, its name in
+// lower case in parentheses: "wave 2 (a tenth)", "wave 1 (first, now)".
 func WaveSaid(w int, name string) string {
-	return "wave " + strconv.Itoa(w) + ", " + strings.ToLower(strings.ReplaceAll(name, ",", ""))
+	return "wave " + strconv.Itoa(w) + " (" + strings.ToLower(name) + ")"
 }
 
 // RestorePending reports whether the tenant's data is to go back to the

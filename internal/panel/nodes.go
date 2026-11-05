@@ -107,7 +107,9 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 			if !t.Archived() {
 				data.RunNames = append(data.RunNames, t.Spec.Name)
 			}
-		case t.Replica == name || t.ReplicaNext == name:
+		// Counted as the overview and its menu count them: a live tenant's
+		// copy it holds now.
+		case t.Replica == name && !t.Archived():
 			data.Keeps = append(data.Keeps, row)
 		}
 	}

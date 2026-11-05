@@ -77,15 +77,25 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 		if from == "" {
 			from = unset
 		}
+		// A limit the new app does not set takes this node's default, as
+		// its status says them; only one with no default goes.
+		defaulted := false
+		if loses {
+			if def, known := nodeDefault(t, d.Key); known && def != "" {
+				to, loses, defaulted = def+" (this node's default; "+c.To+" sets none)", false, true
+			} else if known {
+				to = "no limit (" + c.To + " sets none, and this node has no default)"
+			} else {
+				to = "not set by " + c.To + "; this node's default, if any, is not known"
+			}
+		}
 		if to == "" {
 			to = unset
-			if loses {
-				to = "no limit (" + c.To + " sets none)"
-			}
 		}
 		if loses {
 			lost = append(lost, d.Key)
 		}
+		gone = gone && !defaulted
 		if field[0] >= 'a' && field[0] <= 'z' {
 			field = capital(field)
 		}
@@ -190,4 +200,25 @@ func orRoot(user string) string {
 		return "the image's own user"
 	}
 	return user
+}
+
+// nodeDefault is the default its node applies for a limit ("memory",
+// "CPUs", "processes", "disk") the spec leaves unset: said as the panel
+// says that limit, "" for none; known is false when its node has not said.
+func nodeDefault(t api.Tenant, key string) (said string, known bool) {
+	if t.Status == nil || t.Status.Defaults == (spec.Limits{}) && t.Status.Limits == (spec.Limits{}) {
+		return "", false
+	}
+	d := t.Status.Defaults
+	switch key {
+	case "memory":
+		return memText(d.MemoryMB), true
+	case "CPUs":
+		return floatText(d.CPUs), true
+	case "processes":
+		return intText(d.PIDs), true
+	case "disk":
+		return gbText(d.DiskGB), true
+	}
+	return "", false
 }

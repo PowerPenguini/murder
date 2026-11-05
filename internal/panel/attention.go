@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/spec"
 )
 
 // notice is one thing that needs attention, a node or a tenant, with all
@@ -99,6 +100,20 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 				Primary: &fix{"Fail it over", href}})
 		case n.State.Kind == "warn":
 			out = append(out, notice{Node: true, Subject: n.Name, Href: href, Text: " is " + n.State.Label})
+		}
+	}
+	// The limits some running tenant has: one that runs without such a
+	// limit, say after an app change dropped it, can take what the others
+	// on its node need.
+	limited := map[string]bool{}
+	for _, row := range rows {
+		if row.Archived() || row.Spec.Suspended || row.Status == nil {
+			continue
+		}
+		for _, kind := range limitKinds {
+			if kind.of(row.Status.Limits) > 0 {
+				limited[kind.name] = true
+			}
 		}
 	}
 	for _, row := range rows {
@@ -192,6 +207,14 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 			}
 			texts = append(texts, text)
 			causes = append(causes, cause{sentence([]string{text}), itSentence(text)})
+		}
+		if missing := unlimited(row.Tenant, limited); len(missing) > 0 {
+			said := strings.Join(missing, ", ")
+			n.Reasons = append(n.Reasons, "no "+said+" limit")
+			text := "runs with no " + said + " limit, which the other tenants have: it can take what they need"
+			texts = append(texts, text)
+			causes = append(causes, cause{sentence([]string{text}), itSentence(text)})
+			n.Fixes = append(n.Fixes, fix{"Set its limits", href + "/settings#memory"})
 		}
 		if len(causes) == 0 {
 			continue
@@ -483,3 +506,31 @@ func raiseMemory(t api.Tenant) string {
 
 // nbsp keeps a number with its unit: "250 MB".
 func nbsp(text string) string { return strings.ReplaceAll(text, " ", "\u00a0") }
+
+// limitKind is a kind of limit, named as a sentence says it.
+type limitKind struct {
+	name string
+	of   func(spec.Limits) float64
+}
+
+var limitKinds = []limitKind{
+	{"memory", func(l spec.Limits) float64 { return float64(l.MemoryMB) }},
+	{"CPU", func(l spec.Limits) float64 { return l.CPUs }},
+	{"process", func(l spec.Limits) float64 { return float64(l.PIDs) }},
+	{"disk", func(l spec.Limits) float64 { return float64(l.DiskGB) }},
+}
+
+// unlimited names the kinds of limit t's container runs without, as its
+// node says, that some running tenant has: "disk", "CPU and disk".
+func unlimited(t api.Tenant, limited map[string]bool) []string {
+	if t.Status == nil || t.Status.Limits == (spec.Limits{}) && t.Status.Defaults == (spec.Limits{}) {
+		return nil
+	}
+	var out []string
+	for _, kind := range limitKinds {
+		if limited[kind.name] && kind.of(t.Status.Limits) == 0 {
+			out = append(out, kind.name)
+		}
+	}
+	return out
+}

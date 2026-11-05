@@ -35,7 +35,7 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	file := between(page, `aria-label="the app's spec">`, "</textarea>")
 	changed := strings.Replace(file, "memoryMB: 256", "memoryMB: 512", 1)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review"}, "file": {changed}, "updated": {updated}}, server.URL)
-	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked in wave 2, a tenth, by baltic-freight",
+	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked in wave 2 (a tenth) by baltic-freight",
 		// Only the tenants whose spec changes restart, and are counted:
 		// atlas keeps its own memory, so the change leaves it.
 		"5 restart · 1 unchanged · 1 held, left out", `Memory <span class="nowrap">256 MB</span> <span class="nowrap">→ 512 MB</span>`, "Unchanged: memory stays 768 MB",
@@ -114,7 +114,7 @@ func TestRolloutProgress(t *testing.T) {
 		t.Fatalf("moved a wave without the name: wave %d", app.Rollout.Wave)
 	}
 	_, page := get(t, server.URL+"/apps/web")
-	for _, want := range []string{`<li class="done"><span class="wn">Canaries</span>`, `<li class="blocked"><span class="wn">A tenth</span><span class="wc">1 tenant · blocked by baltic-freight</span>`, "moved, not healthy: blocks the next wave", "waits for half", "stays: it is held", "Half (kowalski-trans) moves once baltic-freight is healthy", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
+	for _, want := range []string{`<li class="done"><span class="wn">Canaries</span>`, `<li class="blocked"><span class="wn">A tenth</span><span class="wc">1 tenant · blocked by baltic-freight</span>`, "moved, not healthy: blocks the next wave", "waits for half", "stays: it is held", "Wave 3 (half) moves once baltic-freight has been healthy on revision 3 for a minute", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, page)
 		}
@@ -284,7 +284,7 @@ func newServerOf(t *testing.T, cluster *DemoCluster) *httptest.Server {
 func TestCauseTenantAndRolloutJoin(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, page := get(t, server.URL+"/")
-	for _, want := range []string{"It blocks web&#39;s rollout of revision 3: the next wave (half) waits for it.", "web&#39;s limit is likely too low: 5 of the 6 tenants on its 256 MB limit ran out of memory",
+	for _, want := range []string{"It blocks web&#39;s rollout of revision 3: baltic-freight moved in wave 2 (a tenth) and is not healthy, so wave 3 (half) waits.", "web&#39;s limit is likely too low: 5 of the 6 tenants on its 256 MB limit ran out of memory",
 		"atlas keeps its own 768 MB", "test-staging is held on its revision", `class="button primary">Raise web&#39;s memory limit</a>`, "/apps/web?memoryMB=512#spec", "Only this tenant: raise its limit",
 		"baltic-freight</a> is unhealthy: out of memory 4m ago,", "Likely web&#39;s 256 MB limit: 5 of the 6 tenants on it ran out of memory in 24 h."} {
 		if !strings.Contains(page, want) {
@@ -481,7 +481,7 @@ func TestTenantRowsSayWhy(t *testing.T) {
 func TestDrainSaysWhatItLeavesUnprotected(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, page := get(t, server.URL+"/nodes/nbg-1")
-	if !strings.Contains(page, "baltic-freight, kowalski-trans, vistula-cargo would run on fsn-1 without a ready copy on another node") || !strings.Contains(page, "(now 3 and 4)") || strings.Contains(page, `value="remove"`) {
+	if !strings.Contains(page, "baltic-freight, kowalski-trans, vistula-cargo would run on fsn-1 without a ready copy on another node") || !strings.Contains(page, "Now it runs 3 tenants (and 1 archived) and keeps 4 copies.") || strings.Contains(page, `value="remove"`) {
 		t.Fatalf("the drain:\n%s", page)
 	}
 	if _, page = get(t, server.URL+"/nodes/hel-1"); !strings.Contains(page, `value="remove"`) {
@@ -567,7 +567,7 @@ func TestRestoreAtAChosenTimeAndImageReferences(t *testing.T) {
 	_, page = get(t, server.URL+"/apps/web")
 	updated := between(page, `name="updated" value="`, `"`)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review-update"}, "updated": {updated}}, server.URL)
-	if !strings.Contains(body, "Full image reference") || !strings.Contains(body, strings.Repeat("5e", 32)) || !strings.Contains(body, "is blocked in wave 2, a tenth, by baltic-freight") {
+	if !strings.Contains(body, "Full image reference") || !strings.Contains(body, strings.Repeat("5e", 32)) || !strings.Contains(body, "is blocked in wave 2 (a tenth) by baltic-freight") {
 		t.Fatalf("the image review:\n%s", body)
 	}
 }
@@ -900,10 +900,10 @@ func TestTheBrokenFirstPace(t *testing.T) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, body)
 		}
 	}
-	if _, page := get(t, server.URL+"/tenants/baltic-freight"); !strings.Contains(page, `it moved from revision 3 to 4 in wave 1, first now.`) {
+	if _, page := get(t, server.URL+"/tenants/baltic-freight"); !strings.Contains(page, `it moved from revision 3 to 4 in wave 1 (first, now).`) {
 		t.Fatalf("baltic-freight's wave:\n%s", page)
 	}
-	if _, page := get(t, server.URL+"/tenants/acme-logistics"); !strings.Contains(page, `moves to 4 in wave 2, canaries.`) {
+	if _, page := get(t, server.URL+"/tenants/acme-logistics"); !strings.Contains(page, `moves to 4 in wave 2 (canaries).`) {
 		t.Fatalf("acme-logistics's wave:\n%s", page)
 	}
 	// atlas's own memory covers the change: its page says so, not a bare
@@ -1084,8 +1084,8 @@ func TestChangingATenantsApp(t *testing.T) {
 	// was written by another user than testapp runs as.
 	_, body = get(t, server.URL+"/tenants/atlas/settings?do=review&app=testapp")
 	for _, want := range []string{"Review changing atlas to app testapp", "<th>Now, on web</th><th>After, on testapp</th>",
-		"App web → testapp: 2 settings change, 5 go (3 limits: CPUs, processes, disk)", "atlas would run with no limit on CPUs, processes, disk:",
-		`<span class="st warn">no limit (testapp sets none)</span>`,
+		"App web → testapp: 4 settings change, 3 go (1 limit: disk)", "atlas would run with no limit on disk:",
+		`<span class="st warn">no limit (testapp sets none, and this node has no default)</span>`, "512 (this node&#39;s default; testapp sets none)",
 		"testapp runs as 10001:10001, but atlas's data at /data was written as 1000:1000.",
 		`<td class="l-main">User</td><td class="dim l-sub" data-label="Now">1000:1000</td><td class="l-sub" data-label="After">10001:10001</td>`,
 		`<td class="l-main">Image</td>`, "Its own, kept over testapp's", `<span class="nowrap">memory 768 MB</span>`, `<span class="nowrap">TZ</span>`,
@@ -1120,6 +1120,17 @@ func TestChangingATenantsApp(t *testing.T) {
 	}
 	if strings.Contains(after, `<div class="v">0 B`) {
 		t.Fatalf("its data said as 0 B:\n%s", after)
+	}
+	// The disk limit it lost stays said, as at risk, until one is set: on
+	// its page, in the tenants list and on the overview.
+	if !strings.Contains(after, "It runs with no disk limit</span>, which the other tenants have") || !strings.Contains(after, `<span class="st warn">none</span>`) {
+		t.Fatalf("after the change, its lost limit is not said:\n%s", after)
+	}
+	if _, list := get(t, server.URL+"/tenants?show=risk"); !strings.Contains(list, ">no disk limit</div>") {
+		t.Fatalf("the tenants at risk lack atlas:\n%s", list)
+	}
+	if _, overview := get(t, server.URL+"/"); !strings.Contains(overview, "runs with no disk limit, which the other tenants have") {
+		t.Fatalf("the overview lacks atlas's lost limit:\n%s", overview)
 	}
 	// Changing back: who wrote the data was read (1000:1000), the user web
 	// runs as, so nothing is red; SESSION_KEY gets the value it kept.
@@ -1161,10 +1172,10 @@ func TestAnEmptyOverrideIsSaid(t *testing.T) {
 func TestEventsNameTheirWave(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, page := get(t, server.URL+"/events?show=all")
-	if !strings.Contains(page, "wave 2, a tenth: revision 2 → 3") || strings.Contains(page, "wave 2: revision") {
+	if !strings.Contains(page, "wave 2 (a tenth): revision 2 → 3") || strings.Contains(page, "wave 2: revision") {
 		t.Fatalf("events' waves:\n%s", page)
 	}
-	if got := namedWave(store.Event{Action: "app.rolled-out", Detail: "wave 3: revision 1 → 2"}); got != "wave 3, half: revision 1 → 2" {
+	if got := namedWave(store.Event{Action: "app.rolled-out", Detail: "wave 3: revision 1 → 2"}); got != "wave 3 (half): revision 1 → 2" {
 		t.Fatalf("an older event: %q", got)
 	}
 }
@@ -1188,5 +1199,31 @@ func TestAnAppChangeWarnsOfTheOwnerAsRead(t *testing.T) {
 	now.Status.DataOwner = "10001:10001"
 	if c := appChangeOf(now, to, settingsForm{}); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "the user testapp runs as") {
 		t.Fatalf("read, the new app's own user: %+v", c)
+	}
+}
+
+// A blocked wave is said one way on the tenant's page, the overview and
+// the app's page.
+func TestOneBlockedWaveSentence(t *testing.T) {
+	server := newServerOf(t, NewDemoCluster())
+	const said = "baltic-freight moved in wave 2 (a tenth) and is not healthy, so wave 3 (half) waits."
+	for _, path := range []string{"/tenants/baltic-freight", "/", "/apps/web"} {
+		if _, page := get(t, server.URL+path); !strings.Contains(page, said) {
+			t.Fatalf("%s does not say %q:\n%s", path, said, page)
+		}
+	}
+}
+
+// A node's tenants are counted one way: its page, its menu and the
+// overview count the live ones, archived ones said apart.
+func TestOneCountPerNode(t *testing.T) {
+	server := newServerOf(t, NewDemoCluster())
+	_, node := get(t, server.URL+"/nodes/nbg-1")
+	if !strings.Contains(node, `Runs</div><div class="v num">3 tenants <small>and 1 archived</small>`) || !strings.Contains(node, "Now it runs 3 tenants (and 1 archived) and keeps 4 copies.") ||
+		!strings.Contains(node, `Keeps copies of</div><div class="v num">4 tenants`) {
+		t.Fatalf("nbg-1's page:\n%s", node)
+	}
+	if _, overview := get(t, server.URL+"/"); !strings.Contains(between(overview, ">nbg-1<", "</tr>"), `3 <span class="dim">· 4 copies</span>`) {
+		t.Fatalf("nbg-1 on the overview:\n%s", between(overview, ">nbg-1<", "</tr>"))
 	}
 }

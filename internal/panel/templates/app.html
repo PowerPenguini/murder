@@ -7,7 +7,7 @@
 <section class="near" id="rollout" data-live>
   <div class="head rollout-head"><h2>Rollout of revision {{.ToRevision}}</h2><span class="dim">{{.Moved}} of {{.Total}} moved{{with .Blockers}}, <span class="red-text-inline">blocked by {{range $i, $b := .}}{{if $i}}, {{end}}{{$b}}{{end}}</span>{{end}}{{if eq .State "paused"}}, paused{{end}}</span>
     {{if eq .State "running"}}<form method="post" class="row"><input type="hidden" name="do" value="pause"><button type="submit">Pause</button></form>{{else}}<form method="post" class="row"><input type="hidden" name="do" value="resume"><button type="submit" class="primary">Resume</button></form>{{end}}</div>
-  <div class="notices"><div class="nrow{{if or .Blockers (eq .State "paused")}} bad{{end}}">{{if .Blockers}}<span class="lead-in">Blocked by {{range $i, $b := .Blockers}}{{if $i}}, {{end}}<a href="/tenants/{{$b}}">{{$b}}</a>{{end}}.</span> {{end}}{{.Waits}}</div>
+  <div class="notices"><div class="nrow{{if or .Blockers (eq .State "paused")}} bad{{end}}">{{if .Blockers}}<span class="lead-in">Blocked:</span> {{end}}{{.Waits}}</div>
     {{if and $d.Memory .Blockers}}{{template "app-memory" $}}{{end}}</div>
   {{if eq .State "running"}}
   <div class="actions spaced rollout-actions">

@@ -123,6 +123,9 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
 	}
+	// The limits it runs with, and the node's defaults among them.
+	limits := tenant.Limits.Or(r.config.DefaultLimits)
+	defer func() { status.Limits, status.Defaults = limits, r.config.DefaultLimits }()
 	// Who wrote its data, as read: what an app that runs as another user
 	// would find there.
 	if who, mixed, err := volume.DataOwner(dataPath); err == nil {
