@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/domains"
 )
 
@@ -82,5 +84,18 @@ func TestTenantDomainCommands(t *testing.T) {
 	want := []string{"add App.Customer.com", "list", "remove app.customer.com", "check app.customer.com"}
 	if strings.Join(*calls, "|") != strings.Join(want, "|") {
 		t.Fatalf("calls %v", *calls)
+	}
+}
+
+func TestANodeAlonesDomainsPointAtItsConfiguredAddresses(t *testing.T) {
+	cfg := config.Agent{BaseDomain: "murder.internal", PublicAddresses: []string{"203.0.113.10", "2001:db8::10", "203.0.113.10"}}
+	cfg.Edge.HTTP = ":80"
+	manager := newDomainManager(cfg, nil, nil, nil, slog.New(slog.DiscardHandler))
+	if manager.Public == nil {
+		t.Fatal("a node alone's manager has no public addresses")
+	}
+	got := manager.Public()
+	if len(got) != 2 || got[0].String() != "203.0.113.10" || got[1].String() != "2001:db8::10" {
+		t.Fatalf("public = %v", got)
 	}
 }

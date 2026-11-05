@@ -79,6 +79,9 @@ func TestParseRejectsBadConfig(t *testing.T) {
 		"registry file":  "baseDomain: example.com\nregistries: [{host: ghcr.io, username: u, tokenFile: t}]\n",
 		"hub twice":      "baseDomain: example.com\nregistries: [{host: docker.io, username: u, tokenFile: /t}, {host: index.docker.io, username: v, tokenFile: /v}]\n",
 		"registry twice": "baseDomain: example.com\nregistries: [{host: ghcr.io, username: u, tokenFile: /t}, {host: GHCR.io, username: v, tokenFile: /v}]\n",
+		"public private": "baseDomain: example.com\npublicAddresses: [10.0.0.2]\n",
+		"public name":    "baseDomain: example.com\npublicAddresses: [example.com]\n",
+		"public cluster": "baseDomain: example.com\npublicAddresses: [203.0.113.10]\ncluster: {address: 10.0.0.2:7400, dir: /var/lib/murder/cluster}\n",
 	} {
 		if _, err := Parse([]byte(document)); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -275,5 +278,15 @@ func TestThePanelsTunnel(t *testing.T) {
 		if _, err := Parse([]byte(config)); err == nil || !strings.Contains(err.Error(), "panel.") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+func TestANodeAloneNamesItsPublicAddresses(t *testing.T) {
+	agent, err := Parse([]byte("baseDomain: example.com\npublicAddresses: [203.0.113.10, \"2001:db8::10\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.PublicAddresses) != 2 || agent.PublicAddresses[0] != "203.0.113.10" {
+		t.Fatalf("publicAddresses = %v", agent.PublicAddresses)
 	}
 }

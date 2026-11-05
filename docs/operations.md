@@ -194,7 +194,8 @@ backups; purging the tenant releases them.
   tenant's own name, `acme.<baseDomain>`. It follows the nodes as
   `cluster.dns` keeps the wildcard records;
 - a zone's apex (`customer.com`), which may have no CNAME: A and AAAA
-  records with the nodes' public addresses (`cluster.publicAddresses`), or
+  records with the nodes' public addresses (`cluster.publicAddresses`, or
+  `publicAddresses` on a node alone, which `murder setup` writes), or
   the provider's ALIAS or ANAME record to `acme.<baseDomain>`. These are
   kept by hand: change them when a node is replaced.
 
@@ -202,8 +203,9 @@ backups; purging the tenant releases them.
 
 **What happens.** The leader checks the name's DNS at once: a CNAME that
 leads to `acme.<baseDomain>` or to the base domain, or addresses that are
-all the nodes' public ones (outside a cluster, or without
-`publicAddresses`: those `acme.<baseDomain>` has). A name that does not
+all the nodes' public ones (`cluster.publicAddresses`; on a node alone,
+the top-level `publicAddresses`; without them, those `<tenant>.<baseDomain>`
+has). A name that does not
 point at the cluster yet is checked again after a minute, then less and
 less often, an hour apart at most (`check` asks at once). No CA is asked
 for a name that does not point here: its rate limits count failures. Once

@@ -33,6 +33,10 @@ type Agent struct {
 	Node string `yaml:"node"`
 	// BaseDomain is the domain tenants live below: <tenant>.<BaseDomain>.
 	BaseDomain string `yaml:"baseDomain"`
+	// PublicAddresses are a node alone's public IP addresses, where clients
+	// reach its edge: a tenant's own domain must point at them before its
+	// certificate is ordered. A node of a cluster has cluster.publicAddresses.
+	PublicAddresses []string `yaml:"publicAddresses"`
 	// Database holds the node's apps, tenants, secrets and audit log.
 	Database      string `yaml:"database"`
 	MasterKeyFile string `yaml:"masterKeyFile"`
@@ -445,7 +449,11 @@ func (a Agent) Validate() error {
 	problems = append(problems, registriesProblems(a.Registries)...)
 	if a.Cluster != nil {
 		problems = append(problems, a.Cluster.problems()...)
+		if len(a.PublicAddresses) > 0 {
+			problems = append(problems, "publicAddresses is for a node alone: a node of a cluster has them under cluster.publicAddresses")
+		}
 	}
+	problems = append(problems, publicProblems("publicAddresses", a.PublicAddresses)...)
 	if a.Backups != nil {
 		problems = append(problems, a.Backups.problems(a.Volumes.Driver)...)
 	}
@@ -631,13 +639,7 @@ func (c Cluster) problems() []string {
 			problems = append(problems, "cluster.failover.hetzner.tokenFile must be an absolute path")
 		}
 	}
-	for _, value := range c.PublicAddresses {
-		if address, err := netip.ParseAddr(value); err != nil || address.Zone() != "" {
-			problems = append(problems, fmt.Sprintf("cluster.publicAddresses: %q is not an IP address", value))
-		} else if address.IsPrivate() || address.IsLoopback() || address.IsUnspecified() || address.IsLinkLocalUnicast() || address.IsMulticast() {
-			problems = append(problems, fmt.Sprintf("cluster.publicAddresses: %s is not a public address", value))
-		}
-	}
+	problems = append(problems, publicProblems("cluster.publicAddresses", c.PublicAddresses)...)
 	if d := c.DNS; d != nil {
 		if !slices.Contains(DNSProviders, d.Provider) {
 			problems = append(problems, fmt.Sprintf("cluster.dns.provider must be one of %v", DNSProviders))
@@ -652,6 +654,20 @@ func (c Cluster) problems() []string {
 		}
 		if len(c.PublicAddresses) == 0 {
 			problems = append(problems, "cluster.dns needs cluster.publicAddresses: without them the records never name this node")
+		}
+	}
+	return problems
+}
+
+// publicProblems are what is wrong with the public addresses values, the
+// setting named key.
+func publicProblems(key string, values []string) []string {
+	var problems []string
+	for _, value := range values {
+		if address, err := netip.ParseAddr(value); err != nil || address.Zone() != "" {
+			problems = append(problems, fmt.Sprintf("%s: %q is not an IP address", key, value))
+		} else if address.IsPrivate() || address.IsLoopback() || address.IsUnspecified() || address.IsLinkLocalUnicast() || address.IsMulticast() {
+			problems = append(problems, fmt.Sprintf("%s: %s is not a public address", key, value))
 		}
 	}
 	return problems
