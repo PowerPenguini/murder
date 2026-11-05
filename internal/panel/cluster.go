@@ -77,6 +77,14 @@ func (j *Job) Done() bool {
 	return !j.Ended.IsZero()
 }
 
+// EndedAt is when the job ended, zero while it runs. Ended itself is
+// written by the job's own goroutine: read it so, or only once Done.
+func (j *Job) EndedAt() time.Time {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.Ended
+}
+
 // JobKind is what a job does.
 type JobKind string
 
@@ -938,7 +946,7 @@ func (s *Server) jobPage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, &api.Error{Status: http.StatusNotFound, Message: "no such job on this node's panel: jobs are kept by the panel that began them, until it restarts"})
 		return
 	}
-	data := jobData{Job: job, Kept: s.Jobs.kept(), Since: job.Started.Add(-time.Minute), Until: job.Ended}
+	data := jobData{Job: job, Kept: s.Jobs.kept(), Since: job.Started.Add(-time.Minute), Until: job.EndedAt()}
 	if data.Until.IsZero() {
 		data.Until = s.now()
 	}
