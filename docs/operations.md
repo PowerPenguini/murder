@@ -234,7 +234,7 @@ What it needs:
 - `edge.tls.mode: acme` with `email` (the account's contact): the same
   CA as the wildcard. With `internal` or `off`, domains are checked and
   routed, without certificates (plain HTTP when TLS is off). `internal`
-  with both `ca` and `email` set, as for a test cluster, still orders
+  with `ca` set (`email` optional), as for a test cluster, still orders
   domains' certificates from that CA (say Let's Encrypt's staging one).
 - Port 80 open to the internet on every node the name leads to: the CA
   asks any of them, from several places. Keep it open in the provider's
