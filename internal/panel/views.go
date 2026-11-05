@@ -707,6 +707,8 @@ type tenantData struct {
 	RiskOthers string
 	// AppMemory says its app's tenants run out of memory, if they do.
 	AppMemory *appMemory
+	// Domains is its own host names' box.
+	Domains *domainsView
 	// Operation is what a person did to it lately, and how it went; Me is
 	// who looks, as the audit log names them.
 	Operation *operation
@@ -742,6 +744,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	data := tenantData{Tenant: t, State: tenantState(t), Replica: replicaState(t, len(nodes.Nodes) > 1), Events: shownEvents(events, "", 20),
 		Activity: activityOf(events, s.now(), 14*24*time.Hour, 24*time.Hour, len(events) < activityEvents, dayLabel), Usage: use}
 	data.Row = tenantRow{Tenant: t, State: data.State, Replica: data.Replica}
+	data.Domains = s.domainsOf(r, t, nodes)
 	if b, ok := cluster.Backups[name]; ok {
 		b.Stale = b.Stale && !t.Archived()
 		data.Row.Backup = &b
