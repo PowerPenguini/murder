@@ -82,6 +82,16 @@ func Check(ctx context.Context, resolver Resolver, name string, target Target) R
 	for _, address := range target.Addresses {
 		ours[address.Unmap()] = true
 	}
+	// Without the nodes' addresses, as outside a cluster, those the
+	// tenant's own name leads to are the cluster's.
+	known := len(ours) > 0
+	if !known && len(target.Names) > 0 {
+		if own, err := resolver.LookupNetIP(ctx, "ip", target.Names[0]); err == nil {
+			for _, address := range own {
+				ours[address.Unmap()] = true
+			}
+		}
+	}
 	var foreign []string
 	for _, address := range addresses {
 		if !ours[address.Unmap()] {
@@ -91,10 +101,10 @@ func Check(ctx context.Context, resolver Resolver, name string, target Target) R
 	slices.Sort(foreign)
 	foreign = slices.Compact(foreign)
 	switch {
-	case len(foreign) == 0:
+	case len(foreign) == 0 && len(ours) > 0:
 		return Result{OK: true, Said: "its addresses are the cluster's" + via}
-	case len(target.Addresses) == 0:
-		return Result{Said: fmt.Sprintf("it points at %s%s, and the nodes' public addresses are not known (cluster.publicAddresses): only a CNAME to %s is checked", strings.Join(foreign, ", "), via, strings.Join(target.Names, " or "))}
+	case !known && len(target.Names) > 0:
+		return Result{Said: fmt.Sprintf("it points at %s%s, which %s does not (the nodes' public addresses are not known: cluster.publicAddresses)", strings.Join(foreign, ", "), via, target.Names[0])}
 	default:
 		return Result{Said: fmt.Sprintf("it points at %s%s, which no node of the cluster has", strings.Join(foreign, ", "), via)}
 	}

@@ -83,9 +83,15 @@ func TestCheck(t *testing.T) {
 			t.Errorf("%s: %+v; want %+v", name, got, want)
 		}
 	}
+	// Without the nodes' addresses, the tenant's own name's are the
+	// cluster's.
 	unknown := Target{Names: target.Names}
-	if got := Check(t.Context(), resolver, "ours.customer.com", unknown); got.OK || !strings.Contains(got.Said, "public addresses are not known") {
-		t.Errorf("without the nodes' addresses: %+v", got)
+	if got := Check(t.Context(), resolver, "ours.customer.com", unknown); got.OK || !strings.Contains(got.Said, "which acme.murder.example.net does not") {
+		t.Errorf("without the nodes' addresses, other addresses: %+v", got)
+	}
+	resolver.addresses["same.customer.com"] = []string{"203.0.113.10"}
+	if got := Check(t.Context(), resolver, "same.customer.com", unknown); !got.OK {
+		t.Errorf("without the nodes' addresses, the tenant's name's: %+v", got)
 	}
 	if got := Check(t.Context(), resolver, "cname.customer.com", unknown); !got.OK {
 		t.Errorf("a CNAME without the nodes' addresses: %+v", got)
