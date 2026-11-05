@@ -906,3 +906,33 @@ func TestAThawEndsTheFreezeItWasFor(t *testing.T) {
 		t.Fatalf("nothing frozen: %v", err)
 	}
 }
+
+// A secret an app change drops keeps its value: the new app does not get it,
+// and changing back gives the tenant the same value, not a new one.
+func TestADroppedSecretKeepsItsValue(t *testing.T) {
+	st, _ := withApp(t, options())
+	other := appSpec()
+	other.Secrets = nil
+	if _, err := st.PutApp(App{Name: "plain", Spec: other}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := first.Sealed["SESSION"]
+	moved, _, err := st.Configure("acme", "plain", spec.Overrides{}, 0, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, has := moved.Spec.Secrets["SESSION"]; has || moved.Sealed["SESSION"] != value {
+		t.Fatalf("on plain: spec %v, kept %q (was %q)", moved.Spec.Secrets, moved.Sealed["SESSION"], value)
+	}
+	back, _, err := st.Configure("acme", "web", spec.Overrides{}, 0, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Sealed["SESSION"] != value {
+		t.Fatalf("changed back, SESSION is %q, was %q", back.Sealed["SESSION"], value)
+	}
+}

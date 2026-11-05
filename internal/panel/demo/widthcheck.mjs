@@ -1,6 +1,7 @@
 // widthcheck.mjs BASE (node internal/panel/demo/widthcheck.mjs http://127.0.0.1:7480, with the demo running): fails when a panel page is wider than the window at
 // 390, 1024, 1280 or 1440 px, or a block sticks out of the page's column,
-// or text comes closer than 8 px to the frame of its box or open menu.
+// or text comes closer than 8 px to the frame of its box or open menu, or
+// an opened menu, sheet or pop-over is not wholly on screen.
 // Drives Chromium through its DevTools protocol (Node 22 or later).
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
@@ -129,15 +130,33 @@ const edges = `(async () => {
   const main = document.querySelector("main");
   for (const box of main.querySelectorAll(".notice, .problem, .review-box, .panel")) if (shown(box) && !box.closest(".pop")) measure(box, box.className.split(" ")[0]);
   const wait = () => new Promise((r) => setTimeout(r, 60));
+  // An opened menu, sheet or pop-over is wholly on screen, has a size,
+  // and is what a tap at its centre reaches: a box off the screen has no
+  // text near any edge, so the edge test alone cannot fail it.
+  const onScreen = (pop, where) => {
+    const r = pop.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) { close.push(where + ": opens with no size"); return; }
+    if (r.top < -0.5 || r.left < -0.5 || r.bottom > innerHeight + 0.5 || r.right > innerWidth + 0.5) {
+      close.push(where + ": not wholly on screen (top " + Math.round(r.top) + ", bottom " + Math.round(r.bottom) + " of " + innerHeight + ", left " + Math.round(r.left) + ", right " + Math.round(r.right) + " of " + innerWidth + ")");
+      return;
+    }
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!hit || !pop.contains(hit)) close.push(where + ": covered at its centre by " + (hit ? hit.tagName.toLowerCase() + "." + String(hit.className).split(" ")[0] : "nothing"));
+  };
   for (const d of document.querySelectorAll("details")) {
     const pop = d.querySelector(":scope > .pop");
-    if (!pop || !shown(d.querySelector(":scope > summary"))) continue;
+    const summary = d.querySelector(":scope > summary");
+    if (!pop || !shown(summary)) continue;
+    // Opened as a person would: its button in view.
+    summary.scrollIntoView({ block: "center" }); await wait();
     d.open = true; await wait();
-    const name = "menu " + d.querySelector(":scope > summary").textContent.trim().slice(0, 24);
+    const name = "menu " + summary.textContent.trim().slice(0, 24);
     measure(pop, name);
-    for (const act of pop.querySelectorAll(":scope > details.act")) { act.open = true; await wait(); measure(pop, name + " / " + act.querySelector("summary").textContent.trim().slice(0, 20)); act.open = false; }
+    onScreen(pop, name);
+    for (const act of pop.querySelectorAll(":scope > details.act")) { act.open = true; await wait(); const an = name + " / " + act.querySelector("summary").textContent.trim().slice(0, 20); measure(pop, an); onScreen(pop, an); act.open = false; }
     d.open = false; await wait();
   }
+  scrollTo(0, 0);
   return JSON.stringify([...new Set(close)].slice(0, 6));
 })()`;
 await send("Page.enable");

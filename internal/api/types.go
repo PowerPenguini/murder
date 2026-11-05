@@ -23,6 +23,10 @@ type Tenant struct {
 	Node string `json:"node"`
 	// Elsewhere is set when another node than this one runs the tenant.
 	Elsewhere bool `json:"elsewhere,omitempty"`
+	// KeptSecrets names the secrets murder holds a value of for the tenant,
+	// its spec's and those an app change dropped, which it keeps: a secret
+	// added back gets its kept value. Names only, never values.
+	KeptSecrets []string `json:"keptSecrets,omitempty"`
 	// Replica is the node that keeps a copy of the tenant's data;
 	// ReplicaReady says the copy holds the whole data, so the tenant can
 	// fail over to it; ReplicaSyncedAt is when the copy last matched the

@@ -23,10 +23,18 @@ type appChange struct {
 	// what it had from the old app and the new one lacks; Made the
 	// secrets the new app has and it gets made.
 	Kept, Dropped, Made []string
-	// Owner is set when its data was written as another user than the new
-	// app runs as: the user now, and the one after.
-	OwnerNow, OwnerAfter string
-	DataPath             string
+	// OwnerNow and OwnerAfter are set when its data, as its node read it,
+	// was written by another user than the new app runs as; OwnerMixed says
+	// some of it has yet another owner. OwnerNote says it, in grey, when
+	// there is nothing to warn of, or the owner was not read.
+	OwnerNow, OwnerAfter, OwnerNote string
+	OwnerMixed                      bool
+	// Back are the secrets the new app has that murder kept a value of:
+	// they get that value again. SecretsKept says secrets go, their values
+	// kept.
+	Back        []string
+	SecretsKept bool
+	DataPath    string
 	// Summary says it in one line; Unlimited names the limits it would
 	// lose ("CPUs, processes, disk").
 	Summary, Unlimited string
@@ -121,16 +129,40 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 		}
 		if _, ok := after.Secrets[key]; !ok {
 			c.Dropped = append(c.Dropped, key+" (secret)")
+			c.SecretsKept = true
 		}
 	}
+	// A secret the new app has: the value murder kept of it (an earlier app
+	// gave it one), or a new one.
 	for _, key := range slices.Sorted(maps.Keys(after.Secrets)) {
-		if _, ok := now.Secrets[key]; !ok {
+		if _, ok := now.Secrets[key]; ok {
+			continue
+		}
+		if slices.Contains(t.KeptSecrets, key) {
+			c.Back = append(c.Back, key)
+		} else {
 			c.Made = append(c.Made, key)
 		}
 	}
-	// Its data stays as written: by the user it runs as now.
-	if now.User != after.User && now.DataPath != "" {
-		c.OwnerNow, c.OwnerAfter = orRoot(now.User), orRoot(after.User)
+	// Who wrote its data, as its node read it, against the user the new
+	// app runs as: a warning only for an owner read and different.
+	if now.DataPath != "" {
+		read := ""
+		if t.Status != nil {
+			read, c.OwnerMixed = t.Status.DataOwner, t.Status.DataMixed
+		}
+		switch {
+		case read != "" && after.User != "" && read != after.User:
+			c.OwnerNow, c.OwnerAfter = read, after.User
+		case read != "" && after.User == "":
+			c.OwnerNote = to.Name + " runs as its image's own user; " + t.Spec.Name + "'s data at " + now.DataPath + " was written as " + read + ": check that its image can use it."
+		case read != "":
+			c.OwnerNote = t.Spec.Name + "'s data at " + now.DataPath + " was written as " + read + ", the user " + to.Name + " runs as."
+		case now.User != after.User && t.Status == nil:
+			c.OwnerNote = "Who wrote " + t.Spec.Name + "'s data is not known: its node has not said. " + to.Name + " runs as " + orRoot(after.User) + "."
+		case now.User != after.User:
+			c.OwnerNote = "Who wrote " + t.Spec.Name + "'s data was not read (it may be empty). " + to.Name + " runs as " + orRoot(after.User) + "."
+		}
 	}
 	// The summary counts as the table does: changed, gone, limits lost.
 	changed, gone := 0, 0

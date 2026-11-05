@@ -61,11 +61,17 @@ type Status struct {
 	// Restarts counts how often the container was started again after its
 	// app exited; LastExit says when it last exited and, if known, why.
 	// Both start again with a new container.
-	Restarts    int       `json:"restarts,omitempty"`
-	LastExit    string    `json:"lastExit,omitempty"`
-	ContainerID string    `json:"containerID,omitempty"`
-	Generation  int64     `json:"generation"`
-	CheckedAt   time.Time `json:"checkedAt"`
+	Restarts    int    `json:"restarts,omitempty"`
+	LastExit    string `json:"lastExit,omitempty"`
+	ContainerID string `json:"containerID,omitempty"`
+	// DataOwner is who wrote the tenant's data, read on its node each pass
+	// ("uid:gid", the owner most of its data directory's entries have);
+	// empty when its data is empty or could not be read. DataMixed says
+	// some entries have another owner.
+	DataOwner  string    `json:"dataOwner,omitempty"`
+	DataMixed  bool      `json:"dataMixed,omitempty"`
+	Generation int64     `json:"generation"`
+	CheckedAt  time.Time `json:"checkedAt"`
 }
 
 // Config holds the node-wide settings the reconciler applies to every tenant.

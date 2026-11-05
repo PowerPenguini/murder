@@ -19,6 +19,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/reconcile"
+	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -1090,6 +1091,7 @@ func TestChangingATenantsApp(t *testing.T) {
 		`<td class="l-main">Image</td>`, "Its own, kept over testapp's", `<span class="nowrap">memory 768 MB</span>`, `<span class="nowrap">TZ</span>`,
 		`<td class="l-main">SESSION_KEY (secret)</td><td class="dim l-sub" data-label="Now">hex, 32 bytes</td><td class="l-sub" data-label="After">not set</td>`,
 		"Gone with web", `<span class="nowrap">DATA_DIR</span>`, `<span class="nowrap">SESSION_KEY (secret)</span>`,
+		"The values of the secrets that go are kept by murder, not given to testapp: changing back to web gives them back",
 		"Type atlas to confirm.", `data-confirm="atlas"`, `class="danger">Change atlas to testapp</button>`, "data-review"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the app change's review lacks %q:\n%s", want, body)
@@ -1111,13 +1113,25 @@ func TestChangingATenantsApp(t *testing.T) {
 	// owner kept in view until it runs healthy, and no "0 B" of data.
 	_, after := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
 	for _, want := range []string{"Changed from app web to testapp</span> by you", "Change it back to web</a>",
-		"testapp runs as 10001:10001, but its data at /data was written as 1000:1000 under web"} {
+		"testapp runs as 10001:10001, but its data at /data was written as 1000:1000: if it does not start"} {
 		if !strings.Contains(after, want) {
 			t.Fatalf("after the change lacks %q:\n%s", want, after)
 		}
 	}
 	if strings.Contains(after, `<div class="v">0 B`) {
 		t.Fatalf("its data said as 0 B:\n%s", after)
+	}
+	// Changing back: who wrote the data was read (1000:1000), the user web
+	// runs as, so nothing is red; SESSION_KEY gets the value it kept.
+	_, back := get(t, server.URL+"/tenants/atlas/settings?do=review&app=web")
+	for _, want := range []string{"Review changing atlas to app web", "atlas&#39;s data at /data was written as 1000:1000, the user web runs as.",
+		"Its kept value again", "SESSION_KEY (secret)</span>: the value it had before", "Back: keep testapp</a>"} {
+		if !strings.Contains(back, want) {
+			t.Fatalf("the change back lacks %q:\n%s", want, back)
+		}
+	}
+	if strings.Contains(back, `class="notice bad"`) || strings.Contains(back, "Made new for it") {
+		t.Fatalf("the change back warns of a guess, or makes a kept secret new:\n%s", back)
 	}
 	if after, _ := cluster.Get(ctx, "atlas"); after.App != "testapp" {
 		t.Fatalf("atlas runs app %q", after.App)
@@ -1152,5 +1166,27 @@ func TestEventsNameTheirWave(t *testing.T) {
 	}
 	if got := namedWave(store.Event{Action: "app.rolled-out", Detail: "wave 3: revision 1 → 2"}); got != "wave 3, half: revision 1 → 2" {
 		t.Fatalf("an older event: %q", got)
+	}
+}
+
+// The data's owner is warned of only as read: a different owner is red, an
+// owner not read is said in grey, never guessed from the app's user.
+func TestAnAppChangeWarnsOfTheOwnerAsRead(t *testing.T) {
+	now := api.Tenant{App: "web", Spec: spec.Tenant{Name: "atlas", User: "1000:1000", DataPath: "/data"}}
+	to := api.App{Name: "testapp", Spec: spec.Tenant{Image: "x", User: "10001:10001"}}
+	if c := appChangeOf(now, to, settingsForm{}); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "is not known: its node has not said") {
+		t.Fatalf("no status: %+v", c)
+	}
+	now.Status = &reconcile.Status{}
+	if c := appChangeOf(now, to, settingsForm{}); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "was not read (it may be empty)") {
+		t.Fatalf("not read: %+v", c)
+	}
+	now.Status.DataOwner, now.Status.DataMixed = "1000:1000", true
+	if c := appChangeOf(now, to, settingsForm{}); c.OwnerNow != "1000:1000" || c.OwnerAfter != "10001:10001" || !c.OwnerMixed {
+		t.Fatalf("read, another owner: %+v", c)
+	}
+	now.Status.DataOwner = "10001:10001"
+	if c := appChangeOf(now, to, settingsForm{}); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "the user testapp runs as") {
+		t.Fatalf("read, the new app's own user: %+v", c)
 	}
 }

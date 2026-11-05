@@ -46,7 +46,7 @@ func (d Demo) Nodes(context.Context) (api.Nodes, error) {
 func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 	now := d.now()
 	running := func(restarts int) *reconcile.Status {
-		return &reconcile.Status{Phase: "running", Healthy: true, Restarts: restarts, Generation: 3, CheckedAt: now.Add(-4 * time.Second)}
+		return &reconcile.Status{Phase: "running", Healthy: true, Restarts: restarts, Generation: 3, CheckedAt: now.Add(-4 * time.Second), DataOwner: "1000:1000"}
 	}
 	tenant := func(name, app, node, replica string, ready bool, status *reconcile.Status) api.Tenant {
 		return api.Tenant{
@@ -56,12 +56,13 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 			App: app, Node: node, Replica: replica, ReplicaReady: ready, ReplicaSyncedAt: now.Add(-9 * time.Second),
 			Host: name + ".example.com", URL: "https://" + name + ".example.com", Generation: 3,
 			CreatedAt: now.Add(-20 * 24 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour), Status: status,
+			KeptSecrets: []string{"SESSION_KEY"},
 		}
 	}
 	moving := tenant("kowalski-trans", "web", "nbg-1", "fsn-1", true, running(0))
-	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 1, LastExit: "killed (SIGKILL) at " + now.Add(-4*time.Minute).UTC().Format(time.RFC3339) + ", most likely for using more than its 256 MB of memory", Generation: 3, CheckedAt: now.Add(-3 * time.Second)})
+	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 1, LastExit: "killed (SIGKILL) at " + now.Add(-4*time.Minute).UTC().Format(time.RFC3339) + ", most likely for using more than its 256 MB of memory", Generation: 3, CheckedAt: now.Add(-3 * time.Second), DataOwner: "1000:1000"})
 	syncing := tenant("nordwind", "web", "fsn-1", "nbg-1", false, running(0))
-	suspended := tenant("test-staging", "web", "fsn-1", "nbg-1", true, &reconcile.Status{Phase: "stopped", Generation: 5, CheckedAt: now.Add(-6 * time.Second)})
+	suspended := tenant("test-staging", "web", "fsn-1", "nbg-1", true, &reconcile.Status{Phase: "stopped", Generation: 5, CheckedAt: now.Add(-6 * time.Second), DataOwner: "1000:1000"})
 	suspended.Spec.Suspended = true
 	archived := tenant("old-demo", "web", "nbg-1", "", false, nil)
 	archived.ArchivedAt = now.Add(-9 * 24 * time.Hour)
@@ -177,4 +178,13 @@ func SeedDemoJobs(path string, now time.Time) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o600)
+}
+
+// dataOwnerOf is who wrote a tenant's data, kept as its container is
+// replaced: the data stays, and so does who wrote it.
+func dataOwnerOf(old *reconcile.Status) string {
+	if old == nil {
+		return ""
+	}
+	return old.DataOwner
 }

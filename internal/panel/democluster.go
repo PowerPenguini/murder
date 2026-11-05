@@ -132,7 +132,7 @@ func (a *demoActor) change(name, action, detail string, change func(*api.Tenant)
 	// A new container starts, and settles a few seconds later (settle).
 	if _, starts := operations[action]; starts && t.Status != nil && !t.Spec.Suspended {
 		// A new container: its restarts are its own.
-		t.Status = &reconcile.Status{Phase: "starting", Generation: t.Generation, CheckedAt: time.Now()}
+		t.Status = &reconcile.Status{Phase: "starting", Generation: t.Generation, CheckedAt: time.Now(), DataOwner: dataOwnerOf(t.Status)}
 	}
 	a.tenants[name] = t
 	a.record(action, name, detail)
@@ -220,7 +220,7 @@ func (a *demoActor) Suspend(_ context.Context, name string, suspended bool) (api
 		if suspended {
 			phase = "stopped"
 		}
-		t.Status = &reconcile.Status{Phase: phase, Healthy: !suspended, CheckedAt: time.Now()}
+		t.Status = &reconcile.Status{Phase: phase, Healthy: !suspended, CheckedAt: time.Now(), DataOwner: dataOwnerOf(t.Status)}
 		return nil
 	})
 }
@@ -250,7 +250,7 @@ func (a *demoActor) Archive(_ context.Context, name string) error {
 func (a *demoActor) Restore(_ context.Context, name string) (api.Tenant, error) {
 	return a.change(name, "tenant.restored", "", func(t *api.Tenant) error {
 		t.ArchivedAt = time.Time{}
-		t.Status = &reconcile.Status{Phase: "running", Healthy: true, CheckedAt: time.Now()}
+		t.Status = &reconcile.Status{Phase: "running", Healthy: true, CheckedAt: time.Now(), DataOwner: dataOwnerOf(t.Status)}
 		return nil
 	})
 }

@@ -1008,9 +1008,12 @@ table.settings.grid .row-act details.menu-text > summary.button::after { display
 /* A secret's "New value…" at the right of its Override cell, as an added
    row's Remove: the three tables keep one grid. Its pop-over opens upward,
    over the row's own table, never over what follows. */
-table.settings.grid .row-act { float: right; line-height: 32px; margin-left: var(--s3); }
+table.settings.grid .row-act { float: right; margin-left: var(--s3); }
+table.settings.grid .row-act > details > summary { line-height: 24px; }
 table.secrets.grid td.own .own-field { width: auto; }
-table.settings.grid .row-act details.menu-text .pop { top: auto; bottom: calc(100% + 6px); }
+/* Its pop-over opens down from the row at the body's own leading (the
+   cell's 32 px line is the link's alone); a phone opens it as a sheet. */
+table.settings.grid .row-act .pop { line-height: 1.55; }
 table.settings.grid tr.add td.own .remove-row { margin-left: var(--s2); }
 
 /* While the page shows old data, the side bar's counts and marks are old
@@ -1066,3 +1069,8 @@ input.confirm-field { max-width: 320px; }
    chart beside it does not stretch. */
 .charts > figure.chart { align-self: start; }
 .warn-notice .st:empty::before, .op-owner .st:empty::before { margin-right: var(--s2); }
+/* A review's stacked notices: 16 px apart, as on the app review, and 24 px
+   before its table. */
+.review-box > .notice, .review-box > .owner-note { margin: 0 0 var(--s4); }
+.review-box > .summary-line { margin-bottom: var(--s4); }
+.review-box > .notice + table, .review-box > .owner-note + table { margin-top: var(--s5); }

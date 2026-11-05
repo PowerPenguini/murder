@@ -34,7 +34,7 @@ func (d *DemoCluster) moveTenant(t *api.Tenant, composed spec.Tenant, detail str
 	t.Generation++
 	if changed && !t.Spec.Suspended && t.Status != nil {
 		// A new container: its restarts and last exit are its own.
-		t.Status = &reconcile.Status{Phase: "starting", Generation: t.Generation, CheckedAt: time.Now()}
+		t.Status = &reconcile.Status{Phase: "starting", Generation: t.Generation, CheckedAt: time.Now(), DataOwner: dataOwnerOf(t.Status)}
 	}
 	d.note("murder (rollout)", "app.rolled-out", t.Spec.Name, t.App, detail)
 }

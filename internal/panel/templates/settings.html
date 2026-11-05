@@ -13,10 +13,11 @@
     {{with $d.AppChange}}{{$c := .}}
     <h2>Review changing {{$t.Spec.Name}} to app {{.To}}</h2>
     <p class="summary-line">{{.Summary}}.</p>
-    {{if .OwnerAfter}}<div class="notice bad spaced" role="alert"><p class="flat"><span class="lead-in">{{.To}} runs as {{.OwnerAfter}}, but {{$t.Spec.Name}}'s data at {{.DataPath}} was written as {{.OwnerNow}}.</span> Its new container may not be able to read or write it.</p>
+    {{if .OwnerAfter}}<div class="notice bad" role="alert"><p class="flat"><span class="lead-in">{{.To}} runs as {{.OwnerAfter}}, but {{$t.Spec.Name}}'s data at {{.DataPath}} was written as {{.OwnerNow}}{{if .OwnerMixed}}, and some of it by another user{{end}}.</span> Its new container may not be able to read or write it.</p>
       <p class="flat spaced">Before you change it, check that {{.To}}'s image can use data owned by {{.OwnerNow}}, or set <span class="mono">user: "{{.OwnerNow}}"</span> in {{.To}}'s spec if its image allows.</p></div>{{end}}
-    {{with .Unlimited}}<div class="notice warn-notice spaced" role="status"><p class="flat"><span class="st warn"></span><span class="lead-in">{{$t.Spec.Name}} would run with no limit on {{.}}:</span> {{$c.To}} sets none. Without one it can take what the node's other tenants need. Set them in <a href="/apps/{{$c.To}}">{{$c.To}}'s spec</a>, or as {{$t.Spec.Name}}'s own, first.</p></div>{{end}}
-    <table class="list changes spaced">
+    {{with .OwnerNote}}<p class="hint flat owner-note">{{.}}</p>{{end}}
+    {{with .Unlimited}}<div class="notice warn-notice" role="status"><p class="flat"><span class="st warn"></span><span class="lead-in">{{$t.Spec.Name}} would run with no limit on {{.}}:</span> {{$c.To}} sets none. Without one it can take what the node's other tenants need. Set them in <a href="/apps/{{$c.To}}">{{$c.To}}'s spec</a>, or as {{$t.Spec.Name}}'s own, first.</p></div>{{end}}
+    <table class="list changes">
       <thead><tr><th>Setting</th><th>Now, on {{.From}}</th><th>After, on {{.To}}</th></tr></thead>
       <tbody>{{range .Fields}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.Now}}</td><td class="l-sub" data-label="After">{{if .Loses}}<span class="st warn">{{.After}}</span>{{else}}{{.After}}{{end}}</td></tr>{{end}}
       {{range $d.Review}}{{if or (eq .Field "Canary") (eq .Field "Held")}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="After">{{.To}}</td></tr>{{end}}{{end}}</tbody>
@@ -24,11 +25,13 @@
     <dl class="carry">
       {{with .Kept}}<div><dt>Its own, kept over {{$c.To}}'s</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
       {{with .Dropped}}<div><dt>Gone with {{$c.From}}</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
-      {{with .Made}}<div><dt>Made new for it</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
+      {{with .Back}}<div><dt>Its kept value again</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}} (secret)</span>{{end}}: the value it had before, so what it signed still works</dd></div>{{end}}
+      {{with .Made}}<div><dt>Made new for it</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}} (secret)</span>{{end}}: a value of its own, made once</dd></div>{{end}}
     </dl>
+    {{if .SecretsKept}}<p class="hint flat">The values of the secrets that go are kept by murder, not given to {{.To}}: changing back to {{.From}} gives them back, and what they signed still works.</p>{{end}}
     <p class="hint">Its data stays as it is, and {{.To}}'s container starts on it: {{.To}}'s image must understand it. An image may change data as it starts (a migration), and changing back to {{.From}} later does not undo that. {{$t.Spec.Name}} answers no request while its new container starts. Type {{$t.Spec.Name}} to confirm.</p>
     <input type="text" name="confirm" class="confirm-field" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
-    <div class="actions"><button type="submit" name="do" value="save" class="danger">Change {{$t.Spec.Name}} to {{.To}}</button><button type="submit" name="do" value="edit" formnovalidate>Keep editing</button></div>
+    <div class="actions"><button type="submit" name="do" value="save" class="danger">Change {{$t.Spec.Name}} to {{.To}}</button>{{if $d.FromMenu}}<a href="/tenants/{{$t.Spec.Name}}" class="button">Back: keep {{.From}}</a>{{else}}<button type="submit" name="do" value="edit" formnovalidate>Keep editing</button>{{end}}</div>
     {{else}}
     <h2>Review {{plural (len $d.Review) "change" "changes"}} to {{$t.Spec.Name}}</h2>
     <table class="list changes">

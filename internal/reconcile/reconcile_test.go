@@ -2417,3 +2417,22 @@ func TestContainersHashedWithSealedValuesAreAdopted(t *testing.T) {
 		t.Fatal("a container hashed with sealed values outlived them")
 	}
 }
+
+// A tenant's status says who wrote its data, as read on its node: nothing
+// for empty data, then the owner of what is in it.
+func TestStatusSaysWhoWroteTheData(t *testing.T) {
+	f := newFixture(t)
+	f.create(t, "acme")
+	f.reconcile(t)
+	if status, _ := f.reconciler.Status("acme"); status.DataOwner != "" {
+		t.Fatalf("empty data said to be written by %q", status.DataOwner)
+	}
+	if err := os.WriteFile(filepath.Join(f.volumes.Root, "acme", "db.sqlite"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	want := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	if status, _ := f.reconciler.Status("acme"); status.DataOwner != want || status.DataMixed {
+		t.Fatalf("data owner %q (mixed %v), want %s", status.DataOwner, status.DataMixed, want)
+	}
+}

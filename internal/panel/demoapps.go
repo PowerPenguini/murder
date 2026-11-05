@@ -82,6 +82,7 @@ func (d *DemoCluster) demoApps() {
 		CreatedAt: created, UpdatedAt: created}
 	t := d.tenants["atlas"]
 	t.Overrides = spec.Overrides{Env: map[string]string{"TZ": "Europe/Berlin", "FEATURE_PLANNER": "on"}, Secrets: spec.Secrets{"ADMIN_PASSWORD": {Kind: "password", Bytes: 20}}, Limits: spec.Limits{MemoryMB: 768}}
+	t.KeptSecrets = []string{"ADMIN_PASSWORD", "SESSION_KEY"}
 	d.tenants["atlas"] = t
 	// Each tenant runs its app's spec, of the revision it is on, with its
 	// overrides, composed as the store composes it.
@@ -360,6 +361,14 @@ func (a *demoActor) Configure(_ context.Context, name string, request api.Tenant
 	}
 	changed, err := a.change(name, "tenant.updated", detail, func(t *api.Tenant) error {
 		suspended := t.Spec.Suspended
+		// As the store: every secret it was given keeps its value, kept or
+		// in use.
+		for key := range composed.Secrets {
+			if !slices.Contains(t.KeptSecrets, key) {
+				t.KeptSecrets = append(t.KeptSecrets, key)
+			}
+		}
+		slices.Sort(t.KeptSecrets)
 		t.App, t.Overrides, t.Spec = request.App, request.Overrides.Normalized(), composed
 		t.Spec.Suspended = suspended
 		return nil

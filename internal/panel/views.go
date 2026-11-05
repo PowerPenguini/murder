@@ -678,15 +678,11 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	s.appContext(ctx, r, t, &data)
 	data.Operation = operationOf(t, events, s.now())
 	data.Me = s.actor(userOf(r))
-	// After another app, until it runs healthy: the data's owner, as the
-	// review warned.
-	if op := data.Operation; op != nil && op.From != "" && op.Kind != "ok" && s.Actions != nil {
-		if apps, err := s.Actions(s.actor(userOf(r))).Apps(ctx); err == nil {
-			for _, app := range apps {
-				if app.Name == op.From && app.Spec.User != t.Spec.User && t.Spec.DataPath != "" {
-					op.Owner = t.App + " runs as " + orRoot(t.Spec.User) + ", but its data at " + t.Spec.DataPath + " was written as " + orRoot(app.Spec.User) + " under " + op.From + ": if it does not start, that is the likely cause."
-				}
-			}
+	// After another app, until it runs healthy: who wrote its data, as its
+	// node read it, when that is not the user it now runs as.
+	if op := data.Operation; op != nil && op.From != "" && op.Kind != "ok" && t.Status != nil {
+		if read := t.Status.DataOwner; read != "" && t.Spec.User != "" && read != t.Spec.User && t.Spec.DataPath != "" {
+			op.Owner = t.App + " runs as " + t.Spec.User + ", but its data at " + t.Spec.DataPath + " was written as " + read + ": if it does not start, that is the likely cause."
 		}
 	}
 	if use != nil {

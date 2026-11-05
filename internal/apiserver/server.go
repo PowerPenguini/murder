@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -130,6 +132,7 @@ func (s *Server) view(record store.Record) api.Tenant {
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
 		AppRevision: record.AppRevision, BeforeRevision: record.BeforeRevision, Canary: record.Canary, Hold: record.Hold, Restoring: record.Restore != "",
 	}
+	view.KeptSecrets = slices.Sorted(maps.Keys(record.Sealed))
 	view.Elsewhere = record.Node != s.store.Node()
 	if !view.Elsewhere && s.replicas != nil {
 		view.ReplicaSyncedAt = s.replicas.Synced(record.Spec.Name)

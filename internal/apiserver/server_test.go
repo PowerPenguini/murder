@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -245,6 +246,10 @@ func TestAppsArePinnedAndRolledOutToTheirTenants(t *testing.T) {
 	}
 	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
 		t.Fatal(err)
+	}
+	// The secrets it holds a value of are named, never their values.
+	if acme, err := f.client.Get(ctx, "acme"); err != nil || !slices.Equal(acme.KeptSecrets, []string{"SESSION_SECRET"}) {
+		t.Fatalf("acme's kept secrets = %v, %v", acme.KeptSecrets, err)
 	}
 	beta := tenantOf("beta")
 	beta.Overrides = spec.Overrides{Env: map[string]string{"TZ": "UTC"}}
@@ -657,11 +662,12 @@ func TestStatusOfTenantsOfOtherNodes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	healthy := reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true, Generation: 1}
+	// Who wrote its data, as that node read it, comes along.
+	healthy := reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true, Generation: 1, DataOwner: "1000:1000"}
 	f.server.WithCluster(statusCluster{statuses: map[string]reconcile.Status{"n2/on-n2": healthy}})
 
 	tenant, err := f.client.Get(ctx, "on-n2")
-	if err != nil || tenant.Status == nil || !tenant.Status.Healthy || tenant.Status.Phase != reconcile.PhaseRunning {
+	if err != nil || tenant.Status == nil || !tenant.Status.Healthy || tenant.Status.Phase != reconcile.PhaseRunning || tenant.Status.DataOwner != "1000:1000" {
 		t.Fatalf("on-n2 = %+v, %v", tenant, err)
 	}
 	// Its copy, and whether it can take over.

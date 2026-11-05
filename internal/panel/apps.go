@@ -834,8 +834,10 @@ type settingsData struct {
 	// the app's limit, when it is likely the better fix.
 	Suggest    string
 	SuggestApp *appMemory
-	// AppChange is what another app does to it, when the form moves it.
+	// AppChange is what another app does to it, when the form moves it;
+	// FromMenu says the review was asked from its menu, not an editor.
 	AppChange *appChange
+	FromMenu  bool
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -909,6 +911,7 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 			if app.Name == form.App {
 				change := appChangeOf(t, app, form)
 				data.AppChange, found = &change, true
+				data.FromMenu = r.Method == http.MethodGet
 			}
 		}
 		if !found && problem == "" {

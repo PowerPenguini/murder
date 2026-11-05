@@ -123,6 +123,13 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
 	}
+	// Who wrote its data, as read: what an app that runs as another user
+	// would find there.
+	if who, mixed, err := volume.DataOwner(dataPath); err == nil {
+		defer func() { status.DataOwner, status.DataMixed = who, mixed }()
+	} else {
+		r.log.Debug("data owner not read", "tenant", tenant.Name, "error", err)
+	}
 	labels := map[string]string{runtime.LabelTenant: tenant.Name}
 	err = r.runtime.EnsureNetwork(ctx, NetworkName(tenant.Name), record.Subnet, labels)
 	if errors.Is(err, runtime.ErrNetworkMismatch) {
