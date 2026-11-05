@@ -202,6 +202,10 @@ type operation struct {
 	Event store.Event
 	// Said says it as done ("Restarted"); State how it goes, Kind its tag.
 	Said, State, Kind string
+	// From is the app it ran before, when this changed its app; Owner says
+	// the data's owner differs from the new app's user, while it is not
+	// yet healthy: the review's warning, kept.
+	From, Owner string
 }
 
 // operations are the actions whose outcome a tenant's page follows.
@@ -237,6 +241,12 @@ func operationOf(t api.Tenant, events []store.Event, now time.Time) *operation {
 		op := &operation{Event: e, Said: said}
 		if e.Action == "tenant.moved" && t.Node != "" {
 			op.Said = "Moved to " + t.Node
+		}
+		// "app web → testapp; …": another app.
+		if rest, ok := strings.CutPrefix(e.Detail, "app "); ok && e.Action == "tenant.updated" {
+			if from, _, ok := strings.Cut(rest, " → "); ok {
+				op.From, op.Said = from, "Changed from app "+from+" to "+t.App
+			}
 		}
 		status := t.Status
 		switch {

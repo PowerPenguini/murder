@@ -1,7 +1,9 @@
 package panel
 
 import (
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -217,6 +219,7 @@ func (r eventRow) Oldest() store.Event {
 func groupEvents(events []store.Event) []eventRow {
 	var rows []eventRow
 	for _, e := range events {
+		e.Detail = namedWave(e)
 		if n := len(rows); n > 0 {
 			last := &rows[n-1]
 			if last.Action == e.Action && last.Detail == e.Detail && byPeople(last.Event) == byPeople(e) && last.Actor == e.Actor {
@@ -236,4 +239,23 @@ func groupEvents(events []store.Event) []eventRow {
 		rows = append(rows, eventRow{Event: e})
 	}
 	return rows
+}
+
+// numberedWave is a rollout's move as events said it before they named
+// their wave: "wave 2: revision 2 → 3".
+var numberedWave = regexp.MustCompile(`^wave (\d+): `)
+
+// namedWave says an older move with its wave's name, as newer ones are
+// recorded: "wave 2, a tenth: revision 2 → 3". Those rollouts moved no
+// tenant first, so the waves are named from the canaries.
+func namedWave(e store.Event) string {
+	if e.Action != "app.rolled-out" {
+		return e.Detail
+	}
+	m := numberedWave.FindStringSubmatch(e.Detail)
+	if m == nil {
+		return e.Detail
+	}
+	n, _ := strconv.Atoi(m[1])
+	return store.WaveSaid(n, store.WaveName(n-1)) + ": " + e.Detail[len(m[0]):]
 }

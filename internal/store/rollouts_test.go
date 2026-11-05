@@ -491,7 +491,7 @@ func TestSomeTenantsGoFirst(t *testing.T) {
 		}
 	}
 	events, _ := st.Events(EventQuery{Tenant: "b"})
-	if len(events) == 0 || !strings.Contains(events[0].Detail, "wave 1, first: revision 1 → 2") {
+	if len(events) == 0 || !strings.Contains(events[0].Detail, "wave 1, first now: revision 1 → 2") {
 		t.Fatalf("b's events: %+v", events)
 	}
 }

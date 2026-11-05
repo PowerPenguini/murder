@@ -113,7 +113,7 @@ func (d *DemoCluster) drive() {
 			t.BeforeRevision, t.AppRevision = from, 0
 			composed := spec.Compose(to, tenant, t.Overrides)
 			composed.Suspended = t.Spec.Suspended
-			d.moveTenant(&t, composed, "wave "+strconv.Itoa(ro.Wave+1)+": revision "+strconv.FormatInt(from, 10)+" → "+strconv.FormatInt(ro.ToRevision, 10))
+			d.moveTenant(&t, composed, store.WaveSaid(ro.Wave+1, ro.WaveName(ro.Wave+1))+": revision "+strconv.FormatInt(from, 10)+" → "+strconv.FormatInt(ro.ToRevision, 10))
 			d.tenants[tenant] = t
 		}
 		next.Wave++

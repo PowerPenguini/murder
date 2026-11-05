@@ -79,7 +79,7 @@ func (d *DemoCluster) Usage(ctx context.Context) (api.UsageReport, error) {
 			at := now.Truncate(time.Minute).Add(-time.Minute)
 			p := demoPoint(t.Spec.Name, limits.MemoryMB, limits.CPUs, at, time.Minute, d.demoMemory(t.Spec.Name, limits.MemoryMB, at.Add(time.Minute)))
 			r.Tenants[t.Spec.Name] = usage.Now{At: p.At, CPU: p.CPU, Memory: p.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
-				NetRx: p.NetRx, NetTx: p.NetTx, DiskUsed: int64(limits.DiskGB) << 30 / 7, Requests: p.Requests, Errors: p.Errors, P95: p.P95}
+				NetRx: p.NetRx, NetTx: p.NetTx, DiskUsed: demoData, Requests: p.Requests, Errors: p.Errors, P95: p.P95}
 			memory += p.Memory
 			cpu += p.CPU
 		}
@@ -152,7 +152,7 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	newest.Requests, newest.Errors, newest.NetRx, newest.NetTx = m.Requests*k, m.Errors*k, m.NetRx*k, m.NetTx*k
 	last := *newest
 	series.Now = usage.Now{At: last.At, CPU: last.CPU, Memory: last.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
-		DiskUsed: int64(limits.DiskGB) << 30 / 7, DiskLimit: int64(limits.DiskGB) << 30, Requests: last.Requests / int64(step.Minutes()), Errors: last.Errors / int64(step.Minutes()), P95: last.P95}
+		DiskUsed: demoData, DiskLimit: int64(limits.DiskGB) << 30, Requests: last.Requests / int64(step.Minutes()), Errors: last.Errors / int64(step.Minutes()), P95: last.P95}
 	return series, nil
 }
 
@@ -234,3 +234,7 @@ func (d *DemoCluster) peakIn(name string, limitMB int, at time.Time, step time.D
 	}
 	return peak
 }
+
+// demoData is a tenant's data size: what its volume holds, whatever its
+// limit, which another app may not set.
+const demoData = int64(10) << 30 / 7

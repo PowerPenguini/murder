@@ -41,6 +41,8 @@ type tenantUsage struct {
 	// Data is its data's size against its disk limit, if both are known.
 	Data                *meter
 	DataText, DataLimit string
+	// DataUnread says its data's size is not read yet.
+	DataUnread bool
 }
 
 // chartSpans are the spans a tenant's charts show, and the step of each.
@@ -129,6 +131,10 @@ func (s *Server) tenantUsage(ctx context.Context, name, rangeName string) *tenan
 	}
 	if used := series.Now.DiskUsed; used >= 0 {
 		u.DataText = size(float64(used))
+		// Nothing read yet (a new container) is not an empty volume.
+		if used == 0 {
+			u.DataText, u.DataUnread = "not measured yet", true
+		}
 		if limit := series.Now.DiskLimit; limit > 0 {
 			m := meterOf(int(used>>20), int(limit>>20))
 			u.Data = &m

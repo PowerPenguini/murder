@@ -18,7 +18,13 @@ ws.addEventListener("message", (m) => { const x = JSON.parse(m.data); if (x.id) 
   if (x.method === "Page.javascriptDialogOpening") { dialogs++; ws.send(JSON.stringify({ id: 999999, method: "Page.handleJavaScriptDialog", params: { accept: true } })); } });
 const send = (method, params = {}) => new Promise((r) => { const n = ++id; waiting.set(n, r); ws.send(JSON.stringify({ id: n, method, params })); });
 const ev = async (expr) => (await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true })).result.result.value;
-const go = async (path) => { await send("Page.navigate", { url: base + path }); await sleep(1200); };
+// Navigates and waits for the page to finish loading (up to 15 s), then a
+// moment for its scripts.
+const go = async (path) => {
+  await send("Page.navigate", { url: base + path }); await sleep(300);
+  for (let i = 0; i < 60; i++) { if ((await send("Runtime.evaluate", { expression: "document.readyState", returnByValue: true })).result?.result?.value === "complete") break; await sleep(250); }
+  await sleep(600);
+};
 const mouse = (type, x, y) => send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: type === "mouseMoved" ? 0 : 1 });
 const key = (k, code) => send("Input.dispatchKeyEvent", { type: "keyDown", key: k, code, windowsVirtualKeyCode: { ArrowDown: 40, ArrowUp: 38 }[k] });
 await send("Page.enable"); await send("Runtime.enable");
@@ -39,6 +45,33 @@ await mouse("mouseMoved", 30, 30); await sleep(150);
 check("chart reading goes on leaving the figure", (await ev(`document.querySelectorAll("figure.chart")[1].querySelector(".annot").textContent`)) === "");
 await mouse("mousePressed", geo.x, geo.y); await mouse("mouseReleased", geo.x, geo.y); await mouse("mouseMoved", 30, 30); await sleep(150);
 check("a click pins the reading", (await ev(`document.querySelectorAll("figure.chart")[1].querySelector(".annot").textContent`)) !== "");
+
+// Round 8: a mark lane is counted right, at desktop and phone widths: no
+// more restart bars drawn than the legend counts, and no two drawn groups
+// closer than 4 px.
+const laneProbe = `JSON.stringify((() => {
+  const legend = document.querySelector(".marks-legend"); const said = legend ? parseInt(legend.textContent) || 0 : 0;
+  const drawn = (r) => { for (let e = r; e && e.tagName !== "svg"; e = e.parentNode) if (e.getAttribute && e.getAttribute("display") === "none") return false; return true; };
+  const out = [];
+  for (const lane of document.querySelectorAll("figure.chart svg.lane")) {
+    const rects = [...lane.querySelectorAll("rect.m-restart, rect.m-change")].filter(drawn).map((r) => [r.getBoundingClientRect(), r.closest("a")]);
+    const bars = rects.filter(([, a], k) => lane.querySelectorAll("rect.m-restart").length && true).filter(([r, a]) => a && [...a.querySelectorAll("rect.m-restart")].filter(drawn).some((x) => x.getBoundingClientRect().left === r.left)).length;
+    rects.sort((p, q) => p[0].left - q[0].left);
+    let close = 0;
+    for (let k = 1; k < rects.length; k++) if (rects[k][1] !== rects[k - 1][1] && rects[k][0].left - rects[k - 1][0].right < 4) close++;
+    out.push({ bars, said, close });
+  }
+  return out;
+})())`;
+for (const width of [1440, 390]) {
+  await send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: width < 600 });
+  for (const path of ["/tenants/baltic-freight", "/tenants/acme-logistics"]) {
+    await go(path);
+    const lanes = JSON.parse(await ev(laneProbe));
+    check(`${path} at ${width}: lanes counted right, groups apart`, lanes.length > 0 && lanes.every((l) => l.bars <= l.said && l.close === 0), JSON.stringify(lanes[1] || lanes[0]));
+  }
+}
+await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
 
 // 1.3: a removed added row is not restored with the draft.
 await go("/tenants/atlas/settings");

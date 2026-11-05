@@ -300,7 +300,14 @@ details.drop.end .pop, .pagehead details.drop .pop { left: auto; right: 0; }
 .pop.acts > .act-note { margin: 0; padding: var(--s3) var(--s4); max-width: none; }
 .pop.acts .hint { max-width: none; }
 .pop.acts > .act > summary:focus-visible { outline-offset: -2px; }
-@media (max-width: 760px) { .pop.acts { width: auto; padding-top: var(--s4); } .pop.acts > .act > summary, .pop.acts > .act > form, .pop.acts > .act-note { padding-left: 0; padding-right: 0; } }
+/* On a phone a menu of actions is a sheet like any other: the sheet's own
+   16 px inset holds its title, Close, items, text, field and buttons. */
+@media (max-width: 760px) {
+  .pop.acts { width: auto; padding: var(--s4); }
+  .pop.acts > .act > summary { padding: var(--s3) 0; }
+  .pop.acts > .act > form { padding: 0 0 var(--s4); }
+  .pop.acts > .act-note { padding: var(--s3) 0 0; }
+}
 .panel { padding: var(--s5); border: 1px solid var(--frame); background: var(--raised); }
 
 /* ── notices ──────────────────────────────────────── */
@@ -926,14 +933,14 @@ table.secrets td.own select, table.secrets tr.add select { width: auto; }
   table.settings.list tr.setting td.l-sub[data-label="Source"] { grid-column: 1; grid-row: 2; padding-left: 0; font-size: 12.5px; }
   table.settings.list tr.setting td.l-sub[data-label="Source"]::before { content: none; }
   table.settings.list tr.setting td.own { display: contents; }
+  /* Its label ("Override") is the switch's own word: the cell's caption
+     would take a grid row of its own, a band under every card. */
+  table.settings.list tr.setting td.own::before { content: none; display: none; }
   table.settings.list tr.setting td.own .own-check { grid-column: 2; grid-row: 2; justify-self: end; margin: 0; }
   table.settings.list tr.setting td.own .own-field { grid-column: 1 / -1; grid-row: 3; width: 100%; }
   table.settings.list tr.setting td.own .caption { grid-column: 1 / -1; grid-row: 4; }
   /* The row's action under what shows: no empty rows above it while the
      value is hidden. */
-  table.settings.list tr.setting td.act { display: block; grid-column: 1 / -1; grid-row: 3; }
-  table.settings.list tr.setting:has(.own-switch:checked) td.act { grid-row: 5; }
-  table.settings.list tr.setting td.act:empty { display: none; }
   table.settings.list tr.add { grid-template-columns: minmax(0, 1fr); }
   table.settings.list tr.add td.l-sub[data-label] { padding-left: 0; }
   table.settings.list tr.add td.l-sub[data-label]::before { content: none; }
@@ -954,7 +961,6 @@ table.secrets td.l-main input, table.env td.l-main input { width: 100%; min-widt
 .scope-line { display: block; }
 
 /* A row's own actions (a secret's "New value…"): a cell at every width. */
-table.settings td.act { width: 1%; white-space: nowrap; }
 /* A line over its limit keeps a gap of the plot's own black around it. */
 path.halo { stroke: var(--bg); }
 
@@ -967,7 +973,6 @@ table.settings.grid col.c-name { width: 22%; }
 table.settings.grid col.c-effect { width: 19%; }
 table.settings.grid col.c-source { width: 25%; }
 table.settings.grid col.c-own { width: 24%; }
-table.settings.grid col.c-act { width: 10%; }
 /* A table with no row actions has no empty column for them: its Override
    column takes that width, starting where the others' does. */
 table.settings.grid col.c-own-wide { width: 34%; }
@@ -982,14 +987,11 @@ table.settings.grid tr.add input[type=text], table.settings.grid tr.add input[ty
 table.settings.grid tr.add td.own { white-space: nowrap; }
 table.settings.grid tr.add td.own input[type=text] { width: 100%; }
 table.env.grid tr.add td.own input[type=text] { width: calc(100% - 72px); }
-table.settings.grid td.act { width: auto; text-align: right; }
 table.settings.grid .own-switch { width: 16px; height: 16px; }
 .own-check .sw { display: none; }
 @media (max-width: 1279px) {
   table.settings.grid col.c-source { width: 22%; }
-  table.settings.grid col.c-act { width: 13%; }
   table.settings.grid col.c-own-wide { width: 37%; }
-  table.settings.grid td.act details.menu-text > summary.button { white-space: normal; text-align: right; }
   table.settings.grid td.own { white-space: normal; }
   table.settings.grid td.own .own-field { width: 100%; margin-top: var(--s2); }
 }
@@ -997,14 +999,19 @@ table.settings.grid .own-switch { width: 16px; height: 16px; }
   table.settings.grid { table-layout: auto; }
   .own-check .sw { display: inline; color: var(--soft); font-size: 13px; }
   table.settings.list tr.setting td.own .own-check { min-height: 32px; padding: 4px 0 4px 8px; gap: 8px; align-items: center; }
-  table.settings.grid tr.add td.act { display: block; grid-column: 1 / -1; text-align: left; }
-  table.settings.grid tr.add td.act:not(:has(button:not([hidden]))) { display: none; }
 }
 /* The value only with its switch on, at every width. */
 table.settings.grid tr.setting:not(:has(.own-switch:checked)) .own-field { display: none; }
 /* A row's action is a quiet text control that opens its menu. */
-table.settings.grid td.act details.menu-text > summary.button { border: 0; padding: 4px 0; min-height: 0; background: none; color: var(--fg); text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
-table.settings.grid td.act details.menu-text > summary.button::after { display: none; }
+table.settings.grid .row-act details.menu-text > summary.button { border: 0; padding: 4px 0; min-height: 0; background: none; color: var(--fg); text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
+table.settings.grid .row-act details.menu-text > summary.button::after { display: none; }
+/* A secret's "New value…" at the right of its Override cell, as an added
+   row's Remove: the three tables keep one grid. Its pop-over opens upward,
+   over the row's own table, never over what follows. */
+table.settings.grid .row-act { float: right; line-height: 32px; margin-left: var(--s3); }
+table.secrets.grid td.own .own-field { width: auto; }
+table.settings.grid .row-act details.menu-text .pop { top: auto; bottom: calc(100% + 6px); }
+table.settings.grid tr.add td.own .remove-row { margin-left: var(--s2); }
 
 /* While the page shows old data, the side bar's counts and marks are old
    too: grey and outlined, not red. */
@@ -1045,3 +1052,9 @@ dl.carry dt { color: var(--dim); }
 dl.carry dd { margin: 0; }
 input.confirm-field { max-width: 320px; }
 @media (max-width: 760px) { dl.carry { grid-template-columns: minmax(0, 1fr); gap: 2px; } dl.carry dd { margin-bottom: var(--s3); } input.confirm-field { max-width: none; } }
+.op-owner { display: block; margin-top: var(--s1); color: var(--soft); }
+@media (max-width: 760px) {
+  /* A card's action under its last line, and nothing below it. */
+  table.settings.grid .row-act { float: none; grid-column: 1 / -1; grid-row: 3; justify-self: end; line-height: normal; margin: 0; }
+  table.settings.grid tr.setting:has(.own-switch:checked) .row-act { grid-row: 5; }
+}

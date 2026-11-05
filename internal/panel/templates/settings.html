@@ -10,13 +10,14 @@
     <input type="hidden" name="env" value="{{$f.Env}}"><input type="hidden" name="secrets" value="{{$f.Secrets}}">
     <input type="hidden" name="flags" value="1"><input type="hidden" name="canary" value="{{$f.Canary}}"><input type="hidden" name="hold" value="{{$f.Hold}}">
     {{with $d.AppChange}}{{$c := .}}
-    <h2>Review moving {{$t.Spec.Name}} to app {{.To}}</h2>
+    <h2>Review changing {{$t.Spec.Name}} to app {{.To}}</h2>
     <p class="summary-line">{{.Summary}}.</p>
     {{if .OwnerAfter}}<div class="notice bad spaced" role="alert"><p class="flat"><span class="lead-in">{{.To}} runs as {{.OwnerAfter}}, but {{$t.Spec.Name}}'s data at {{.DataPath}} was written as {{.OwnerNow}}.</span> Its new container may not be able to read or write it.</p>
-      <p class="flat spaced">Before you move it, check that {{.To}}'s image can use data owned by {{.OwnerNow}}, or set <span class="mono">user: "{{.OwnerNow}}"</span> in {{.To}}'s spec if its image allows.</p></div>{{end}}
+      <p class="flat spaced">Before you change it, check that {{.To}}'s image can use data owned by {{.OwnerNow}}, or set <span class="mono">user: "{{.OwnerNow}}"</span> in {{.To}}'s spec if its image allows.</p></div>{{end}}
+    {{with .Unlimited}}<div class="notice warn-notice spaced" role="status"><p class="flat"><span class="st warn"></span><span class="lead-in">{{$t.Spec.Name}} would run with no limit on {{.}}:</span> {{$c.To}} sets none. Without one it can take what the node's other tenants need. Set them in <a href="/apps/{{$c.To}}">{{$c.To}}'s spec</a>, or as {{$t.Spec.Name}}'s own, first.</p></div>{{end}}
     <table class="list changes spaced">
       <thead><tr><th>Setting</th><th>Now, on {{.From}}</th><th>After, on {{.To}}</th></tr></thead>
-      <tbody>{{range .Fields}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.Now}}</td><td class="l-sub" data-label="After">{{.After}}</td></tr>{{end}}
+      <tbody>{{range .Fields}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.Now}}</td><td class="l-sub" data-label="After">{{if .Loses}}<span class="st warn">{{.After}}</span>{{else}}{{.After}}{{end}}</td></tr>{{end}}
       {{range $d.Review}}{{if or (eq .Field "Canary") (eq .Field "Held")}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="After">{{.To}}</td></tr>{{end}}{{end}}</tbody>
     </table>
     <dl class="carry">
@@ -24,14 +25,14 @@
       {{with .Dropped}}<div><dt>Gone with {{$c.From}}</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
       {{with .Made}}<div><dt>Made new for it</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
     </dl>
-    <p class="hint">Its data stays as it is, and {{.To}}'s container starts on it: {{.To}}'s image must understand it. An image may change data as it starts (a migration), and moving back to {{.From}} later does not undo that. {{$t.Spec.Name}} answers no request while its new container starts. Type {{$t.Spec.Name}} to confirm.</p>
+    <p class="hint">Its data stays as it is, and {{.To}}'s container starts on it: {{.To}}'s image must understand it. An image may change data as it starts (a migration), and changing back to {{.From}} later does not undo that. {{$t.Spec.Name}} answers no request while its new container starts. Type {{$t.Spec.Name}} to confirm.</p>
     <input type="text" name="confirm" class="confirm-field" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
-    <div class="actions"><button type="submit" name="do" value="save" class="danger">Move {{$t.Spec.Name}} to {{.To}}</button><button type="submit" name="do" value="edit" formnovalidate>Keep editing</button></div>
+    <div class="actions"><button type="submit" name="do" value="save" class="danger">Change {{$t.Spec.Name}} to {{.To}}</button><button type="submit" name="do" value="edit" formnovalidate>Keep editing</button></div>
     {{else}}
     <h2>Review {{plural (len $d.Review) "change" "changes"}} to {{$t.Spec.Name}}</h2>
     <table class="list changes">
-      <thead><tr><th>Setting</th><th>Current</th><th>Proposed</th></tr></thead>
-      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Current">{{.From}}</td><td class="l-sub" data-label="Proposed">{{.To}}</td></tr>{{end}}</tbody>
+      <thead><tr><th>Setting</th><th>Now</th><th>After</th></tr></thead>
+      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="After">{{.To}}</td></tr>{{end}}</tbody>
     </table>
     <p class="hint">{{if $d.Restarts}}Saving gives {{$t.Spec.Name}} a new container{{if $t.Archived}} once it is restored{{else}}: it answers no request for the few seconds it starts{{end}}. Its data stays.{{else}}Rollout flags change no container: they count from {{$t.App}}'s next rollout.{{end}} Exactly these values are saved; to change them, keep editing.</p>
     <div class="actions"><button type="submit" name="do" value="save" class="primary">{{if $d.Restarts}}Save and restart {{$t.Spec.Name}}{{else}}Save{{end}}</button><button type="submit" name="do" value="edit">Keep editing</button></div>
@@ -88,8 +89,8 @@
 
     <div class="head spaced"><h2>Secrets</h2><span class="dim">made once, kept encrypted, never shown; one of its own replaces {{$t.App}}'s</span></div>
     <table class="secrets settings list grid" id="secrets">
-      <colgroup><col class="c-name"><col class="c-effect"><col class="c-source"><col class="c-own"><col class="c-act"></colgroup>
-      <thead><tr><th>Secret</th><th>Kind</th><th>Source</th><th>Override</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
+      <colgroup><col class="c-name"><col class="c-effect"><col class="c-source"><col class="c-own-wide"></colgroup>
+      <thead><tr><th>Secret</th><th>Kind</th><th>Source</th><th>Override</th></tr></thead>
       <tbody>
       {{range $d.SecretFields}}<tr class="setting">
         <td class="mono l-main">{{.Name}}</td>
@@ -97,22 +98,23 @@
         <td class="dim l-sub" data-label="Source">{{if .New}}Added in this draft{{else if .Own}}Tenant override{{else}}Inherited from {{$t.App}}{{end}}</td>
         <td class="l-sub own" data-label="Override"><input type="hidden" name="secretname" value="{{.Name}}">
           <label class="check own-check"><input type="checkbox" name="secretown" value="{{.Name}}" class="own-switch" data-key="{{.Name}}"{{if .DraftOwn}} checked{{end}} aria-label="A secret of its own for {{.Name}}"><span class="sw" aria-hidden="true">Override</span></label>
-          <span class="own-field"><select name="secretkind" data-key="{{.Name}}" aria-label="{{.Name}}: its kind">{{$k := .DraftKind}}{{range $d.Kinds}}<option{{if eq . $k}} selected{{end}}>{{.}}</option>{{end}}</select> <input type="number" name="secretbytes" value="{{if .DraftBytes}}{{.DraftBytes}}{{end}}" min="1" placeholder="length" class="tiny" data-key="{{.Name}}" aria-label="{{.Name}}: its length"></span></td>
-        <td class="end act">{{if and (not $t.Archived) (or .Own .FromApp)}}<details class="menu-text">
+          <span class="own-field"><select name="secretkind" data-key="{{.Name}}" aria-label="{{.Name}}: its kind">{{$k := .DraftKind}}{{range $d.Kinds}}<option{{if eq . $k}} selected{{end}}>{{.}}</option>{{end}}</select> <input type="number" name="secretbytes" value="{{if .DraftBytes}}{{.DraftBytes}}{{end}}" min="1" placeholder="length" class="tiny" data-key="{{.Name}}" aria-label="{{.Name}}: its length"></span>
+          {{if and (not $t.Archived) (or .Own .FromApp)}}<span class="row-act"><details class="menu-text">
             <summary class="button small">New value…</summary>
             <div class="pop">
               <div class="stack">
-                <p class="hint">A new value for {{$t.Spec.Name}} alone{{if not .Own}}: each tenant has its own value of {{.Name}}, so {{$t.App}}'s other tenants keep theirs, and its kind stays {{$t.App}}'s{{end}}. It restarts {{$t.Spec.Name}}, and what it signed or set with the old one (sessions, a password) stops working. It is not part of the review above. Type {{.Name}} to confirm.</p>
+                <p class="flat strong">A new value of {{.Name}}</p>
+                <p class="hint flat">For {{$t.Spec.Name}} alone{{if not .Own}}: {{$t.App}}'s other tenants keep theirs{{end}}.</p>
+                <p class="flat">It restarts {{$t.Spec.Name}}; what the old value signed (sessions, a password) stops working. Type {{.Name}} to confirm.</p>
                 <input type="text" name="confirm" form="rotate-{{.Name}}" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
                 <div><button type="submit" form="rotate-{{.Name}}" class="danger">Give it a new value</button></div>
               </div>
             </div>
-          </details>{{end}}</td></tr>{{end}}
+          </details></span>{{end}}</td></tr>{{end}}
       {{range $i, $_ := (repeat $d.BlankSecret)}}<tr class="add">
         <td class="l-main"><input type="text" name="secretnewname" placeholder="NEW_SECRET" class="mono-input" aria-label="a secret to add: its name" autocomplete="off" autocapitalize="characters" spellcheck="false"></td>
         <td class="dim l-sub add-help" colspan="2">A new secret: its name, kind and length</td>
-        <td class="l-sub own" data-label="Kind"><select name="secretnewkind" aria-label="a secret to add: its kind">{{range $d.Kinds}}<option>{{.}}</option>{{end}}</select> <input type="number" name="secretnewbytes" min="1" placeholder="length" class="tiny" aria-label="a secret to add: its length"></td>
-        <td class="end act"><button type="button" class="link remove-row" hidden>Remove</button></td></tr>{{end}}
+        <td class="l-sub own" data-label="Kind"><select name="secretnewkind" aria-label="a secret to add: its kind">{{range $d.Kinds}}<option>{{.}}</option>{{end}}</select> <input type="number" name="secretnewbytes" min="1" placeholder="length" class="tiny" aria-label="a secret to add: its length"><button type="button" class="link remove-row" hidden>Remove</button></td></tr>{{end}}
       </tbody>
     </table>
     <div class="row"><button type="submit" name="do" value="addsecret" class="small" data-add-row="secrets" aria-controls="secrets">Add a secret</button><span class="hint">Made once by murder when saved; its value is never shown. A new value for one is "New value…" in its row, apart from the review.</span></div>

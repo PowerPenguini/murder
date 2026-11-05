@@ -60,6 +60,12 @@ func WaveName(w int) string {
 	return "Wave " + strconv.Itoa(w+1)
 }
 
+// WaveSaid names wave w as a sentence does, its name in lower case and
+// without commas: "wave 2, a tenth", "wave 1, first now".
+func WaveSaid(w int, name string) string {
+	return "wave " + strconv.Itoa(w) + ", " + strings.ToLower(strings.ReplaceAll(name, ",", ""))
+}
+
 // RestorePending reports whether the tenant's data is to go back to the
 // snapshot from before its rollout moved it: until it has, it takes no
 // request, so nothing is written to data about to be replaced.
@@ -186,7 +192,7 @@ func (s *SQLite) AdvanceRollout(app string, at RolloutAt, tenants []string, acto
 			if err := tx.Exec(`UPDATE tenants SET before_revision = app_revision, app_revision = 0, moved_on = node, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 				return err
 			}
-			if err := event(tx, now, actor, "app.rolled-out", name, app, fmt.Sprintf("wave %d: revision %d → %d", wave+1, record.AppRevision, rollout.ToRevision)); err != nil {
+			if err := event(tx, now, actor, "app.rolled-out", name, app, fmt.Sprintf("%s: revision %d → %d", WaveSaid(wave+1, rollout.WaveName(wave+1)), record.AppRevision, rollout.ToRevision)); err != nil {
 				return err
 			}
 		}

@@ -687,7 +687,7 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 		v.Waits = next + " once " + strings.Join(v.Blockers, ", ") + " " + map[bool]string{true: "is", false: "are"}[len(v.Blockers) == 1] +
 			" healthy on revision " + strconv.FormatInt(r.ToRevision, 10) + " for " + soak + ". A tenant not healthy within 5 minutes of its move pauses the rollout."
 	default:
-		who := "its wave \"" + strings.ToLower(r.WaveName(r.Wave)) + "\" has"
+		who := store.WaveSaid(r.Wave, r.WaveName(r.Wave)) + " has"
 		if len(current) == 1 {
 			who = current[0] + " has"
 		} else if len(current) > 1 {

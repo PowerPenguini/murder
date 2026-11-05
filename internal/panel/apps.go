@@ -1057,6 +1057,12 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		if len(said) == 0 {
 			said = append(said, name+"'s settings are unchanged")
 		}
+		// Another app: to its Overview, where the new container is followed.
+		if form.App != t.App {
+			flash(w, r, "done", name+" now runs app "+form.App+": its new container starts")
+			http.Redirect(w, r, "/tenants/"+url.PathEscape(name), http.StatusSeeOther)
+			return
+		}
 		back("done", strings.Join(said, "; "))
 	case "flags":
 		canary, hold := r.FormValue("canary") == "on", r.FormValue("hold") == "on"

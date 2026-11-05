@@ -127,50 +127,76 @@
       const widen = () => {
         const w = units(24);
         for (const hit of lane.querySelectorAll("rect.hit")) {
+          if (!hit.nextElementSibling) continue;
           const x = Number(hit.nextElementSibling.dataset.x || hit.nextElementSibling.getAttribute("x"));
           hit.setAttribute("width", String(w));
           hit.setAttribute("x", String(Math.max(0, Math.min(1000 - w, x - w / 2))));
         }
-        for (const mark of lane.querySelectorAll("rect.m-restart, rect.m-change")) {
+        for (const mark of lane.querySelectorAll("rect.m-restart:not(.m-twin), rect.m-change:not(.m-twin)")) {
           const size = units(mark.classList.contains("m-restart") ? 3 : 6);
           mark.setAttribute("width", String(size));
           // Whole, inside the lane, even at its ends.
           mark.setAttribute("x", String(Math.max(0, Math.min(1000 - size, Number(mark.dataset.x) - size / 2))));
         }
       };
-      // Marks closer than 12 px (as near as the readout lists) are one glyph: the strongest kind (a
-      // restart over a change), doubled, its link the group's first; the
-      // readout and its "nearby" list say every mark in it.
+      // Marks that would touch, or lie within 12 px (as near as the readout
+      // lists them), are drawn as one group: each kind it holds drawn
+      // apart, a restart bar then a change square, doubled only when two or
+      // more of that kind are in it. So a lane is counted right: it never
+      // shows more restarts than there are, and a mixed group shows both.
+      // Groups keep 4 px apart, measured from their drawn edges. The
+      // readout and its "nearby" list say every mark in a group.
       const merge = () => {
         const width = plot.getBoundingClientRect().width;
         if (width === 0) return;
+        const px = (x) => (x * width) / 1000;
+        const size = (restart) => (restart ? 3 : 6), GAP = 2, APART = 4;
         const items = [...lane.querySelectorAll(":scope > a")].map((a) => {
-          const glyph = a.querySelector("rect.m-restart, rect.m-change");
+          const glyph = a.querySelector("rect.m-restart:not(.m-twin), rect.m-change:not(.m-twin)");
+          if (!a.dataset.label) a.dataset.label = a.getAttribute("aria-label") || "";
           return { a, glyph, x: Number(glyph.dataset.x), restart: glyph.classList.contains("m-restart") };
         }).sort((p, q) => p.x - q.x);
         for (const item of items) {
           item.a.removeAttribute("display");
+          item.glyph.removeAttribute("display");
+          item.a.setAttribute("aria-label", item.a.dataset.label);
           for (const twin of item.a.querySelectorAll(".m-twin")) twin.remove();
         }
-        let start = 0;
-        while (start < items.length) {
-          let end = start + 1;
-          while (end < items.length && ((items[end].x - items[start].x) * width) / 1000 < 12) end++;
-          const group = items.slice(start, end);
-          if (group.length > 1) {
-            const lead = group.find((item) => item.restart) || group[0];
-            for (const item of group) if (item !== lead) item.a.setAttribute("display", "none");
-            const twin = lead.glyph.cloneNode();
-            twin.classList.add("m-twin");
-            // The twin beside its lead: after it, or before it at the lane's end.
-            const leadX = Number(lead.glyph.getAttribute("x"));
-            const size = Number(lead.glyph.getAttribute("width"));
-            const step = units(lead.restart ? 5 : 8);
-            twin.setAttribute("x", String(leadX + step + size <= 1000 ? leadX + step : Math.max(0, leadX - step)));
-            lead.glyph.after(twin);
-            lead.a.setAttribute("aria-label", group.length + " marks, the first: " + lead.a.getAttribute("aria-label").replace(/^\d+ marks, the first: /, ""));
+        // The glyphs a group draws, in order, and its drawn width in px.
+        const glyphsOf = (group) => {
+          const restarts = group.filter((m) => m.restart), changes = group.filter((m) => !m.restart);
+          const out = [];
+          for (let k = 0; k < Math.min(restarts.length, 2); k++) out.push(restarts[0]);
+          for (let k = 0; k < Math.min(changes.length, 2); k++) out.push(changes[0]);
+          return out;
+        };
+        const span = (group) => glyphsOf(group).reduce((w, m, k) => w + size(m.restart) + (k ? GAP : 0), 0);
+        const left = (group) => px(group[0].x) - size(group[0].restart) / 2;
+        const groups = [];
+        for (const item of items) {
+          const last = groups[groups.length - 1];
+          if (last && (px(item.x) - size(item.restart) / 2 < left(last) + span(last) + APART || px(item.x) - px(last[0].x) < 12)) last.push(item);
+          else groups.push([item]);
+        }
+        for (const group of groups) {
+          if (group.length < 2) continue;
+          const lead = group.find((m) => m.restart) || group[0];
+          for (const m of group) if (m !== lead) m.a.setAttribute("display", "none");
+          lead.glyph.setAttribute("display", "none");
+          // Drawn from the group's first mark, kept inside the lane.
+          let at = Math.max(0, Math.min(width - span(group), left(group)));
+          for (const m of glyphsOf(group)) {
+            const glyph = m.glyph.cloneNode();
+            glyph.removeAttribute("display");
+            glyph.classList.add("m-twin");
+            glyph.setAttribute("x", String(units(at)));
+            glyph.setAttribute("width", String(units(size(m.restart))));
+            lead.a.append(glyph);
+            at += size(m.restart) + GAP;
           }
-          start = end;
+          const restarts = group.filter((m) => m.restart).length, changes = group.length - restarts;
+          const kinds = [restarts && restarts + (restarts === 1 ? " restart" : " restarts"), changes && changes + (changes === 1 ? " change" : " changes")].filter(Boolean).join(", ");
+          lead.a.setAttribute("aria-label", group.length + " marks (" + kinds + "), the first: " + lead.a.dataset.label);
         }
       };
       widen();

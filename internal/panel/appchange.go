@@ -27,12 +27,17 @@ type appChange struct {
 	// app runs as: the user now, and the one after.
 	OwnerNow, OwnerAfter string
 	DataPath             string
-	// Summary says it in one line.
-	Summary string
+	// Summary says it in one line; Unlimited names the limits it would
+	// lose ("CPUs, processes, disk").
+	Summary, Unlimited string
 }
 
-// appField is one setting, as it is now and as it would be.
-type appField struct{ Field, Now, After string }
+// appField is one setting, as it is now and as it would be; Loses says a
+// limit goes, a protection the tenant had; Gone that the setting goes.
+type appField struct {
+	Field, Now, After string
+	Loses, Gone       bool
+}
 
 // appChangeOf composes what tenant t would run on app to, with the
 // overrides the form holds.
@@ -41,6 +46,7 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 	now := t.Spec
 	after := spec.Compose(to.Spec, t.Spec.Name, overrides)
 	c := appChange{From: t.App, To: to.Name, DataPath: now.DataPath}
+	var lost []string
 	for _, d := range diffSpecs(now, after) {
 		field, from, to := d.Key, d.From, d.To
 		// What an empty value means depends on the setting.
@@ -58,16 +64,24 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 				to = secretText(v)
 			}
 		}
+		loses := unset == "no limit" && to == "" && from != ""
+		gone := to == "" && from != ""
 		if from == "" {
 			from = unset
 		}
 		if to == "" {
 			to = unset
+			if loses {
+				to = "no limit (" + c.To + " sets none)"
+			}
+		}
+		if loses {
+			lost = append(lost, d.Key)
 		}
 		if field[0] >= 'a' && field[0] <= 'z' {
 			field = capital(field)
 		}
-		c.Fields = append(c.Fields, appField{field, from, to})
+		c.Fields = append(c.Fields, appField{Field: field, Now: from, After: to, Loses: loses, Gone: gone && !loses})
 	}
 	// Its own settings stay, over the new app's.
 	if overrides.Image != "" {
@@ -118,9 +132,22 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 	if now.User != after.User && now.DataPath != "" {
 		c.OwnerNow, c.OwnerAfter = orRoot(now.User), orRoot(after.User)
 	}
-	c.Summary = "App " + t.App + " → " + to.Name + "; " + plural(len(c.Fields), "setting changes", "settings change")
-	if len(c.Dropped) > 0 {
-		c.Summary += ", " + strconv.Itoa(len(c.Dropped)) + " go"
+	// The summary counts as the table does: changed, gone, limits lost.
+	changed, gone := 0, 0
+	for _, f := range c.Fields {
+		if f.Gone || f.Loses {
+			gone++
+		} else {
+			changed++
+		}
+	}
+	c.Unlimited = strings.Join(lost, ", ")
+	c.Summary = "App " + t.App + " → " + to.Name + ": " + plural(changed, "setting changes", "settings change")
+	if gone > 0 {
+		c.Summary += ", " + strconv.Itoa(gone) + " go"
+		if len(lost) > 0 {
+			c.Summary += " (" + plural(len(lost), "limit", "limits") + ": " + c.Unlimited + ")"
+		}
 	}
 	c.Summary += "; " + t.Spec.Name + " restarts, its data stays"
 	return c

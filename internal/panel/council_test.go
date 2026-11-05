@@ -34,7 +34,7 @@ func TestAppChangesAreReviewed(t *testing.T) {
 	file := between(page, `aria-label="the app's spec">`, "</textarea>")
 	changed := strings.Replace(file, "memoryMB: 256", "memoryMB: 512", 1)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review"}, "file": {changed}, "updated": {updated}}, server.URL)
-	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked in its wave \"a tenth\" by baltic-freight",
+	for _, want := range []string{"What changes", `<span class="tx" role="cell">  memoryMB: 512</span>`, "1 line out, 1 line in", `name="do" value="save"`, "Held, and left out until released", "A rollout of revision 3 is blocked in wave 2, a tenth, by baltic-freight",
 		// Only the tenants whose spec changes restart, and are counted:
 		// atlas keeps its own memory, so the change leaves it.
 		"5 restart · 1 unchanged · 1 held, left out", `Memory <span class="nowrap">256 MB</span> <span class="nowrap">→ 512 MB</span>`, "Unchanged: memory stays 768 MB",
@@ -566,7 +566,7 @@ func TestRestoreAtAChosenTimeAndImageReferences(t *testing.T) {
 	_, page = get(t, server.URL+"/apps/web")
 	updated := between(page, `name="updated" value="`, `"`)
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"review-update"}, "updated": {updated}}, server.URL)
-	if !strings.Contains(body, "Full image reference") || !strings.Contains(body, strings.Repeat("5e", 32)) || !strings.Contains(body, "is blocked in its wave \"a tenth\" by baltic-freight") {
+	if !strings.Contains(body, "Full image reference") || !strings.Contains(body, strings.Repeat("5e", 32)) || !strings.Contains(body, "is blocked in wave 2, a tenth, by baltic-freight") {
 		t.Fatalf("the image review:\n%s", body)
 	}
 }
@@ -899,10 +899,10 @@ func TestTheBrokenFirstPace(t *testing.T) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, body)
 		}
 	}
-	if _, page := get(t, server.URL+"/tenants/baltic-freight"); !strings.Contains(page, `it moved from revision 3 to 4 in its wave "first, now"`) {
+	if _, page := get(t, server.URL+"/tenants/baltic-freight"); !strings.Contains(page, `it moved from revision 3 to 4 in wave 1, first now.`) {
 		t.Fatalf("baltic-freight's wave:\n%s", page)
 	}
-	if _, page := get(t, server.URL+"/tenants/acme-logistics"); !strings.Contains(page, `moves to 4 in its wave "canaries"`) {
+	if _, page := get(t, server.URL+"/tenants/acme-logistics"); !strings.Contains(page, `moves to 4 in wave 2, canaries.`) {
 		t.Fatalf("acme-logistics's wave:\n%s", page)
 	}
 	// atlas's own memory covers the change: its page says so, not a bare
@@ -1036,7 +1036,7 @@ func TestReviewsHaveTheirOwnAddress(t *testing.T) {
 		t.Fatalf("an unknown draft:\n%s", body)
 	}
 	_, body = get(t, server.URL+"/tenants/atlas/settings")
-	if !strings.Contains(body, `<td class="end act"><details class="menu-text">`) || strings.Contains(body, `class="end l-more"`) {
+	if !strings.Contains(body, `<span class="row-act"><details class="menu-text">`) || strings.Contains(body, `class="end l-more"`) {
 		t.Fatalf("the secrets' actions:\n%s", body)
 	}
 }
@@ -1082,13 +1082,15 @@ func TestChangingATenantsApp(t *testing.T) {
 	// its own settings kept, what goes with web, and a warning that its data
 	// was written by another user than testapp runs as.
 	_, body = get(t, server.URL+"/tenants/atlas/settings?do=review&app=testapp")
-	for _, want := range []string{"Review moving atlas to app testapp", "<th>Now, on web</th><th>After, on testapp</th>",
+	for _, want := range []string{"Review changing atlas to app testapp", "<th>Now, on web</th><th>After, on testapp</th>",
+		"App web → testapp: 2 settings change, 5 go (3 limits: CPUs, processes, disk)", "atlas would run with no limit on CPUs, processes, disk:",
+		`<span class="st warn">no limit (testapp sets none)</span>`,
 		"testapp runs as 10001:10001, but atlas's data at /data was written as 1000:1000.",
 		`<td class="l-main">User</td><td class="dim l-sub" data-label="Now">1000:1000</td><td class="l-sub" data-label="After">10001:10001</td>`,
-		`<td class="l-main">Image</td>`, "Its own, kept over testapp's", `<span class="nowrap">memory 768 MB</span>`, `<span class="nowrap">TZ</span>`, `<td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1</td><td class="l-sub" data-label="After">no limit</td>`,
+		`<td class="l-main">Image</td>`, "Its own, kept over testapp's", `<span class="nowrap">memory 768 MB</span>`, `<span class="nowrap">TZ</span>`,
 		`<td class="l-main">SESSION_KEY (secret)</td><td class="dim l-sub" data-label="Now">hex, 32 bytes</td><td class="l-sub" data-label="After">not set</td>`,
 		"Gone with web", `<span class="nowrap">DATA_DIR</span>`, `<span class="nowrap">SESSION_KEY (secret)</span>`,
-		"Type atlas to confirm.", `data-confirm="atlas"`, `class="danger">Move atlas to testapp</button>`, "data-review"} {
+		"Type atlas to confirm.", `data-confirm="atlas"`, `class="danger">Change atlas to testapp</button>`, "data-review"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the app change's review lacks %q:\n%s", want, body)
 		}
@@ -1105,7 +1107,18 @@ func TestChangingATenantsApp(t *testing.T) {
 		t.Fatalf("atlas moved to %q without its name typed", still.App)
 	}
 	form.Set("confirm", "atlas")
-	submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	// After it: its Overview, the change said with a way back, the data's
+	// owner kept in view until it runs healthy, and no "0 B" of data.
+	_, after := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	for _, want := range []string{"Changed from app web to testapp</span> by you", "Change it back to web</a>",
+		"testapp runs as 10001:10001, but its data at /data was written as 1000:1000 under web"} {
+		if !strings.Contains(after, want) {
+			t.Fatalf("after the change lacks %q:\n%s", want, after)
+		}
+	}
+	if strings.Contains(after, `<div class="v">0 B`) {
+		t.Fatalf("its data said as 0 B:\n%s", after)
+	}
 	if after, _ := cluster.Get(ctx, "atlas"); after.App != "testapp" {
 		t.Fatalf("atlas runs app %q", after.App)
 	}
@@ -1126,5 +1139,18 @@ func TestAnEmptyOverrideIsSaid(t *testing.T) {
 	}
 	if strings.Contains(body, "Nothing changes: the form holds") {
 		t.Fatalf("an empty override said nothing changes:\n%s", body)
+	}
+}
+
+// Events name a rollout's waves as the plan and the pages do: "wave 2, a
+// tenth"; an older event that said only the number is named the same way.
+func TestEventsNameTheirWave(t *testing.T) {
+	server := newServerOf(t, NewDemoCluster())
+	_, page := get(t, server.URL+"/events?show=all")
+	if !strings.Contains(page, "wave 2, a tenth: revision 2 → 3") || strings.Contains(page, "wave 2: revision") {
+		t.Fatalf("events' waves:\n%s", page)
+	}
+	if got := namedWave(store.Event{Action: "app.rolled-out", Detail: "wave 3: revision 1 → 2"}); got != "wave 3, half: revision 1 → 2" {
+		t.Fatalf("an older event: %q", got)
 	}
 }

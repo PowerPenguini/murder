@@ -66,7 +66,7 @@ func (d *DemoCluster) demoApps() {
 		if moved == 2 {
 			at = time.Now().Add(-4*time.Minute - 30*time.Second)
 		}
-		d.events = append(d.events, store.Event{At: at, Actor: "murder (rollout)", Action: "app.rolled-out", Tenant: name, App: "web", Detail: "wave " + strconv.Itoa(moved) + ": revision 2 → 3"})
+		d.events = append(d.events, store.Event{At: at, Actor: "murder (rollout)", Action: "app.rolled-out", Tenant: name, App: "web", Detail: store.WaveSaid(moved, store.WaveName(moved-1)) + ": revision 2 → 3"})
 	}
 	for _, name := range []string{"kowalski-trans", "nordwind", "vistula-cargo", "test-staging"} {
 		t := d.tenants[name]
@@ -237,7 +237,7 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 			composed.Suspended = t.Spec.Suspended
 			from := t.AppRevision
 			t.BeforeRevision, t.AppRevision = from, 0
-			a.moveTenant(&t, composed, "wave 1, first: revision "+strconv.FormatInt(from, 10)+" → "+strconv.FormatInt(stored.Revision, 10))
+			a.moveTenant(&t, composed, store.WaveSaid(1, "First, now")+": revision "+strconv.FormatInt(from, 10)+" → "+strconv.FormatInt(stored.Revision, 10))
 			a.tenants[tenant] = t
 			stored.Rollout.Wave, stored.Rollout.First = 1, 1
 			for i := range applied.Tenants {
@@ -353,7 +353,12 @@ func (a *demoActor) Configure(_ context.Context, name string, request api.Tenant
 	if request.App == t.App && request.Overrides.Equal(t.Overrides) {
 		return api.Applied{Tenant: t}, nil
 	}
-	changed, err := a.change(name, "tenant.updated", "", func(t *api.Tenant) error {
+	// As the store says it: another app is named in the event.
+	detail := ""
+	if request.App != t.App {
+		detail = "app " + t.App + " → " + request.App
+	}
+	changed, err := a.change(name, "tenant.updated", detail, func(t *api.Tenant) error {
 		suspended := t.Spec.Suspended
 		t.App, t.Overrides, t.Spec = request.App, request.Overrides.Normalized(), composed
 		t.Spec.Suspended = suspended

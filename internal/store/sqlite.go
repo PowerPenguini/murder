@@ -1101,7 +1101,7 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 					if err := tx.Exec(`UPDATE tenants SET before_revision = app_revision, app_revision = 0, moved_on = node, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 						return err
 					}
-					if err := event(tx, now, actor, "app.rolled-out", name, app.Name, fmt.Sprintf("wave 1, first: revision %d → %d", from, revision)); err != nil {
+					if err := event(tx, now, actor, "app.rolled-out", name, app.Name, fmt.Sprintf("%s: revision %d → %d", WaveSaid(1, "First, now"), from, revision)); err != nil {
 						return err
 					}
 				}
