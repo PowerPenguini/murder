@@ -120,9 +120,26 @@
     }
     sheet = details;
   };
+  // On a desktop a pop-over is wholly on screen: below its button if it
+  // fits, else above it, else the page scrolls just enough to show it.
+  // Again when an action inside it opens and it grows.
+  const place = (details) => {
+    if (phone.matches || !details.open) return;
+    const pop = details.querySelector(":scope > .pop");
+    if (!pop) return;
+    pop.classList.remove("up");
+    const box = pop.getBoundingClientRect();
+    if (box.bottom <= innerHeight) return;
+    const above = details.querySelector(":scope > summary").getBoundingClientRect().top - 6;
+    if (box.height <= above) pop.classList.add("up");
+    else pop.scrollIntoView({ block: "nearest" });
+  };
   document.addEventListener("toggle", (event) => {
     const details = event.target;
     if (!(details instanceof HTMLDetailsElement)) return;
+    const outer = details.parentElement && details.parentElement.closest("details");
+    if (details.open) place(details);
+    if (outer && outer.querySelector(":scope > .pop") && outer.querySelector(":scope > .pop").contains(details)) place(outer);
     if (!details.open) {
       if (details === sheet) {
         release();

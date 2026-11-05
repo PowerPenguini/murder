@@ -12,7 +12,7 @@ tenant, its detail), then who. A row opens on its whole record. */}}
       <td class="l-main">
         <details class="event" data-id="{{.ID}}" id="{{if .Group}}evs-{{else}}ev-{{end}}{{.ID}}">
           {{if .Group}}
-          <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{if eq (len .Tenants) 1}}<a href="/tenants/{{index .Tenants 0}}">{{index .Tenants 0}}</a> {{.Predicate}}, {{len .Group}} times{{else if .Tenants}}{{len .Tenants}} tenants {{.PredicatePlural}}, {{len .Group}} times{{else}}{{action .Action}}, {{len .Group}} times{{end}}</span><span class="detail">{{breakable .Detail}}{{if ne (ago .Oldest.At) (ago .At)}}{{with .Detail}} · {{end}}{{ago .Oldest.At}} to {{ago .At}} ago{{end}}<span class="phone-inline">{{if or .Detail (ne (ago .Oldest.At) (ago .At))}} · {{end}}by {{who .Actor}}</span></span></summary>
+          <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{if eq (len .Tenants) 1}}<a href="/tenants/{{index .Tenants 0}}">{{index .Tenants 0}}</a> {{.Predicate}}, {{len .Group}} times{{else if .Tenants}}{{len .Tenants}} tenants {{.PredicatePlural}}{{if ne (len .Group) (len .Tenants)}}, {{len .Group}} times in all{{end}}{{else}}{{action .Action}}, {{len .Group}} times{{end}}</span><span class="detail">{{breakable .Detail}}{{if ne (ago .Oldest.At) (ago .At)}}{{with .Detail}} · {{end}}{{ago .Oldest.At}} to {{ago .At}} ago{{end}}<span class="phone-inline">{{if or .Detail (ne (ago .Oldest.At) (ago .At))}} · {{end}}by {{who .Actor}}</span></span></summary>
           <ul class="grouped">{{range .Group}}<li id="ev-{{.ID}}"><span class="num">{{utc .At}}</span>{{with .Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{end}} <span class="dim">#{{.ID}}</span></li>{{end}}</ul>
           {{else}}
           <summary><span class="what">{{if failure .Action}}<span class="st warn" aria-label="a failure"></span>{{end}}{{with .Predicate}}<a href="/tenants/{{$e.Tenant}}">{{$e.Tenant}}</a> {{.}}{{else}}{{with $e.Node}}<a href="{{node .}}">{{.}}</a>{{$e.NodePredicate}}{{else}}{{with $e.AppPredicate}}<a href="/apps/{{$e.App}}">{{$e.App}}</a>{{.}}{{else}}{{action $e.Action}}{{with $e.Tenant}} <a href="/tenants/{{.}}">{{.}}</a>{{else}}{{with $e.App}} <a href="/apps/{{.}}" class="dim">app {{.}}</a>{{end}}{{end}}{{end}}{{end}}{{end}}</span><span class="detail">{{if $e.Node}}{{with $e.NodeDetail}}{{.}}<span class="phone-inline"> · </span>{{end}}{{else}}{{with .Detail}}{{breakable .}}<span class="phone-inline"> · </span>{{end}}{{end}}<span class="phone-inline">by {{who $e.Actor}}</span></span></summary>
@@ -121,8 +121,10 @@ its pages beside it, what can be done to it, and where it runs. */}}
         <summary class="button" aria-label="Move {{$t.Spec.Name}}">Move</summary>
         <div class="pop">
           <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="move">
-            <label class="field">To <select name="to">{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
-            <p class="hint">Moves its data and container to that node. Requests wait meanwhile, a few seconds for small data.</p>
+            <p class="flat strong pop-title">Move {{$t.Spec.Name}}</p>
+            <label class="field">To <select name="to">{{range .Targets}}<option{{if eq . $t.Replica}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+            <p class="hint">Moves its data and container to that node. Requests wait meanwhile.{{if and $t.Replica $t.ReplicaReady}} {{$t.Replica}} holds its copy, matched {{ago $t.ReplicaSyncedAt}} ago: a move there takes a few seconds; to another node, its whole data goes first.{{end}}</p>
+            {{if .OutOfMemory}}<p class="hint">Moving keeps its {{mem $t.Spec.Limits.MemoryMB}} memory limit: it runs out of memory on any node. Raise its limit instead.</p>{{end}}
             <div><button type="submit" class="primary">Move {{$t.Spec.Name}}</button></div>
           </form>
         </div>

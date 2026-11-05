@@ -1219,7 +1219,7 @@ func TestOneBlockedWaveSentence(t *testing.T) {
 func TestOneCountPerNode(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, node := get(t, server.URL+"/nodes/nbg-1")
-	if !strings.Contains(node, `Runs</div><div class="v num">3 tenants <small>and 1 archived</small>`) || !strings.Contains(node, "Now it runs 3 tenants (and 1 archived) and keeps 4 copies.") ||
+	if !strings.Contains(node, `Runs</div><div class="v num">3 tenants</div><div class="dim small">and 1 archived</div>`) || !strings.Contains(node, "Now it runs 3 tenants (and 1 archived) and keeps 4 copies.") ||
 		!strings.Contains(node, `Keeps copies of</div><div class="v num">4 tenants`) {
 		t.Fatalf("nbg-1's page:\n%s", node)
 	}

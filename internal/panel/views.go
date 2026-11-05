@@ -1084,6 +1084,9 @@ type tenantHead struct {
 	Targets     []string
 	// Apps are the other apps it could run, for "Change its app".
 	Apps []string
+	// OutOfMemory says it last exited out of memory and is not healthy:
+	// moving it keeps its limit, so the move is no fix.
+	OutOfMemory bool
 }
 
 // withApps adds the apps the tenant could change to, for its menu.
@@ -1106,6 +1109,11 @@ func (s *Server) withApps(ctx context.Context, r *http.Request, h tenantHead) te
 
 func (s *Server) headOf(t api.Tenant, nodes api.Nodes, on string) tenantHead {
 	h := tenantHead{Tenant: t, State: tenantState(t), On: on, Acts: s.Actions != nil, Edits: s.Apps != nil}
+	if st := t.Status; st != nil && !st.Healthy {
+		if e, ok := parseExit(st.LastExit); ok && e.Memory {
+			h.OutOfMemory = true
+		}
+	}
 	for _, node := range nodes.Nodes {
 		if node.Name != t.Node && node.Answers && !node.Failed() {
 			h.Targets = append(h.Targets, node.Name)

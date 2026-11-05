@@ -41,7 +41,7 @@
     {{else}}
     <div class="stat"><div class="caps">Use</div><div class="v dim">not measured</div></div>
     {{end}}
-    {{$archived := sub (len $d.Runs) (len $d.RunNames)}}<div class="stat"><div class="caps">Runs</div><div class="v num">{{plural (len $d.RunNames) "tenant" "tenants"}}{{if $archived}} <small>and {{$archived}} archived</small>{{end}}</div></div>
+    {{$archived := sub (len $d.Runs) (len $d.RunNames)}}<div class="stat"><div class="caps">Runs</div><div class="v num">{{plural (len $d.RunNames) "tenant" "tenants"}}</div>{{if $archived}}<div class="dim small">and {{$archived}} archived</div>{{end}}</div>
     <div class="stat"><div class="caps">Keeps copies of</div><div class="v num">{{plural (len $d.Keeps) "tenant" "tenants"}}</div></div>
     <div class="stat"><div class="caps">Backups</div><div class="v figure-like{{if not $d.Backups}} dim{{end}}">{{with $d.Backups}}{{if .Failing}}<span class="red-text-inline">{{.Failing}} failing</span>{{else if .Stale}}{{.Stale}} late{{else if .Ready}}every {{every .Every}}{{else}}not running{{end}}{{else}}{{if $n.Answers}}not set up{{else}}not known{{end}}{{end}}</div></div>
   </div>

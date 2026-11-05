@@ -102,7 +102,7 @@
         <td class="dim l-sub" data-label="Source">{{if .New}}Added in this draft{{else if .Own}}Tenant override{{else}}Inherited from {{$t.App}}{{end}}</td>
         <td class="l-sub own" data-label="Override"><input type="hidden" name="secretname" value="{{.Name}}">
           <label class="check own-check"><input type="checkbox" name="secretown" value="{{.Name}}" class="own-switch" data-key="{{.Name}}"{{if .DraftOwn}} checked{{end}} aria-label="A secret of its own for {{.Name}}"><span class="sw" aria-hidden="true">Override</span></label>
-          <span class="own-field"><select name="secretkind" data-key="{{.Name}}" aria-label="{{.Name}}: its kind">{{$k := .DraftKind}}{{range $d.Kinds}}<option{{if eq . $k}} selected{{end}}>{{.}}</option>{{end}}</select> <input type="number" name="secretbytes" value="{{if .DraftBytes}}{{.DraftBytes}}{{end}}" min="1" placeholder="length" class="tiny" data-key="{{.Name}}" aria-label="{{.Name}}: its length"></span>
+          <span class="own-field"><select name="secretkind" data-key="{{.Name}}" aria-label="{{.Name}}: its kind">{{$k := .DraftKind}}{{range $d.Kinds}}<option{{if eq . $k}} selected{{end}}>{{.}}</option>{{end}}</select> <input type="number" name="secretbytes" value="{{if .DraftBytes}}{{.DraftBytes}}{{end}}" min="1" placeholder="length" class="tiny" data-key="{{.Name}}" aria-label="{{.Name}}: its length, in bytes"> <span class="dim small">bytes</span></span>
           {{if and (not $t.Archived) (or .Own .FromApp)}}<span class="row-act"><details class="menu-text">
             <summary class="button small">New value…</summary>
             <div class="pop">
@@ -118,7 +118,7 @@
       {{range $i, $_ := (repeat $d.BlankSecret)}}<tr class="add">
         <td class="l-main"><input type="text" name="secretnewname" placeholder="NEW_SECRET" class="mono-input" aria-label="a secret to add: its name" autocomplete="off" autocapitalize="characters" spellcheck="false"></td>
         <td class="dim l-sub add-help" colspan="2">A new secret: its name, kind and length</td>
-        <td class="l-sub own" data-label="Kind"><select name="secretnewkind" aria-label="a secret to add: its kind">{{range $d.Kinds}}<option>{{.}}</option>{{end}}</select> <input type="number" name="secretnewbytes" min="1" placeholder="length" class="tiny" aria-label="a secret to add: its length"><button type="button" class="link remove-row" hidden>Remove</button></td></tr>{{end}}
+        <td class="l-sub own" data-label="Kind"><select name="secretnewkind" aria-label="a secret to add: its kind">{{range $d.Kinds}}<option>{{.}}</option>{{end}}</select> <input type="number" name="secretnewbytes" min="1" placeholder="length" class="tiny" aria-label="a secret to add: its length, in bytes"> <span class="dim small">bytes</span><button type="button" class="link remove-row" hidden>Remove</button></td></tr>{{end}}
       </tbody>
     </table>
     <div class="row"><button type="submit" name="do" value="addsecret" class="small" data-add-row="secrets" aria-controls="secrets">Add a secret</button><span class="hint">Made once by murder when saved; its value is never shown. A new value for one is "New value…" in its row, apart from the review.</span></div>

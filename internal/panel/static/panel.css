@@ -909,10 +909,12 @@ td.empty a, p.calm a { text-decoration: underline; text-underline-offset: 3px; }
 .annot details.nearby[open] > summary { text-align: right; }
 .annot details.nearby li a { color: var(--fg); }
 @media (max-width: 760px) {
-  /* On a phone the reading has a line of its own, held for it, under the
-     legend; the nearby list opens in place, pushing what is under it. */
-  .legrow { flex-wrap: wrap; }
+  /* On a phone the reading takes a line of its own under the legend once
+     there is one, pushing what is below (never the plot read); empty, it
+     takes no room, so a chart ends at its legend. */
+  .legrow { flex-wrap: wrap; row-gap: 6px; }
   .annot { flex-basis: 100%; justify-content: flex-start; height: 1.6em; }
+  .annot:empty { height: 0; margin-top: -6px; }
   .annot:has(details[open]) { height: auto; flex-wrap: wrap; }
   .annot details.nearby[open] > summary { text-align: left; }
 }
@@ -1037,7 +1039,6 @@ p.summary-line + .lead { margin-top: var(--s1); }
 
 /* An Override sent on with no value: its row says so, in red. */
 table.settings tr.missing td.own input[aria-invalid] { border-color: var(--bad); }
-.problem .inline-form form.stack { max-width: 440px; }
 p.before-actions { margin: 0 0 var(--s3); }
 p.cause a.inline { margin-left: 0; }
 /* A result that wraps keeps its lines clear of its square: a hanging
@@ -1064,7 +1065,11 @@ input.confirm-field { max-width: 320px; }
 .stat-caption { margin: 6px 0 0; font-size: 12.5px; color: var(--dim); max-width: 34ch; }
 /* In a problem box the typed form reads as part of it: its sentence at the
    box's own size and colour, at the field's measure. */
-.problem .inline-form .hint { font-size: inherit; color: inherit; max-width: 440px; }
+/* Its sentence at the box's own measure; only the field and button keep
+   the form's 440 px. */
+.problem .inline-form .hint { font-size: inherit; color: inherit; max-width: 78ch; }
+.problem .inline-form form.stack { max-width: none; }
+.problem .inline-form form.stack > input, .problem .inline-form form.stack > div { max-width: 440px; }
 /* A chart's nearby list, open in place, lengthens only its own figure: the
    chart beside it does not stretch. */
 .charts > figure.chart { align-self: start; }
@@ -1074,3 +1079,7 @@ input.confirm-field { max-width: 320px; }
 .review-box > .notice, .review-box > .owner-note { margin: 0 0 var(--s4); }
 .review-box > .summary-line { margin-bottom: var(--s4); }
 .review-box > .notice + table, .review-box > .owner-note + table { margin-top: var(--s5); }
+/* A pop-over's own title on a desktop; a phone's sheet head says it. */
+@media (max-width: 760px) { .pop .pop-title { display: none; } }
+/* A desktop pop-over with no room below its button opens above it. */
+@media (min-width: 761px) { .pop.up { top: auto; bottom: calc(100% + 6px); } }

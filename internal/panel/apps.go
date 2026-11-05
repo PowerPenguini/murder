@@ -1063,7 +1063,8 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		// Another app: to its Overview, where the new container is followed.
 		if form.App != t.App {
 			flash(w, r, "done", name+" now runs app "+form.App+": its new container starts")
-			http.Redirect(w, r, "/tenants/"+url.PathEscape(name), http.StatusSeeOther)
+			// Its own fragment: a redirect without one keeps the review's.
+			http.Redirect(w, r, "/tenants/"+url.PathEscape(name)+"#operation", http.StatusSeeOther)
 			return
 		}
 		back("done", strings.Join(said, "; "))
