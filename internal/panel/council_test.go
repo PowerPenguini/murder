@@ -1355,15 +1355,17 @@ func TestADiskLimitBelowItsDataIsNotSet(t *testing.T) {
 	}
 	saved := fields(again)
 	saved.Set("do", "save")
-	// Saved, it goes to atlas's Overview, where the save's line says it.
-	_, landed := submit(t, client, server, "/tenants/atlas/settings", saved, server.URL)
-	if op := between(landed, `id="operation"`, "</div>"); !strings.Contains(op, `<span class="lead-in">Disk limit set to 10 GB</span>`) || !strings.Contains(op, "done: nothing restarted") {
-		t.Fatalf("after the save:\n%s", op)
+	// Saved, it returns to atlas's Settings, where it was asked, saying
+	// so; its Overview's save line says it too.
+	response, landed := submit(t, client, server, "/tenants/atlas/settings", saved, server.URL)
+	if response.Request.URL.Path != "/tenants/atlas/settings" || !strings.Contains(landed, "atlas&#39;s disk limit is set on its data: nothing restarted") {
+		t.Fatalf("after the save: at %s\n%s", response.Request.URL, landed)
 	}
 	if after, _ := cluster.Get(context.Background(), "atlas"); after.Overrides.Limits.DiskGB != 10 || after.Status.Phase != "running" || after.Status.Generation != after.Generation {
 		t.Fatalf("after a disk limit alone: %+v, status %+v", after.Overrides.Limits, after.Status)
 	}
-	if _, page := get(t, server.URL+"/tenants/atlas"); !strings.Contains(between(page, `id="operation"`, "</div>"), "done: nothing restarted") {
+	if _, page := get(t, server.URL+"/tenants/atlas"); !strings.Contains(between(page, `id="operation"`, "</div>"), `<span class="lead-in">Disk limit set to 10 GB</span>`) ||
+		!strings.Contains(between(page, `id="operation"`, "</div>"), "done: nothing restarted") {
 		t.Fatalf("a disk limit set live is not done:\n%s", between(page, `id="operation"`, "</div>"))
 	}
 	// Set behind the panel's back, below its data: its node did not set
@@ -1469,10 +1471,15 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 	for _, name := range []string{"generation", "reviewed", "app", "image", "memoryMB", "cpus", "pids", "diskGB", "env", "secrets", "flags", "canary", "hold"} {
 		save.Set(name, html.UnescapeString(between(review, `name="`+name+`" value="`, `"`)))
 	}
-	// The save lands on its Overview: the red notice gone, the save's line
+	// The save returns to its Settings, where it was asked, saying it can
+	// write again; on its Overview, the red notice is gone, the save's line
 	// saying what it did.
-	if _, page = submit(t, client, server, "/tenants/atlas/settings", save, server.URL); strings.Contains(page, "cannot write") ||
-		!strings.Contains(said(between(page, `id="operation"`, "</div>")), `<span class="lead-in">Disk limit raised to 10 GB</span> by you`) ||
+	response, saved := submit(t, client, server, "/tenants/atlas/settings", save, server.URL)
+	if response.Request.URL.Path != "/tenants/atlas/settings" || strings.Contains(saved, "cannot write") || !strings.Contains(saved, "atlas&#39;s disk limit is set on its data: it can write again, nothing restarted") {
+		t.Fatalf("raised, atlas's settings: at %s\n%s", response.Request.URL, saved)
+	}
+	if _, page = get(t, server.URL+"/tenants/atlas"); strings.Contains(page, "cannot write") ||
+		!strings.Contains(said(between(page, `id="operation"`, "</div>")), `<span class="lead-in">Disk limit raised to 10 GB</span> by `) ||
 		!strings.Contains(between(page, `id="operation"`, "</div>"), ": it can write again, nothing restarted. ") {
 		t.Fatalf("raised, atlas:\n%s", between(page, `<div class="notices"`, "<section"))
 	}

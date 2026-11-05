@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -72,14 +73,47 @@ func takeFlash(w http.ResponseWriter, r *http.Request) (done, problem string) {
 	return message, ""
 }
 
-// tenantAction does one thing to a tenant, and sends back to its page.
+// tenantBack is where a form posted from one of tenant name's pages
+// returns: the page its back field names, when that is the tenant's
+// Overview, Logs or Settings, else fallback. Nothing else is taken: no
+// other site, no other page of the panel. Its Overview and Logs keep
+// their address's choices (a range, a filter); its Settings not, as those
+// propose or review a change.
+func tenantBack(r *http.Request, name, fallback string) string {
+	home := "/tenants/" + url.PathEscape(name)
+	back := r.FormValue("back")
+	if back == "" || len(back) > 2048 || !strings.HasPrefix(back, "/") || strings.ContainsAny(back, "\\#") ||
+		strings.IndexFunc(back, unicode.IsControl) >= 0 {
+		return fallback
+	}
+	u, err := url.Parse(back)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" || u.RawPath != "" {
+		return fallback
+	}
+	switch u.Path {
+	case home + "/settings":
+		return u.Path
+	case home, home + "/logs":
+	default:
+		return fallback
+	}
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil || len(query) == 0 {
+		return u.Path
+	}
+	return u.Path + "?" + query.Encode()
+}
+
+// tenantAction does one thing to a tenant, and sends back to the page of
+// it the form was on.
 func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	agent := s.Actions(s.actor(userOf(r)))
 	// A move waits for the tenant to run on its new node.
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
-	back := "/tenants/" + url.PathEscape(name)
+	home := "/tenants/" + url.PathEscape(name)
+	back := tenantBack(r, name, home)
 	confirmed := typed(r.FormValue("confirm"), name)
 	var err error
 	var done string
@@ -143,6 +177,11 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 		flash(w, r, "problem", err.Error())
 	} else {
 		flash(w, r, "done", done)
+		// Suspended or archived, it has no container whose lines its Logs
+		// could read: to its Overview.
+		if do := r.FormValue("do"); (do == "suspend" || do == "archive") && strings.HasPrefix(back, home+"/logs") {
+			back = home
+		}
 	}
 	http.Redirect(w, r, back, http.StatusSeeOther)
 }
@@ -333,6 +372,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	head := s.withApps(ctx, r, s.headOf(t, nodes, "logs"))
+	head.Back = r.URL.RequestURI()
 	// Its state as its other tabs say it: one that cannot write says so.
 	if u, ok := s.usageNow(ctx).Tenants[t.Spec.Name]; ok {
 		head.State = writable(head.State, &u)

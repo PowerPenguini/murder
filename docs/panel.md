@@ -122,7 +122,10 @@ To try the pages without a cluster: `go run ./internal/panel/demo`.
   tenant unhealthy or failed and why, one near its memory limit, one
   without a copy; a tenant's page says what is wrong with it and where to
   fix it. A tenant's pages share a head: where it is, its state, and its
-  Overview, Logs and Settings. A form sent once is not sent again while it
+  Overview, Logs and Settings; an action or a save from one of them returns
+  to it (its own pages only) and says there what it did, and a review that
+  lowers a memory or disk limit to under twice what the tenant uses says
+  so. A form sent once is not sent again while it
   works; wide tables scroll on a phone. Events say their actions in words
   (the code on hover) and can show only what people did; a tenant's logs
   filter, with warnings and errors standing out; the cluster says whether
