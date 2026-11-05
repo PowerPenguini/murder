@@ -523,18 +523,23 @@ func newPublisher(cfg *config.DNS, name string, public []string) (records.Publis
 	return &records.Hetzner{Token: token, Zone: zone, Name: name, TTL: cfg.TTL.Duration, Endpoint: cfg.Endpoint}, nil
 }
 
+// parsePublic is the addresses the config's values name, sorted, each once.
+func parsePublic(values []string) []netip.Addr {
+	var addresses []netip.Addr
+	for _, value := range values {
+		if address, err := netip.ParseAddr(value); err == nil {
+			addresses = append(addresses, address.Unmap())
+		}
+	}
+	slices.SortFunc(addresses, func(a, b netip.Addr) int { return a.Compare(b) })
+	return slices.Compact(addresses)
+}
+
 // keepPublic keeps this node's public addresses, as its config has them,
 // recorded for the DNS records, as after the node left the cluster and
 // joined it again; a freeze or a lost leader only delays it.
 func keepPublic(ctx context.Context, st *store.SQLite, node string, values []string, log *slog.Logger) {
-	var want []netip.Addr
-	for _, value := range values {
-		if address, err := netip.ParseAddr(value); err == nil {
-			want = append(want, address.Unmap())
-		}
-	}
-	slices.SortFunc(want, func(a, b netip.Addr) int { return a.Compare(b) })
-	want = slices.Compact(want)
+	want := parsePublic(values)
 	warned := false
 	for {
 		if !slices.ContainsFunc(st.Nodes(), func(n store.Node) bool { return n.Name == node && slices.Equal(n.Public, want) }) {

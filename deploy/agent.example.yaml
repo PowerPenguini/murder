@@ -1,6 +1,7 @@
 # /etc/murder/agent.yaml
 node: node-fsn-1                   # stored by "murder init" (host name if unset); must match afterwards
 baseDomain: example.com            # tenants live at <tenant>.example.com
+# publicAddresses: [203.0.113.10]  # a node alone: where tenants' own domains point (in a cluster, cluster.publicAddresses)
 database: /var/lib/murder/murder.db  # apps, tenants, sealed secrets, audit log (SQLite)
 masterKeyFile: /etc/murder/master.key
 socket: /run/murder/agent.sock

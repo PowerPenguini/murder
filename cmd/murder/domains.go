@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -51,6 +53,12 @@ func newDomainManager(cfg config.Agent, st *store.SQLite, key *secrets.Key, memb
 		manager.NoCA = "it points at the cluster, but no certificate is ordered: edge.tls.mode is internal, not acme, and sets no ca, on the leader"
 	default:
 		manager.NoCA = "it points at the cluster and is served over plain HTTP: edge.tls is off on the leader, so no certificate is ordered"
+	}
+	if member == nil {
+		// A node alone records no public addresses in the state: its
+		// domains point at those its config names.
+		public := parsePublic(cfg.PublicAddresses)
+		manager.Public = func() []netip.Addr { return slices.Clone(public) }
 	}
 	if member != nil {
 		manager.Leader = member.Leader

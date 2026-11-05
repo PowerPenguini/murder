@@ -145,6 +145,11 @@ func TestTheConfigIsOneTheAgentAccepts(t *testing.T) {
 			if (s.ZFSPool != "") != (agent.Volumes.Driver == "zfs") || (s.ClusterAddress != "") != (agent.Cluster != nil) || s.Panel != (agent.Panel.Tunnel != nil) {
 				t.Fatalf("settings %+v gave volumes %+v, cluster %+v, panel %+v", s, agent.Volumes, agent.Cluster, agent.Panel)
 			}
+			// A node alone keeps its public addresses for its tenants'
+			// domains; a node of a cluster keeps them under cluster.
+			if alone := agent.Cluster == nil; alone != slices.Equal(agent.PublicAddresses, s.Public) || !alone && !slices.Equal(agent.Cluster.PublicAddresses, s.Public) {
+				t.Fatalf("public %v gave %s", s.Public, Config(s))
+			}
 			if s.Failover != (agent.Cluster != nil && agent.Cluster.Failover != nil) || s.ManageDNS != (agent.Cluster != nil && agent.Cluster.DNS != nil) {
 				t.Fatalf("failover %v, dns %v in %s", s.Failover, s.ManageDNS, Config(s))
 			}

@@ -32,6 +32,9 @@ var configTemplate = template.Must(template.New("agent.yaml").Funcs(template.Fun
 # has a default (see deploy/agent.example.yaml for every setting).
 node: {{.Node}}
 baseDomain: {{.Domain}}  # tenants live at <tenant>.{{.Domain}}
+{{- if and .Public (not .ClusterAddress)}}
+publicAddresses: {{list .Public}}  # tenants' own domains point here
+{{- end}}
 {{- if .ZFSPool}}
 
 volumes:
