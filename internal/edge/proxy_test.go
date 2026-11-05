@@ -252,7 +252,13 @@ func TestAFailedACMEAttemptLeavesNothingRunning(t *testing.T) {
 			t.Fatal("a certificate without asking for one")
 		}
 	}
-	if after := renewing(); after != before {
+	// A stopped cache's goroutine returns a moment after Stop does: give
+	// it a while, not forever.
+	after := renewing()
+	for deadline := time.Now().Add(5 * time.Second); after != before && time.Now().Before(deadline); after = renewing() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if after != before {
 		t.Fatalf("%d caches renewing after three failed attempts, %d before", after, before)
 	}
 	// Without a certificate there is nothing to stop.
