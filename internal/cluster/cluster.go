@@ -378,16 +378,30 @@ func (c *Cluster) registerHere(ctx context.Context, name string, key ed25519.Pub
 	if frozen := c.config.Store.Frozen(); frozen != "" {
 		return fmt.Errorf("%w: %s", store.ErrFrozen, frozen)
 	}
+	if err := c.EveryNodeRuns(ctx, store.IdentitySchema); err != nil {
+		return errNotEveryNode
+	}
+	return c.config.Store.SetNodeKey(name, EncodeKey(key), "node "+name)
+}
+
+// EveryNodeRuns returns nil once every other node of the cluster answers
+// that it runs a release of schema version schema or later, which applies
+// the changes of that version: a node of an older release would stop at
+// the first.
+func (c *Cluster) EveryNodeRuns(ctx context.Context, schema int) error {
 	for _, node := range c.config.Store.Nodes() {
 		if node.Name == c.config.Node {
 			continue
 		}
 		var answer releaseAnswer
-		if err := c.request(ctx, node.Name, http.MethodGet, "/cluster/v1/release", nil, &answer); err != nil || answer.Schema < store.IdentitySchema {
-			return errNotEveryNode
+		if err := c.request(ctx, node.Name, http.MethodGet, "/cluster/v1/release", nil, &answer); err != nil {
+			return fmt.Errorf("node %s does not say which release it runs: %w", node.Name, err)
+		}
+		if answer.Schema < schema {
+			return fmt.Errorf("node %s runs a release of schema version %d, before %d", node.Name, answer.Schema, schema)
 		}
 	}
-	return c.config.Store.SetNodeKey(name, EncodeKey(key), "node "+name)
+	return nil
 }
 
 // Admit lets a host that brought an invitation join as node name, with the

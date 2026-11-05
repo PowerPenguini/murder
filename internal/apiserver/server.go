@@ -96,6 +96,7 @@ func (s *Server) Handler() http.Handler {
 	s.keyRoutes(mux)
 	s.upgradeRoutes(mux)
 	s.usageRoutes(mux)
+	s.domainRoutes(mux)
 	mux.HandleFunc("GET /v1/routes", s.routes)
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
@@ -142,6 +143,12 @@ func (s *Server) view(record store.Record) api.Tenant {
 		AppRevision: record.AppRevision, BeforeRevision: record.BeforeRevision, Canary: record.Canary, Hold: record.Hold, Restoring: record.Restore != "",
 	}
 	view.KeptSecrets = slices.Sorted(maps.Keys(record.Sealed))
+	if domains := s.store.TenantDomains(record.Spec.Name); len(domains) > 0 {
+		view.Domains = make([]api.Domain, 0, len(domains))
+		for _, domain := range domains {
+			view.Domains = append(view.Domains, s.domainView(domain))
+		}
+	}
 	view.Elsewhere = record.Node != s.store.Node()
 	if !view.Elsewhere && s.replicas != nil {
 		view.ReplicaSyncedAt = s.replicas.Synced(record.Spec.Name)
@@ -927,6 +934,10 @@ type RouteState interface {
 	// Live refuses an archived tenant with store.ErrArchived: it has no
 	// route.
 	Live(name string) (store.Record, error)
+	// Domains are the tenants' own domains, Challenges the ACME
+	// challenges the edges answer for them.
+	Domains() []store.Domain
+	Challenges() []store.Challenge
 }
 
 var _ RouteState = (*store.SQLite)(nil)

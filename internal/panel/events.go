@@ -17,7 +17,10 @@ var actions = map[string]string{
 	"changes.frozen": "changes frozen", "changes.thawed": "changes taken again",
 	"cluster.started": "cluster started",
 	"device.added":    "device added", "device.removed": "device removed",
-	"node.joined": "node joined", "node.removed": "node removed", "node.changed": "node changed",
+	"domain.added": "domain added", "domain.removed": "domain removed", "domain.verified": "domain points here", "domain.pending": "domain waits for its DNS",
+	"domain.issued": "domain's certificate issued", "domain.renewed": "domain's certificate renewed", "domain.failed": "domain's certificate failed",
+	"acme.account-created": "ACME account made",
+	"node.joined":          "node joined", "node.removed": "node removed", "node.changed": "node changed",
 	"node.failed": "node failed", "node.failed-over": "node's tenants failed over", "node.back": "node back",
 	"node.away": "node restarting", "node.upgrading": "node upgrading", "node.upgraded": "node upgraded",
 	"node.public": "node's public addresses", "node.tunnel": "node in the tunnel",
@@ -106,7 +109,7 @@ func logLines(output string) []logLine {
 var failures = map[string]bool{
 	"node.failed": true, "node.failed-over": true, "tenant.failed-over": true, "tenant.restarted": true,
 	"tenant.move-cancelled": true, "rollout.paused": true, "rollout.rolled-back": true, "rollout.restored": true,
-	"backup.failed": true,
+	"backup.failed": true, "domain.failed": true,
 }
 
 // failureEvent says an event tells of something that broke.
@@ -120,6 +123,9 @@ var predicates = map[string]string{
 	"tenant.failed-over": "failed over to its copy", "tenant.restarted": "restarted after it exited", "tenant.replica": "had its copy placed",
 	"tenant.replica-moving": "has its copy moving", "tenant.replica-ready": "has its copy ready", "app.rolled-out": "took its app's new revision",
 	"secret.rotated": "had a secret given a new value", "tenant.flags": "had its rollout flags changed",
+	"domain.added": "was given a domain", "domain.removed": "had a domain removed", "domain.verified": "has a domain pointing here",
+	"domain.pending": "has a domain waiting for its DNS", "domain.issued": "got a domain's certificate", "domain.renewed": "had a domain's certificate renewed",
+	"domain.failed": "could not get a domain's certificate",
 }
 
 // eventRow is one row of an events table: an event, or a run of the same

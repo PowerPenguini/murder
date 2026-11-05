@@ -20,7 +20,7 @@ volumes:
   parent: tank/murder/tenants      # datasets mount below /srv/murder/tenants (mountRoot)
 
 edge:                              # served by "murder edge"
-  http: ":80"
+  http: ":80"                      # open to the internet: tenants' own domains get their certificates over HTTP-01 here
   https: ":443"
   # metrics: 127.0.0.1:9465         # the edge's own /metrics
   # drain: 30s                      # how long a replaced edge finishes its requests
@@ -29,7 +29,7 @@ edge:                              # served by "murder edge"
   tls:
     mode: acme                     # off | internal | acme
     storage: /var/lib/murder/certs
-    email: ops@example.com
+    email: ops@example.com         # the ACME account's contact; tenants' own domains' certificates come from the same CA
     dnsProvider: hetzner           # hetzner (Hetzner Cloud DNS) | namecheap
     dnsTokenFile: /etc/murder/dns.token
 

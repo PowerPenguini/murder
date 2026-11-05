@@ -6,13 +6,15 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // routesWait is how long a request for routes newer than the client's waits
 // for a change before it answers with the same ones.
 var routesWait = 25 * time.Second
 
-// Table is every route this node serves, with its version.
+// Table is every route this node serves, with its version: the tenants,
+// their own domains and the ACME challenges the edges answer.
 func (r Routes) Table() edge.Table {
 	routes := map[string]edge.Route{}
 	for _, record := range r.Store.List() {
@@ -20,7 +22,58 @@ func (r Routes) Table() edge.Table {
 			routes[record.Spec.Name] = route
 		}
 	}
-	return edge.NewTable(routes)
+	domains := map[string]edge.DomainRoute{}
+	for _, domain := range r.Store.Domains() {
+		if _, routed := routes[domain.Tenant]; routed {
+			if route, ok := domainRoute(domain, time.Now()); ok {
+				domains[domain.Name] = route
+			}
+		}
+	}
+	challenges := map[string]edge.ChallengeRoute{}
+	for _, challenge := range r.Store.Challenges() {
+		if challenge.ExpiresAt.After(time.Now()) {
+			challenges[challenge.Token] = edge.ChallengeRoute{Domain: challenge.Domain, KeyAuth: challenge.KeyAuth}
+		}
+	}
+	return edge.NewTableWith(routes, domains, challenges)
+}
+
+// domainRoute is how the edges route a tenant's domain: once it was seen
+// to point at the cluster, with its certificate until that expires.
+func domainRoute(domain store.Domain, now time.Time) (edge.DomainRoute, bool) {
+	if !domain.Verified() {
+		return edge.DomainRoute{}, false
+	}
+	route := edge.DomainRoute{Tenant: domain.Tenant}
+	if domain.Certificate != "" && domain.Key != "" && now.Before(domain.NotAfter) {
+		route.Certificate, route.Key = domain.Certificate, domain.Key
+	}
+	return route, true
+}
+
+// Domain routes a tenant's own domain, as the edge's table would.
+func (r Routes) Domain(host string) (edge.DomainRoute, bool) {
+	for _, domain := range r.Store.Domains() {
+		if domain.Name != host {
+			continue
+		}
+		if _, ok := r.Route(domain.Tenant); !ok {
+			return edge.DomainRoute{}, false
+		}
+		return domainRoute(domain, time.Now())
+	}
+	return edge.DomainRoute{}, false
+}
+
+// Challenge finds an ACME challenge the edges answer.
+func (r Routes) Challenge(token string) (edge.ChallengeRoute, bool) {
+	for _, challenge := range r.Store.Challenges() {
+		if challenge.Token == token && challenge.ExpiresAt.After(time.Now()) {
+			return edge.ChallengeRoute{Domain: challenge.Domain, KeyAuth: challenge.KeyAuth}, true
+		}
+	}
+	return edge.ChallengeRoute{}, false
 }
 
 // routes answers the edge: the route table, or, with after naming the

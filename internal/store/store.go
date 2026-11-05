@@ -288,9 +288,11 @@ type FailedOver struct {
 // Sealer makes a new value for one secret of a tenant and seals it.
 type Sealer func(tenant, name string, secret spec.Secret) (string, error)
 
-// Resealer seals a tenant's secret's value again; changed is false for a
-// value it leaves as it is.
-type Resealer func(tenant, name, sealed string) (resealed string, changed bool, err error)
+// Resealer seals a value sealed under context again; changed is false for
+// a value it leaves as it is. The contexts are SecretContext for tenants'
+// secrets, DomainKeyContext and AccountKeyContext for certificates' and
+// ACME accounts' private keys.
+type Resealer func(context, sealed string) (resealed string, changed bool, err error)
 
 // Store is the desired state of a node. Reads come from memory and never
 // fail; every write is one transaction that also records who made it.
@@ -365,7 +367,8 @@ type Store interface {
 	SetSuspended(name string, suspended bool, actor string) (Record, error)
 	// Rotate gives one secret of the tenant's spec a new value.
 	Rotate(name, secret, actor string) (Record, error)
-	// ResealSecrets seals every tenant's secrets again with reseal, in
+	// ResealSecrets seals every tenant's secrets again with reseal, and
+	// the private keys of domains' certificates and of ACME accounts, in
 	// one change, and says how many changed. A value changed since it was
 	// read keeps its new one.
 	ResealSecrets(reseal Resealer, actor string) (int, error)
@@ -446,6 +449,15 @@ type Store interface {
 	PanelSession(hash string) (PanelSession, error)
 	EndPanelSession(hash string) error
 	PanelSecret(name string) (string, error)
+	// Tenants' own domains (see domains.go): the API adds and removes
+	// them; the leader checks them and keeps their certificates.
+	Domains() []Domain
+	Domain(name string) (Domain, error)
+	TenantDomains(tenant string) []Domain
+	AddDomain(tenant, name, actor string) (Domain, bool, error)
+	RemoveDomain(tenant, name, actor string) error
+	CheckDomainNow(tenant, name, actor string) error
+	Challenges() []Challenge
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error

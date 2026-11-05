@@ -109,9 +109,7 @@ func TestTheMasterKeyRotatesWhileTheClusterRuns(t *testing.T) {
 		Raw:    from.key.Raw,
 		Settle: 200 * time.Millisecond,
 		Reseal: func(string) (int, error) {
-			return from.store.ResealSecrets(func(tenant, name, sealed string) (string, bool, error) {
-				return from.key.Reseal(secrets.Context(tenant, name), sealed)
-			}, "alice")
+			return from.store.ResealSecrets(from.key.Reseal, "alice")
 		},
 	}
 	result, err := r.Run(ctx(t))

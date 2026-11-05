@@ -20,10 +20,35 @@ import (
 type Table struct {
 	Version string           `json:"version"`
 	Routes  map[string]Route `json:"routes"`
+	// Domains are tenants' own host names, by name; Challenges the ACME
+	// HTTP-01 challenges every edge answers, by token.
+	Domains    map[string]DomainRoute    `json:"domains,omitempty"`
+	Challenges map[string]ChallengeRoute `json:"challenges,omitempty"`
+}
+
+// DomainRoute is a tenant's own host name: the tenant it leads to, and
+// its certificate once it has one: the chain, PEM, and its private key,
+// PEM, sealed with the master key.
+type DomainRoute struct {
+	Tenant      string `json:"tenant"`
+	Certificate string `json:"certificate,omitempty"`
+	Key         string `json:"key,omitempty"`
+}
+
+// ChallengeRoute is an ACME HTTP-01 challenge: the edge answers
+// http://Domain/.well-known/acme-challenge/<token> with KeyAuth.
+type ChallengeRoute struct {
+	Domain  string `json:"domain"`
+	KeyAuth string `json:"keyAuth"`
 }
 
 // NewTable versions routes by their content.
 func NewTable(routes map[string]Route) Table {
+	return NewTableWith(routes, nil, nil)
+}
+
+// NewTableWith versions routes, domains and challenges by their content.
+func NewTableWith(routes map[string]Route, domains map[string]DomainRoute, challenges map[string]ChallengeRoute) Table {
 	if routes == nil {
 		routes = map[string]Route{}
 	}
@@ -32,7 +57,22 @@ func NewTable(routes map[string]Route) Table {
 		route := routes[tenant]
 		fmt.Fprintf(sum, "%s\x00%s\x00%s\x00%t\x00%t\x00", tenant, route.Backend, route.Relay, route.Suspended, route.Moving)
 	}
-	return Table{Version: hex.EncodeToString(sum.Sum(nil))[:16], Routes: routes}
+	// A table without domains keeps the version it had before them.
+	for _, name := range slices.Sorted(maps.Keys(domains)) {
+		domain := domains[name]
+		fmt.Fprintf(sum, "domain\x00%s\x00%s\x00%s\x00%s\x00", name, domain.Tenant, domain.Certificate, domain.Key)
+	}
+	for _, token := range slices.Sorted(maps.Keys(challenges)) {
+		challenge := challenges[token]
+		fmt.Fprintf(sum, "challenge\x00%s\x00%s\x00%s\x00", token, challenge.Domain, challenge.KeyAuth)
+	}
+	if len(domains) == 0 {
+		domains = nil
+	}
+	if len(challenges) == 0 {
+		challenges = nil
+	}
+	return Table{Version: hex.EncodeToString(sum.Sum(nil))[:16], Routes: routes, Domains: domains, Challenges: challenges}
 }
 
 // LiveTable is the table the edge serves from, replaced whole.
@@ -80,6 +120,26 @@ func (l *LiveTable) Route(tenant string) (Route, bool) {
 	}
 	route, ok := table.Routes[tenant]
 	return route, ok
+}
+
+// Domain implements Domains.
+func (l *LiveTable) Domain(host string) (DomainRoute, bool) {
+	table := l.table.Load()
+	if table == nil {
+		return DomainRoute{}, false
+	}
+	domain, ok := table.Domains[host]
+	return domain, ok
+}
+
+// Challenge implements Challenges.
+func (l *LiveTable) Challenge(token string) (ChallengeRoute, bool) {
+	table := l.table.Load()
+	if table == nil {
+		return ChallengeRoute{}, false
+	}
+	challenge, ok := table.Challenges[token]
+	return challenge, ok
 }
 
 // Load returns the table served now; zero before the first.
@@ -161,7 +221,7 @@ func LoadTable(path string) (Table, bool, error) {
 	if err := json.Unmarshal(data, &table); err != nil {
 		return Table{}, false, fmt.Errorf("routes %s: %w", path, err)
 	}
-	return NewTable(table.Routes), true, nil
+	return NewTableWith(table.Routes, table.Domains, table.Challenges), true, nil
 }
 
 // SaveTable writes table to path whole, or not at all.

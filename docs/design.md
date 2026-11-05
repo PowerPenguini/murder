@@ -49,7 +49,13 @@ between servers, is not something they solve.
 - The wildcard DNS name points at every server; the edge proxy on each routes
   by `Host` to wherever the tenant runs, over the private network. A wildcard
   certificate comes from ACME DNS-01.
-- Custom tenant domains come later.
+- A tenant may have host names of its own, outside the base domain, such
+  as `app.customer.com`. The cluster's leader checks that a name points at
+  the cluster, then orders its certificate over ACME HTTP-01 and renews it;
+  the certificate and its sealed key are in the replicated state, so every
+  edge serves it by SNI and answers the CA's challenge, and a new leader
+  goes on renewing. See
+  [operations.md](operations.md#give-a-tenant-its-own-domain).
 
 ## Delivery
 

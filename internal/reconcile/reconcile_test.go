@@ -2381,12 +2381,12 @@ func TestAPurgeGivenUpWhileWaitingDeletesNothing(t *testing.T) {
 // a master key rotation leaves them.
 func (f *fixture) resealAll(t *testing.T) {
 	t.Helper()
-	count, err := f.store.ResealSecrets(func(tenant, name, sealed string) (string, bool, error) {
-		plain, err := f.key.Open(secrets.Context(tenant, name), sealed)
+	count, err := f.store.ResealSecrets(func(context, sealed string) (string, bool, error) {
+		plain, err := f.key.Open(context, sealed)
 		if err != nil {
 			return "", false, err
 		}
-		again, err := f.key.Seal(secrets.Context(tenant, name), plain)
+		again, err := f.key.Seal(context, plain)
 		return again, err == nil, err
 	}, "test")
 	if err != nil || count == 0 {

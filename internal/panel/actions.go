@@ -107,6 +107,10 @@ func tenantBack(r *http.Request, name, fallback string) string {
 // tenantAction does one thing to a tenant, and sends back to the page of
 // it the form was on.
 func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.FormValue("do"), "domain-") {
+		s.domainAction(w, r)
+		return
+	}
 	name := r.PathValue("name")
 	agent := s.Actions(s.actor(userOf(r)))
 	// A move waits for the tenant to run on its new node.

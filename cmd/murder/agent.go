@@ -354,6 +354,10 @@ func runAgent(args []string) error {
 		}
 		go watcher.Run(ctx)
 	}
+	// The leader checks tenants' own domains, and orders and renews their
+	// certificates.
+	domainManager := newDomainManager(cfg, st, key, member, log.With("component", "domains"))
+	go domainManager.Run(ctx)
 	// The leader compares the nodes' replicated states every few minutes:
 	// they apply the same log, so a difference is a fault to look into.
 	var digests *cluster.Digests
@@ -396,7 +400,7 @@ func runAgent(args []string) error {
 	}
 
 	servers := []*http.Server{apiServer}
-	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator, monitor: monitor, usage: recorder, digests: digests, releases: watcher}
+	observed := &agentMetrics{store: st, reconciler: reconciler, api: apiHandler, firewall: firewallLoaded, backups: backups, replicator: replicator, monitor: monitor, usage: recorder, digests: digests, releases: watcher, domains: domainManager}
 	if metricsListener != nil {
 		metricsServer := &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, metricsServer)

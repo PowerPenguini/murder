@@ -415,3 +415,105 @@ func slogLevel(level zapcore.Level) slog.Level {
 		return slog.LevelError
 	}
 }
+
+// DomainCertificates serves the certificates of tenants' own domains, as
+// the routes the edge serves hold them, their private keys sealed with
+// the master key: each is opened and parsed once, and again when the
+// routes bring another.
+type DomainCertificates struct {
+	domains Domains
+	// open opens a certificate's private key, sealed for domain.
+	open func(domain, sealed string) (string, error)
+	log  *slog.Logger
+	now  func() time.Time
+
+	mu    sync.Mutex
+	cache map[string]domainCertificate
+}
+
+type domainCertificate struct {
+	// certificate and key are what the routes held when it was parsed.
+	certificate, key string
+	parsed           *tls.Certificate
+	failed           time.Time
+}
+
+// domainRetry is how long a certificate that could not be opened is not
+// tried again: the master key ring may follow a rotation meanwhile.
+const domainRetry = time.Minute
+
+// domainCacheMost is how many certificates are kept parsed before the
+// cache starts over, dropping those of domains gone.
+const domainCacheMost = 4096
+
+// NewDomainCertificates serves the certificates of domains, opening their
+// keys with open.
+func NewDomainCertificates(domains Domains, open func(domain, sealed string) (string, error), log *slog.Logger) *DomainCertificates {
+	return &DomainCertificates{domains: domains, open: open, log: log, now: time.Now, cache: map[string]domainCertificate{}}
+}
+
+// Certificate returns the certificate of the tenant's domain serverName,
+// or nil if it is none, or has none yet.
+func (d *DomainCertificates) Certificate(serverName string) *tls.Certificate {
+	if d == nil || serverName == "" {
+		return nil
+	}
+	name := strings.TrimSuffix(strings.ToLower(serverName), ".")
+	route, ok := d.domains.Domain(name)
+	if !ok || route.Certificate == "" || route.Key == "" {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	cached, ok := d.cache[name]
+	if ok && cached.certificate == route.Certificate && cached.key == route.Key {
+		if cached.parsed != nil || d.now().Sub(cached.failed) < domainRetry {
+			return cached.parsed
+		}
+	}
+	if len(d.cache) >= domainCacheMost {
+		clear(d.cache)
+	}
+	entry := domainCertificate{certificate: route.Certificate, key: route.Key}
+	parsed, err := d.parse(name, route)
+	if err != nil {
+		entry.failed = d.now()
+		d.log.Error("serve a tenant's domain's certificate", "domain", name, "error", err)
+	} else {
+		entry.parsed = parsed
+	}
+	d.cache[name] = entry
+	return entry.parsed
+}
+
+func (d *DomainCertificates) parse(name string, route DomainRoute) (*tls.Certificate, error) {
+	key, err := d.open(name, route.Key)
+	if err != nil {
+		return nil, fmt.Errorf("open its key: %w", err)
+	}
+	pair, err := tls.X509KeyPair([]byte(route.Certificate), []byte(key))
+	if err != nil {
+		return nil, err
+	}
+	return &pair, nil
+}
+
+// ServeDomains has the certificates serve tenants' own domains by the
+// name a client asks for (SNI), and every other name as before.
+func (c *Certificates) ServeDomains(domains *DomainCertificates) {
+	if c == nil || domains == nil {
+		return
+	}
+	config := c.Config.Clone()
+	fallback := config.GetCertificate
+	config.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if certificate := domains.Certificate(hello.ServerName); certificate != nil {
+			return certificate, nil
+		}
+		if fallback != nil {
+			return fallback(hello)
+		}
+		return nil, fmt.Errorf("no certificate for %q", hello.ServerName)
+	}
+	c.Config = config
+}

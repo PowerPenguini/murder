@@ -194,9 +194,7 @@ func (k *keyRotator) Rotate(ctx context.Context, actor string) (rotation.Result,
 			if current := key.Current(); current != target {
 				return 0, fmt.Errorf("this node uses key %s, not %s", current, target)
 			}
-			return k.store.ResealSecrets(func(tenant, name, sealed string) (string, bool, error) {
-				return key.Reseal(secrets.Context(tenant, name), sealed)
-			}, actor)
+			return k.store.ResealSecrets(key.Reseal, actor)
 		},
 		Report: func(step string) { k.log.Info("master key rotation", "step", step) },
 	}

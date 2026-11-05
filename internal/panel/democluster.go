@@ -89,6 +89,7 @@ func NewDemoCluster() *DemoCluster {
 		}
 	}
 	d.demoApps()
+	d.demoDomains()
 	return d
 }
 
@@ -239,7 +240,7 @@ func (d *DemoCluster) note(actor, action, tenant, app, detail string) {
 // the caller holds d.mu.
 func (d *DemoCluster) current() {
 	for name, t := range d.tenants {
-		t = d.settle(t)
+		t = d.settleDomains(d.settle(t))
 		// The agent checks a running tenant's health every pass.
 		if s := t.Status; s != nil && s.Phase == "running" && time.Since(s.CheckedAt) > 15*time.Second {
 			status := *s
