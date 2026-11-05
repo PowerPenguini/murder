@@ -120,8 +120,54 @@ type settingChange struct {
 	Field, From, To string
 	// Risk says the change leaves it without a limit the others have;
 	// FromRisk that it runs without one now; FromFull that its data fills
-	// the one it has now.
-	Risk, FromRisk, FromFull bool
+	// the one it has now; Tight that it lowers a limit to under twice what
+	// it uses of it now.
+	Risk, FromRisk, FromFull, Tight bool
+}
+
+// tightLimit is a limit a review lowers to under twice what the tenant
+// uses of it now: said before it is saved, not refused.
+type tightLimit struct {
+	// Label is its row's ("Memory", "Disk"); Lead and Say say it.
+	Label, Lead, Say string
+}
+
+// tightLimits says the memory and disk limits a form lowers (or sets,
+// where there was none) to under twice what tenant name uses of them now:
+// memoryUsed and diskUsed in bytes, 0 or less not measured. A disk limit
+// at or under its data is refused apart (diskRoom.Short), not said here.
+func tightLimits(name string, now, then []limitInEffect, memoryUsed, diskUsed int64) []tightLimit {
+	var out []tightLimit
+	for i, n := range now {
+		a := then[i]
+		if a.Value <= 0 || (n.Value > 0 && a.Value >= n.Value) {
+			continue
+		}
+		switch a.Key {
+		case "memory":
+			limit := int64(a.Value) << 20
+			if memoryUsed <= 0 || limit >= 2*memoryUsed {
+				continue
+			}
+			used := nbsp(size(float64(memoryUsed)))
+			if limit <= memoryUsed {
+				out = append(out, tightLimit{a.Label, nbsp(a.Said) + " is less than " + name + " uses now, " + used + ":",
+					"its new container may run out of memory: over its limit, it is killed and restarts."})
+				continue
+			}
+			out = append(out, tightLimit{a.Label, nbsp(a.Said) + " leaves " + name + " little room:",
+				"it uses " + used + " now, more than half of it. Over its limit, its container is killed and restarts."})
+		case "disk":
+			limit := int64(a.Value) << 30
+			if diskUsed <= 0 || limit <= diskUsed || limit >= 2*diskUsed {
+				continue
+			}
+			twice := (2*diskUsed + (1 << 30) - 1) >> 30
+			out = append(out, tightLimit{a.Label, nbsp(a.Said) + " leaves " + name + " little room:",
+				"its data is " + nbsp(size(float64(diskUsed))) + " now, more than half of it. Once its data fills the limit, " + name + " cannot write; " + strconv.FormatInt(twice, 10) + "\u00a0GB is twice its data."})
+		}
+	}
+	return out
 }
 
 // settingFields are a tenant's fields, from its app's spec and its form.
@@ -221,7 +267,7 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 	was := formOf(t)
 	var out []settingChange
 	if form.App != was.App {
-		out = append(out, settingChange{"App", was.App, form.App + ": its whole spec changes", false, false, false})
+		out = append(out, settingChange{"App", was.App, form.App + ": its whole spec changes", false, false, false, false})
 	}
 	say := func(own, unit string, appValue string) string {
 		if own == "" {
@@ -233,7 +279,7 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 		return own + unit + ", tenant override"
 	}
 	if was.Image != form.Image {
-		out = append(out, settingChange{"Image", say(was.Image, "", imageDigest(app.Image)), say(form.Image, "", imageDigest(app.Image)), false, false, false})
+		out = append(out, settingChange{"Image", say(was.Image, "", imageDigest(app.Image)), say(form.Image, "", imageDigest(app.Image)), false, false, false, false})
 	}
 	// Its limits as every page says them, now and with the form's values.
 	afterOwn, _ := form.overrides()
@@ -242,7 +288,7 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 	for i, n := range now {
 		a := then[i]
 		if n.Value != a.Value || n.From != a.From {
-			out = append(out, settingChange{n.Label, n.WithSource(), a.WithSource(), a.Risk, n.Risk, false})
+			out = append(out, settingChange{n.Label, n.WithSource(), a.WithSource(), a.Risk, n.Risk, false, false})
 		}
 	}
 	before, _ := was.overrides()
@@ -264,25 +310,25 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 			if appHas {
 				to = appValue + ", inherited from " + t.App
 			}
-			out = append(out, settingChange{"Environment " + key, old + ", tenant override", to, false, false, false})
+			out = append(out, settingChange{"Environment " + key, old + ", tenant override", to, false, false, false, false})
 		case !had && has:
 			from := "unset"
 			if appHas {
 				from = appValue + ", inherited from " + t.App
 			}
-			out = append(out, settingChange{"Environment " + key, from, next + ", tenant override", false, false, false})
+			out = append(out, settingChange{"Environment " + key, from, next + ", tenant override", false, false, false, false})
 		case had && has && old != next:
-			out = append(out, settingChange{"Environment " + key, old, next, false, false, false})
+			out = append(out, settingChange{"Environment " + key, old, next, false, false, false, false})
 		}
 	}
 	for _, key := range slices.Sorted(maps.Keys(after.Secrets)) {
 		if _, had := before.Secrets[key]; !had {
-			out = append(out, settingChange{"Secret " + key, "none of its own", "made once, " + after.Secrets[key].Kind, false, false, false})
+			out = append(out, settingChange{"Secret " + key, "none of its own", "made once, " + after.Secrets[key].Kind, false, false, false, false})
 		}
 	}
 	for _, key := range slices.Sorted(maps.Keys(before.Secrets)) {
 		if _, has := after.Secrets[key]; !has {
-			out = append(out, settingChange{"Secret " + key, "tenant override", "dropped: the app's, if it has one", false, false, false})
+			out = append(out, settingChange{"Secret " + key, "tenant override", "dropped: the app's, if it has one", false, false, false, false})
 		}
 	}
 	flag := func(on string, yes, no string) string {
@@ -292,10 +338,10 @@ func settingChanges(t api.Tenant, app spec.Tenant, form settingsForm, limited ma
 		return no
 	}
 	if form.Flags && form.Canary != was.Canary {
-		out = append(out, settingChange{"Canary", flag(was.Canary, "yes", "no"), flag(form.Canary, "yes: takes "+t.App+"'s changes first", "no: with the others"), false, false, false})
+		out = append(out, settingChange{"Canary", flag(was.Canary, "yes", "no"), flag(form.Canary, "yes: takes "+t.App+"'s changes first", "no: with the others"), false, false, false, false})
 	}
 	if form.Flags && form.Hold != was.Hold {
-		out = append(out, settingChange{"Held", flag(was.Hold, "yes", "no"), flag(form.Hold, "yes: stays on the revision it runs", "no: follows "+t.App+" again"), false, false, false})
+		out = append(out, settingChange{"Held", flag(was.Hold, "yes", "no"), flag(form.Hold, "yes: stays on the revision it runs", "no: follows "+t.App+" again"), false, false, false, false})
 	}
 	return out
 }

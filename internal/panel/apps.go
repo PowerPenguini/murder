@@ -886,10 +886,16 @@ type settingsData struct {
 	// why the one reviewed is too small.
 	Disk      diskRoom
 	DiskShort string
+	// Tight are the limits the review lowers to under twice what it uses
+	// of them now.
+	Tight []tightLimit
 	// AppChange is what another app does to it, when the form moves it;
 	// FromMenu says the review was asked from its menu, not an editor.
 	AppChange *appChange
 	FromMenu  bool
+	// Back is the page of it a save returns to: its Settings, or the page
+	// whose menu asked for the review.
+	Back string
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -940,8 +946,13 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 	} else {
 		limited = map[string]bool{}
 	}
-	// What a disk limit must leave it: its data, and what the others have.
-	data.Disk = s.diskRoom(ctx, t, everyone)
+	// What a disk limit must leave it: its data, and what the others have;
+	// and the memory it uses, for a review that lowers its limits.
+	used, measured := s.usageNow(ctx).Tenants[t.Spec.Name]
+	if !measured {
+		used.DiskUsed = -1
+	}
+	data.Disk = diskRoomOf(t, everyone, used.DiskUsed, used.DiskLimit)
 	data.Fields = settingFields(t, appSpec, form, limited, data.Disk)
 	if r.Method == http.MethodGet && form.MemoryMB != formOf(t).MemoryMB {
 		data.Suggest = "Proposed: memory " + memory(atoi(form.MemoryMB)) + " as a tenant override, up from " + memory(t.Spec.Limits.MemoryMB) + ". Nothing changes until you review and save it."
@@ -995,6 +1006,19 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 			}
 		}
 		data.DiskShort = data.Disk.Short(t.Spec.Name, diskAfter(t, appSpec, form))
+		// A limit lowered to under twice what it uses now: said, not refused.
+		if form.App == t.App {
+			afterOwn, _ := form.overrides()
+			then := limitsInEffect(afterOwn.Limits.Or(appSpec.Limits), afterOwn.Limits, t.App, t.Status, t.Node, limited)
+			data.Tight = tightLimits(t.Spec.Name, limitsOf(t, limited), then, used.MemoryUsed, data.Disk.Used)
+			for _, l := range data.Tight {
+				for i := range data.Review {
+					if data.Review[i].Field == l.Label {
+						data.Review[i].Tight = true
+					}
+				}
+			}
+		}
 		data.Token = reviewToken(t.Spec.Name, form)
 		data.Live = form.diskOnly(t)
 		data.Restarts = form.containerChanged(t) && !data.Live
@@ -1028,6 +1052,14 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 	} else {
 		data.Head = s.headOf(t, api.Nodes{}, "settings")
 	}
+	data.Head.Back = "/tenants/" + url.PathEscape(t.Spec.Name) + "/settings"
+	// A review asked from another page's menu returns there.
+	data.Back = data.Head.Back
+	if data.FromMenu {
+		data.Back = tenantBack(r, t.Spec.Name, "/tenants/"+url.PathEscape(t.Spec.Name))
+	} else if r.Method == http.MethodPost {
+		data.Back = tenantBack(r, t.Spec.Name, data.Back)
+	}
 	for _, app := range apps {
 		if app.Name != t.App && !t.Archived() {
 			data.Head.Apps = append(data.Head.Apps, app.Name)
@@ -1055,9 +1087,10 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	settings := "/tenants/" + url.PathEscape(name) + "/settings"
 	back := func(kind, message string) {
 		flash(w, r, kind, message)
-		http.Redirect(w, r, "/tenants/"+url.PathEscape(name)+"/settings", http.StatusSeeOther)
+		http.Redirect(w, r, settings, http.StatusSeeOther)
 	}
 	switch r.FormValue("do") {
 	case "addrow", "addsecret":
@@ -1131,7 +1164,9 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		}
 		// A disk limit its data already fills is one its node does not set
 		// (ZFS refuses a refquota below what the dataset holds): not saved.
-		if room := s.diskRoom(ctx, t, nil); room.Short(name, diskAfter(t, s.appSpecOf(ctx, r, t.App), form)) != "" {
+		room := s.diskRoom(ctx, t, nil)
+		diskGB := diskAfter(t, s.appSpecOf(ctx, r, t.App), form)
+		if room.Short(name, diskGB) != "" {
 			r.Form.Set("do", "review")
 			refuse("its node does not set a disk limit below its data: give " + name + " more than " + size(float64(room.Used)))
 			return
@@ -1158,6 +1193,8 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 				said = append(said, name+"'s settings are unchanged")
 			case applied.Tenant.Archived():
 				said = append(said, name+"'s settings are changed; it runs them once restored")
+			case live && room.Full() && int64(diskGB)<<30 > room.Used:
+				said = append(said, name+"'s disk limit is set on its data: it can write again, nothing restarted")
 			case live:
 				said = append(said, name+"'s disk limit is set on its data: nothing restarted")
 			default:
@@ -1175,22 +1212,21 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		if len(said) == 0 {
 			said = append(said, name+"'s settings are unchanged")
 		}
-		// Its disk limit alone: to its Overview, where the save's line says
-		// it was set and nothing restarted, and a full disk's red notice
-		// is gone.
-		if live && !form.flagsChanged(t) && !t.Archived() {
-			// No fragment: its line is near the top, under its name.
-			http.Redirect(w, r, "/tenants/"+url.PathEscape(name), http.StatusSeeOther)
-			return
-		}
-		// Another app: to its Overview, where the new container is followed.
+		// Back to the page the change was asked from: its Settings, or the
+		// page whose menu asked to change its app (its Overview, unsaid).
+		to := tenantBack(r, name, settings)
 		if form.App != t.App {
-			flash(w, r, "done", name+" now runs app "+form.App+": its new container starts")
-			// Its own fragment: a redirect without one keeps the review's.
-			http.Redirect(w, r, "/tenants/"+url.PathEscape(name)+"#operation", http.StatusSeeOther)
-			return
+			to = tenantBack(r, name, "/tenants/"+url.PathEscape(name))
+			said = []string{name + " now runs app " + form.App + ": its new container starts"}
+			// On its Overview, the new container is followed in its
+			// operation line; its own fragment, as a redirect without one
+			// keeps the review's.
+			if to == "/tenants/"+url.PathEscape(name) {
+				to += "#operation"
+			}
 		}
-		back("done", strings.Join(said, "; "))
+		flash(w, r, "done", strings.Join(said, "; "))
+		http.Redirect(w, r, to, http.StatusSeeOther)
 	case "flags":
 		canary, hold := r.FormValue("canary") == "on", r.FormValue("hold") == "on"
 		if _, err := agent.SetFlags(ctx, name, api.TenantFlags{Canary: &canary, Hold: &hold}); err != nil {

@@ -168,6 +168,8 @@ type tenantUse struct {
 	// DiskUsed and DiskLimit are its data's size and limit in bytes (-1
 	// not measured; 0 limit: none).
 	DiskUsed, DiskLimit int64
+	// MemoryUsed is the memory it uses now, in bytes.
+	MemoryUsed int64
 }
 
 // DiskFull says its data is at or over its disk limit: it cannot write.
@@ -301,7 +303,7 @@ func (s *Server) usageNow(ctx context.Context, archived ...map[string]bool) clus
 			Memory: meterOf(int(used>>20), int(h.MemoryTotal>>20)), MemoryText: size(float64(used)) + " of " + size(float64(h.MemoryTotal)),
 		}
 		for name, t := range n.Tenants {
-			tu := tenantUse{MemoryText: size(float64(t.Memory)), CPUText: cores(t.CPU), Requests: rate(float64(t.Requests)), DiskUsed: t.DiskUsed, DiskLimit: t.DiskLimit}
+			tu := tenantUse{MemoryText: size(float64(t.Memory)), CPUText: cores(t.CPU), Requests: rate(float64(t.Requests)), DiskUsed: t.DiskUsed, DiskLimit: t.DiskLimit, MemoryUsed: t.Memory}
 			if t.MemoryLimit > 0 {
 				tu.Memory = meterOf(int(t.Memory>>20), int(t.MemoryLimit>>20))
 				tu.MemoryLimit = size(float64(t.MemoryLimit))

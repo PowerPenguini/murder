@@ -5,7 +5,7 @@
 {{if and $d.Reviewing (or $d.Review $d.AppChange)}}
 <section data-still data-review class="near">
   <form method="post" class="review-box" id="review">
-    <input type="hidden" name="generation" value="{{$f.Generation}}"><input type="hidden" name="reviewed" value="{{$d.Token}}">
+    <input type="hidden" name="generation" value="{{$f.Generation}}"><input type="hidden" name="reviewed" value="{{$d.Token}}"><input type="hidden" name="back" value="{{$d.Back}}">
     <input type="hidden" name="app" value="{{$f.App}}"><input type="hidden" name="image" value="{{$f.Image}}">
     <input type="hidden" name="memoryMB" value="{{$f.MemoryMB}}"><input type="hidden" name="cpus" value="{{$f.CPUs}}"><input type="hidden" name="pids" value="{{$f.PIDs}}"><input type="hidden" name="diskGB" value="{{$f.DiskGB}}">
     <input type="hidden" name="env" value="{{$f.Env}}"><input type="hidden" name="secrets" value="{{$f.Secrets}}">
@@ -31,14 +31,15 @@
     {{if .SecretsKept}}<p class="hint flat">The values of the secrets that go are kept by murder, not given to {{.To}}: changing back to {{.From}} gives them back, and what they signed still works.</p>{{end}}
     <p class="hint">Its data stays as it is, and {{.To}}'s container starts on it: {{.To}}'s image must understand it. An image may change data as it starts (a migration), and changing back to {{.From}} later does not undo that. {{$t.Spec.Name}} answers no request while its new container starts. Type {{$t.Spec.Name}} to confirm.</p>
     <input type="text" name="confirm" class="confirm-field" placeholder="{{$t.Spec.Name}}" data-confirm="{{$t.Spec.Name}}" aria-label="type {{$t.Spec.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
-    <div class="actions"><button type="submit" name="do" value="save" class="danger">Change {{$t.Spec.Name}} to {{.To}}</button>{{if $d.FromMenu}}<a href="/tenants/{{$t.Spec.Name}}" class="button">Back: keep {{.From}}</a>{{else}}<button type="submit" name="do" value="edit" formnovalidate>Keep editing</button>{{end}}</div>
+    <div class="actions"><button type="submit" name="do" value="save" class="danger">Change {{$t.Spec.Name}} to {{.To}}</button>{{if $d.FromMenu}}<a href="{{$d.Back}}" class="button">Back: keep {{.From}}</a>{{else}}<button type="submit" name="do" value="edit" formnovalidate>Keep editing</button>{{end}}</div>
     {{else}}
     <h2>Review {{plural (len $d.Review) "change" "changes"}} to {{$t.Spec.Name}}</h2>
     {{with $d.Fixes}}<p class="summary-line">{{.}}.</p>{{end}}
     {{with $d.DiskShort}}<div class="notice bad" role="alert"><p class="flat"><span class="lead-in">{{.}}.</span></p>{{with $d.Disk.Suggest}}<p class="flat spaced">{{.}} GB is {{if eq . $d.Disk.Others}}what the other tenants have{{else}}twice its data{{end}}: it leaves room to grow.</p>{{end}}</div>{{end}}
+    {{with $d.Tight}}<div class="notice warn-notice" role="status">{{range $i, $l := .}}<p class="flat{{if $i}} spaced{{end}}"><span class="st warn"></span><span class="lead-in">{{$l.Lead}}</span> {{$l.Say}}</p>{{end}}</div>{{end}}
     <table class="list changes">
       <thead><tr><th>Setting</th><th>Now</th><th>After</th></tr></thead>
-      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{if .FromFull}}<span class="st bad">{{names .From}}</span><span class="risk-why bad">Its data fills it.</span>{{else if .FromRisk}}<span class="st warn">{{names .From}}</span>{{else}}{{names .From}}{{end}}</td><td class="l-sub" data-label="After">{{if .Risk}}<span class="st warn">{{names .To}}</span>{{else}}{{names .To}}{{end}}</td></tr>{{end}}</tbody>
+      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{if .FromFull}}<span class="st bad">{{names .From}}</span><span class="risk-why bad">Its data fills it.</span>{{else if .FromRisk}}<span class="st warn">{{names .From}}</span>{{else}}{{names .From}}{{end}}</td><td class="l-sub" data-label="After">{{if or .Risk .Tight}}<span class="st warn">{{names .To}}</span>{{else}}{{names .To}}{{end}}</td></tr>{{end}}</tbody>
     </table>
     {{if $d.DiskShort}}
     <div class="actions">{{with $d.Disk.Suggest}}<input type="hidden" name="suggest" value="{{.}}"><button type="submit" name="do" value="usedisk" class="primary">Use {{.}} GB instead</button>{{end}}<button type="submit" name="do" value="edit" formnovalidate>Keep editing</button></div>

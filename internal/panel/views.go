@@ -840,6 +840,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		data.Problem = ""
 	}
 	data.Head = s.withApps(ctx, r, s.headOf(t, nodes, "overview"))
+	data.Head.Back = r.URL.RequestURI()
 	if data.DiskFull != "" && data.Head.State.Kind == "ok" {
 		data.State, data.Head.State = tag{"cannot write", "bad"}, tag{"cannot write", "bad"}
 	}
@@ -1204,6 +1205,9 @@ type tenantHead struct {
 	// OutOfMemory says it last exited out of memory and is not healthy:
 	// moving it keeps its limit, so the move is no fix.
 	OutOfMemory bool
+	// Back is the address of the page it heads, for its forms to return
+	// to (checked again as they are sent: tenantBack).
+	Back string
 }
 
 // withApps adds the apps the tenant could change to, for its menu.
