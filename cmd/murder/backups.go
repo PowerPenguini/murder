@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	measure "github.com/PowerPenguini/murder/internal/usage"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -364,6 +365,25 @@ func newAgentBackups(cfg config.Agent, st backup.State, exclusive func(func() er
 			return made, err
 		},
 	})}, nil
+}
+
+// usage is how the node's backups go, for its use reports, which the
+// panel reads.
+func (a *agentBackups) useReport() *measure.Backups {
+	status := a.Scheduler.Status()
+	out := &measure.Backups{Ready: status.Ready, Every: int(status.Every / time.Second), Tenants: map[string]measure.Backup{}}
+	for name, failing := range status.Failing {
+		out.Tenants[name] = measure.Backup{Last: status.Last[name], Failing: failing, Error: status.Why[name]}
+	}
+	for name, last := range status.Last {
+		if _, ok := out.Tenants[name]; !ok {
+			out.Tenants[name] = measure.Backup{Last: last}
+		}
+	}
+	if status.StateTried {
+		out.State = &measure.Backup{Last: status.StateLast, Failing: status.StateFailing}
+	}
+	return out
 }
 
 func (a *agentBackups) RunNow(ctx context.Context) ([]api.BackupResult, error) {

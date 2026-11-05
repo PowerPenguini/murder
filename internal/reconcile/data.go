@@ -127,7 +127,7 @@ func (r *Reconciler) clearRuntime(ctx context.Context, name string) error {
 			own = append(own, container)
 		}
 	}
-	if err := r.removeContainers(ctx, own); err != nil {
+	if err := r.removeContainers(ctx, own, ""); err != nil {
 		return fmt.Errorf("remove containers: %w", err)
 	}
 	if err := r.runtime.RemoveNetwork(ctx, NetworkName(name)); errors.Is(err, runtime.ErrNotOwned) {

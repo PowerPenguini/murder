@@ -293,8 +293,10 @@ func TestReadingTheKernel(t *testing.T) {
 		Tenants: func() []Tenant {
 			return []Tenant{{Name: "web", Container: "abc123", CPULimit: 2, DiskLimit: 10 << 30}, {Name: "idle"}}
 		},
-		Pid:  func(context.Context, string) (int, error) { pids++; return 42, nil },
-		Disk: func(_ context.Context, tenant string) (int64, bool, error) { return 1 << 30, tenant == "web", nil }}
+		Pid: func(context.Context, string) (int, error) { pids++; return 42, nil },
+		Disk: func(_ context.Context, tenant string) (int64, int64, bool, error) {
+			return 1 << 30, -1, tenant == "web", nil
+		}}
 	collector.Collect(context.Background())
 	collector.Now = func() time.Time { return t0.Add(time.Minute) }
 	collector.Collect(context.Background())
@@ -352,5 +354,68 @@ func TestAHostWithoutCgroup2(t *testing.T) {
 	collector.Collect(context.Background())
 	if looked != 0 || collector.cgroup2 {
 		t.Fatalf("containers were read on a host without cgroup v2: %d", looked)
+	}
+}
+
+// A report says how the node's backups go, once told how to know.
+func TestReportSaysBackups(t *testing.T) {
+	r := NewRecorder("n1")
+	if r.Report(time.Now()).Backups != nil {
+		t.Fatal("backups without a source")
+	}
+	last := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	r.SetBackups(func() *Backups {
+		return &Backups{Ready: true, Every: 3600, Tenants: map[string]Backup{"acme": {Last: last}, "web": {Failing: true}}}
+	})
+	b := r.Report(time.Now()).Backups
+	if b == nil || !b.Ready || b.Every != 3600 || !b.Tenants["acme"].Last.Equal(last) || !b.Tenants["web"].Failing {
+		t.Fatalf("backups %+v", b)
+	}
+}
+
+// A step keeps the least memory it was read using, so a container killed
+// for its memory and started again low shows; and the limit it ran under.
+func TestAStepKeepsItsLowestMemoryAndItsLimit(t *testing.T) {
+	r := NewRecorder("n1")
+	readings := []struct {
+		container string
+		mb, limit int64
+	}{{"c1", 240, 256}, {"c1", 255, 256}, {"c2", 110, 256}, {"c2", 150, 256}, {"c3", 160, 512}, {"c3", 170, 512}}
+	for i, reading := range readings {
+		at := t0.Add(time.Duration(i) * 30 * time.Second)
+		r.Sample("web", Raw{At: at, Container: reading.container, Memory: reading.mb << 20, MemoryLimit: reading.limit << 20}, 0)
+	}
+	series, _ := r.Series("web", 5*time.Minute, t0.Add(6*time.Minute))
+	if len(series.Points) != 1 {
+		t.Fatalf("series: %+v", series)
+	}
+	p := series.Points[0]
+	if p.Memory != 255<<20 || p.MemoryLow != 110<<20 || p.MemoryLimit != 512<<20 {
+		t.Fatalf("step: memory %d, low %d, limit %d MB", p.Memory>>20, p.MemoryLow>>20, p.MemoryLimit>>20)
+	}
+	minutes, _ := r.Series("web", time.Minute, t0.Add(6*time.Minute))
+	if first := minutes.Points[0]; first.MemoryLow != 240<<20 || first.MemoryLimit != 256<<20 {
+		t.Fatalf("first minute: %+v", first)
+	}
+}
+
+// A tenant's disk limit is reported as its volume has it: a limit the
+// volume refused (one below its data) is not the one in force.
+func TestTheDiskLimitIsTheVolumes(t *testing.T) {
+	recorder := NewRecorder("n1")
+	limit := int64(-1)
+	collector := &Collector{Recorder: recorder, Reader: Reader{Proc: t.TempDir(), Cgroup: t.TempDir()}, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return t0 },
+		Tenants: func() []Tenant { return []Tenant{{Name: "web", DiskLimit: 1 << 30}} },
+		Pid:     func(context.Context, string) (int, error) { return 0, nil },
+		Disk:    func(context.Context, string) (int64, int64, bool, error) { return 3 << 29, limit, true, nil }}
+	collector.Collect(context.Background())
+	if web := recorder.tenants["web"].now; web.DiskLimit != 1<<30 {
+		t.Fatalf("a volume that does not tell its limit: %+v", web)
+	}
+	limit = 0
+	collector.Now = func() time.Time { return t0.Add(DiskEvery) }
+	collector.Collect(context.Background())
+	if web := recorder.tenants["web"].now; web.DiskLimit != 0 || web.DiskUsed != 3<<29 {
+		t.Fatalf("the refused limit reported: %+v", web)
 	}
 }

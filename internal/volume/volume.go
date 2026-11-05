@@ -177,17 +177,26 @@ func (z ZFS) now() time.Time {
 	return time.Now()
 }
 
-// Used is the size of the tenant's data, as its disk limit counts it.
-func (z ZFS) Used(ctx context.Context, tenant string) (int64, error) {
-	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", "referenced", z.dataset(tenant))
+// Used is the size of the tenant's data, as its disk limit counts it, and
+// that limit as the dataset has it (refquota, in bytes; 0 none): what is
+// set, which is not the spec's when ZFS refused it (ErrDiskLimit).
+func (z ZFS) Used(ctx context.Context, tenant string) (used, limit int64, err error) {
+	dataset := z.dataset(tenant)
+	output, err := z.Run(ctx, "zfs", "get", "-H", "-p", "-o", "value", "referenced,refquota", dataset)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	used, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("zfs get referenced %s: %q", z.dataset(tenant), output)
+	values := strings.Fields(string(output))
+	if len(values) != 2 {
+		return 0, 0, fmt.Errorf("zfs get referenced,refquota %s: %q", dataset, output)
 	}
-	return used, nil
+	if used, err = strconv.ParseInt(values[0], 10, 64); err != nil {
+		return 0, 0, fmt.Errorf("zfs get referenced %s: %q", dataset, values[0])
+	}
+	if limit, err = strconv.ParseInt(values[1], 10, 64); err != nil {
+		return 0, 0, fmt.Errorf("zfs get refquota %s: %q", dataset, values[1])
+	}
+	return used, limit, nil
 }
 
 // properties are what Murder reads of a dataset.

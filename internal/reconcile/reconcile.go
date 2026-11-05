@@ -61,11 +61,22 @@ type Status struct {
 	// Restarts counts how often the container was started again after its
 	// app exited; LastExit says when it last exited and, if known, why.
 	// Both start again with a new container.
-	Restarts    int       `json:"restarts,omitempty"`
-	LastExit    string    `json:"lastExit,omitempty"`
-	ContainerID string    `json:"containerID,omitempty"`
-	Generation  int64     `json:"generation"`
-	CheckedAt   time.Time `json:"checkedAt"`
+	Restarts    int    `json:"restarts,omitempty"`
+	LastExit    string `json:"lastExit,omitempty"`
+	ContainerID string `json:"containerID,omitempty"`
+	// DataOwner is who wrote the tenant's data, read on its node each pass
+	// ("uid:gid", the owner most of its data directory's entries have);
+	// empty when its data is empty or could not be read. DataMixed says
+	// some entries have another owner.
+	DataOwner string `json:"dataOwner,omitempty"`
+	DataMixed bool   `json:"dataMixed,omitempty"`
+	// Limits are those its container runs with: its spec's, and this
+	// node's defaults where its spec sets none. Defaults are the node's,
+	// so a reader can tell which is which (a zero is no limit).
+	Limits     spec.Limits `json:"limits,omitzero"`
+	Defaults   spec.Limits `json:"defaults,omitzero"`
+	Generation int64       `json:"generation"`
+	CheckedAt  time.Time   `json:"checkedAt"`
 }
 
 // Config holds the node-wide settings the reconciler applies to every tenant.
@@ -77,6 +88,9 @@ type Config struct {
 	DefaultLimits spec.Limits
 	StopTimeout   time.Duration
 	HealthTimeout time.Duration
+	// PreviousDir keeps the last lines of each tenant's previous container
+	// (previous.go); empty keeps none.
+	PreviousDir string
 }
 
 // Reconciler drives the runtime towards the store's desired state.
@@ -300,12 +314,19 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		if err := r.interrupted(ctx); err != nil {
 			return err
 		}
-		if err := r.removeContainers(step, byTenant[tenant]); err != nil {
+		if err := r.removeContainers(step, byTenant[tenant], ""); err != nil {
 			errs = append(errs, fmt.Errorf("remove containers of %q, which no tenant wants: %w", tenant, err))
 			continue
 		}
 		r.log.Info("removed the containers of a tenant no longer wanted", "tenant", tenant)
 	}
+	// What is kept of a previous container stays while the tenant is this
+	// node's, archived too; a tenant gone elsewhere or purged takes none.
+	here := map[string]bool{}
+	for _, record := range r.own() {
+		here[record.Spec.Name] = true
+	}
+	r.forgetPrevious(here)
 	if err := r.removeOrphanNetworks(step, wanted); err != nil {
 		errs = append(errs, err)
 	}

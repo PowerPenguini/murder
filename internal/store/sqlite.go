@@ -1036,6 +1036,13 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			composed := spec.Compose(app.Spec, name, record.Overrides)
 			composed.Suspended = record.Spec.Suspended
 			if composed.Equal(record.Spec) && record.AppRevision == 0 {
+				// It runs the change already: no earlier rollout's move is
+				// said of it in this one.
+				if record.BeforeRevision != 0 {
+					if err := tx.Exec(`UPDATE tenants SET before_revision = 0 WHERE name = ?`, name); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			if err := s.sealMissing(tx, now, composed, record.Sealed); err != nil {
@@ -1073,11 +1080,36 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 			result.Rollout = true
 			if err := tx.Exec(`INSERT INTO rollouts (app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor) VALUES (?, ?, 'running', 0, ?, '', ?, ?, ?)
 				ON CONFLICT (app) DO UPDATE SET to_revision = excluded.to_revision, state = 'running', wave = 0, wave_started = excluded.wave_started,
-					reason = '', started_at = excluded.started_at, updated_at = excluded.updated_at, actor = excluded.actor, epoch = rollouts.epoch + 1`,
+					reason = '', started_at = excluded.started_at, updated_at = excluded.updated_at, actor = excluded.actor, epoch = rollouts.epoch + 1, first = 0`,
 				app.Name, revision, stamp, stamp, stamp, actorOf(actor)); err != nil {
 				return err
 			}
 			detail += fmt.Sprintf("; rolls out in waves to %d tenants", len(result.Tenants))
+			// The tenants asked to go first move now, as the first wave.
+			var first []string
+			for _, name := range slices.Sorted(slices.Values(app.First)) {
+				if slices.Contains(result.Tenants, name) && !slices.Contains(first, name) {
+					first = append(first, name)
+				}
+			}
+			if len(first) > 0 {
+				for _, name := range first {
+					from := current.tenants[name].AppRevision
+					if from == 0 {
+						from = oldRevision
+					}
+					if err := tx.Exec(`UPDATE tenants SET before_revision = app_revision, app_revision = 0, moved_on = node, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
+						return err
+					}
+					if err := event(tx, now, actor, "app.rolled-out", name, app.Name, fmt.Sprintf("%s: revision %d → %d", WaveSaid(1, "First, now"), from, revision)); err != nil {
+						return err
+					}
+				}
+				if err := tx.Exec(`UPDATE rollouts SET wave = 1, first = 1, epoch = epoch + 1 WHERE app = ?`, app.Name); err != nil {
+					return err
+				}
+				detail += "; first, now: " + strings.Join(first, ", ")
+			}
 		case rolling && !waves:
 			if err := tx.Exec(`UPDATE rollouts SET state = 'done', reason = 'replaced by a change rolled out at once', updated_at = ?, epoch = epoch + 1 WHERE app = ? AND state IN ('running', 'paused')`, stamp, app.Name); err != nil {
 				return err
@@ -1277,7 +1309,7 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 			return err
 		}
 		// In a cluster, where it runs is worth recording.
-		detail := overridesDetail(overrides)
+		detail := OverridesDetail(overrides)
 		if len(current.nodes) > 0 {
 			detail = strings.TrimSuffix("on node "+node+"; "+detail, "; ")
 		}
@@ -1289,9 +1321,10 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 	return next.tenants[tenant.Name].clone(), nil
 }
 
-// overridesDetail names what a tenant overrides, without env values: the
-// audit log outlives tenants and may not keep credentials passed as env.
-func overridesDetail(overrides spec.Overrides) string {
+// OverridesDetail names what a tenant overrides, as its events say it,
+// without env values: the audit log outlives tenants and may not keep
+// credentials passed as env.
+func OverridesDetail(overrides spec.Overrides) string {
 	var parts []string
 	if overrides.Image != "" {
 		parts = append(parts, "image "+overrides.Image)
@@ -1309,6 +1342,63 @@ func overridesDetail(overrides spec.Overrides) string {
 		return ""
 	}
 	return "overrides: " + strings.Join(parts, "; ")
+}
+
+// ChangesDetail names what a change of a tenant's overrides changes, as
+// its event says it, without env values: "disk limit 2 GB → 10 GB, env TZ
+// changed, secret API_KEY added". A limit that goes takes the app's again.
+func ChangesDetail(was, now spec.Overrides) string {
+	var parts []string
+	switch {
+	case was.Image == now.Image:
+	case now.Image == "":
+		parts = append(parts, "image back to the app's")
+	case was.Image == "":
+		parts = append(parts, "image set to "+now.Image)
+	default:
+		parts = append(parts, "image "+was.Image+" → "+now.Image)
+	}
+	limit := func(name string, from, to float64, unit string) {
+		said := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) + unit }
+		switch {
+		case from == to:
+		case to == 0:
+			parts = append(parts, name+" back to the app's")
+		case from == 0:
+			parts = append(parts, name+" set to "+said(to))
+		default:
+			parts = append(parts, name+" "+said(from)+" → "+said(to))
+		}
+	}
+	limit("memory limit", float64(was.Limits.MemoryMB), float64(now.Limits.MemoryMB), " MB")
+	limit("CPU limit", was.Limits.CPUs, now.Limits.CPUs, "")
+	limit("process limit", float64(was.Limits.PIDs), float64(now.Limits.PIDs), "")
+	limit("disk limit", float64(was.Limits.DiskGB), float64(now.Limits.DiskGB), " GB")
+	for _, key := range slices.Sorted(maps.Keys(now.Env)) {
+		if old, ok := was.Env[key]; !ok {
+			parts = append(parts, "env "+key+" set")
+		} else if old != now.Env[key] {
+			parts = append(parts, "env "+key+" changed")
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(was.Env)) {
+		if _, ok := now.Env[key]; !ok {
+			parts = append(parts, "env "+key+" removed")
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(now.Secrets)) {
+		if old, ok := was.Secrets[key]; !ok {
+			parts = append(parts, "secret "+key+" added")
+		} else if old != now.Secrets[key] {
+			parts = append(parts, "secret "+key+" changed")
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(was.Secrets)) {
+		if _, ok := now.Secrets[key]; !ok {
+			parts = append(parts, "secret "+key+" removed")
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generation int64, actor string) (Record, bool, error) {
@@ -1346,9 +1436,13 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 				return err
 			}
 		}
-		detail := overridesDetail(overrides)
+		detail := OverridesDetail(overrides)
 		if detail == "" {
 			detail = "no overrides"
+		}
+		// What changed first, for a reader of the log: the whole after it.
+		if changes := ChangesDetail(record.Overrides, overrides); changes != "" {
+			detail = "changes: " + changes + "; " + detail
 		}
 		if record.App != app {
 			detail = "app " + record.App + " → " + app + "; " + detail
@@ -1480,6 +1574,20 @@ func (s *SQLite) Observe(name, dataImage string) error {
 	if errors.Is(err, errUnchanged) {
 		return nil
 	}
+	return err
+}
+
+// AppExited records, for the node that runs a tenant, that its app exited
+// and its container was started again, with how: frozen or not, since an
+// exit during an upgrade happened all the same. Every release applies it.
+func (s *SQLite) AppExited(name, detail string) error {
+	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, ok := current.tenants[name]
+		if !ok {
+			return fmt.Errorf("tenant %s: %w", name, ErrNotFound)
+		}
+		return event(tx, now, "murder", "tenant.restarted", name, record.App, detail)
+	})
 	return err
 }
 

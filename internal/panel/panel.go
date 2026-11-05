@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +61,9 @@ func staticURL(name string) string { return "/static/" + name + "?v=" + staticVe
 
 // Server serves the panel's pages.
 type Server struct {
+	// drafts keeps the app specs under review, for their review's address.
+	drafts reviewDrafts
+
 	// Name is the panel's host name in its tunnel; requests are answered
 	// only as it or as a loopback name.
 	Name string
@@ -93,7 +97,7 @@ type Server struct {
 // New returns a panel asking backend.
 func New(backend Backend, log *slog.Logger) (*Server, error) {
 	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}, Jobs: &Jobs{}}
-	for _, page := range []string{"overview", "tenants", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job", "apps", "app", "settings"} {
+	for _, page := range []string{"overview", "tenants", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job", "apps", "app", "settings", "node", "review"} {
 		t, err := template.New("layout.html").Funcs(s.funcs()).ParseFS(templateFiles, "templates/layout.html", "templates/partials.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("panel template %s: %w", page, err)
@@ -114,6 +118,7 @@ func (s *Server) Handler() http.Handler {
 	pages.HandleFunc("GET /tenants", s.tenants)
 	pages.HandleFunc("GET /tenants/{name}", s.tenant)
 	pages.HandleFunc("GET /events", s.events)
+	pages.HandleFunc("GET /nodes/{name}", s.node)
 	if s.Access != nil {
 		pages.HandleFunc("GET /access", s.access)
 		pages.HandleFunc("POST /access", s.access)
@@ -128,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 		pages.HandleFunc("POST /apps", s.createApp)
 		pages.HandleFunc("GET /apps/{name}", s.app)
 		pages.HandleFunc("POST /apps/{name}", s.appAction)
+		pages.HandleFunc("GET /apps/{name}/review", s.appReview)
 		pages.HandleFunc("GET /tenants/{name}/settings", s.settings)
 		pages.HandleFunc("POST /tenants/{name}/settings", s.settingsAction)
 	}
@@ -146,7 +152,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /auth/enroll/finish", s.Auth.enrollFinish)
 		mux.HandleFunc("POST /auth/logout", s.Auth.logout)
 	}
-	mux.Handle("/", s.signedIn(pages))
+	mux.Handle("/", s.signedIn(formText(pages)))
 	// Bounded outermost: a request refused before its body is read still
 	// has its body held to a time, which the server's draining of it
 	// keeps to.
@@ -240,7 +246,8 @@ func (s *Server) signedIn(next http.Handler) http.Handler {
 		user, ok := s.Auth.User(r)
 		if !ok {
 			if r.Method == http.MethodGet {
-				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				// Signed in, the person comes back here.
+				http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 				return
 			}
 			http.Error(w, "sign in first", http.StatusUnauthorized)
@@ -318,7 +325,7 @@ func noListing(next http.Handler) http.Handler {
 func secure(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self' data:; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self' data:; script-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		// Not no-referrer: browsers then send forms with "Origin: null",
 		// and the panel could not tell its own from others'.
@@ -376,7 +383,9 @@ type page struct {
 	Done, Problem string
 	// Edits says apps and tenants' settings may be edited.
 	Edits bool
-	Data  any
+	// Alerts count what is broken, for the side bar.
+	Alerts navAlerts
+	Data   any
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, section string, data any) {
@@ -411,6 +420,7 @@ func (s *Server) renderWith(w http.ResponseWriter, r *http.Request, name, title,
 // what their last action did.
 func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section string, nodes api.Nodes, data any) page {
 	p := page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Edits: s.Apps != nil, Data: data}
+	p.Alerts = s.alertsFor(r, nodes, data)
 	// A page following the cluster leaves what an action did to the page
 	// it was meant for.
 	if r.Header.Get("X-Murder-Live") == "" {
@@ -419,10 +429,52 @@ func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section 
 	return p
 }
 
+// alertsFor counts what is broken in the cluster, for the side bar: from
+// the tenants a page read already, or asked for.
+func (s *Server) alertsFor(r *http.Request, nodes api.Nodes, data any) navAlerts {
+	if d, ok := data.(overviewData); ok {
+		a := alertsOf(d.Attention, d.FailingBackups)
+		a.Apps = badApps(d.AppStates)
+		return a
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	var tenants []api.Tenant
+	var use clusterUse
+	var apps []api.App
+	var events []store.Event
+	_ = all(
+		func() (err error) { tenants, err = s.backend.List(ctx); return },
+		func() error { use = s.usageNow(ctx); return nil },
+		func() error {
+			if s.Actions != nil {
+				apps, _ = s.Actions(s.actor(userOf(r))).Apps(ctx)
+			}
+			return nil
+		},
+		func() error { events, _ = s.backend.Events(ctx, store.EventQuery{Limit: activityEvents}); return nil },
+	)
+	notices, failing, badApps := s.triage(nodes, tenants, use, apps, events)
+	a := alertsOf(notices, failing)
+	a.Apps = badApps
+	return a
+}
+
 func (s *Server) write(w http.ResponseWriter, name string, p page, status int) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	if err := s.pages[name].ExecuteTemplate(w, "layout.html", p); err != nil {
+	// Actors read as the reader says them: their own actions are "you".
+	tmpl := s.pages[name]
+	if clone, err := tmpl.Clone(); err == nil {
+		me := s.actor(p.User)
+		tmpl = clone.Funcs(template.FuncMap{"who": func(actor string) string {
+			if sameActor(actor, me) {
+				return "you"
+			}
+			return who(actor)
+		}})
+	}
+	if err := tmpl.ExecuteTemplate(w, "layout.html", p); err != nil {
 		s.log.Error("render a panel page", "page", name, "error", err)
 	}
 }

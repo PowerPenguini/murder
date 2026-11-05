@@ -23,6 +23,10 @@ type Tenant struct {
 	Node string `json:"node"`
 	// Elsewhere is set when another node than this one runs the tenant.
 	Elsewhere bool `json:"elsewhere,omitempty"`
+	// KeptSecrets names the secrets murder holds a value of for the tenant,
+	// its spec's and those an app change dropped, which it keeps: a secret
+	// added back gets its kept value. Names only, never values.
+	KeptSecrets []string `json:"keptSecrets,omitempty"`
 	// Replica is the node that keeps a copy of the tenant's data;
 	// ReplicaReady says the copy holds the whole data, so the tenant can
 	// fail over to it; ReplicaSyncedAt is when the copy last matched the
@@ -159,3 +163,23 @@ type ErrorBody struct {
 // acts for. It is recorded next to the socket user, never instead of it:
 // anyone who can use the socket controls every tenant anyway.
 const ActorHeader = "X-Murder-Actor"
+
+// PreviousLogs are the last lines of a tenant's previous container, kept
+// by its node as the container exited and was started again, or was
+// replaced or removed: at most 1000 lines or 64 KB.
+type PreviousLogs struct {
+	Container string `json:"container"`
+	Image     string `json:"image,omitempty"`
+	// Why is "exited" (started again in place), "replaced" or "stopped"
+	// (removed as the tenant was suspended).
+	Why       string    `json:"why"`
+	ExitedAt  time.Time `json:"exitedAt,omitzero"`
+	ExitKnown bool      `json:"exitKnown,omitempty"`
+	ExitCode  int       `json:"exitCode,omitempty"`
+	OOMKilled bool      `json:"oomKilled,omitempty"`
+	MemoryMB  int       `json:"memoryMB,omitempty"`
+	// At is when they were kept; Cut says older lines were dropped.
+	At    time.Time `json:"at"`
+	Cut   bool      `json:"cut,omitempty"`
+	Lines string    `json:"lines"`
+}

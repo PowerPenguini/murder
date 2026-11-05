@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -129,6 +132,7 @@ func (s *Server) view(record store.Record) api.Tenant {
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
 		AppRevision: record.AppRevision, BeforeRevision: record.BeforeRevision, Canary: record.Canary, Hold: record.Hold, Restoring: record.Restore != "",
 	}
+	view.KeptSecrets = slices.Sorted(maps.Keys(record.Sealed))
 	view.Elsewhere = record.Node != s.store.Node()
 	if !view.Elsewhere && s.replicas != nil {
 		view.ReplicaSyncedAt = s.replicas.Synced(record.Spec.Name)
@@ -276,7 +280,7 @@ func (s *Server) storeApp(w http.ResponseWriter, r *http.Request, name string, a
 		writeError(w, clientGone(fmt.Errorf("the client gave up while waiting; nothing was changed: %w", err)))
 		return
 	}
-	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app, Tag: tag, Latest: latest, AllAtOnce: atOnce(r)}, cond, actor(r))
+	change, err := s.store.PutAppIf(store.App{Name: name, Spec: app, Tag: tag, Latest: latest, AllAtOnce: atOnce(r), First: first(r)}, cond, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -328,6 +332,18 @@ func (s *Server) pinTag(ctx context.Context, tag string, strict bool) (string, s
 // atOnce reports whether a request moves every tenant to an app's change
 // now (?rollout=now), not in waves.
 func atOnce(r *http.Request) bool { return r.URL.Query().Get("rollout") == "now" }
+
+// first names the tenants an app change in waves moves at once, as its
+// first wave: ?first=a,b.
+func first(r *http.Request) []string {
+	var names []string
+	for _, name := range strings.Split(r.URL.Query().Get("first"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
 
 // writeAppChange answers with a stored app and the tenants it rolls out to.
 func (s *Server) writeAppChange(w http.ResponseWriter, change store.AppChange, note string) {
@@ -765,6 +781,21 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, fmt.Errorf("%w: tenant %s runs on node %s: read its logs there", reconcile.ErrElsewhere, name, record.Node))
 		return
 	}
+	if r.URL.Query().Get("previous") != "" {
+		kept, err := s.reconciler.Previous(name)
+		if errors.Is(err, reconcile.ErrNoPrevious) {
+			writeError(w, notFound(fmt.Errorf("tenant %s: no previous container's lines are kept on node %s", name, record.Node)))
+			return
+		}
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, api.PreviousLogs{Container: kept.Container, Image: kept.Image, Why: kept.Why,
+			ExitedAt: kept.ExitedAt, ExitKnown: kept.ExitKnown, ExitCode: kept.ExitCode, OOMKilled: kept.OOMKilled, MemoryMB: kept.MemoryMB,
+			At: kept.At, Cut: kept.Cut, Lines: string(kept.Lines)})
+		return
+	}
 	tail := 200
 	if value := r.URL.Query().Get("tail"); value != "" {
 		parsed, err := strconv.Atoi(value)
@@ -779,7 +810,19 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, notFound(fmt.Errorf("tenant %s has no container", name)))
 		return
 	}
-	output, err := s.runtime.Logs(r.Context(), status.ContainerID, tail)
+	// A container started again in place after its app exited holds the
+	// lines of its runs before; those are the previous container's, kept
+	// apart. Its current run's are those after that exit.
+	var output []byte
+	if since := s.reconciler.LinesSince(name, status.ContainerID); !since.IsZero() {
+		if reader, ok := s.runtime.(runtime.SinceLogs); ok {
+			output, err = reader.LogsSince(r.Context(), status.ContainerID, tail, since)
+		} else {
+			output, err = s.runtime.Logs(r.Context(), status.ContainerID, tail)
+		}
+	} else {
+		output, err = s.runtime.Logs(r.Context(), status.ContainerID, tail)
+	}
 	if err != nil {
 		writeError(w, err)
 		return

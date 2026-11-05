@@ -2,45 +2,36 @@
 <h1>Cluster</h1>
 {{with $d.Release}}<p class="{{if $d.Mixed}}problem bad{{else}}lead{{end}}">{{.}}</p>{{end}}
 
+{{with $d.Resilience}}
+<section class="near" aria-labelledby="resilience-h">
+  <h2 id="resilience-h" class="sr">What the cluster can take</h2>
+  <ul class="attention facts">
+    {{range .}}<li{{if eq .Kind "bad"}} class="broken"{{end}}><span class="st {{.Kind}}"></span><div>{{.Text}}{{with .Href}} <a href="{{.}}">Show them</a>{{end}}</div></li>{{end}}
+  </ul>
+</section>
+{{end}}
+
 <section class="near">
-  <table>
-    <thead><tr><th>Node</th><th>State</th><th class="hide-narrow">Release</th><th class="hide-narrow">Up</th><th class="hide-narrow">Tunnel</th><th class="end"></th></tr></thead>
+  <table class="list">
+    <thead><tr><th>Node</th><th>State</th><th class="hide-narrow">Release</th><th class="hide-narrow">Up for</th><th class="hide-narrow">Tunnel address</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
     <tbody>
     {{range $d.Nodes}}{{$n := .}}
-      <tr>
-        <td>{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}{{if eq .Name $d.Self}} <span class="dim">· this node</span>{{end}}</td>
-        <td><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
-        <td class="mono dim hide-narrow">{{if .Version}}{{.Version}} · {{.Schema}}{{else}}—{{end}}</td>
-        <td class="dim hide-narrow">{{if .Started.IsZero}}—{{else}}{{ago .Started}}{{end}}</td>
-        <td class="mono dim hide-narrow">{{with .Tunnel}}{{.Address}}{{else}}—{{end}}</td>
-        <td class="end">
+      <tr id="node-{{.Name}}">
+        <td class="l-main"><a href="{{node .Name}}" class="strong">{{.Name}}</a>{{if .Leader}} <span class="dim">leader</span>{{end}}{{if eq .Name $d.Self}} <span class="dim">· this panel asks it</span>{{end}}</td>
+        <td class="l-sub"><span class="st {{.State.Kind}}" data-node-state="{{.Name}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
+        <td class="mono dim hide-narrow">{{if .Version}}{{.Version}} · schema {{.Schema}}{{else}}not known{{end}}</td>
+        <td class="dim hide-narrow">{{if .Started.IsZero}}not known{{else}}{{ago .Started}}{{end}}</td>
+        <td class="mono dim hide-narrow">{{with .Tunnel}}{{.Address}}{{else}}none{{end}}</td>
+        <td class="l-more"><details class="rowmore"><summary>Details</summary><dl class="pairs">
+          <dt>Release</dt><dd class="mono">{{if .Version}}{{.Version}}, schema {{.Schema}}{{else}}not known{{end}}</dd>
+          <dt>Up for</dt><dd>{{if .Started.IsZero}}not known{{else}}{{ago .Started}}{{end}}</dd>
+          <dt>Tunnel</dt><dd class="mono">{{with .Tunnel}}{{.Address}}{{else}}none{{end}}</dd>
+          <dt>Runs</dt><dd>{{plural (len .Runs) "tenant" "tenants"}}</dd>
+        </dl></details></td>
+        <td class="end l-side">
           <details class="menu">
             <summary aria-label="what to do with {{.Name}}">⋯</summary>
-            <div class="pop">
-              {{if and .Answers .Targets}}
-              <form method="post" class="stack"><input type="hidden" name="do" value="drain"><input type="hidden" name="node" value="{{.Name}}">
-                <label class="field">Drain to <select name="to" aria-label="to" required><option value="" selected disabled>choose a node</option>{{range .Targets}}<option>{{.}}</option>{{end}}</select></label>
-                <span class="hint">Moves every tenant of {{.Name}} there, one after the other.</span>
-                <div><button type="submit">Drain</button></div>
-              </form>
-              {{end}}
-              {{if and (not .Answers) (not .Failed)}}
-              <form method="post" class="stack"><input type="hidden" name="do" value="failover"><input type="hidden" name="node" value="{{.Name}}">
-                <span class="hint">Only once you made sure it is powered off: its tenants must not run twice. Type its name.</span>
-                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
-                <div><button type="submit" class="danger">It is off — fail it over</button></div>
-              </form>
-              {{end}}
-              {{if ne .Name $d.Self}}
-              <form method="post" class="stack"><input type="hidden" name="do" value="remove"><input type="hidden" name="node" value="{{.Name}}">
-                <span class="hint">Once it runs no tenant and keeps no copy. Type its name.</span>
-                <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="the node's name" autocomplete="off" required>
-                <div><button type="submit" class="danger">Remove from the cluster</button></div>
-              </form>
-              {{else if not (and .Answers .Targets)}}
-              <span class="hint">Nothing to do with the node you ask.</span>
-              {{end}}
-            </div>
+            <div class="pop acts">{{template "node-actions" (nodeActs .NodeState (eq .Name $d.Self) .Targets $d.All "")}}            </div>
           </details>
         </td>
       </tr>
@@ -63,7 +54,7 @@
     <button type="submit"{{if $d.Busy}} disabled{{end}}>Balance</button>
   </form>
   {{else}}
-  <p class="lead">No node runs two tenants more than another.</p>
+  <p class="lead">Tenant counts are balanced: no node runs two more than another.</p>
   {{end}}
 </section>
 {{end}}
@@ -74,20 +65,79 @@
   {{if $d.Rotating}}
   <p class="lead">A {{$d.Frozen}} runs: it takes changes again once it ends, in a minute or less. One that stopped goes on with <code>sudo murder key rotate</code> on that node.</p>
   {{else}}{{with $d.Upgrading}}
-  <p class="lead">{{$d.Frozen}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>, begun by {{.By}}, runs now and takes changes again once it ends.</p>
+  <p class="lead">{{$d.Frozen}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>, begun by {{who .By}}, runs now and takes changes again once it ends.</p>
   {{else}}
   <p class="lead">{{$d.Frozen}}.</p>
-  <p>Taking changes again here is only for an upgrade that stopped, once every node runs one release. Never use it while an upgrade runs from another node's panel or command line: this panel sees only the jobs it began, and nodes of two releases would then take changes.</p>
+  <p>Taking changes again here is only for an upgrade that stopped, once every node runs one release. Never use it while an upgrade runs from another node's panel or command line: this panel sees only the jobs it began, and nodes of two releases would then take changes. Type thaw to confirm.</p>
   <form method="post" class="row spaced"><input type="hidden" name="do" value="thaw"><input type="hidden" name="frozen" value="{{$d.Frozen}}">
-    <input type="text" name="confirm" placeholder="type thaw" data-confirm="thaw" aria-label="type thaw" autocomplete="off" required class="short">
+    <input type="text" name="confirm" placeholder="thaw" data-confirm="thaw" aria-label="type thaw to confirm" required class="short" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
     <button type="submit" class="danger">Take changes again</button></form>
   {{end}}{{end}}
 </section>
 {{end}}
 
+<section id="backups">
+  <div class="head"><h2>Backups</h2><span class="dim">encrypted, to S3, by each node of its own tenants</span></div>
+  {{if $d.Reported}}
+  <table class="list">
+    <thead><tr><th>Node</th><th>State</th><th>Runs</th><th class="num">Tenants</th><th>Oldest successful backup</th><th class="hide-narrow">State backup</th></tr></thead>
+    <tbody>
+    {{range $d.Backups}}
+      <tr>
+        <td class="l-main"><a href="{{node .Node}}" class="strong">{{.Node}}</a></td>
+        {{with .Backups}}
+        <td class="l-side">{{if .Failing}}<span class="st bad">{{.Failing}} failing</span>{{else if .Stale}}<span class="st warn">{{.Stale}} late</span>{{else if not .Ready}}<span class="st warn">not running</span>{{else}}<span class="st ok">fresh</span>{{end}}</td>
+        <td class="l-sub" data-label="Runs">{{if .Ready}}every {{every .Every}}{{else}}<span class="dim">waits for its keys</span>{{end}}</td>
+        <td class="num hide-narrow">{{.Tenants}}</td>
+        <td class="l-sub" data-label="Oldest">{{if .Oldest.IsZero}}<span class="dim">none yet</span>{{else}}{{ago .Oldest}} ago{{end}}</td>
+        <td class="hide-narrow">{{with .State}}{{if .Failing}}<span class="st bad">failing</span>{{else}}{{ago .Last}} ago{{end}}{{else}}<span class="faint">kept by the leader</span>{{end}}</td>
+        {{else}}
+        <td class="l-side" colspan="5">{{if .Answers}}<span class="dim">not set up on it</span>{{else}}<span class="dim">not known: it does not answer</span>{{end}}</td>
+        {{end}}
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{with $d.Failing}}
+  <ul class="attention spaced">
+    {{range $f := .}}{{$cause := index (causeOf $f) 0}}{{$fix := index (causeOf $f) 1}}<li{{if .Failing}} class="broken"{{end}}><span class="st {{if .Failing}}bad{{else}}warn{{end}}"></span><div>
+      <p class="nhead"><a href="/tenants/{{.Tenant}}" class="subject">{{.Tenant}}</a>{{if .Failing}}'s last backup failed{{if not .None}}; the newest is {{ago .Last}} old{{end}}{{else}}'s newest backup is {{ago .Last}} old, though they run every {{every .Every}}{{end}}.</p>
+      {{if $cause}}<p class="cause bad">{{$cause}}</p>{{end}}
+      <p class="cause">{{if eq .Node $.Data.Self}}{{if $cause}}Once fixed, back it up{{else}}Back it up again{{end}} with "Back up {{.Node}}'s tenants now (this node)", below.{{else}}{{if $cause}}Once fixed, back it up{{else}}Back it up again{{end}} on <a href="{{node .Node}}" class="inline">{{.Node}}</a>: <code>sudo murder backups now</code> there.{{end}}</p>
+      {{if $cause}}<details class="evidence"><summary>What to check</summary><div class="evbody"><p>{{$fix}}</p></div></details>{{end}}
+      {{with .Error}}<details class="evidence"><summary>What {{$f.Node}} said</summary><div class="evbody"><p class="mono">{{.}}</p></div></details>{{else}}{{if .Failing}}<p class="cause">Its node did not say why: its agent's log does (<code>journalctl -u murder-agent</code> on <a href="{{node .Node}}">{{.Node}}</a>).</p>{{end}}{{end}}
+    </div></li>{{end}}
+  </ul>
+  {{end}}
+  {{else}}
+  <p class="calm">No node reports backups: they are set up in each node's config (<code>backups:</code>), then <code>sudo murder backups setup</code>.</p>
+  {{end}}
+  <details class="howto spaced"{{if $d.Asked}} open{{end}} id="restore">
+    <summary>How to restore {{if ne $d.Tenant "TENANT"}}{{$d.Tenant}}{{else}}a tenant{{end}} from a backup</summary>
+    <div class="panel">
+      <p class="flat">A restore puts a backup in place of a tenant's data, on the node that runs it{{with $d.RestoreNode}} ({{.}}){{end}}. The panel does not run it: it needs the backups' private key, which stays off the cluster.</p>
+      <form method="get" action="/cluster#restore" class="row restore-at">
+        <input type="hidden" name="tenant" value="{{$d.Tenant}}">
+        <label class="field">Go back to (UTC) <input type="text" name="at" value="{{if not $d.RestoreAt.IsZero}}{{$d.RestoreAt.UTC.Format "2006-01-02 15:04:05"}}{{end}}" placeholder="2026-11-04 11:29" class="short" autocomplete="off" spellcheck="false"></label>
+        <button type="submit">Use this time</button>
+        {{if not $d.Newest.IsZero}}<span class="hint">Its newest backup is from {{utc $d.Newest}}{{if not $d.Chosen}}, used below{{end}}. Step 1 lists the others.</span>{{end}}
+      </form>
+      {{with $d.AtProblem}}<div class="notice bad flat">{{.}}</div>{{end}}
+      <ol class="steps">
+        <li>On {{if $d.RestoreNode}}{{$d.RestoreNode}}{{else}}the node that runs it{{end}}, list its backups, to check there is one at or before that time: <span class="cmd"><pre class="secret" id="restore-1">sudo murder backups list {{$d.Tenant}}</pre><button type="button" class="small" data-copy="restore-1" hidden>Copy</button></span></li>
+        <li>On {{if $d.RestoreNode}}{{$d.RestoreNode}}{{else}}that node{{end}}, archive it, so nothing writes to its data meanwhile; it stops serving: <span class="cmd"><pre class="secret" id="restore-2">sudo murder tenant archive {{$d.Tenant}}</pre><button type="button" class="small" data-copy="restore-2" hidden>Copy</button></span></li>
+        <li>Bring the backups' private key (<code>key.txt</code>) to {{if $d.RestoreNode}}{{$d.RestoreNode}}{{else}}that node{{end}} for this step only, and restore its data from the newest backup at or before {{if $d.RestoreAt.IsZero}}that time{{else}}{{utc $d.RestoreAt}}{{end}}. That backup may be older than the time chosen (step 1 shows which it is): everything written since that backup is replaced. <span class="cmd"><pre class="secret" id="restore-3">sudo murder backups restore {{$d.Tenant}} -at {{if $d.RestoreAt.IsZero}}TIME{{else}}{{iso $d.RestoreAt}}{{end}} -identity key.txt</pre><button type="button" class="small" data-copy="restore-3" hidden>Copy</button></span> <span class="after-cmd">Then remove the key from the node.</span></li>
+        <li>Serve it again: <span class="cmd"><pre class="secret" id="restore-4">sudo murder tenant restore {{$d.Tenant}}</pre><button type="button" class="small" data-copy="restore-4" hidden>Copy</button></span></li>
+        <li>Check it here: its <a href="/tenants/{{$d.Tenant}}">state</a> and <a href="/tenants/{{$d.Tenant}}/logs">logs</a>. What it had stays beside it, unmounted (<code>murder-replaced-…</code>), until you remove it.</li>
+      </ol>
+      <p class="hint">For another tenant, open it from its page's "Restore".</p>
+    </div>
+  </details>
+</section>
+
 <section>
   <div class="head"><h2>Maintenance</h2></div>
-  <div class="actions flush">
+  <div class="actions">
     {{with $d.Busy}}
     <span class="dim">Upgrading waits for <a href="/jobs/{{.ID}}">{{.Title}}</a>.</span>
     {{else}}
@@ -95,33 +145,34 @@
       <summary class="button">Upgrade</summary>
       <div class="pop wide">
         <form method="post" action="/cluster/upgrade" enctype="multipart/form-data" class="stack">
-          <span class="hint">A new murder binary, installed on every node one after the other, this one last. Tenants keep serving; changes wait meanwhile. It runs as root on every node.</span>
-          <input type="text" name="confirm" placeholder="type upgrade" data-confirm="upgrade" aria-label="type upgrade" autocomplete="off" required>
+          <p class="hint">A new murder binary, installed on every node one after the other, this one last. Tenants keep serving; changes wait meanwhile. It runs as root on every node. Type upgrade to confirm.</p>
+          <input type="text" name="confirm" placeholder="upgrade" data-confirm="upgrade" aria-label="type upgrade to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
           <input type="file" name="binary" required aria-label="the murder binary">
           <div><button type="submit" class="primary">Upgrade the cluster</button></div>
         </form>
       </div>
     </details>
     {{end}}
-    <form method="post" class="row"><input type="hidden" name="do" value="backups"><button type="submit">Back up {{$d.Self}}'s tenants</button></form>
+    <form method="post" class="row"><input type="hidden" name="do" value="backups"><button type="submit">Back up {{$d.Self}}'s tenants now (this node)</button></form>
   </div>
-  <p class="hint spaced">Each node backs up its own tenants on schedule; restore one from a node with <code>murder backups restore</code>.</p>
+  <p class="hint spaced">Each node backs up its own tenants on schedule; this backs up {{$d.Self}}'s at once, as a job.</p>
 </section>
 
 <section>
   <div class="head"><h2>Jobs</h2></div>
-  <table>
-    <thead><tr><th>Began</th><th>Job</th><th>By</th><th>State</th></tr></thead>
+  <table class="list rows">
+    <thead><tr><th>Began</th><th>Job</th><th class="hide-narrow">By</th><th>State</th></tr></thead>
     <tbody>
     {{range $d.Jobs}}
       <tr>
-        <td class="when">{{ago .Started}}</td>
-        <td><a href="/jobs/{{.ID}}">{{.Title}}</a></td>
-        <td class="dim">{{.By}}</td>
-        <td>{{if not .Done}}<span class="st warn">running</span>{{else if .Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}</td>
+        <td class="when hide-narrow">{{ago .Started}} ago</td>
+        <td class="l-main"><a class="row-link" href="/jobs/{{.ID}}">{{.Title}}</a></td>
+        <td class="dim hide-narrow">{{who .By}}</td>
+        <td class="l-sub phone-only" data-label="Began">{{ago .Started}} ago, by {{who .By}}</td>
+        <td class="l-side">{{if not .Done}}<span class="st busy">running</span>{{else if .Interrupted}}<span class="st warn">interrupted</span>{{else if .Failed}}{{if superseded . $d.Jobs}}<span class="st mute" title="a newer run of it succeeded">failed, since done</span>{{else}}<span class="st bad">failed</span>{{end}}{{else}}<span class="st ok">done</span>{{end}}</td>
       </tr>
     {{else}}
-      <tr><td colspan="4" class="empty">None yet. Jobs live in this node's panel until it restarts.</td></tr>
+      <tr><td colspan="4" class="empty l-main">None yet. {{if $d.JobsKept}}This node's panel keeps its jobs' records, across restarts.{{else}}Jobs live in this node's panel until it restarts.{{end}}</td></tr>
     {{end}}
     </tbody>
   </table>

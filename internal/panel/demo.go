@@ -2,8 +2,10 @@ package panel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/netip"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -44,23 +46,23 @@ func (d Demo) Nodes(context.Context) (api.Nodes, error) {
 func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 	now := d.now()
 	running := func(restarts int) *reconcile.Status {
-		return &reconcile.Status{Phase: "running", Healthy: true, Restarts: restarts, Generation: 3, CheckedAt: now.Add(-4 * time.Second)}
+		return &reconcile.Status{Phase: "running", Healthy: true, Restarts: restarts, Generation: 3, CheckedAt: now.Add(-4 * time.Second), DataOwner: "1000:1000"}
 	}
 	tenant := func(name, app, node, replica string, ready bool, status *reconcile.Status) api.Tenant {
 		return api.Tenant{
-			Spec: spec.Tenant{Name: name, Image: "sha256:c23c323553d0a47eedff01b1cfb4a83a8f9b1b03f7f75a454c9ebf1391201156", Port: 8080, HealthPath: "/health", DataPath: "/data", User: "1000:1000",
+			Spec: spec.Tenant{Name: name, Image: "ghcr.io/example/web@sha256:c23c323553d0a47eedff01b1cfb4a83a8f9b1b03f7f75a454c9ebf1391201156", Port: 8080, HealthPath: "/health", DataPath: "/data", User: "1000:1000",
 				Env: map[string]string{"DATA_DIR": "/data", "TZ": "Europe/Warsaw"}, Secrets: spec.Secrets{"SESSION_KEY": {Kind: "hex"}},
 				Limits: spec.Limits{MemoryMB: 256, CPUs: 1, PIDs: 256, DiskGB: 10}},
 			App: app, Node: node, Replica: replica, ReplicaReady: ready, ReplicaSyncedAt: now.Add(-9 * time.Second),
 			Host: name + ".example.com", URL: "https://" + name + ".example.com", Generation: 3,
 			CreatedAt: now.Add(-20 * 24 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour), Status: status,
+			KeptSecrets: []string{"SESSION_KEY"},
 		}
 	}
 	moving := tenant("kowalski-trans", "web", "nbg-1", "fsn-1", true, running(0))
-	moving.ReplicaNext = "hel-1"
-	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 3, LastExit: "exit 137 (most likely out of memory) 4m ago", Generation: 2, CheckedAt: now.Add(-3 * time.Second)})
+	unhealthy := tenant("baltic-freight", "web", "nbg-1", "fsn-1", true, &reconcile.Status{Phase: "running", Healthy: false, Restarts: 1, LastExit: "killed (SIGKILL) at " + now.Add(-4*time.Minute).UTC().Format(time.RFC3339) + ", most likely for using more than its 256 MB of memory", Generation: 3, CheckedAt: now.Add(-3 * time.Second), DataOwner: "1000:1000"})
 	syncing := tenant("nordwind", "web", "fsn-1", "nbg-1", false, running(0))
-	suspended := tenant("test-staging", "web", "fsn-1", "nbg-1", true, &reconcile.Status{Phase: "stopped", Generation: 5, CheckedAt: now.Add(-6 * time.Second)})
+	suspended := tenant("test-staging", "web", "fsn-1", "nbg-1", true, &reconcile.Status{Phase: "stopped", Generation: 5, CheckedAt: now.Add(-6 * time.Second), DataOwner: "1000:1000"})
 	suspended.Spec.Suspended = true
 	archived := tenant("old-demo", "web", "nbg-1", "", false, nil)
 	archived.ArchivedAt = now.Add(-9 * 24 * time.Hour)
@@ -68,7 +70,7 @@ func (d Demo) List(ctx context.Context) ([]api.Tenant, error) {
 		tenant("atlas", "web", "fsn-1", "nbg-1", true, running(0)),
 		tenant("acme-logistics", "web", "fsn-1", "nbg-1", true, running(1)),
 		unhealthy, moving, syncing, suspended, archived,
-		tenant("vistula-cargo", "web", "nbg-1", "fsn-1", true, running(0)),
+		tenant("vistula-cargo", "web", "nbg-1", "fsn-1", false, running(0)),
 	}, nil
 }
 
@@ -82,18 +84,26 @@ func (d Demo) Get(ctx context.Context, name string) (api.Tenant, error) {
 	return api.Tenant{}, &api.Error{Status: 404, Message: fmt.Sprintf("tenant %s: not found", name)}
 }
 
+// demoKill is how the agent records a memory kill in the audit log
+// (reconcile.ExitDetail), at the app's limit.
+const demoKill = "exit 137: killed (SIGKILL), most likely for using more than its 256 MB of memory"
+
 func (d Demo) Events(_ context.Context, query store.EventQuery) ([]store.Event, error) {
 	now := d.now()
 	all := []store.Event{
-		{ID: 214, At: now.Add(-50 * time.Second), Actor: "murder", Action: "tenant.replica", Tenant: "kowalski-trans", App: "web", Detail: "copy moves from fsn-1 to hel-1, which keeps fewer"},
-		{ID: 213, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "node.failed-over", Detail: "hel-1: 2 tenants run from their replicas"},
+		// Its last exit, which the tenant's status says.
+		{At: now.Add(-4 * time.Minute), Actor: "murder", Action: "tenant.restarted", Tenant: "baltic-freight", App: "web", Detail: demoKill},
+		{ID: 214, At: now.Add(-50 * time.Second), Actor: "murder", Action: "tenant.replica", Tenant: "vistula-cargo", App: "web", Detail: "a new copy on fsn-1, as hel-1 failed"},
+		{ID: 213, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "node.failed-over", Detail: "hel-1: 2 tenants run from their copies"},
 		{ID: 212, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "vistula-cargo", App: "web", Detail: "hel-1 → nbg-1"},
 		{ID: 211, At: now.Add(-5 * time.Minute), Actor: "murder (failover)", Action: "tenant.failed-over", Tenant: "nordwind", App: "web", Detail: "hel-1 → fsn-1"},
-		{ID: 210, At: now.Add(-48 * time.Minute), Actor: "jan via murder-panel", Action: "tenant.suspended", Tenant: "test-staging", App: "web"},
-		{ID: 209, At: now.Add(-3 * time.Hour), Actor: "root", Action: "app.updated", App: "web", Detail: "image sha256:c23c323553d0"},
+		{ID: 210, At: now.Add(-48 * time.Minute), Actor: "jan (panel) via murder-panel", Action: "tenant.suspended", Tenant: "test-staging", App: "web"},
+		{ID: 209, At: now.Add(-3 * time.Hour), Actor: "root", Action: "app.updated", App: "web", Detail: "image ghcr.io/example/web@sha256:c23c323553d0"},
 		{ID: 208, At: now.Add(-3 * time.Hour), Actor: "root", Action: "tenant.rolled", Tenant: "atlas", App: "web"},
 		{ID: 207, At: now.Add(-26 * time.Hour), Actor: "root", Action: "node.upgraded", Detail: "fsn-1 to a10e3bfb8220"},
-		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "anna via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "web"},
+		// What the drain the panel was stopped in did (SeedDemoJobs).
+		{At: now.Add(-26*time.Hour + 41*time.Second), Actor: "jan (panel) via murder-panel", Action: "tenant.moved", Tenant: "atlas", App: "web", Detail: "nbg-1 → fsn-1"},
+		{ID: 206, At: now.Add(-9 * 24 * time.Hour), Actor: "jan (panel) via murder-panel", Action: "tenant.archived", Tenant: "old-demo", App: "web"},
 	}
 	all = withHistory(all, now)
 	var out []store.Event
@@ -117,7 +127,7 @@ func withHistory(events []store.Event, now time.Time) []store.Event {
 		{"tenant.replica-ready", "the copy holds the whole data"},
 		{"tenant.rolled", ""},
 		{"tenant.replica", "copy kept"},
-		{"tenant.restarted", "exit 137 (most likely out of memory)"},
+		{"tenant.restarted", demoKill},
 	}
 	seed := uint32(7)
 	next := func(n int) int {
@@ -132,6 +142,12 @@ func withHistory(events []store.Event, now time.Time) []store.Event {
 		}
 		r := routine[next(len(routine))]
 		tenant := tenants[next(len(tenants))]
+		// atlas keeps its own 768 MB and stays within it; test-staging is
+		// suspended: neither runs out of memory. Its last exit an hour ago
+		// is baltic-freight's newest before the one above.
+		if r.action == "tenant.restarted" && (tenant == "atlas" || tenant == "test-staging") {
+			tenant = "nordwind"
+		}
 		events = append(events, store.Event{At: now.Add(-ago - time.Minute), Actor: "murder", Action: r.action, Tenant: tenant, App: "web", Detail: r.detail})
 	}
 	slices.SortStableFunc(events, func(a, b store.Event) int { return b.At.Compare(a.At) })
@@ -139,4 +155,36 @@ func withHistory(events []store.Event, now time.Time) []store.Event {
 		events[i].ID = int64(len(events) - i)
 	}
 	return events
+}
+
+// SeedDemoJobs writes job records to show, in a file the demo keeps its
+// jobs in, unless it has some: a drain the panel was stopped in, and a
+// backup that ended.
+func SeedDemoJobs(path string, now time.Time) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	records := []jobRecord{
+		// Its output as clusterops.Drain writes it; the panel stopped two
+		// minutes in, as it moved kowalski-trans.
+		{ID: "5eedd8a1n0000001", Title: "Drain nbg-1 to fsn-1", By: "jan (panel)", Kind: JobDrain, Started: now.Add(-26 * time.Hour),
+			Ended: now.Add(-26*time.Hour + 2*time.Minute), Interrupted: true,
+			Output: "atlas moved to fsn-1 in 41s\n\ninterrupted: the panel stopped while this ran; the audit log says what it changed\n"},
+		{ID: "5eedbac0000002", Title: "Back up the tenants of nbg-1", By: "jan (panel)", Kind: JobBackups, Started: now.Add(-27 * time.Hour), Ended: now.Add(-27*time.Hour + 40*time.Second),
+			Output: "baltic-freight: backups/baltic-freight/" + now.Add(-27*time.Hour).UTC().Format("20060102T150405Z") + ".db.zst\nkowalski-trans: failed: put: 403 Forbidden\n", Failed: "1 of 2 backups failed"},
+	}
+	data, err := json.Marshal(records)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+// dataOwnerOf is who wrote a tenant's data, kept as its container is
+// replaced: the data stays, and so does who wrote it.
+func dataOwnerOf(old *reconcile.Status) string {
+	if old == nil {
+		return ""
+	}
+	return old.DataOwner
 }

@@ -143,7 +143,10 @@ func runAgent(args []string) error {
 	if err != nil {
 		return err
 	}
-	reconciler := reconcile.New(st, docker, volumes, key, reconcile.Config{BaseDomain: cfg.BaseDomain, Scheme: cfg.Scheme(), DefaultLimits: cfg.Defaults}, log)
+	reconciler := reconcile.New(st, docker, volumes, key, reconcile.Config{BaseDomain: cfg.BaseDomain, Scheme: cfg.Scheme(), DefaultLimits: cfg.Defaults,
+		// The last lines of each tenant's previous container, beside the
+		// database: this node's own, never the cluster's.
+		PreviousDir: filepath.Join(filepath.Dir(cfg.Database), "previous-logs")}, log)
 	// What the node's tenants use, measured here and kept for a day.
 	recorder := measure.NewRecorder(node)
 	// The agent's part in an upgrade: the new binary replaces this one, and
@@ -296,6 +299,7 @@ func runAgent(args []string) error {
 			return err
 		}
 		apiHandler.WithBackups(backups)
+		recorder.SetBackups(backups.useReport)
 	}
 	if replicator != nil {
 		apiHandler.WithReplicas(replicator)

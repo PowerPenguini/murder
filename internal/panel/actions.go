@@ -26,6 +26,17 @@ type ActionAgent interface {
 	Restore(ctx context.Context, name string) (api.Tenant, error)
 	Purge(ctx context.Context, name string) error
 	Logs(ctx context.Context, name string, tail int) ([]byte, error)
+	// PreviousLogs are the last lines its node kept of the tenant's
+	// previous container; a 404 when it kept none.
+	PreviousLogs(ctx context.Context, name string) (api.PreviousLogs, error)
+}
+
+// typed says the name typed to confirm an action is the one asked for:
+// spaces around it and the case of its letters aside, as a phone's
+// keyboard may capitalise the first letter or add a space. The names asked
+// for are lowercase by rule, or a secret's, which no two differ by case.
+func typed(given, name string) bool {
+	return name != "" && strings.EqualFold(strings.TrimSpace(given), name)
 }
 
 // flashCookie is __Host-, so only the panel's own name sets it, not a
@@ -69,19 +80,29 @@ func (s *Server) tenantAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
 	back := "/tenants/" + url.PathEscape(name)
-	confirmed := strings.TrimSpace(r.FormValue("confirm")) == name
+	confirmed := typed(r.FormValue("confirm"), name)
 	var err error
 	var done string
 	switch r.FormValue("do") {
 	case "suspend":
+		// It stops serving: the name is typed, as for archiving.
+		if !confirmed {
+			err = errors.New("type the tenant's name to suspend it")
+			break
+		}
 		_, err = agent.Suspend(ctx, name, true)
 		done = name + " is suspended: its container stopped, its data kept"
 	case "resume":
 		_, err = agent.Suspend(ctx, name, false)
 		done = name + " runs again"
 	case "roll":
+		// It stops serving for a moment: the name is typed.
+		if !confirmed {
+			err = errors.New("type the tenant's name to restart it")
+			break
+		}
 		_, err = agent.Roll(ctx, name)
-		done = name + " gets a new container"
+		done = name + " is restarting in a new container, its data kept: its state shows when it is healthy"
 	case "move":
 		// A move outlives the request: a browser that stops waiting, or
 		// a panel that restarts, would otherwise have it undone.
@@ -163,8 +184,121 @@ const logBytes = 2 << 20
 
 type logsData struct {
 	Tenant string
-	Lines  string
 	Tail   int
+	Head   tenantHead
+	// Lines are those the filter lets through, of All read; Warnings and
+	// Errors count those read.
+	Lines            []logLine
+	All              int
+	Warnings, Errors int
+	// Level is all, warn (warnings and errors) or error; Query the text
+	// asked for; Follow says the page follows new lines.
+	Level, Query string
+	Follow       bool
+	// ReadAt is when they were read.
+	ReadAt time.Time
+	// Restarted says its container restarted; LastExit how it last exited.
+	Restarted bool
+	LastExit  string
+	// Previous is what its node kept of its previous container, if
+	// anything; Showing says the page shows those lines, not the current
+	// container's. PreviousProblem says why they could not be read.
+	Previous        *api.PreviousLogs
+	Showing         bool
+	PreviousProblem string
+}
+
+// Link is this page's address with some of its choices changed: pairs of
+// a name ("level", "q", "follow", "tail", "container") and its value, an
+// empty value dropping it.
+func (d logsData) Link(pairs ...string) string {
+	values := url.Values{}
+	set := func(name, value string) {
+		if value == "" {
+			values.Del(name)
+		} else {
+			values.Set(name, value)
+		}
+	}
+	if d.Level != "all" {
+		set("level", d.Level)
+	}
+	set("q", d.Query)
+	if d.Follow {
+		set("follow", "1")
+	}
+	if d.Tail != 300 {
+		set("tail", strconv.Itoa(d.Tail))
+	}
+	if d.Showing {
+		set("container", "previous")
+	}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		set(pairs[i], pairs[i+1])
+	}
+	if values.Get("level") == "all" {
+		values.Del("level")
+	}
+	if len(values) == 0 {
+		return "?"
+	}
+	return "?" + values.Encode()
+}
+
+// PreviousSaid is how a previous container went: "exit 137, 4m ago".
+func (d logsData) PreviousSaid() string {
+	p := d.Previous
+	if p == nil {
+		return ""
+	}
+	switch {
+	case p.Why == "exited" || p.ExitKnown:
+		return "exit " + strconv.Itoa(p.ExitCode) + ", " + ago(d.ReadAt, p.ExitedAt) + " ago"
+	case p.Why == "stopped":
+		return "stopped " + ago(d.ReadAt, p.At) + " ago"
+	}
+	return "replaced " + ago(d.ReadAt, p.At) + " ago"
+}
+
+// PreviousShort says it in a phone's switch: "137, 4m".
+func (d logsData) PreviousShort() string {
+	p := d.Previous
+	if p == nil {
+		return ""
+	}
+	switch {
+	case p.Why == "exited" || p.ExitKnown:
+		return strconv.Itoa(p.ExitCode) + ", " + ago(d.ReadAt, p.ExitedAt)
+	case p.Why == "stopped":
+		return "stopped, " + ago(d.ReadAt, p.At)
+	}
+	return "replaced, " + ago(d.ReadAt, p.At)
+}
+
+// PreviousWhy says in a sentence how the previous container ended.
+func (d logsData) PreviousWhy() string {
+	p := d.Previous
+	if p == nil {
+		return ""
+	}
+	at := p.At
+	if !p.ExitedAt.IsZero() {
+		at = p.ExitedAt
+	}
+	when := ago(d.ReadAt, at) + " ago (" + at.UTC().Format("2006-01-02 15:04:05") + " UTC)"
+	switch {
+	case p.ExitKnown && (p.OOMKilled || p.ExitCode == 137) && p.MemoryMB > 0:
+		how := "was killed"
+		if !p.OOMKilled {
+			how = "was killed (exit 137), most likely"
+		}
+		return "Its app " + how + " for using more than its " + memory(p.MemoryMB) + " of memory " + when + "."
+	case p.ExitKnown:
+		return "Its app exited with code " + strconv.Itoa(p.ExitCode) + " " + when + "."
+	case p.Why == "stopped":
+		return "It was removed as the tenant was suspended, " + when + "."
+	}
+	return "A new container took its place " + when + "."
 }
 
 // ansi matches terminal escapes, which a page shows as noise.
@@ -178,8 +312,18 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	data, err := s.Actions(s.actor(userOf(r))).Logs(ctx, name, tail)
-	if err != nil {
+	var data []byte
+	var t api.Tenant
+	var nodes api.Nodes
+	var previous api.PreviousLogs
+	var previousErr error
+	agent := s.Actions(s.actor(userOf(r)))
+	if err := all(
+		func() (err error) { data, err = agent.Logs(ctx, name, tail); return },
+		func() error { previous, previousErr = agent.PreviousLogs(ctx, name); return nil },
+		func() (err error) { t, err = s.backend.Get(ctx, name); return },
+		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
+	); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -187,5 +331,49 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	if len(data) > logBytes {
 		data = data[len(data)-logBytes:]
 	}
-	s.render(w, r, "logs", name+" logs", "tenants", logsData{Tenant: name, Lines: ansi.ReplaceAllString(string(data), ""), Tail: tail})
+	q := r.URL.Query()
+	head := s.withApps(ctx, r, s.headOf(t, nodes, "logs"))
+	// Its state as its other tabs say it: one that cannot write says so.
+	if u, ok := s.usageNow(ctx).Tenants[t.Spec.Name]; ok {
+		head.State = writable(head.State, &u)
+	}
+	logs := logsData{Tenant: name, Tail: tail, Head: head, Level: q.Get("level"), Query: strings.TrimSpace(q.Get("q")),
+		Follow: q.Get("follow") != "", ReadAt: s.now()}
+	if logs.Level != "warn" && logs.Level != "error" {
+		logs.Level = "all"
+	}
+	if t.Status != nil && t.Status.Restarts > 0 {
+		logs.Restarted, logs.LastExit = true, t.Status.LastExit
+	}
+	var missing *api.Error
+	switch {
+	case previousErr == nil:
+		logs.Previous = &previous
+		if q.Get("container") == "previous" {
+			// What was kept does not change: nothing to follow.
+			logs.Showing, logs.Follow = true, false
+			data = []byte(previous.Lines)
+		}
+	case errors.As(previousErr, &missing) && missing.Status == http.StatusNotFound:
+	default:
+		logs.PreviousProblem = previousErr.Error()
+	}
+	query := strings.ToLower(logs.Query)
+	for _, line := range logLines(ansi.ReplaceAllString(string(data), "")) {
+		logs.All++
+		switch line.Level {
+		case "warn":
+			logs.Warnings++
+		case "error":
+			logs.Errors++
+		}
+		if (logs.Level == "warn" && line.Level == "") || (logs.Level == "error" && line.Level != "error") {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(line.Stamp+" "+line.Text), query) {
+			continue
+		}
+		logs.Lines = append(logs.Lines, line)
+	}
+	s.write(w, "logs", s.pageFor(w, r, name+" · logs", "tenants", nodes, logs), http.StatusOK)
 }

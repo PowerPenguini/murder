@@ -60,13 +60,13 @@ func TestActingOnTheCluster(t *testing.T) {
 	cluster, s, server, client := newClusterPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/cluster")
-	for _, want := range []string{"fsn-1", "nbg-1", "hel-1", "· 13", `placeholder="hel-1"`, "None yet."} {
+	for _, want := range []string{"fsn-1", "nbg-1", "hel-1", "· schema 13", `placeholder="hel-1" data-confirm="hel-1"`, "None yet."} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the cluster page lacks %q:\n%s", want, page)
 		}
 	}
 	// hel-1 failed over already, and this node is not removed from itself.
-	if strings.Contains(page, "it is off") || strings.Contains(page, `placeholder="fsn-1"`) {
+	if strings.Contains(page, "It is off") || strings.Contains(page, `value="remove"><input type="hidden" name="node" value="fsn-1"`) {
 		t.Fatalf("the cluster page offers what does not apply:\n%s", page)
 	}
 
@@ -88,10 +88,14 @@ func TestActingOnTheCluster(t *testing.T) {
 		t.Fatalf("nodes after the removal: %+v", nodes.Nodes)
 	}
 
+	// Draining moves every tenant of a node: its name is typed.
+	if _, body := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}}, server.URL); !strings.Contains(body, "type the node&#39;s name to drain it") {
+		t.Fatalf("drained without the name:\n%s", body)
+	}
 	// A drain is a job: its page tells each move.
-	response, _ := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}}, server.URL)
+	response, _ := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}, "confirm": {"nbg-1"}}, server.URL)
 	body = waitForJob(t, s, client, response)
-	if !strings.Contains(body, "drain nbg-1 to fsn-1") || !strings.Contains(body, ">done<") || !strings.Contains(body, "moved") {
+	if !strings.Contains(body, "Drain nbg-1 to fsn-1") || !strings.Contains(body, ">done<") || !strings.Contains(body, "moved") {
 		t.Fatalf("the drain's page:\n%s", body)
 	}
 	tenants, _ := cluster.List(ctx)
@@ -100,7 +104,7 @@ func TestActingOnTheCluster(t *testing.T) {
 			t.Fatalf("%s still runs on nbg-1 after the drain", tenant.Spec.Name)
 		}
 	}
-	if _, page = get(t, server.URL+"/cluster"); !strings.Contains(page, "drain nbg-1 to fsn-1") {
+	if _, page = get(t, server.URL+"/cluster"); !strings.Contains(page, "Drain nbg-1 to fsn-1") {
 		t.Fatalf("the cluster page does not list the drain:\n%s", page)
 	}
 
@@ -109,16 +113,16 @@ func TestActingOnTheCluster(t *testing.T) {
 		t.Fatalf("the cluster page offers no balancing:\n%s", page)
 	}
 	response, _ = submit(t, client, server, "/cluster", url.Values{"do": {"balance"}}, server.URL)
-	if body = waitForJob(t, s, client, response); !strings.Contains(body, "balance the tenants") || !strings.Contains(body, "to nbg-1") || !strings.Contains(body, ">done<") {
+	if body = waitForJob(t, s, client, response); !strings.Contains(body, "Balance the tenants") || !strings.Contains(body, "to nbg-1") || !strings.Contains(body, ">done<") {
 		t.Fatalf("the balance's page:\n%s", body)
 	}
-	if _, page = get(t, server.URL+"/cluster"); !strings.Contains(page, "No node runs two tenants more than another") {
+	if _, page = get(t, server.URL+"/cluster"); !strings.Contains(page, "Tenant counts are balanced") {
 		t.Fatalf("not balanced after balancing:\n%s", page)
 	}
 
 	// Backing up is a job too, listing each tenant's backup.
 	response, _ = submit(t, client, server, "/cluster", url.Values{"do": {"backups"}}, server.URL)
-	if body = waitForJob(t, s, client, response); !strings.Contains(body, "back up the tenants of fsn-1") || !strings.Contains(body, ".db.zst") {
+	if body = waitForJob(t, s, client, response); !strings.Contains(body, "Back up the tenants of fsn-1") || !strings.Contains(body, ".db.zst") {
 		t.Fatalf("the backups' page:\n%s", body)
 	}
 
@@ -312,7 +316,7 @@ func TestOneChangeOfTheClusterAtATime(t *testing.T) {
 	defer close(release)
 	_ = cluster.AsCluster("test").Freeze(context.Background(), "an upgrade runs")
 
-	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}}, server.URL)
+	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"drain"}, "node": {"nbg-1"}, "to": {"fsn-1"}, "confirm": {"nbg-1"}}, server.URL)
 	if !strings.Contains(body, "one change of the cluster at a time") {
 		t.Fatalf("a drain began during an upgrade:\n%s", body)
 	}
@@ -320,7 +324,7 @@ func TestOneChangeOfTheClusterAtATime(t *testing.T) {
 	if nodes, _ := cluster.Nodes(context.Background()); nodes.Frozen == "" || !strings.Contains(body, "takes changes again once it ends") {
 		t.Fatalf("thawed during an upgrade:\n%s", body)
 	}
-	if strings.Contains(body, `placeholder="type thaw"`) || strings.Contains(body, `action="/cluster/upgrade"`) || !strings.Contains(body, "/jobs/"+upgrading.ID) {
+	if strings.Contains(body, `data-confirm="thaw"`) || strings.Contains(body, `action="/cluster/upgrade"`) || !strings.Contains(body, "/jobs/"+upgrading.ID) {
 		t.Fatalf("the page offers thawing or upgrading during an upgrade:\n%s", body)
 	}
 	response := uploadBinary(t, client, server, os.Args[0], "upgrade")
@@ -380,7 +384,7 @@ func TestARotationsFreezeIsNotThawedFromThePanel(t *testing.T) {
 	cluster, _, server, client := newClusterPanel(t)
 	_ = cluster.AsCluster("test").Freeze(context.Background(), store.RotationFreeze+"fsn-1")
 	_, page := get(t, server.URL+"/cluster")
-	if !strings.Contains(page, "master key rotation from node fsn-1 runs") || strings.Contains(page, `placeholder="type thaw"`) {
+	if !strings.Contains(page, "master key rotation from node fsn-1 runs") || strings.Contains(page, `data-confirm="thaw"`) {
 		t.Fatalf("the cluster page during a rotation:\n%s", page)
 	}
 	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"thaw"}, "confirm": {"thaw"}, "frozen": {store.RotationFreeze + "fsn-1"}}, server.URL)

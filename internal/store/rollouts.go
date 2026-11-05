@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,34 @@ type Rollout struct {
 	Actor     string    `json:"actor"`
 	// Epoch counts its changes of state: each wave, pause and resume.
 	Epoch int64 `json:"epoch"`
+	// First counts its leading waves of tenants named to move first: 0 or
+	// 1. The wave after them is the canaries.
+	First int `json:"first,omitempty"`
+}
+
+// WaveName names its wave w, from 1, as its plan does: the tenants moved
+// first, the canaries, a tenth, half, the rest.
+func (r Rollout) WaveName(w int) string {
+	if w <= r.First {
+		return "First, now"
+	}
+	return WaveName(w - 1 - r.First)
+}
+
+// WaveName names a rollout's wave by its place among the waves after any
+// moved first, from 0: the canaries first.
+func WaveName(w int) string {
+	names := []string{"Canaries", "A tenth", "Half", "The rest"}
+	if w >= 0 && w < len(names) {
+		return names[w]
+	}
+	return "Wave " + strconv.Itoa(w+1)
+}
+
+// WaveSaid names wave w as every sentence and event does, its name in
+// lower case in parentheses: "wave 2 (a tenth)", "wave 1 (first, now)".
+func WaveSaid(w int, name string) string {
+	return "wave " + strconv.Itoa(w) + " (" + strings.ToLower(name) + ")"
 }
 
 // RestorePending reports whether the tenant's data is to go back to the
@@ -77,14 +106,14 @@ func (s *SQLite) RolloutState() ([]Rollout, []Record) {
 
 func loadRollouts(q querier, state *snapshot) error {
 	state.rollouts = map[string]Rollout{}
-	rows, err := q.Query(`SELECT app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor, epoch FROM rollouts`)
+	rows, err := q.Query(`SELECT app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor, epoch, first FROM rollouts`)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var r Rollout
 		var waveStarted, started, updated string
-		if err := rows.Scan(&r.App, &r.ToRevision, &r.State, &r.Wave, &waveStarted, &r.Reason, &started, &updated, &r.Actor, &r.Epoch); err != nil {
+		if err := rows.Scan(&r.App, &r.ToRevision, &r.State, &r.Wave, &waveStarted, &r.Reason, &started, &updated, &r.Actor, &r.Epoch, &r.First); err != nil {
 			rows.Close()
 			return err
 		}
@@ -163,7 +192,7 @@ func (s *SQLite) AdvanceRollout(app string, at RolloutAt, tenants []string, acto
 			if err := tx.Exec(`UPDATE tenants SET before_revision = app_revision, app_revision = 0, moved_on = node, generation = generation + 1, updated_at = ? WHERE name = ?`, stamp, name); err != nil {
 				return err
 			}
-			if err := event(tx, now, actor, "app.rolled-out", name, app, fmt.Sprintf("wave %d: revision %d → %d", wave+1, record.AppRevision, rollout.ToRevision)); err != nil {
+			if err := event(tx, now, actor, "app.rolled-out", name, app, fmt.Sprintf("%s: revision %d → %d", WaveSaid(wave+1, rollout.WaveName(wave+1)), record.AppRevision, rollout.ToRevision)); err != nil {
 				return err
 			}
 		}
@@ -399,6 +428,20 @@ func (s *SQLite) Restored(name, image string) error {
 	return err
 }
 
+// FlagsDetail says what a change of a tenant's rollout flags changes:
+// "held: no → yes", "canary: yes → no".
+func FlagsDetail(canary, hold, wantCanary, wantHold bool) string {
+	yes := map[bool]string{true: "yes", false: "no"}
+	var parts []string
+	if canary != wantCanary {
+		parts = append(parts, "canary: "+yes[canary]+" → "+yes[wantCanary])
+	}
+	if hold != wantHold {
+		parts = append(parts, "held: "+yes[hold]+" → "+yes[wantHold])
+	}
+	return strings.Join(parts, ", ")
+}
+
 // SetFlags makes a tenant a canary or not, held or not. A tenant no longer
 // held, while its app rolls nothing out, runs the app's newest revision.
 func (s *SQLite) SetFlags(name string, canary, hold *bool, actor string) (Record, error) {
@@ -427,7 +470,7 @@ func (s *SQLite) SetFlags(name string, canary, hold *bool, actor string) (Record
 				return err
 			}
 		}
-		return event(tx, now, actor, "tenant.flags", name, record.App, fmt.Sprintf("canary %v, hold %v", wantCanary, wantHold))
+		return event(tx, now, actor, "tenant.flags", name, record.App, FlagsDetail(record.Canary, record.Hold, wantCanary, wantHold))
 	})
 	if err == errUnchanged {
 		return s.Get(name)

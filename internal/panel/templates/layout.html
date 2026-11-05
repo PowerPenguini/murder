@@ -4,8 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>{{.Title}} · murder</title>
+<title>{{.Alerts.Title}}{{.Title}} · murder</title>
 <link rel="icon" href="{{static "icon.svg"}}" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="{{static "panel.css"}}">
 </head>
 <body>
@@ -14,33 +15,46 @@
 {{template "content" .}}
 </main>
 {{else}}
+<a class="skip" href="#main">Skip to the page</a>
 <div class="shell">
 <aside class="side">
-  <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt="murder"></a>
-  <nav class="menu" aria-label="the panel">
-    <a href="/" {{if eq .Section "overview"}}class="on"{{end}}>Overview</a>
-    <a href="/tenants" {{if eq .Section "tenants"}}class="on"{{end}}>Tenants</a>
-    {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on"{{end}}>Apps</a>{{end}}
-    <a href="/events" {{if eq .Section "events"}}class="on"{{end}}>Events</a>
-    <a href="/cluster" {{if eq .Section "cluster"}}class="on"{{end}}>Cluster</a>
-    <a href="/access" {{if eq .Section "access"}}class="on"{{end}}>Access</a>
-  </nav>
+  <a class="brand" href="/"><img src="{{static "crow.svg"}}" alt="murder, the overview"></a>
+  <nav class="menu" aria-label="the panel" id="menu">{{template "nav" .}}</nav>
+  <details class="navmenu" id="navmenu">
+    <summary><span class="sr">Page: </span>{{template "section" .}}{{with .Alerts.Of .Section}}<span class="count" title="{{.}} broken here">{{.}}</span><span class="sr"> broken here</span>{{end}}{{if .Alerts.Elsewhere .Section}}<span class="elsewhere" title="something is broken on another page"></span><span class="sr">, something is broken on another page</span>{{end}}</summary>
+    <nav class="navlist" aria-label="the panel">{{template "nav" .}}</nav>
+  </details>
   <div class="who">
-    <div class="node" title="the node this panel asks{{with .Cluster.Leader}}; {{.}} leads{{end}}"><span class="live" title="following the cluster, every few seconds"></span>{{.Cluster.Self}}</div>
-    {{with .User}}<div class="user"><span>{{.}}</span><form method="post" action="/auth/logout"><button type="submit">Sign out</button></form></div>{{end}}
+    <div class="livestate" id="livestate" data-at="{{.Now.UnixMilli}}" data-node="{{.Cluster.Self}}" data-others="{{others .Cluster}}" role="status">
+      <span class="live" aria-hidden="true"></span><span class="livetext">As of {{.Now.UTC.Format "15:04:05"}} UTC</span>
+    </div>
+    <div class="node" title="the node this panel asks{{with .Cluster.Leader}}; {{.}} leads{{end}}"><span class="dim">via</span> <span class="mono">{{.Cluster.Self}}</span></div>
+    {{with .User}}<div class="user"><span>{{.}}</span><form method="post" action="/auth/logout"><button type="submit" class="link">Sign out</button></form></div>{{end}}
   </div>
 </aside>
 <div class="page" id="live">
 {{with .Cluster.Frozen}}<div class="frozen">Changes are frozen: {{.}}</div>{{end}}
-<main>
-{{with .Problem}}<div class="notice bad">{{.}}</div>{{end}}
-{{with .Done}}<div class="notice">{{.}}</div>{{end}}
+<main id="main">
+{{if not (headFirst .Data)}}{{template "page-notices" .}}{{end}}
 {{template "content" .}}
 </main>
 </div>
 </div>
 <script src="{{static "live.js"}}"></script>
 <script src="{{static "forms.js"}}"></script>
+<script src="{{static "charts.js"}}"></script>
 {{end}}
 </body>
 </html>
+{{define "nav"}}
+    <a href="/" {{if eq .Section "overview"}}class="on" aria-current="page"{{end}}>Overview{{with .Alerts.Overview}}<span class="count" title="{{plural . "thing" "things"}} broken">{{.}}</span>{{end}}</a>
+    <a href="/tenants" {{if eq .Section "tenants"}}class="on" aria-current="page"{{end}}>Tenants{{with .Alerts.Tenants}}<span class="count" title="{{plural . "tenant" "tenants"}} broken">{{.}}</span>{{end}}</a>
+    {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on" aria-current="page"{{end}}>Apps{{with .Alerts.Apps}}<span class="count" title="{{plural . "app" "apps"}} broken: a rollout blocked, or a limit that breaks a tenant">{{.}}</span>{{end}}</a>{{end}}
+    <a href="/events" {{if eq .Section "events"}}class="on" aria-current="page"{{end}}>Events</a>
+    <a href="/cluster" {{if eq .Section "cluster"}}class="on" aria-current="page"{{end}}>Cluster{{with .Alerts.Cluster}}<span class="count" title="{{.}} broken: nodes down or backups failing">{{.}}</span>{{end}}</a>
+    <a href="/access" {{if eq .Section "access"}}class="on" aria-current="page"{{end}}>Access</a>
+{{end}}
+{{define "section"}}{{if eq .Section "overview"}}Overview{{else if eq .Section "tenants"}}Tenants{{else if eq .Section "apps"}}Apps{{else if eq .Section "events"}}Events{{else if eq .Section "cluster"}}Cluster{{else if eq .Section "access"}}Access{{else}}Menu{{end}}{{end}}
+
+{{define "page-notices"}}{{with .Problem}}<div class="notice bad" role="alert">{{.}}</div>{{end}}
+{{with .Done}}<div class="notice" role="status">{{.}}</div>{{end}}{{end}}

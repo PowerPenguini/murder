@@ -52,7 +52,13 @@
         say("checking…");
         const answer = await post("/auth/login/finish", credentialJSON(credential));
         say("signed in as " + answer.user);
-        location.replace("/");
+        // Back to the page that sent here, on this panel only.
+        const next = new URLSearchParams(location.search).get("next") || "/";
+        // The page a draft was kept for picks it up again (forms.js).
+        try {
+          sessionStorage.setItem("murder-resume", new URL(next, location.origin).pathname);
+        } catch {}
+        location.replace(/^\/(?![\/\\])/.test(next) ? next : "/");
       } catch (error) {
         say(error.name === "NotAllowedError" ? "cancelled, or no passkey here" : error.message, true);
         signin.disabled = false;

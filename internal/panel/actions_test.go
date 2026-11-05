@@ -50,7 +50,11 @@ func submit(t *testing.T, client *http.Client, server *httptest.Server, path str
 func TestActingOnTenants(t *testing.T) {
 	cluster, server, client := newActingPanel(t)
 	ctx := context.Background()
-	_, body := submit(t, client, server, "/tenants/atlas", url.Values{"do": {"suspend"}}, server.URL)
+	// Suspending stops it serving: the name is typed.
+	if _, body := submit(t, client, server, "/tenants/atlas", url.Values{"do": {"suspend"}}, server.URL); !strings.Contains(body, "type the tenant&#39;s name to suspend it") {
+		t.Fatalf("suspended without the name:\n%s", body)
+	}
+	_, body := submit(t, client, server, "/tenants/atlas", url.Values{"do": {"suspend"}, "confirm": {"atlas"}}, server.URL)
 	if !strings.Contains(body, "atlas is suspended") || !strings.Contains(body, ">suspended<") {
 		t.Fatalf("after suspending:\n%s", body)
 	}
@@ -62,7 +66,7 @@ func TestActingOnTenants(t *testing.T) {
 			t.Fatal("the action's notice shown twice")
 		}
 	}
-	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "atlas", Limit: 1}); events[0].Action != "tenant.suspended" || events[0].Actor != "murder-panel socket" {
+	if events, _ := cluster.Events(ctx, store.EventQuery{Tenant: "atlas", Limit: 1}); events[0].Action != "tenant.suspended" || who(events[0].Actor) != "the local panel" {
 		t.Fatalf("event %+v", events[0])
 	}
 	// Archiving without the name typed does nothing.
@@ -87,7 +91,7 @@ func TestActingOnTenants(t *testing.T) {
 	}
 	// A move, and a tenant made.
 	// A move goes on after the page is back: the page says it began.
-	if _, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"move"}, "to": {"nbg-1"}}, server.URL); !strings.Contains(body, "moves to nbg-1") {
+	if _, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"move"}, "to": {"nbg-1"}}, server.URL); !strings.Contains(body, "moves to nbg-1") && !strings.Contains(body, "Moved to nbg-1") {
 		t.Fatalf("after a move began:\n%s", body)
 	}
 	for i := 0; ; i++ {
@@ -108,14 +112,14 @@ func TestActingOnTenants(t *testing.T) {
 	if response, err := client.Do(live); err == nil {
 		page, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		if strings.Contains(string(page), `class="notice">moved<`) {
+		if strings.Contains(string(page), `class="notice" role="status">moved<`) {
 			t.Fatal("a live fetch took the notice")
 		}
 	}
 	if response, err := client.Get(server.URL + "/"); err == nil {
 		page, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		if !strings.Contains(string(page), `class="notice">moved<`) {
+		if !strings.Contains(string(page), `class="notice" role="status">moved<`) {
 			t.Fatal("the notice was lost")
 		}
 	}

@@ -47,10 +47,16 @@ func TestEventsAndErrorsPages(t *testing.T) {
 	}
 	server := httptest.NewServer(s.Handler())
 	defer server.Close()
-	_, all := get(t, server.URL+"/events")
+	_, all := get(t, server.URL+"/events?show=all")
 	_, people := get(t, server.URL+"/events?people=1")
-	if !strings.Contains(all, ">copy ready<") || strings.Contains(people, ">copy ready<") || !strings.Contains(people, ">suspended<") {
+	_, shown := get(t, server.URL+"/events")
+	if !strings.Contains(all, "has its copy ready") || strings.Contains(people, "has its copy ready") || !strings.Contains(people, "</a> was suspended") {
 		t.Fatalf("people's events:\n%s", people)
+	}
+	// By default, what people did and what broke; the cluster's keeping
+	// is a click away.
+	if strings.Contains(shown, "has its copy ready") || !strings.Contains(shown, "</a> was suspended") || !strings.Contains(shown, "failed over to its copy") || strings.Contains(people, "failed over to its copy") || !strings.Contains(shown, "Include them") {
+		t.Fatalf("the default events:\n%s", shown)
 	}
 	if !strings.Contains(all, `<option value="baltic-freight">`) || !strings.Contains(all, `<option value="web">`) {
 		t.Fatalf("the filters offer no names:\n%s", all)

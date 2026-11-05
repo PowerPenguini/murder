@@ -1,0 +1,109 @@
+{{define "content"}}{{$d := .Data}}{{$a := $d.App}}
+<nav class="crumbs" aria-label="where this is"><a href="/apps">Apps</a><span>/</span><a href="/apps/{{$a.Name}}">{{$a.Name}}</a><span>/</span><span>Review</span></nav>
+<h1>{{$d.Title}}</h1>
+{{with $d.Summary}}<p class="summary-line">{{.}}.</p>{{end}}
+<p class="lead">Nothing has changed yet. Look it over; rolling it out stores revision {{next $a.Revision}} of {{$a.Name}}.</p>
+<div data-still data-review hidden></div>
+{{if and $d.Changed $d.Restart}}
+<section class="near" id="pace">
+  <form method="get" action="/apps/{{$a.Name}}/review#pace" class="pace-form" data-pace>
+    <input type="hidden" name="do" value="{{$d.ReviewDo}}"><input type="hidden" name="updated" value="{{$d.Updated}}">
+    {{with $d.Draft}}<input type="hidden" name="draft" value="{{.}}">{{end}}
+    {{if eq $d.Do "restore"}}<input type="hidden" name="revision" value="{{$d.Revision}}">{{end}}
+    <fieldset class="pace">
+      <legend>How it reaches the {{plural (len $d.Restart) "tenant" "tenants"}} it restarts</legend>
+      {{range $d.Paces}}<label class="check"><input type="radio" name="pace" value="{{.Value}}"{{if eq .Value $d.Pace}} checked{{end}}> <span>{{.Label}}{{if .Default}} <span class="dim">(proposed)</span>{{end}}</span></label>{{end}}
+      <div class="row"><button type="submit" class="small js-hide">Show this plan</button><span class="hint">The page below describes the pace chosen here.</span></div>
+    </fieldset>
+  </form>
+</section>
+{{end}}
+{{with $a.Rollout}}{{if .Active}}<div class="notice spaced">{{if $d.Blocked}}<span class="lead-in">A rollout of revision {{.ToRevision}} is blocked in {{waveSaid .Wave $d.AtWave}} by {{range $i, $b := $d.Blocked}}{{if $i}}, {{end}}{{$b}}{{end}}.</span>{{else}}<span class="lead-in">A rollout of revision {{.ToRevision}} runs, in {{waveSaid .Wave $d.AtWave}}.</span>{{end}} This change replaces it{{if eq $d.Pace "now"}} and ends it: every tenant it restarts takes the new revision now, those it moved too{{else if eq $d.Pace "first"}}: {{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} {{if eq (len $d.Broken) 1}}moves{{else}}move{{end}} now, then the rest in waves; tenants it moved stay on revision {{.ToRevision}} until their wave{{else}}: the new one starts again with the canaries, and tenants it moved stay on revision {{.ToRevision}} until their wave{{end}}.
+  {{if and (eq $d.Do "restore") $d.Moved}}<p class="flat spaced">Or abort that rollout instead: it takes the {{plural (len $d.Moved) "tenant" "tenants"}} it moved ({{range $i, $m := $d.Moved}}{{if $i}}, {{end}}{{$m}}{{end}}) back to the revision each ran before, now, and stores no new revision. <a href="/apps/{{$a.Name}}#rollout">Abort, on {{$a.Name}}'s page</a></p>{{end}}</div>{{end}}{{end}}
+{{if and $d.ImageTenants (not $d.NewImage)}}<div class="notice{{if eq $d.Pace "now"}} bad{{end}} spaced" id="images"><span class="lead-in">{{plural (len $d.ImageTenants) "tenant also takes" "tenants also take"}} a new image with it:</span> {{range $i, $n := $d.ImageTenants}}{{if $i}}, {{end}}{{$n}}{{end}} ({{$d.ImageChange}}), as {{if eq (len $d.ImageTenants) 1}}it runs{{else}}they run{{end}} an older revision.{{if eq $d.Pace "now"}} Every tenant now gives {{if eq (len $d.ImageTenants) 1}}it{{else}}them{{end}} that image at once, with no wave to prove it first.{{else}} {{if eq (len $d.ImageTenants) 1}}It takes{{else}}They take{{end}} it in {{if eq (len $d.ImageTenants) 1}}its{{else}}their{{end}} wave, once the one before stayed healthy.{{end}}</div>{{end}}
+
+<section class="near">
+  <div class="head"><h2>What changes</h2>{{if $d.Changed}}<span class="dim num">{{plural $d.Removed "line" "lines"}} out, {{plural $d.Added "line" "lines"}} in</span>{{end}}</div>
+  {{if $d.Changed}}
+  {{if $d.NewImage}}<div class="imagechange">
+    <table class="kv">
+      <tbody>
+        <tr><td class="dim">Image now</td><td><span class="mono dim">{{imageRepo $d.OldImage}}</span> <span class="mono">{{imageShort $d.OldImage}}</span></td></tr>
+        <tr><td class="dim">Proposed</td><td><span class="mono dim">{{imageRepo $d.NewImage}}</span> <span class="mono strong">{{imageShort $d.NewImage}}</span></td></tr>
+      </tbody>
+    </table>
+    <details class="howto"><summary>Full image reference</summary>
+      <div class="panel spaced"><p class="flat dim small">Current</p><pre class="secret" id="image-old">{{$d.OldImage}}</pre><button type="button" class="small" data-copy="image-old" hidden>Copy</button>
+      <p class="flat dim small">Proposed</p><pre class="secret" id="image-new">{{$d.NewImage}}</pre><button type="button" class="small" data-copy="image-new" hidden>Copy</button></div>
+    </details>
+  </div>{{end}}
+  {{if and $d.NewImage (eq $d.Added 1) (eq $d.Removed 1)}}<details class="howto spaced"><summary>Show YAML diff</summary>{{end}}
+  {{if and $d.Summary (not (and $d.NewImage (eq $d.Added 1) (eq $d.Removed 1)))}}
+  {{/* On a phone the summary above says it; the YAML is a tap away. */}}
+  <details class="howto phone-only"><summary>Show the YAML diff</summary>{{template "review-diff" $d}}</details>
+  <div class="desktop-only">{{template "review-diff" $d}}</div>
+  {{else}}{{template "review-diff" $d}}{{end}}
+  {{if and $d.NewImage (eq $d.Added 1) (eq $d.Removed 1)}}</details>{{end}}
+  {{else}}
+  <p class="calm">Nothing changes: the spec is the one {{$a.Name}} runs.</p>
+  {{end}}
+</section>
+
+{{if $d.Changed}}
+<section>
+  <div class="head"><h2>Affected tenants</h2><span class="dim">{{len $d.Restart}} restart{{with $d.Join}} · {{len .}} keep their container{{end}}{{with $d.Unchanged}} · {{len .}} unchanged{{end}}{{with $d.Held}} · {{len .}} held, left out{{end}}</span></div>
+  {{if $d.Tenants}}
+  <table class="list scope">
+    <thead><tr><th>Tenants</th><th>What this change does to them</th></tr></thead>
+    <tbody>
+    {{range $d.Groups}}
+      <tr class="{{.Kind}}">
+        <td class="l-main">{{range $i, $t := .Tenants}}{{if $i}}, {{end}}<a href="/tenants/{{$t.Name}}">{{$t.Name}}</a>{{if $t.Canary}} <span class="dim">canary</span>{{end}}{{if eq $t.State.Kind "bad"}} <span class="st bad">{{$t.State.Label}}</span>{{end}}{{end}}</td>
+        <td class="l-sub" data-label="Result">{{if eq .Kind "restart"}}<span class="strong">New container</span>{{range (index .Tenants 0).Scope.Lines}}<span class="scope-line">{{if .To}}{{.Key}} <span class="nowrap">{{.From}}</span> <span class="nowrap">→ {{.To}}</span>{{else}}{{.Text}}{{end}}</span>{{end}}{{else}}{{.Result}}{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{if $d.Unchanged}}<p class="hint spaced">A tenant's override wins over the app's spec: a change only to fields it overrides leaves it as it runs, with no new container.</p>{{end}}
+  {{else}}<p class="calm">No live tenant runs it: the change is stored, and new tenants take it.</p>{{end}}
+  {{with $d.Held}}<p class="hint spaced">Held, and left out until released: {{range $i, $h := .}}{{if $i}}, {{end}}<a href="/tenants/{{$h}}">{{$h}}</a>{{end}}.</p>{{end}}
+  {{with $d.Archived}}<p class="hint spaced">Left out while archived: {{range $i, $h := .}}{{if $i}}, {{end}}{{$h}}{{end}}.</p>{{end}}
+</section>
+
+{{if $d.Restart}}
+<section id="plan">
+  <div class="head"><h2>How it rolls out</h2><span class="dim">{{if eq $d.Pace "now"}}every tenant now{{else if eq $d.Pace "first"}}{{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} now, the rest in waves{{else}}in waves{{end}}</span></div>
+  {{if eq $d.Pace "now"}}
+  <div class="notice{{if $d.ImageTenants}} bad{{end}}"><p class="flat"><span class="lead-in">Together, now:</span> {{range $i, $t := $d.Restart}}{{if $i}}, {{end}}{{$t.Name}}{{end}} restart at once, each answering no request for the few seconds it starts.{{with $d.Join}} {{range $i, $t := .}}{{if $i}}, {{end}}{{$t.Name}}{{end}} take the revision and keep their containers.{{end}}</p>
+    <p class="flat spaced">No health gate: nothing waits to see one healthy before the next, so a change that breaks them breaks them all.</p></div>
+  {{else}}
+  <ol class="waves plan">
+    {{range $i, $w := $d.Waves}}<li class="next"><span class="wn">{{add1 $i}}. {{$w.Name}}</span>{{$all := true}}{{range $w.Tenants}}{{if not (joins $d .)}}{{$all = false}}{{end}}{{end}}<span class="wc">{{if $all}}{{range $j, $n := $w.Tenants}}{{if $j}}, {{end}}{{$n}}{{end}}: <span class="faint">no restart, {{if eq (len $w.Tenants) 1}}takes{{else}}take{{end}} revision {{if eq $d.Do "restore"}}{{$d.Revision}}{{else}}{{next $d.App.Revision}}{{end}} in place</span>{{else}}{{range $j, $n := $w.Tenants}}{{if $j}}, {{end}}{{$n}}{{if joins $d $n}} <span class="faint">(no restart)</span>{{end}}{{end}}{{end}}</span></li>{{end}}
+  </ol>
+  <p class="hint spaced">{{if eq $d.Pace "first"}}{{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} move{{if eq (len $d.Broken) 1}}s{{end}} as you roll it out. Each wave after moves once the one before has stayed healthy: two minutes for the first, a minute after.{{else}}Each wave moves once the one before has stayed healthy: two minutes for canaries, a minute after.{{end}} A tenant not healthy within 5 minutes of its move pauses the rollout; you can then resume, abort, or restore their data.</p>
+  {{end}}
+</section>
+{{end}}
+
+<section>
+  <div class="head"><h2>Its data</h2></div>
+  <p class="flat">Each tenant keeps its data as it moves, and a snapshot of it is taken first. A new image may change that data as it starts (a migration): going back to an older revision later does not undo it. While the rollout runs, the "Restore data snapshot" button on <a href="/apps/{{$a.Name}}#rollout">{{$a.Name}}'s page</a> puts the snapshot back, losing what was written since.</p>
+</section>
+{{end}}
+
+<section>
+  {{if and $d.Changed $d.Restart (ne $d.Pace $d.Proposed)}}<p class="hint{{if and (eq $d.Pace "now") $d.ImageTenants}} red{{end}} before-actions">{{if eq $d.Pace "now"}}Not the pace proposed: no health gate{{with $d.ImageTenants}}, and {{plural (len .) "tenant takes" "tenants take"}} a new image at once{{end}}.{{else}}Not the pace proposed: {{if eq $d.Proposed "first"}}{{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} now, the rest in waves{{else}}in waves{{end}} was.{{end}}</p>{{end}}
+  <form method="post" action="/apps/{{$a.Name}}" class="actions">
+    <input type="hidden" name="updated" value="{{$d.Updated}}">
+    {{if eq $d.Do "save"}}<input type="hidden" name="file" value="{{$d.File}}">{{end}}
+    {{if eq $d.Do "restore"}}<input type="hidden" name="revision" value="{{$d.Revision}}">{{end}}
+    {{if and $d.Changed $d.Restart}}<input type="hidden" name="pace" value="{{$d.Pace}}">{{if eq $d.Pace "first"}}<input type="hidden" name="first" value="{{range $i, $b := $d.Broken}}{{if $i}},{{end}}{{$b}}{{end}}">{{end}}{{end}}
+    {{if $d.Changed}}<button type="submit" name="do" value="{{$d.Do}}" class="{{if or (not $d.Restart) (eq $d.Pace $d.Proposed)}}primary{{else}}unproposed{{end}}">{{if not $d.Tenants}}Store the change{{else if not $d.Restart}}Store revision {{next $a.Revision}}: no tenant restarts{{else if eq $d.Pace "now"}}{{if eq $d.Do "restore"}}Return {{plural (len $d.Restart) "tenant" "tenants"}} to revision {{$d.Revision}} now{{else}}Restart {{plural (len $d.Restart) "tenant" "tenants"}} now{{end}}{{else if eq $d.Pace "first"}}Restart {{range $i, $b := $d.Broken}}{{if $i}}, {{end}}{{$b}}{{end}} now, the rest in waves{{else if eq $d.Do "restore"}}Return {{plural (len $d.Restart) "tenant" "tenants"}} to revision {{$d.Revision}} in waves{{else}}Roll out to {{plural (len $d.Restart) "tenant" "tenants"}} in waves{{end}}</button>{{end}}
+    {{if eq $d.Do "save"}}<button type="submit" name="do" value="edit">Back to editing</button>{{else}}<a href="/apps/{{$a.Name}}" class="button">Back to {{$a.Name}}</a>{{end}}
+  </form>
+</section>
+{{end}}
+
+{{define "review-diff"}}<div class="diff" role="table" aria-label="the change, line by line">
+    {{range .Diff}}{{if eq .Op ""}}<div class="gap" role="row"><span role="cell">…</span></div>{{else}}<div class="{{if eq .Op "+"}}in{{else if eq .Op "-"}}out{{end}}" role="row"><span class="ln" role="cell">{{if .Old}}{{.Old}}{{end}}</span><span class="ln" role="cell">{{if .New}}{{.New}}{{end}}</span><span class="op" role="cell" aria-label="{{if eq .Op "+"}}added{{else if eq .Op "-"}}removed{{else}}kept{{end}}">{{.Op}}</span><span class="tx" role="cell"{{if .Short}} title="{{.Text}}"{{end}}>{{if .Short}}{{.Short}}{{else}}{{.Text}}{{end}}</span></div>{{end}}{{end}}
+  </div>{{end}}

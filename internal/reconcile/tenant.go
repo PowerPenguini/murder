@@ -93,7 +93,7 @@ func (r *Reconciler) WatchReplacing() <-chan struct{} {
 func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, existing []runtime.Container) (status Status, err error) {
 	tenant := record.Spec
 	if tenant.Suspended {
-		if err := r.removeContainers(ctx, existing); err != nil {
+		if err := r.removeContainers(ctx, existing, "stopped"); err != nil {
 			return Status{}, err
 		}
 		return Status{Phase: PhaseSuspended}, nil
@@ -122,6 +122,16 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 	}
 	if err != nil {
 		return Status{}, fmt.Errorf("data volume: %w", err)
+	}
+	// The limits it runs with, and the node's defaults among them.
+	limits := tenant.Limits.Or(r.config.DefaultLimits)
+	defer func() { status.Limits, status.Defaults = limits, r.config.DefaultLimits }()
+	// Who wrote its data, as read: what an app that runs as another user
+	// would find there.
+	if who, mixed, err := volume.DataOwner(dataPath); err == nil {
+		defer func() { status.DataOwner, status.DataMixed = who, mixed }()
+	} else {
+		r.log.Debug("data owner not read", "tenant", tenant.Name, "error", err)
 	}
 	labels := map[string]string{runtime.LabelTenant: tenant.Name}
 	err = r.runtime.EnsureNetwork(ctx, NetworkName(tenant.Name), record.Subnet, labels)
@@ -217,7 +227,7 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		}
 		current = &runtime.Container{ID: id, Running: true}
 	} else {
-		if err := r.removeContainers(ctx, outdated); err != nil {
+		if err := r.removeContainers(ctx, outdated, "replaced"); err != nil {
 			return Status{}, err
 		}
 		// The engine starts no container by itself (runtime.RestartPolicy):
@@ -237,6 +247,17 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 					exits.count++
 					exits.at = state.ExitedAt
 					exits.last = lastExit(state, tenant.Limits.Or(r.config.DefaultLimits).MemoryMB)
+					// Its lines up to the exit, before the new run's.
+					memoryMB := tenant.Limits.Or(r.config.DefaultLimits).MemoryMB
+					r.keepPrevious(ctx, tenant.Name, *current, Previous{Why: "exited", Image: tenant.Image,
+						ExitedAt: state.ExitedAt.UTC(), ExitKnown: state.ExitKnown, ExitCode: state.ExitCode, OOMKilled: state.OOMKilled,
+						MemoryMB: memoryMB})
+					// Said in the audit log, once per exit, with the limit
+					// it ran under: whether a limit is too low is judged
+					// from the kills at the limit in effect.
+					if err := r.store.AppExited(tenant.Name, ExitDetail(state, memoryMB)); err != nil {
+						r.log.Warn("record the app's exit", "tenant", tenant.Name, "error", err)
+					}
 				}
 				restarted = true
 			}
@@ -264,6 +285,21 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		return status, nil
 	}
 	return Status{Phase: PhaseRunning, ContainerID: current.ID}, nil
+}
+
+// ExitDetail is how an app exit is said in the audit log: its code first,
+// then, for a kill, the memory limit it ran under, which the panel reads:
+// "exit 137: killed for using more than its 256 MB of memory".
+func ExitDetail(state runtime.ContainerState, memoryMB int) string {
+	switch {
+	case !state.ExitKnown:
+		return "exited; its code is not known"
+	case state.OOMKilled:
+		return fmt.Sprintf("exit %d: killed for using more than its %d MB of memory", state.ExitCode, memoryMB)
+	case state.ExitCode == 137 && memoryMB > 0:
+		return fmt.Sprintf("exit 137: killed (SIGKILL), most likely for using more than its %d MB of memory", memoryMB)
+	}
+	return fmt.Sprintf("exit %d", state.ExitCode)
 }
 
 // lastExit describes the last exit of a container's process.
@@ -345,7 +381,7 @@ func (r *Reconciler) replace(ctx context.Context, record store.Record, dataPath 
 		case <-time.After(r.replaceNotice):
 		}
 	}
-	if err := r.removeContainers(ctx, outdated); err != nil {
+	if err := r.removeContainers(ctx, outdated, "replaced"); err != nil {
 		return "", false, err
 	}
 	// With no old container running, the first snapshot holds every write.
@@ -430,7 +466,7 @@ func (r *Reconciler) pruneSnapshots(ctx context.Context, record store.Record) {
 // as it left it. Until then the edges hold its requests.
 func (r *Reconciler) restoreData(ctx context.Context, record store.Record, existing []runtime.Container) error {
 	tenant := record.Spec.Name
-	if err := r.removeContainers(ctx, existing); err != nil {
+	if err := r.removeContainers(ctx, existing, "replaced"); err != nil {
 		return err
 	}
 	if record.DataImage != record.Restore {
@@ -569,14 +605,31 @@ func (r *Reconciler) awaitReplaced(ctx context.Context, record store.Record) {
 	}
 }
 
-func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.Container) error {
+// removeContainers stops and removes containers. With a reason, "replaced"
+// or "stopped", the last lines of the tenant's container are kept first
+// (previous.go), with its exit if it had exited; with none, nothing is
+// kept: the tenant leaves the node, or is purged.
+func (r *Reconciler) removeContainers(ctx context.Context, containers []runtime.Container, why string) error {
 	var errs []error
 	for _, container := range containers {
+		var exit runtime.ContainerState
+		if why != "" && !container.Running {
+			exit, _ = r.runtime.Inspect(ctx, container.ID)
+		}
 		if container.Running {
 			if err := r.runtime.Stop(ctx, container.ID, r.config.StopTimeout); err != nil {
 				errs = append(errs, fmt.Errorf("stop %s: %w", container.Name, err))
 				continue
 			}
+		}
+		if tenant := container.Labels[runtime.LabelTenant]; why != "" && tenant != "" {
+			kept := Previous{Why: why}
+			// A container that had exited before it was replaced: its
+			// lines end at that exit.
+			if exit.Pid == 0 && !exit.ExitedAt.IsZero() && exit.ExitKnown && exit.ExitCode != 143 {
+				kept.ExitedAt, kept.ExitKnown, kept.ExitCode, kept.OOMKilled = exit.ExitedAt.UTC(), true, exit.ExitCode, exit.OOMKilled
+			}
+			r.keepPrevious(ctx, tenant, container, kept)
 		}
 		if err := r.runtime.Remove(ctx, container.ID); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", container.Name, err))

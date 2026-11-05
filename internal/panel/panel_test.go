@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func TestTheOverviewShowsTheCluster(t *testing.T) {
 		"fsn-1", "nbg-1", "hel-1", ">failed<", ">leader<",
 		"2<small> / 3</small>", // nodes up
 		"5<small> / 6</small>", // healthy of those meant to run
-		"copy moves from fsn-1 to hel-1",
+		"failed over to its copy",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the overview lacks %q", want)
@@ -64,7 +65,7 @@ func TestTheOverviewShowsTheCluster(t *testing.T) {
 	}
 	_, tenants := get(t, server.URL+"/tenants")
 	for _, want := range []string{
-		`href="/tenants/kowalski-trans"`, "→ hel-1, moving", ">unhealthy<", ">archived<", ">suspended<",
+		`href="/tenants/kowalski-trans"`, "catching up", ">unhealthy<", ">archived<", ">suspended<",
 		`data-filter="tenants"`, " live, ", " healthy",
 	} {
 		if !strings.Contains(tenants, want) {
@@ -87,7 +88,7 @@ func TestTheOverviewShowsTheCluster(t *testing.T) {
 func TestATenantsPage(t *testing.T) {
 	server := newTestServer(t, Demo{Now: demoNow})
 	_, body := get(t, server.URL+"/tenants/baltic-freight")
-	for _, want := range []string{"baltic-freight", ">unhealthy<", "exit 137", "SESSION_KEY", "secret · hex", "Europe/Warsaw", "256 MB"} {
+	for _, want := range []string{"baltic-freight", ">unhealthy<", "exit 137", "SESSION_KEY", "secret, hex", "Europe/Warsaw", "256 MB"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the tenant's page lacks %q", want)
 		}
@@ -131,11 +132,11 @@ func (f fakeBackend) Events(ctx context.Context, query store.EventQuery) ([]stor
 func TestTheEventsPage(t *testing.T) {
 	var events []store.Event
 	for id := int64(150); id > 0; id-- {
-		events = append(events, store.Event{ID: id, At: demoNow, Actor: "root", Action: "tenant.created", Detail: "<b>bold</b>"})
+		events = append(events, store.Event{ID: id, At: demoNow, Actor: "root", Action: "tenant.created", Detail: "<b>bold</b> " + strconv.FormatInt(id, 10)})
 	}
 	server := newTestServer(t, fakeBackend{Demo: Demo{Now: demoNow}, events: events})
 	_, body := get(t, server.URL+"/events")
-	if !strings.Contains(body, "before=51") || strings.Contains(body, "<b>bold</b>") || !strings.Contains(body, "&lt;b&gt;bold&lt;/b&gt;") {
+	if !strings.Contains(body, "before=51") || strings.Contains(body, "<b>bold</b>") || !strings.Contains(body, "&lt;b&gt;bold&lt;/b&gt; 150") {
 		t.Fatalf("events page:\n%s", body)
 	}
 	_, older := get(t, server.URL+"/events?before=51")
@@ -162,7 +163,7 @@ func TestAgo(t *testing.T) {
 			t.Errorf("ago(%s) = %q, want %q", c.d, got, c.want)
 		}
 	}
-	if ago(demoNow, time.Time{}) != "—" || shortImage("sha256:c23c323553d0a47e") != "c23c323553d0" {
+	if ago(demoNow, time.Time{}) != "never" || shortImage("sha256:c23c323553d0a47e") != "c23c323553d0" {
 		t.Error("zero time or image")
 	}
 }
@@ -213,7 +214,7 @@ func TestTheSocketsPanelTakesChangesFromItsOwnPages(t *testing.T) {
 	server := httptest.NewServer(s.Handler())
 	defer server.Close()
 	post := func(origin, site string) int {
-		request, _ := http.NewRequest(http.MethodPost, server.URL+"/access", strings.NewReader("do=remove-person&name=anna"))
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/access", strings.NewReader("do=remove-person&name=anna&confirm=anna"))
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		if origin != "" {
 			request.Header.Set("Origin", origin)

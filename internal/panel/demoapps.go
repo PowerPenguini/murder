@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // AsApps is the cluster's apps and tenants' settings, edited by actor.
-func (d *DemoCluster) AsApps(actor string) AppAgent { return &demoActor{d, actor} }
+func (d *DemoCluster) AsApps(actor string) AppAgent { return &demoActor{DemoCluster: d, actor: actor} }
 
 // demoApps makes the demo's apps from its tenants, and gives one tenant
 // settings of its own.
@@ -43,7 +44,7 @@ func (d *DemoCluster) demoApps() {
 		oldest.Image = "ghcr.io/example/web@sha256:" + strings.Repeat("9f", 32)
 		d.revisions["web"] = []store.Revision{
 			{Revision: 1, Spec: oldest, Tag: web.Tag, CreatedAt: created, Actor: "root"},
-			{Revision: 2, Spec: older, Tag: web.Tag, CreatedAt: time.Now().Add(-9 * 24 * time.Hour), Actor: "jan via murder-panel"},
+			{Revision: 2, Spec: older, Tag: web.Tag, CreatedAt: time.Now().Add(-9 * 24 * time.Hour), Actor: "jan (panel) via murder-panel"},
 			{Revision: 3, Spec: web.Spec, Tag: web.Tag, CreatedAt: web.UpdatedAt, Actor: "root"},
 		}
 		web.Revision = 3
@@ -51,15 +52,57 @@ func (d *DemoCluster) demoApps() {
 		web.LatestAt = time.Now().Add(-18 * time.Minute)
 		// A rollout of revision 3 is on its second wave.
 		web.Rollout = &store.Rollout{App: "web", ToRevision: 3, State: store.RolloutRunning, Wave: 2,
-			WaveStarted: time.Now().Add(-40 * time.Second), StartedAt: time.Now().Add(-3 * time.Minute), UpdatedAt: time.Now().Add(-40 * time.Second), Actor: "root"}
+			WaveStarted: time.Now().Add(-4*time.Minute - 30*time.Second), StartedAt: time.Now().Add(-10 * time.Minute), UpdatedAt: time.Now().Add(-4*time.Minute - 30*time.Second), Actor: "root"}
 		d.apps["web"] = web
+	}
+	// Its tenants, as that rollout left them: two canaries moved in the
+	// first wave, baltic-freight in the second and broke; three wait on
+	// revision 2, and test-staging is held there.
+	started := time.Now().Add(-10 * time.Minute)
+	for name, moved := range map[string]int{"atlas": 1, "acme-logistics": 1, "baltic-freight": 2} {
+		t := d.tenants[name]
+		t.BeforeRevision, t.Canary = 2, moved == 1
+		d.tenants[name] = t
+		at := started
+		if moved == 2 {
+			at = time.Now().Add(-4*time.Minute - 30*time.Second)
+		}
+		d.events = append(d.events, store.Event{At: at, Actor: "murder (rollout)", Action: "app.rolled-out", Tenant: name, App: "web", Detail: store.WaveSaid(moved, store.WaveName(moved-1)) + ": revision 2 → 3"})
+	}
+	for _, name := range []string{"kowalski-trans", "nordwind", "vistula-cargo", "test-staging"} {
+		t := d.tenants[name]
+		t.AppRevision = 2
+		t.Hold = name == "test-staging"
+		d.tenants[name] = t
+	}
+	slices.SortStableFunc(d.events, func(a, b store.Event) int { return b.At.Compare(a.At) })
+	for i := range d.events {
+		d.events[i].ID = int64(len(d.events) - i)
 	}
 	d.apps["testapp"] = api.App{Name: "testapp", Spec: spec.Tenant{Image: "ghcr.io/powerpenguini/murder-testapp@sha256:" + strings.Repeat("7", 64), User: "10001:10001", HealthPath: "/health"}.WithDefaults(),
 		CreatedAt: created, UpdatedAt: created}
 	t := d.tenants["atlas"]
 	t.Overrides = spec.Overrides{Env: map[string]string{"TZ": "Europe/Berlin", "FEATURE_PLANNER": "on"}, Secrets: spec.Secrets{"ADMIN_PASSWORD": {Kind: "password", Bytes: 20}}, Limits: spec.Limits{MemoryMB: 768}}
-	t.Spec = spec.Compose(d.apps[t.App].Spec, t.Spec.Name, t.Overrides)
+	t.KeptSecrets = []string{"ADMIN_PASSWORD", "SESSION_KEY"}
 	d.tenants["atlas"] = t
+	// Each tenant runs its app's spec, of the revision it is on, with its
+	// overrides, composed as the store composes it.
+	for name, t := range d.tenants {
+		app, ok := d.apps[t.App]
+		if !ok {
+			continue
+		}
+		from := app.Spec
+		if t.AppRevision != 0 {
+			if kept, ok := d.revisionSpec(t.App, t.AppRevision); ok {
+				from = kept
+			}
+		}
+		suspended := t.Spec.Suspended
+		t.Spec = spec.Compose(from, name, t.Overrides)
+		t.Spec.Suspended = suspended
+		d.tenants[name] = t
+	}
 }
 
 // liveTenantsOf lists the live tenants of app; the caller holds d.mu.
@@ -139,15 +182,7 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 			stored.Latest, stored.LatestAt = old.Latest, old.LatestAt
 		}
 	}
-	a.apps[name] = stored
-	a.revisions[name] = append(a.revisions[name], store.Revision{Revision: stored.Revision, Spec: app, Tag: tag, CreatedAt: now, Actor: a.actor})
-	for _, tenant := range a.liveTenantsOf(name) {
-		t := a.tenants[tenant]
-		t.Spec = spec.Compose(app, tenant, t.Overrides)
-		t.Generation++
-		a.tenants[tenant] = t
-		applied.Tenants = append(applied.Tenants, t)
-	}
+	a.revisions[name] = append(a.revisions[name], store.Revision{Revision: stored.Revision, Spec: app, Tag: tag, CreatedAt: now, Actor: a.actor + " via murder-panel"})
 	action := "app.updated"
 	if !existed {
 		action = "app.created"
@@ -156,6 +191,65 @@ func (a *demoActor) storeApp(name string, app spec.Tenant, tag string, cond stor
 	if detail != "" {
 		a.events[0].Detail = detail
 	}
+	// As the store does: a tenant whose spec does not change, on the
+	// newest revision, is left as it is; a held one keeps its revision; in
+	// waves, the others wait for the rollout, which keeps the revision
+	// each runs until it moves them; at once, each moves now.
+	waves := existed && !a.atOnce
+	for _, tenant := range a.liveTenantsOf(name) {
+		t := a.tenants[tenant]
+		composed := spec.Compose(app, tenant, t.Overrides)
+		composed.Suspended = t.Spec.Suspended
+		if composed.Equal(t.Spec) && t.AppRevision == 0 {
+			// As the store does: no earlier rollout's move is said of it.
+			t.BeforeRevision = 0
+			a.tenants[tenant] = t
+			continue
+		}
+		if t.Hold {
+			if t.AppRevision == 0 {
+				t.AppRevision = old.Revision
+			}
+			a.tenants[tenant] = t
+			continue
+		}
+		if waves {
+			if t.AppRevision == 0 {
+				t.AppRevision, t.BeforeRevision = old.Revision, 0
+			}
+			a.tenants[tenant] = t
+			applied.Tenants = append(applied.Tenants, t)
+			continue
+		}
+		t.AppRevision, t.BeforeRevision = 0, 0
+		a.moveTenant(&t, composed, "app changed")
+		a.tenants[tenant] = t
+		applied.Tenants = append(applied.Tenants, t)
+	}
+	if waves && len(applied.Tenants) > 0 {
+		applied.Rollout = true
+		stored.Rollout = &store.Rollout{App: name, ToRevision: stored.Revision, State: store.RolloutRunning, WaveStarted: now, StartedAt: now, UpdatedAt: now, Actor: a.actor + " via murder-panel"}
+		// As the store does: those asked to go first move now, as wave 1.
+		for _, tenant := range a.liveTenantsOf(name) {
+			t := a.tenants[tenant]
+			if !slices.Contains(a.first, tenant) || t.Hold || t.AppRevision == 0 {
+				continue
+			}
+			composed := spec.Compose(app, tenant, t.Overrides)
+			composed.Suspended = t.Spec.Suspended
+			from := t.AppRevision
+			t.BeforeRevision, t.AppRevision = from, 0
+			a.moveTenant(&t, composed, store.WaveSaid(1, "First, now")+": revision "+strconv.FormatInt(from, 10)+" → "+strconv.FormatInt(stored.Revision, 10))
+			a.tenants[tenant] = t
+			stored.Rollout.Wave, stored.Rollout.First = 1, 1
+			for i := range applied.Tenants {
+				if applied.Tenants[i].Spec.Name == tenant {
+					applied.Tenants[i] = t
+				}
+			}
+		}
+	}
+	a.apps[name] = stored
 	stored.Tenants = a.liveTenantsOf(name)
 	applied.App = stored
 	return applied, nil
@@ -261,12 +355,72 @@ func (a *demoActor) Configure(_ context.Context, name string, request api.Tenant
 	if request.App == t.App && request.Overrides.Equal(t.Overrides) {
 		return api.Applied{Tenant: t}, nil
 	}
-	changed, err := a.change(name, "tenant.updated", "", func(t *api.Tenant) error {
+	// As the store says it: its overrides, another app named first.
+	detail := store.OverridesDetail(request.Overrides.Normalized())
+	if detail == "" {
+		detail = "no overrides"
+	}
+	if changes := store.ChangesDetail(t.Overrides, request.Overrides.Normalized()); changes != "" {
+		detail = "changes: " + changes + "; " + detail
+	}
+	if request.App != t.App {
+		detail = "app " + t.App + " → " + request.App + "; " + detail
+	}
+	// Its disk limit alone changes: its node sets it on the volume as it
+	// runs, no new container (the reconciler leaves it out of the
+	// container's inputs). One below its data the volume refuses, as ZFS
+	// does: it keeps the limit it had, and the node warns.
+	beforeOverrides := t.Overrides
+	beforeOverrides.Limits.DiskGB = request.Overrides.Limits.DiskGB
+	live := request.App == t.App && request.Overrides.Equal(beforeOverrides) && t.Status != nil
+	used, kept := a.diskOf(t)
+	warning := ""
+	if gb := composed.Limits.Or(demoDefaults).DiskGB; gb > 0 && int64(gb)<<30 < used {
+		warning = "disk limit not applied: " + strconv.Itoa(gb) + " GB: cannot set property for 'tank/murder/" + name + "': size is less than current used or reserved space"
+	}
+	a.mu.Lock()
+	if a.diskKept == nil {
+		a.diskKept = map[string]int{}
+	}
+	if warning != "" {
+		a.diskKept[name] = int(kept >> 30)
+	} else {
+		delete(a.diskKept, name)
+	}
+	a.mu.Unlock()
+	var status reconcile.Status
+	if t.Status != nil {
+		status = *t.Status
+	}
+	changed, err := a.change(name, "tenant.updated", detail, func(t *api.Tenant) error {
 		suspended := t.Spec.Suspended
+		// As the store: every secret it was given keeps its value, kept or
+		// in use.
+		for key := range composed.Secrets {
+			if !slices.Contains(t.KeptSecrets, key) {
+				t.KeptSecrets = append(t.KeptSecrets, key)
+			}
+		}
+		slices.Sort(t.KeptSecrets)
 		t.App, t.Overrides, t.Spec = request.App, request.Overrides.Normalized(), composed
 		t.Spec.Suspended = suspended
 		return nil
 	})
+	if err == nil && (live || warning != "") {
+		a.mu.Lock()
+		t := a.tenants[name]
+		if live {
+			// The same container: its node's word, at the new generation.
+			status.Generation, status.CheckedAt = t.Generation, time.Now()
+			t.Status = &status
+		}
+		if t.Status != nil {
+			t.Status.Warning = warning
+		}
+		a.tenants[name] = t
+		changed = t
+		a.mu.Unlock()
+	}
 	return api.Applied{Tenant: changed, Changed: err == nil}, err
 }
 
@@ -300,6 +454,23 @@ func (a *demoActor) RolloutAction(_ context.Context, name, action string) (api.A
 		rollout.State, rollout.Reason, rollout.WaveStarted = store.RolloutRunning, "", time.Now()
 	case "abort":
 		rollout.State, rollout.Reason = store.RolloutAborted, "aborted by "+a.actor
+		// Every tenant it moved goes back to the revision it ran before.
+		for _, tenant := range a.liveTenantsOf(name) {
+			t := a.tenants[tenant]
+			if t.BeforeRevision == 0 || t.Hold {
+				continue
+			}
+			before, ok := a.revisionSpec(name, t.BeforeRevision)
+			if !ok {
+				continue
+			}
+			composed := spec.Compose(before, tenant, t.Overrides)
+			composed.Suspended = t.Spec.Suspended
+			back := t.BeforeRevision
+			t.AppRevision, t.BeforeRevision = back, 0
+			a.moveTenant(&t, composed, "aborted: back to revision "+strconv.FormatInt(back, 10))
+			a.tenants[tenant] = t
+		}
 	case "promote":
 		if rollout.State != store.RolloutRunning {
 			return api.App{}, &api.Error{Status: 409, Message: "the rollout of app " + name + " is " + rollout.State + ": resume it first"}
@@ -339,8 +510,24 @@ func (a *demoActor) RestoreRollout(_ context.Context, name string, tenants []str
 	return api.RolloutRestored{App: app, Tenants: tenants}, nil
 }
 
-func (a *demoActor) SetFlags(_ context.Context, name string, flags api.TenantFlags) (api.Tenant, error) {
-	return a.change(name, "tenant.flags", "", func(t *api.Tenant) error {
+func (a *demoActor) SetFlags(ctx context.Context, name string, flags api.TenantFlags) (api.Tenant, error) {
+	// As the store: nothing changed is not recorded, and the event says
+	// the flags that did change.
+	t, err := a.Get(ctx, name)
+	if err != nil {
+		return t, err
+	}
+	canary, hold := t.Canary, t.Hold
+	if flags.Canary != nil {
+		canary = *flags.Canary
+	}
+	if flags.Hold != nil {
+		hold = *flags.Hold
+	}
+	if canary == t.Canary && hold == t.Hold {
+		return t, nil
+	}
+	return a.change(name, "tenant.flags", store.FlagsDetail(t.Canary, t.Hold, canary, hold), func(t *api.Tenant) error {
 		if flags.Canary != nil {
 			t.Canary = *flags.Canary
 		}

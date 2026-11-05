@@ -349,7 +349,7 @@ func TestAStateFromBeforeIdentityKeysStillServes(t *testing.T) {
 		`ALTER TABLE nodes DROP COLUMN key`,
 		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '4'), ('applied', '9'), ('cluster', 'acme')`,
 		`INSERT INTO nodes (name, address, created_at) VALUES ('n1', '10.0.0.1:7400', '2026-10-01T00:00:00Z')`,
-		`PRAGMA user_version = 15`,
+		`ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -404,4 +404,42 @@ func mustOpen(t *testing.T, path string) *os.File {
 	}
 	t.Cleanup(func() { file.Close() })
 	return file
+}
+
+// A schema 16 database, with a rollout under way, upgrades in place: its
+// rollout moved no tenant first.
+func TestOpenUpgradesSchemaVersion16(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "murder.db")
+	db, err := sql.Open("sqlite", initDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		schema,
+		`ALTER TABLE rollouts DROP COLUMN first`,
+		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '3'), ('applied', '0')`,
+		`INSERT INTO apps (name, spec, created_at, updated_at, revision) VALUES ('web', '` + marshal(normalizeApp(appSpec())) + `', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 2)`,
+		`INSERT INTO rollouts (app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor) VALUES ('web', 2, 'running', 1, '2026-10-01T00:00:00Z', '', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 'bob')`,
+		`PRAGMA user_version = 16`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	rollout, err := st.Rollout("web")
+	if err != nil || rollout.Wave != 1 || rollout.First != 0 || rollout.WaveName(1) != "Canaries" {
+		t.Fatalf("rollout after the upgrade: %+v, %v", rollout, err)
+	}
+	var version int
+	if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("user_version = %d, %v", version, err)
+	}
 }

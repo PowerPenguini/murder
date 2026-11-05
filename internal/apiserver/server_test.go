@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -148,6 +149,11 @@ func (m *memoryRuntime) Logs(_ context.Context, id string, tail int) ([]byte, er
 	return []byte("logs of " + id + "\n"), nil
 }
 
+// LogsSince says from when it was asked to read.
+func (m *memoryRuntime) LogsSince(_ context.Context, id string, tail int, since time.Time) ([]byte, error) {
+	return []byte("logs of " + id + " since " + since.UTC().Format(time.RFC3339) + "\n"), nil
+}
+
 type apiFixture struct {
 	client     *api.Client
 	store      *store.SQLite
@@ -156,6 +162,8 @@ type apiFixture struct {
 	dataRoot   string
 	server     *Server
 	runtime    *memoryRuntime
+	// previousDir is where the reconciler keeps previous containers' lines.
+	previousDir string
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
@@ -183,13 +191,15 @@ func newAPIFixtureWith(t *testing.T, volumes func(volume.Dir) volume.Volumes) *a
 	t.Cleanup(func() { _ = st.Close() })
 	rt := &memoryRuntime{}
 	dataRoot := filepath.Join(t.TempDir(), "tenants")
+	previousDir := filepath.Join(t.TempDir(), "previous")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	reconciler := reconcile.New(st, rt, volumes(volume.Dir{Root: dataRoot}), key, reconcile.Config{BaseDomain: "example.test", HealthTimeout: 100 * time.Millisecond}, log)
+	reconciler := reconcile.New(st, rt, volumes(volume.Dir{Root: dataRoot}), key, reconcile.Config{BaseDomain: "example.test", HealthTimeout: 100 * time.Millisecond,
+		PreviousDir: previousDir}, log)
 	served := NewServer(st, reconciler, rt, key, log)
 	handler := served.Handler()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return &apiFixture{client: api.NewClientURL(server.URL), store: st, reconciler: reconciler, handler: handler, dataRoot: dataRoot, server: served, runtime: rt}
+	return &apiFixture{client: api.NewClientURL(server.URL), store: st, reconciler: reconciler, handler: handler, dataRoot: dataRoot, server: served, runtime: rt, previousDir: previousDir}
 }
 
 func appSpec() spec.Tenant {
@@ -236,6 +246,10 @@ func TestAppsArePinnedAndRolledOutToTheirTenants(t *testing.T) {
 	}
 	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
 		t.Fatal(err)
+	}
+	// The secrets it holds a value of are named, never their values.
+	if acme, err := f.client.Get(ctx, "acme"); err != nil || !slices.Equal(acme.KeptSecrets, []string{"SESSION_SECRET"}) {
+		t.Fatalf("acme's kept secrets = %v, %v", acme.KeptSecrets, err)
 	}
 	beta := tenantOf("beta")
 	beta.Overrides = spec.Overrides{Env: map[string]string{"TZ": "UTC"}}
@@ -648,11 +662,12 @@ func TestStatusOfTenantsOfOtherNodes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	healthy := reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true, Generation: 1}
+	// Who wrote its data, as that node read it, comes along.
+	healthy := reconcile.Status{Phase: reconcile.PhaseRunning, Healthy: true, Generation: 1, DataOwner: "1000:1000"}
 	f.server.WithCluster(statusCluster{statuses: map[string]reconcile.Status{"n2/on-n2": healthy}})
 
 	tenant, err := f.client.Get(ctx, "on-n2")
-	if err != nil || tenant.Status == nil || !tenant.Status.Healthy || tenant.Status.Phase != reconcile.PhaseRunning {
+	if err != nil || tenant.Status == nil || !tenant.Status.Healthy || tenant.Status.Phase != reconcile.PhaseRunning || tenant.Status.DataOwner != "1000:1000" {
 		t.Fatalf("on-n2 = %+v, %v", tenant, err)
 	}
 	// Its copy, and whether it can take over.

@@ -41,6 +41,8 @@ const tenantUsage = `Usage: murder tenant <command> [options]
                          this node's tenants one at a time, each healthy
                          before the next (-wait, 5m by default)
   logs NAME [-tail N]    print the container's recent output
+  logs NAME -previous    print the last lines its node kept of the container
+                         before (one that exited, or was replaced or stopped)
 
 Overrides (repeatable where it makes sense; set changes only what is given):
   -image REF             run this image instead of the app's (a canary)
@@ -102,6 +104,7 @@ func runTenant(args []string) error {
 	wait := flags.Duration("wait", 0, "wait up to this long for the tenant to be healthy (e.g. 2m)")
 	yes := flags.Bool("yes", false, "confirm purge")
 	tail := flags.Int("tail", 200, "with logs: number of lines")
+	previous := flags.Bool("previous", false, "with logs: the previous container's last lines, as its node kept them")
 	asJSON := flags.Bool("json", false, "with list: print JSON")
 	all := flags.Bool("all", false, "with roll: every tenant this node runs")
 	to := flags.String("to", "", "with move: the node to move to")
@@ -237,6 +240,25 @@ func runTenant(args []string) error {
 		return rollAll(ctx, client, *wait)
 	case "logs":
 		if err := need(1); err != nil {
+			return err
+		}
+		if *previous {
+			kept, err := client.PreviousLogs(ctx, positional[0])
+			if err != nil {
+				return err
+			}
+			how := kept.Why
+			if kept.ExitKnown {
+				how = fmt.Sprintf("exited with code %d at %s", kept.ExitCode, kept.ExitedAt.UTC().Format(time.RFC3339))
+				if kept.OOMKilled {
+					how += ", killed for its memory"
+				}
+			}
+			fmt.Fprintf(os.Stderr, "container %s (%s), %s; kept at %s\n", kept.Container, kept.Image, how, kept.At.UTC().Format(time.RFC3339))
+			if kept.Cut {
+				fmt.Fprintln(os.Stderr, "older lines were dropped: a node keeps the last 1000 lines or 64 KB")
+			}
+			_, err = io.WriteString(stdout, kept.Lines)
 			return err
 		}
 		output, err := client.Logs(ctx, positional[0], *tail)

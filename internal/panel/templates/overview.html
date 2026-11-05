@@ -1,49 +1,64 @@
 {{define "content"}}{{$d := .Data}}
+<h1 class="sr">Overview</h1>
 <div class="figures">
-  <div class="figure"><div class="n">{{template "upcount" $d.Nodes}}<small> / {{len $d.Nodes}}</small></div><div class="l">nodes up</div></div>
-  <a class="figure" href="/tenants"><div class="n">{{$d.Healthy}}<small> / {{$d.Serving}}</small></div><div class="l">tenants healthy</div></a>
-  <div class="figure{{range $d.Attention}}{{if .Bad}} alarm{{break}}{{end}}{{end}}"><div class="n">{{len $d.Attention}}</div><div class="l">need attention</div></div>
+  <a class="figure{{if $d.Broken}} alarm{{end}}" href="#attention"><div class="n">{{$d.Broken}}</div><div class="l">broken</div></a>
+  <a class="figure" href="#attention"><div class="n">{{sub (len $d.Attention) $d.Broken}}</div><div class="l">at risk</div></a>
+  <a class="figure" href="/cluster"><div class="n">{{template "upcount" $d.Nodes}}<small> / {{len $d.Nodes}}</small></div><div class="l">nodes up</div></a>
+  <a class="figure" href="{{if lt $d.Healthy $d.Serving}}{{query "show" "unhealthy"}}{{else}}/tenants{{end}}"{{if lt $d.Healthy $d.Serving}} aria-label="{{$d.Healthy}} of {{$d.Serving}} serving tenants healthy: show the {{sub $d.Serving $d.Healthy}} not healthy"{{end}}><div class="n">{{$d.Healthy}}<small> / {{$d.Serving}}</small></div><div class="l">tenants healthy</div></a>
 </div>
 
-<section class="near">
+<section class="near" id="attention" aria-labelledby="attention-h">
+  <h2 id="attention-h" class="sr">Needs attention</h2>
   {{with $d.Attention}}
   <ul class="attention">
-    {{range .}}<li><span class="st {{if .Bad}}bad{{else}}warn{{end}}"></span><a href="{{.Href}}">{{.Subject}}</a> {{.Text}}</li>{{end}}
+    {{range .}}<li{{if .Bad}} class="broken"{{end}}><span class="st {{if .Bad}}bad{{else}}warn{{end}}" aria-label="{{if .Bad}}broken{{else}}at risk{{end}}"></span><div>
+      <p class="nhead"><a href="{{.Href}}" class="subject">{{.Subject}}</a>{{if .Head}}{{names .Head}}{{else}}{{names .Text}}{{end}}.</p>
+      {{range .Subs}}<p class="cause{{if .Bad}} bad{{end}}">{{names .Short}}{{range .Fixes}} <a href="{{.Href}}">{{.Label}}</a>{{end}}</p>{{end}}
+      {{if or .Primary .Fixes}}<div class="nacts">{{with .Primary}}<a href="{{.Href}}" class="button primary">{{.Label}}</a>{{end}}{{range .Fixes}}<a href="{{.Href}}">{{.Label}}</a>{{end}}</div>{{end}}
+      {{if .HasEvidence}}<details class="evidence"><summary>{{.EvidenceLabel}}</summary><div class="evbody">{{range .Evidence}}<p>{{names .}}</p>{{end}}{{range .Subs}}{{if ne .Text .Short}}<p>{{names .Text}}</p>{{end}}{{end}}{{with .More}}<p class="fixes">{{range .}}<a href="{{.Href}}">{{.Label}}</a>{{end}}</p>{{end}}</div></details>{{end}}
+    </div></li>{{end}}
   </ul>
   {{else}}
-  <p class="calm"><span class="st ok"></span>Every node answers and every tenant runs as it should.</p>
+  <p class="calm"><span class="st ok"></span>Every node answers, every tenant runs healthy, and every one has a ready copy.</p>
+  {{end}}
+  {{with $d.Rollouts}}
+  <ul class="attention under">
+    {{range .}}<li><span class="st {{if .Paused}}warn{{else}}busy{{end}}"></span><div><a href="/apps/{{.App}}" class="subject">{{.App}}</a>{{.Text}}.<span class="fixes"><a href="/apps/{{.App}}#rollout">Follow the rollout</a></span></div></li>{{end}}
+  </ul>
   {{end}}
 </section>
 
 <section>
-  <div class="head"><h2>Nodes</h2></div>
-  <div class="scroll">
-  <table>
-    <thead><tr><th>Node</th><th>State</th><th>CPU</th><th>Memory</th><th>Tenants</th><th class="hide-narrow">Address</th></tr></thead>
+  <div class="head"><h2>Nodes</h2><a href="/cluster" class="dim">Cluster</a></div>
+  <table class="list rows">
+    <thead><tr><th>Node</th><th>State</th><th>CPU, cores</th><th>Memory</th><th class="num">Tenants</th><th class="hide-narrow hide-mid">Address</th></tr></thead>
     <tbody>
     {{range $d.Nodes}}
       <tr>
-        <td>{{.Name}}{{if .Leader}} <span class="dim">leader</span>{{end}}</td>
-        <td><span class="st {{.State.Kind}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
-        <td class="barcell">{{with .Use}}<div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div>{{else}}<span class="faint">—</span>{{end}}</td>
-        <td class="barcell">{{with .Use}}<div class="barline">{{template "bar" .Memory}}<span class="num">{{.MemoryText}}</span></div>{{else}}<span class="faint">—</span>{{end}}
-          {{if .MemoryMB}}<div class="barline dim"><span class="num">{{mem .MemoryMB}} reserved by limits</span></div>{{end}}</td>
-        <td class="num-left">{{.Tenants}} <span class="dim">· {{.Copies}} {{if eq .Copies 1}}copy{{else}}copies{{end}}</span></td>
-        <td class="mono dim hide-narrow">{{addrs .NodeState}}</td>
+        <td class="l-main"><a class="row-link" href="{{node .Name}}">{{.Name}}</a>{{if .Leader}} <span class="dim">leader</span>{{end}}</td>
+        <td class="l-side"><span class="st {{.State.Kind}}" data-node-state="{{.Name}}">{{.State.Label}}</span>{{if not .FailedAt.IsZero}} <span class="dim">{{ago .FailedAt}} ago</span>{{end}}</td>
+        <td class="barcell l-sub" data-label="CPU">{{with .Use}}<div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div>{{else}}<span class="faint">not measured</span>{{end}}</td>
+        <td class="barcell l-sub" data-label="Memory">{{with .Use}}<div class="barline">{{template "bar" .Memory}}<span class="num">{{.MemoryText}}</span></div>{{else}}<span class="faint">not measured</span>{{end}}
+          {{if .MemoryMB}}<div class="small dim">{{mem .MemoryMB}} reserved by limits</div>{{end}}</td>
+        <td class="num">{{.Tenants}} <span class="dim">· {{plural .Copies "copy" "copies"}}</span></td>
+        <td class="mono dim hide-narrow hide-mid">{{addrs .NodeState}}</td>
+        <td class="l-more"><details class="rowmore"><summary>Details</summary><dl class="pairs">
+          <dt>Runs</dt><dd>{{plural .Tenants "tenant" "tenants"}}, keeps {{plural .Copies "copy" "copies"}}</dd>
+          <dt>Public address</dt><dd class="mono">{{addrs .NodeState}}</dd>
+        </dl></details></td>
       </tr>
     {{end}}
     </tbody>
   </table>
-  </div>
 </section>
 
 <section>
-  <div class="head"><h2>Activity, last 24 hours</h2><a href="/events" class="dim">{{$d.Activity.Total}} events{{if $d.Activity.Partial}}, the oldest hours not all read{{end}}</a></div>
+  <div class="head"><h2>Activity, last 24 hours</h2>{{if $d.Activity.Partial}}<span class="dim">the oldest hours not all read</span>{{end}}</div>
   {{template "activity" $d.Activity}}
 </section>
 
 <section>
-  <div class="head"><h2>Recent events</h2><a href="/events" class="dim">All events</a></div>
-  <div class="scroll">{{template "events" $d.Events}}</div>
+  <div class="head"><h2>Recent actions and failures</h2><a href="/events" class="dim">All events</a></div>
+  {{template "events" $d.Events}}
 </section>
 {{end}}

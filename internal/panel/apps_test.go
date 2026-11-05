@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -61,7 +62,7 @@ func TestCreatingAnApp(t *testing.T) {
 	if response.Request.URL.Path != "/apps/shop" || !strings.Contains(body, "app shop is created") || !strings.Contains(body, "SESSION_SECRET: hex") {
 		t.Fatalf("after creating shop (%s):\n%s", response.Request.URL, body)
 	}
-	if events, _ := cluster.Events(ctx, store.EventQuery{App: "shop", Limit: 1}); len(events) != 1 || events[0].Action != "app.created" || events[0].Actor != "murder-panel socket" {
+	if events, _ := cluster.Events(ctx, store.EventQuery{App: "shop", Limit: 1}); len(events) != 1 || events[0].Action != "app.created" || who(events[0].Actor) != "the local panel" {
 		t.Fatalf("the audit log: %+v", events)
 	}
 	if _, page := get(t, server.URL+"/events?app=shop"); !strings.Contains(page, "app.created") || strings.Contains(page, "tenant.suspended") {
@@ -88,7 +89,9 @@ func TestEditingAnApp(t *testing.T) {
 		t.Fatalf("a stale save:\n%s", body)
 	}
 	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"save"}, "updated": {updated}, "file": {changed}}, server.URL)
-	if !strings.Contains(body, "app web is changed; it rolls out to 7 tenants") {
+	// atlas keeps its own TZ, test-staging is held, old-demo archived: the
+	// change rolls out to the five whose spec it changes, in waves.
+	if !strings.Contains(body, "app web is changed; it rolls out in waves to 5 tenants") {
 		t.Fatalf("after saving:\n%s", body)
 	}
 	if tenant, _ := cluster.Get(ctx, "acme-logistics"); tenant.Spec.Env["TZ"] != "Europe/Paris" || tenant.Spec.Image != before.Spec.Image {
@@ -118,7 +121,7 @@ func TestATenantsSettings(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	ctx := context.Background()
 	_, page := get(t, server.URL+"/tenants/atlas/settings")
-	for _, want := range []string{"FEATURE_PLANNER=on", "ADMIN_PASSWORD password 20", `value="768"`, "SESSION_KEY", "app web"} {
+	for _, want := range []string{`name="envown" value="FEATURE_PLANNER" class="own-switch" data-key="FEATURE_PLANNER" checked aria-label=`, `name="secretown" value="ADMIN_PASSWORD" class="own-switch" data-key="ADMIN_PASSWORD" checked aria-label=`, `value="768"`, "SESSION_KEY", "Inherited from web"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the settings page lacks %q:\n%s", want, page)
 		}
@@ -129,7 +132,7 @@ func TestATenantsSettings(t *testing.T) {
 
 	// A form that does not read is shown again, as typed.
 	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
-	if !strings.Contains(body, "env line 2: NAME=value") || !strings.Contains(body, "API_TOKEN base64 48") {
+	if !strings.Contains(body, "env line 2: NAME=value") || !strings.Contains(body, `name="secretown" value="API_TOKEN" class="own-switch" data-key="API_TOKEN" checked aria-label=`) || !strings.Contains(body, `value="48"`) {
 		t.Fatalf("a bad env line:\n%s", body)
 	}
 	form.Set("env", "TZ=Europe/Warsaw\n\n# the planner is on for everyone now")
@@ -142,6 +145,11 @@ func TestATenantsSettings(t *testing.T) {
 		t.Fatalf("a stale save:\n%s", body)
 	}
 
+	// A save is only of what was reviewed.
+	if _, body = submit(t, client, server, "/tenants/atlas/settings", form, server.URL); !strings.Contains(body, "these are not the values you reviewed") {
+		t.Fatalf("saved without a review:\n%s", body)
+	}
+	form = reviewed(t, client, server, "/tenants/atlas/settings", form)
 	_, body = submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
 	if !strings.Contains(body, "atlas&#39;s settings are changed") {
 		t.Fatalf("after saving:\n%s", body)
@@ -194,6 +202,15 @@ func TestReadingSettings(t *testing.T) {
 }
 
 // between is the text of page between before and after.
+// keptWhole is the markup that keeps a name or a figure whole on a line.
+var keptWhole = regexp.MustCompile(`<span class="nowrap">([^<]*)</span>`)
+
+// said is a page as its words read: without what keeps a name ("fsn-1")
+// or a figure ("1.4 GB") whole on its line.
+func said(page string) string {
+	return strings.ReplaceAll(keptWhole.ReplaceAllString(page, "$1"), "\u00a0", " ")
+}
+
 func between(page, before, after string) string {
 	_, rest, ok := strings.Cut(page, before)
 	if !ok {
@@ -228,11 +245,11 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 	agent := cluster.AsApps("test")
 	_, page := get(t, server.URL+"/apps/web")
 	updated := between(page, `name="updated" value="`, `"`)
-	if !strings.Contains(page, "A newer image of") || !strings.Contains(page, "Update and roll out") || !strings.Contains(page, "Go back to this") {
+	if !strings.Contains(page, "A newer image of") || !strings.Contains(page, "Review the update") || !strings.Contains(page, "Review going back") {
 		t.Fatalf("the app's page:\n%s", page)
 	}
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"check"}}, server.URL)
-	if !strings.Contains(body, "a newer image of ghcr.io/example/web:stable is in its registry: 5e5e5e5e5e5e") {
+	if !strings.Contains(body, "a newer image of ghcr.io/example/web:stable is in its registry: sha256:5e5e5e5e5e5e") {
 		t.Fatalf("after checking:\n%s", body)
 	}
 	before, _ := agent.App(ctx, "web")
@@ -242,7 +259,7 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 		t.Fatalf("a stale update:\n%s", body)
 	}
 	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"update"}, "updated": {updated}}, server.URL)
-	if !strings.Contains(body, "app web is changed; it rolls out to 7 tenants") || strings.Contains(body, "A newer image of") {
+	if !strings.Contains(body, "app web is changed; it rolls out in waves to 6 tenants") || strings.Contains(body, "A newer image of") {
 		t.Fatalf("after updating:\n%s", body)
 	}
 	after, _ := agent.App(ctx, "web")
@@ -254,9 +271,13 @@ func TestUpdatingAnAppAndGoingBack(t *testing.T) {
 	}
 	// Back to revision 2.
 	updated = between(body, `name="updated" value="`, `"`)
-	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"restore"}, "revision": {"2"}, "updated": {updated}}, server.URL)
-	if !strings.Contains(body, "it rolls out to 7 tenants") {
+	// At once, as the review may choose: every tenant moves now.
+	_, body = submit(t, client, server, "/apps/web", url.Values{"do": {"restore"}, "revision": {"2"}, "updated": {updated}, "pace": {"now"}}, server.URL)
+	if !strings.Contains(body, "app web is changed; it rolls out to 6 tenants") {
 		t.Fatalf("after going back:\n%s", body)
+	}
+	if tenant, _ := cluster.Get(ctx, "baltic-freight"); tenant.AppRevision != 0 || !strings.HasSuffix(tenant.Spec.Image, strings.Repeat("a1", 32)) {
+		t.Fatalf("baltic-freight after going back at once: revision %d, %s", tenant.AppRevision, tenant.Spec.Image)
 	}
 	if back, _ := agent.App(ctx, "web"); back.Revision != 5 || !strings.HasSuffix(back.Spec.Image, strings.Repeat("a1", 32)) {
 		t.Fatalf("app after going back %+v", back)
@@ -277,7 +298,7 @@ func TestARolloutFromThePanel(t *testing.T) {
 	ctx := context.Background()
 	agent := cluster.AsApps("test")
 	_, page := get(t, server.URL+"/apps/web")
-	if !strings.Contains(page, "Revision 3: running, wave 2") || !strings.Contains(page, `value="pause"`) || !strings.Contains(page, `value="promote"`) {
+	if !strings.Contains(page, "Rollout of revision 3") || !strings.Contains(page, "Blocked:</span> baltic-freight moved in wave 2 (a tenth)") || !strings.Contains(page, `value="pause"`) || !strings.Contains(page, `value="promote"`) {
 		t.Fatalf("the app's page:\n%s", page)
 	}
 	_, body := submit(t, client, server, "/apps/web", url.Values{"do": {"pause"}}, server.URL)
@@ -306,7 +327,7 @@ func TestARolloutFromThePanel(t *testing.T) {
 	}
 	// A tenant's flags.
 	_, body = submit(t, client, server, "/tenants/atlas/settings", url.Values{"do": {"flags"}, "canary": {"on"}}, server.URL)
-	if !strings.Contains(body, "atlas takes rollouts first: it is a canary") {
+	if !strings.Contains(body, "atlas is a canary: it takes rollouts first") {
 		t.Fatalf("after the flags:\n%s", body)
 	}
 	if tenant, _ := agent.Get(ctx, "atlas"); !tenant.Canary || tenant.Hold {
@@ -332,4 +353,27 @@ func TestATenantWaitingForItsDataCanBeStartedAsItIs(t *testing.T) {
 	if !strings.Contains(page, "atlas waits for their data from before the rollout") || !strings.Contains(page, `value="abort"`) || strings.Contains(page, `value="pause"`) {
 		t.Fatalf("the app's page:\n%s", page)
 	}
+}
+
+// reviewed reviews a settings form and returns it as its review's Save
+// sends it: with the token that binds it to the values reviewed.
+func reviewed(t *testing.T, client *http.Client, server *httptest.Server, path string, form url.Values) url.Values {
+	t.Helper()
+	review := url.Values{}
+	for key, values := range form {
+		review[key] = values
+	}
+	review.Set("do", "review")
+	_, body := submit(t, client, server, path, review, server.URL)
+	token := between(body, `name="reviewed" value="`, `"`)
+	if token == "" {
+		t.Fatalf("no review:\n%s", body)
+	}
+	saved := url.Values{}
+	for key, values := range form {
+		saved[key] = values
+	}
+	saved.Set("do", "save")
+	saved.Set("reviewed", token)
+	return saved
 }

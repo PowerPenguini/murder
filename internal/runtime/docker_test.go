@@ -386,6 +386,24 @@ func TestLogsAreDemultiplexed(t *testing.T) {
 	}
 }
 
+// The current run of a container started again in place: only what it
+// wrote after a time, which the engine takes as seconds.nanoseconds.
+func TestLogsSinceAskForTheLinesAfterATime(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	engine.handlers["GET /containers/c1/logs"] = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("since") != "1793803200.250000000" || r.URL.Query().Get("tail") != "20" {
+			t.Errorf("query = %v", r.URL.Query())
+		}
+		_, _ = w.Write(frame(1, "after\n"))
+	}
+	since := time.Date(2026, 11, 4, 14, 40, 0, 250_000_000, time.UTC)
+	logs, err := docker.LogsSince(context.Background(), "c1", 20, since)
+	if err != nil || string(logs) != "after\n" {
+		t.Fatalf("LogsSince = %q, %v", logs, err)
+	}
+	var _ SinceLogs = docker
+}
+
 func TestLatestAsksTheRegistryWithoutPulling(t *testing.T) {
 	engine, docker := newFakeEngine(t)
 	ctx := context.Background()

@@ -861,6 +861,18 @@ func (d *Docker) Logs(ctx context.Context, id string, tail int) ([]byte, error) 
 	return demultiplex(stream), nil
 }
 
+// LogsSince returns the last lines a container wrote after since: those of
+// its current run, when it was started again in place.
+func (d *Docker) LogsSince(ctx context.Context, id string, tail int, since time.Time) ([]byte, error) {
+	var stream []byte
+	query := url.Values{"stdout": {"true"}, "stderr": {"true"}, "tail": {strconv.Itoa(tail)},
+		"since": {fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond())}}
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/containers/" + url.PathEscape(id) + "/logs", query: query}, &stream); err != nil {
+		return nil, err
+	}
+	return demultiplex(stream), nil
+}
+
 // demultiplex strips the 8-byte frame headers the engine puts on the output
 // of containers without a TTY. Output that is not framed is returned as is.
 func demultiplex(stream []byte) []byte {

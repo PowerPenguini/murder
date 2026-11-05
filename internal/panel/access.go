@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -52,6 +53,8 @@ type accessData struct {
 	People  []store.PanelUser
 	Devices []store.Device
 	Me      string
+	// CanCodes says recovery codes can be made here: someone signs in.
+	CanCodes bool
 	// Shown once, after an action: an invitation's link, recovery codes,
 	// a device's QR code and configuration, or what went wrong.
 	Invite  string
@@ -64,6 +67,9 @@ type accessData struct {
 type deviceShown struct {
 	Name, Config string
 	QR           template.HTML
+	// Download is the configuration as a file to save, from the page
+	// itself: it is kept nowhere to be asked for again.
+	Download template.URL
 }
 
 // access is the people and devices page; a POST does one thing and shows
@@ -73,7 +79,7 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 	agent := s.Access(s.actor(user))
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	data := accessData{Me: user}
+	data := accessData{Me: user, CanCodes: s.Auth != nil}
 	if r.Method == http.MethodPost {
 		s.accessAction(ctx, r, agent, &data)
 	}
@@ -92,6 +98,7 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 func (s *Server) accessAction(ctx context.Context, r *http.Request, agent AccessAgent, data *accessData) {
 	fail := func(err error) { data.Problem = err.Error() }
 	name := strings.TrimSpace(r.FormValue("name"))
+	confirmed := strings.TrimSpace(r.FormValue("confirm"))
 	switch r.FormValue("do") {
 	case "invite":
 		// Another person who has passkeys adds the next one themselves:
@@ -121,17 +128,39 @@ func (s *Server) accessAction(ctx context.Context, r *http.Request, agent Access
 			fail(errors.New("you cannot remove yourself: ask another person"))
 			return
 		}
+		if !typed(confirmed, name) {
+			fail(errors.New("type the person's name to remove them"))
+			return
+		}
 		if err := agent.RemovePanelUser(ctx, name); err != nil {
 			fail(err)
 			return
 		}
 		data.Done = name + " no longer signs in"
 	case "remove-passkey":
-		if err := agent.RemovePasskey(ctx, r.FormValue("id")); err != nil {
+		id := r.FormValue("id")
+		people, err := agent.PanelUsers(ctx)
+		if err != nil {
 			fail(err)
 			return
 		}
-		data.Done = "the passkey was removed"
+		label, owner := "", ""
+		for _, person := range people {
+			for _, key := range person.Passkeys {
+				if key.ID == id {
+					label, owner = key.Label, person.Name
+				}
+			}
+		}
+		if owner == "" || !typed(confirmed, passkeyName(label, owner)) {
+			fail(errors.New("type the passkey's name to remove it"))
+			return
+		}
+		if err := agent.RemovePasskey(ctx, id); err != nil {
+			fail(err)
+			return
+		}
+		data.Done = "passkey " + passkeyName(label, owner) + " of " + owner + " was removed: it signs in no more"
 	case "codes":
 		if s.Auth == nil {
 			fail(errors.New("no one signs in here"))
@@ -157,6 +186,10 @@ func (s *Server) accessAction(ctx context.Context, r *http.Request, agent Access
 		data.Device = shown
 		data.Done = "device " + name + " may reach the panel"
 	case "remove-device":
+		if !typed(confirmed, name) {
+			fail(errors.New("type the device's name to remove it"))
+			return
+		}
 		if err := agent.RemoveDevice(ctx, name); err != nil {
 			fail(err)
 			return
@@ -190,7 +223,8 @@ func (s *Server) addDevice(ctx context.Context, agent AccessAgent, name string) 
 	if err != nil {
 		svg = ""
 	}
-	return &deviceShown{Name: name, Config: config.String(), QR: template.HTML(svg)}, nil
+	text := config.String()
+	return &deviceShown{Name: name, Config: text, QR: template.HTML(svg), Download: template.URL("data:text/plain;charset=utf-8," + url.PathEscape(text))}, nil
 }
 
 // origin is where the panel's pages are.
@@ -207,4 +241,13 @@ func (s *Server) actor(user string) string {
 		return "murder-panel socket"
 	}
 	return user + " (panel)"
+}
+
+// passkeyName is what removing a passkey asks to be typed: its label, or
+// its owner's name when it has none.
+func passkeyName(label, owner string) string {
+	if label == "" {
+		return owner
+	}
+	return label
 }

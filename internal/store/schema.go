@@ -11,8 +11,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 15 in place.
-const schemaVersion = 16
+// versions 4 to 16 in place.
+const schemaVersion = 17
 
 // IdentitySchema is the schema version that pins each node's identity
 // key in the state: a node registers its key only once every node runs a
@@ -70,7 +70,10 @@ CREATE TABLE rollouts (
 	actor         TEXT NOT NULL,
 	-- epoch counts the rollout's changes of state (waves, pauses, resumes):
 	-- a decision made on one epoch is refused on another.
-	epoch         INTEGER NOT NULL DEFAULT 0
+	epoch         INTEGER NOT NULL DEFAULT 0,
+	-- first counts its leading waves of tenants named to move first (a
+	-- fix's broken tenants): 0 or 1. Its next wave is then the canaries.
+	first         INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 -- The specs an app was stored with, the recent ones, to go back to.
@@ -502,6 +505,14 @@ func upgrade(db *sql.DB) error {
 			}
 		}
 		if err := dropForeignObjects(tx); err != nil {
+			return err
+		}
+		version = 16
+	}
+	// Version 17 lets a rollout move named tenants first, as its first
+	// wave, and says so.
+	if version == 16 {
+		if _, err := tx.Exec(`ALTER TABLE rollouts ADD COLUMN first INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
 	}
