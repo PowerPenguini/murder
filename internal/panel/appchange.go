@@ -38,6 +38,8 @@ type appChange struct {
 	// Summary says it in one line; Unlimited names the limits it would
 	// lose ("CPUs, processes, disk").
 	Summary, Unlimited string
+	// OneLost says one limit goes.
+	OneLost bool
 }
 
 // appField is one setting, as it is now and as it would be; Loses says a
@@ -45,6 +47,8 @@ type appChange struct {
 type appField struct {
 	Field, Now, After string
 	Loses, Gone       bool
+	// Same says its value stays; only where it comes from changes.
+	Same bool
 }
 
 // appChangeOf composes what tenant t would run on app to, with the
@@ -55,13 +59,13 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 	after := spec.Compose(to.Spec, t.Spec.Name, overrides)
 	c := appChange{From: t.App, To: to.Name, DataPath: now.DataPath}
 	var lost []string
+	var head, tail []appField
 	for _, d := range diffSpecs(now, after) {
 		field, from, to := d.Key, d.From, d.To
-		// What an empty value means depends on the setting.
-		unset := "not set"
+		// Limits are said apart, as in effect: below.
 		switch d.Key {
 		case "memory", "CPUs", "processes", "disk":
-			unset = "no limit"
+			continue
 		}
 		if name, ok := strings.CutSuffix(d.Key, " (secret)"); ok {
 			from, to = "", ""
@@ -72,35 +76,45 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 				to = secretText(v)
 			}
 		}
-		loses := unset == "no limit" && to == "" && from != ""
 		gone := to == "" && from != ""
 		if from == "" {
-			from = unset
-		}
-		// A limit the new app does not set takes this node's default, as
-		// its status says them; only one with no default goes.
-		defaulted := false
-		if loses {
-			if def, known := nodeDefault(t, d.Key); known && def != "" {
-				to, loses, defaulted = def+" (this node's default; "+c.To+" sets none)", false, true
-			} else if known {
-				to = "no limit (" + c.To + " sets none, and this node has no default)"
-			} else {
-				to = "not set by " + c.To + "; this node's default, if any, is not known"
-			}
+			from = "not set"
 		}
 		if to == "" {
-			to = unset
+			to = "not set"
 		}
-		if loses {
-			lost = append(lost, d.Key)
-		}
-		gone = gone && !defaulted
+		row := appField{Field: field, Now: from, After: to, Gone: gone}
 		if field[0] >= 'a' && field[0] <= 'z' {
-			field = capital(field)
+			row.Field = capital(field)
 		}
-		c.Fields = append(c.Fields, appField{Field: field, Now: from, After: to, Loses: loses, Gone: gone && !loses})
+		switch d.Key {
+		case "image", "port", "health check", "data path", "user":
+			head = append(head, row)
+		default:
+			tail = append(tail, row)
+		}
 	}
+	// Each limit as it is in effect now and would be: the one account the
+	// settings, its page and its risks give. A limit whose value stays but
+	// whose source changes is shown, in grey, and not counted.
+	nowLimits := limitsOf(t, map[string]bool{})
+	afterLimits := limitsInEffect(after.Limits, overrides.Limits, to.Name, t.Status, t.Node, nil)
+	var limits []appField
+	for i, n := range nowLimits {
+		a := afterLimits[i]
+		row := appField{Field: n.Label, Now: n.InEffect(), After: a.InEffect()}
+		switch {
+		case n.Value == a.Value && n.From == a.From:
+			continue
+		case n.Value == a.Value:
+			row.Same = true
+		case a.From == fromNone:
+			row.Loses = true
+			lost = append(lost, n.Key)
+		}
+		limits = append(limits, row)
+	}
+	c.Fields = append(append(head, limits...), tail...)
 	// Its own settings stay, over the new app's.
 	if overrides.Image != "" {
 		c.Kept = append(c.Kept, "image "+imageDigest(overrides.Image))
@@ -174,16 +188,19 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 			c.OwnerNote = "Who wrote " + t.Spec.Name + "'s data was not read (it may be empty). " + to.Name + " runs as " + orRoot(after.User) + "."
 		}
 	}
-	// The summary counts as the table does: changed, gone, limits lost.
+	// The summary counts as the table does: changed, gone, limits lost; a
+	// row whose value stays is not a change.
 	changed, gone := 0, 0
 	for _, f := range c.Fields {
-		if f.Gone || f.Loses {
+		switch {
+		case f.Same:
+		case f.Gone || f.Loses:
 			gone++
-		} else {
+		default:
 			changed++
 		}
 	}
-	c.Unlimited = strings.Join(lost, ", ")
+	c.Unlimited, c.OneLost = strings.Join(lost, ", "), len(lost) == 1
 	c.Summary = "App " + t.App + " → " + to.Name + ": " + plural(changed, "setting changes", "settings change")
 	if gone > 0 {
 		c.Summary += ", " + strconv.Itoa(gone) + " go"
@@ -200,25 +217,4 @@ func orRoot(user string) string {
 		return "the image's own user"
 	}
 	return user
-}
-
-// nodeDefault is the default its node applies for a limit ("memory",
-// "CPUs", "processes", "disk") the spec leaves unset: said as the panel
-// says that limit, "" for none; known is false when its node has not said.
-func nodeDefault(t api.Tenant, key string) (said string, known bool) {
-	if t.Status == nil || t.Status.Defaults == (spec.Limits{}) && t.Status.Limits == (spec.Limits{}) {
-		return "", false
-	}
-	d := t.Status.Defaults
-	switch key {
-	case "memory":
-		return memText(d.MemoryMB), true
-	case "CPUs":
-		return floatText(d.CPUs), true
-	case "processes":
-		return intText(d.PIDs), true
-	case "disk":
-		return gbText(d.DiskGB), true
-	}
-	return "", false
 }

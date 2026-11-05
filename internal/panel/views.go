@@ -454,19 +454,12 @@ func (s *Server) appContext(ctx context.Context, r *http.Request, t api.Tenant, 
 	) != nil {
 		return
 	}
-	// The limits it runs without that other running tenants have.
+	// The limits it runs with, by the one account every page gives; those
+	// it runs without that other running tenants have are its risk.
+	data.Limits = limitsOf(t, runningLimits(tenants))
 	if !t.Spec.Suspended {
-		limited := map[string]bool{}
-		for _, other := range tenants {
-			if other.Status != nil && !other.Archived() && !other.Spec.Suspended {
-				for _, kind := range limitKinds {
-					if kind.of(other.Status.Limits) > 0 {
-						limited[kind.name] = true
-					}
-				}
-			}
-		}
-		data.Unlimited = strings.Join(unlimited(t, limited), ", ")
+		missing, field := risks(data.Limits)
+		data.Unlimited, data.RiskField = strings.Join(missing, ", "), field
 	}
 	i := slices.IndexFunc(apps, func(a api.App) bool { return a.Name == t.App })
 	if i < 0 {
@@ -620,8 +613,12 @@ type tenantData struct {
 	Place   *rolloutRow
 	// Unchanged says why the rollout leaves it as it runs, when it does.
 	Unchanged string
-	// Unlimited names the limits it runs without that others have ("disk").
+	// Limits are the limits it runs with, as every page says them;
+	// Unlimited names those it runs without that others have ("disk"), and
+	// RiskField the settings row of the first.
+	Limits    []limitInEffect
 	Unlimited string
+	RiskField string
 	// AppMemory says its app's tenants run out of memory, if they do.
 	AppMemory *appMemory
 	// Operation is what a person did to it lately, and how it went; Me is
@@ -691,6 +688,8 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	if use != nil {
 		data.ErrorsBad = use.ErrorsBad
 	}
+	// Its limits, said even when the other tenants could not be read.
+	data.Limits = limitsOf(t, map[string]bool{})
 	s.appContext(ctx, r, t, &data)
 	data.Operation = operationOf(t, events, s.now())
 	data.Me = s.actor(userOf(r))
@@ -909,6 +908,7 @@ func (s *Server) funcs() template.FuncMap {
 		"breakable":  breakable,
 		"waveSaid":   store.WaveSaid,
 		"blocked":    rolloutBlocked,
+		"setLimit":   setLimit,
 		// A tenant's pages say what an action did under their header, so
 		// the header never moves between states of one page.
 		"headFirst": func(d any) bool {

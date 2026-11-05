@@ -31,8 +31,12 @@ type settingField struct {
 	// Mono says the value is code-like (an image); Empty that its
 	// Override was sent on with no value.
 	Mono, Empty bool
-	// Inherit is the app's value, raw: an Override turned on starts at it.
+	// Inherit is the value in effect, raw: an Override turned on starts at
+	// it. Risk says it runs without this limit while others have one; Open
+	// that the row was asked open for a value of its own (?set=).
 	Inherit string
+	Risk    bool
+	Open    bool
 	// Kind, Step and Min shape the input.
 	Kind, Step, Min string
 }
@@ -112,47 +116,32 @@ func secretFields(app spec.Tenant, stored, draft spec.Secrets) []secretField {
 type settingChange struct{ Field, From, To string }
 
 // settingFields are a tenant's fields, from its app's spec and its form.
-func settingFields(t api.Tenant, app spec.Tenant, form settingsForm) []settingField {
+func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map[string]bool) []settingField {
 	stored := formOf(t)
-	source := func(own bool, appValue bool) string {
-		switch {
-		case own:
-			return "Tenant override"
-		case appValue:
-			return "Inherited from " + t.App
-		}
-		return "the node's default"
+	appSource := "Inherited from " + t.App
+	if stored.Image != "" {
+		appSource = "Tenant override"
 	}
-	l, a := t.Spec.Limits, app.Limits
-	// What is in effect and where it comes from is what is saved; the form
-	// is only proposed.
-	field := func(name, label, unit, kind, step, value, saved string, effective string, appSet bool, inherit string) settingField {
-		empty := slices.Contains(form.empty(), name)
-		return settingField{Name: name, Label: label, Unit: unit, Kind: kind, Step: step, Min: "0", Own: value != "" || empty, Value: value, Inherit: inherit,
-			Stored: saved != "", Proposed: value != saved && !empty, Effective: effective, Source: source(saved != "", appSet), Empty: empty}
-	}
-	number := func(n int, unit string) string {
-		if n == 0 {
-			return "none set"
-		}
-		return strconv.Itoa(n) + unit
-	}
-	cpus := "none set"
-	if l.CPUs != 0 {
-		cpus = strconv.FormatFloat(l.CPUs, 'f', -1, 64)
-	}
-	memoryText := "none set"
-	if l.MemoryMB != 0 {
-		memoryText = memory(l.MemoryMB)
-	}
-	return []settingField{
+	out := []settingField{
 		{Name: "image", Label: "Image", Kind: "text", Inherit: t.Spec.Image, Own: form.Image != "" || slices.Contains(form.empty(), "image"), Empty: slices.Contains(form.empty(), "image"), Value: form.Image, Mono: true, Unit: "",
-			Stored: stored.Image != "", Proposed: form.Image != stored.Image, Effective: imageDigest(t.Spec.Image), Source: source(stored.Image != "", true)},
-		field("memoryMB", "Memory", "MB", "number", "1", form.MemoryMB, stored.MemoryMB, memoryText, a.MemoryMB != 0, intText(l.MemoryMB)),
-		field("cpus", "CPUs", "cores", "number", "0.05", form.CPUs, stored.CPUs, cpus, a.CPUs != 0, floatText(l.CPUs)),
-		field("pids", "Processes", "at most", "number", "1", form.PIDs, stored.PIDs, number(l.PIDs, ""), a.PIDs != 0, intText(l.PIDs)),
-		field("diskGB", "Disk", "GB", "number", "1", form.DiskGB, stored.DiskGB, number(l.DiskGB, " GB"), a.DiskGB != 0, intText(l.DiskGB)),
+			Stored: stored.Image != "", Proposed: form.Image != stored.Image, Effective: imageDigest(t.Spec.Image), Source: appSource},
 	}
+	// The limits as every page says them: in effect, and from where.
+	values := map[string][2]string{"memoryMB": {form.MemoryMB, stored.MemoryMB}, "cpus": {form.CPUs, stored.CPUs}, "pids": {form.PIDs, stored.PIDs}, "diskGB": {form.DiskGB, stored.DiskGB}}
+	shape := map[string][3]string{"memoryMB": {"MB", "1"}, "cpus": {"cores", "0.05"}, "pids": {"at most", "1"}, "diskGB": {"GB", "1"}}
+	for _, l := range limitsOf(t, limited) {
+		v := values[l.Field]
+		empty := slices.Contains(form.empty(), l.Field)
+		open := form.Open == l.Field && v[0] == ""
+		inherit := ""
+		if l.Value > 0 {
+			inherit = strconv.FormatFloat(l.Value, 'f', -1, 64)
+		}
+		out = append(out, settingField{Name: l.Field, Label: l.Label, Unit: shape[l.Field][0], Kind: "number", Step: shape[l.Field][1], Min: "0",
+			Own: v[0] != "" || empty || open, Open: open, Value: v[0], Inherit: inherit, Stored: v[1] != "", Proposed: v[0] != v[1] && !empty && !open,
+			Effective: l.Short(), Source: l.Source(), Risk: l.Risk, Empty: empty})
+	}
+	return out
 }
 
 // envRows is the environment the tenant gets: the app's, with its own

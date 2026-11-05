@@ -16,16 +16,16 @@
     {{if .OwnerAfter}}<div class="notice bad" role="alert"><p class="flat"><span class="lead-in">{{.To}} runs as {{.OwnerAfter}}, but {{$t.Spec.Name}}'s data at {{.DataPath}} was written as {{.OwnerNow}}{{if .OwnerMixed}}, and some of it by another user{{end}}.</span> Its new container may not be able to read or write it.</p>
       <p class="flat spaced">Before you change it, check that {{.To}}'s image can use data owned by {{.OwnerNow}}, or set <span class="mono">user: "{{.OwnerNow}}"</span> in {{.To}}'s spec if its image allows.</p></div>{{end}}
     {{with .OwnerNote}}<p class="hint flat owner-note">{{.}}</p>{{end}}
-    {{with .Unlimited}}<div class="notice warn-notice" role="status"><p class="flat"><span class="st warn"></span><span class="lead-in">{{$t.Spec.Name}} would run with no limit on {{.}}:</span> {{$c.To}} sets none. Without one it can take what the node's other tenants need. Set them in <a href="/apps/{{$c.To}}">{{$c.To}}'s spec</a>, or as {{$t.Spec.Name}}'s own, first.</p></div>{{end}}
+    {{with .Unlimited}}<div class="notice warn-notice" role="status"><p class="flat"><span class="st warn"></span><span class="lead-in">{{$t.Spec.Name}} would run with no {{.}} limit:</span> {{$c.To}} sets none, and {{$t.Node}} has no default. Without it, it can take what the node's other tenants need. Set {{if $c.OneLost}}it{{else}}them{{end}} in <a href="/apps/{{$c.To}}">{{$c.To}}'s spec</a>, or as {{$t.Spec.Name}}'s own, first.</p></div>{{end}}
     <table class="list changes">
       <thead><tr><th>Setting</th><th>Now, on {{.From}}</th><th>After, on {{.To}}</th></tr></thead>
-      <tbody>{{range .Fields}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.Now}}</td><td class="l-sub" data-label="After">{{if .Loses}}<span class="st warn">{{.After}}</span>{{else}}{{.After}}{{end}}</td></tr>{{end}}
+      <tbody>{{range .Fields}}<tr{{if .Same}} class="same"{{end}}><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.Now}}</td><td class="l-sub" data-label="After">{{if .Loses}}<span class="st warn">{{.After}}</span>{{else if .Same}}<span class="dim">{{.After}}: the same value</span>{{else}}{{.After}}{{end}}</td></tr>{{end}}
       {{range $d.Review}}{{if or (eq .Field "Canary") (eq .Field "Held")}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="After">{{.To}}</td></tr>{{end}}{{end}}</tbody>
     </table>
     <dl class="carry">
       {{with .Kept}}<div><dt>Its own, kept over {{$c.To}}'s</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
       {{with .Dropped}}<div><dt>Gone with {{$c.From}}</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}}</span>{{end}}</dd></div>{{end}}
-      {{with .Back}}<div><dt>Its kept value again</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}} (secret)</span>{{end}}: the value it had before, so what it signed still works</dd></div>{{end}}
+      {{with .Back}}<div><dt>Given back</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}} (secret)</span>{{end}}: its value from before, so what it signed still works</dd></div>{{end}}
       {{with .Made}}<div><dt>Made new for it</dt><dd>{{range $i, $k := .}}{{if $i}}, {{end}}<span class="nowrap">{{$k}} (secret)</span>{{end}}: a value of its own, made once</dd></div>{{end}}
     </dl>
     {{if .SecretsKept}}<p class="hint flat">The values of the secrets that go are kept by murder, not given to {{.To}}: changing back to {{.From}} gives them back, and what they signed still works.</p>{{end}}
@@ -57,13 +57,13 @@
       <thead><tr><th>Setting</th><th>In effect</th><th>Source</th><th>Override</th></tr></thead>
       <tbody>
       {{range $d.Fields}}
-        <tr class="setting{{if .Empty}} missing{{end}}" id="{{if eq .Name "memoryMB"}}memory{{else}}{{.Name}}{{end}}">
+        <tr class="setting{{if .Empty}} missing{{end}}{{if .Risk}} at-risk{{end}}" id="{{if eq .Name "memoryMB"}}memory{{else}}{{.Name}}{{end}}">
           <td class="l-main"><label for="f-{{.Name}}">{{.Label}}</label></td>
-          <td class="l-side{{if .Mono}} mono{{end}}">{{.Effective}}</td>
-          <td class="l-sub dim" data-label="Source">{{.Source}}</td>
+          <td class="l-side{{if .Mono}} mono{{end}}">{{if .Risk}}<span class="st warn">{{.Effective}}</span>{{else}}{{.Effective}}{{end}}</td>
+          <td class="l-sub dim" data-label="Source">{{.Source}}{{if .Risk}}<span class="risk-why">The other tenants have one: without it, {{$t.Spec.Name}} can take what they need.</span>{{end}}</td>
           <td class="l-sub own" data-label="Override">
             <label class="check own-check"><input type="checkbox" name="own-{{.Name}}" value="on" class="own-switch"{{if .Own}} checked{{end}} aria-label="Override {{.Label}}"><span class="sw" aria-hidden="true">Override</span></label>
-            <span class="own-field"><input type="{{.Kind}}" id="f-{{.Name}}" name="{{.Name}}" value="{{.Value}}"{{with .Inherit}} data-inherit="{{.}}"{{end}}{{if eq .Kind "number"}} min="{{.Min}}" step="{{.Step}}" class="short"{{else}} class="mono-input"{{end}} autocomplete="off" spellcheck="false"{{if .Proposed}} aria-describedby="p-{{.Name}}"{{else if .Empty}} aria-describedby="p-{{.Name}}" aria-invalid="true" data-focus{{end}}>{{if eq .Kind "number"}} <span class="dim small">{{.Unit}}</span>{{end}}</span>{{if .Proposed}}<span class="caption" id="p-{{.Name}}">{{if .Own}}proposed; {{.Effective}} now{{else}}proposed: inherit again{{end}}</span>{{else if .Empty}}<span class="caption red" id="p-{{.Name}}">Give a value, or turn Override off</span>{{end}}
+            <span class="own-field"><input type="{{.Kind}}" id="f-{{.Name}}" name="{{.Name}}" value="{{.Value}}"{{with .Inherit}} data-inherit="{{.}}"{{end}}{{if eq .Kind "number"}} min="{{.Min}}" step="{{.Step}}" class="short"{{else}} class="mono-input"{{end}} autocomplete="off" spellcheck="false"{{if .Proposed}} aria-describedby="p-{{.Name}}"{{else if .Empty}} aria-describedby="p-{{.Name}}" aria-invalid="true" data-focus{{else if .Open}} data-focus{{end}}>{{if eq .Kind "number"}} <span class="dim small">{{.Unit}}</span>{{end}}</span>{{if .Proposed}}<span class="caption" id="p-{{.Name}}">{{if .Own}}proposed; {{.Effective}} now{{else}}proposed: inherit again{{end}}</span>{{else if .Empty}}<span class="caption red" id="p-{{.Name}}">Give a value, or turn Override off</span>{{end}}
           </td>
         </tr>
       {{end}}

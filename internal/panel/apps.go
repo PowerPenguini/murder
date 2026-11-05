@@ -519,8 +519,10 @@ type settingsForm struct {
 	Canary, Hold string
 	Flags        bool
 	// Empty are the settings whose Override is on with no value: said
-	// back, never taken as inheriting again.
+	// back, never taken as inheriting again. Open is a limit's field asked
+	// open for a value of its own, from a link (?set=diskGB).
 	Empty string
+	Open  string
 }
 
 // empty lists the settings sent with Override on and no value.
@@ -556,7 +558,7 @@ func (f settingsForm) flagsChanged(t api.Tenant) bool {
 // made from: its app or overrides, not its rollout flags.
 func (f settingsForm) containerChanged(t api.Tenant) bool {
 	was := formOf(t)
-	f.Canary, f.Hold, f.Flags, f.Empty = was.Canary, was.Hold, was.Flags, ""
+	f.Canary, f.Hold, f.Flags, f.Empty, f.Open = was.Canary, was.Hold, was.Flags, "", ""
 	return f != was
 }
 
@@ -854,6 +856,10 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if mb, err := strconv.Atoi(r.URL.Query().Get("memoryMB")); err == nil && mb > 0 && mb <= 1<<20 {
 		form.MemoryMB = strconv.Itoa(mb)
 	}
+	// A link to set a limit opens its row.
+	if set := r.URL.Query().Get("set"); slices.Contains([]string{"memoryMB", "cpus", "pids", "diskGB"}, set) {
+		form.Open = set
+	}
 	// "Change its app" in the tenant's menu: another app, to review.
 	if app := r.URL.Query().Get("app"); app != "" {
 		form.App = app
@@ -876,7 +882,14 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 			appSpec = app.Spec
 		}
 	}
-	data.Fields = settingFields(t, appSpec, form)
+	// The limits other running tenants have, for its own risks.
+	var limited map[string]bool
+	if all, err := s.backend.List(ctx); err == nil {
+		limited = runningLimits(all)
+	} else {
+		limited = map[string]bool{}
+	}
+	data.Fields = settingFields(t, appSpec, form, limited)
 	if r.Method == http.MethodGet && form.MemoryMB != formOf(t).MemoryMB {
 		data.Suggest = "Proposed: memory " + memory(atoi(form.MemoryMB)) + " as a tenant override, up from " + memory(t.Spec.Limits.MemoryMB) + ". Nothing changes until you review and save it."
 		var tenants []api.Tenant

@@ -1084,8 +1084,10 @@ func TestChangingATenantsApp(t *testing.T) {
 	// was written by another user than testapp runs as.
 	_, body = get(t, server.URL+"/tenants/atlas/settings?do=review&app=testapp")
 	for _, want := range []string{"Review changing atlas to app testapp", "<th>Now, on web</th><th>After, on testapp</th>",
-		"App web → testapp: 4 settings change, 3 go (1 limit: disk)", "atlas would run with no limit on disk:",
-		`<span class="st warn">no limit (testapp sets none, and this node has no default)</span>`, "512 (this node&#39;s default; testapp sets none)",
+		"App web → testapp: 3 settings change, 3 go (1 limit: disk)", "atlas would run with no disk limit:", "Set it in",
+		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now">10 GB</td><td class="l-sub" data-label="After"><span class="st warn">no limit (no default on fsn-1)</span>`,
+		`<td class="l-main">Processes</td><td class="dim l-sub" data-label="Now">256</td><td class="l-sub" data-label="After">512 (node default on fsn-1)</td>`,
+		`<tr class="same"><td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1</td><td class="l-sub" data-label="After"><span class="dim">1 (node default on fsn-1): the same value</span>`,
 		"testapp runs as 10001:10001, but atlas's data at /data was written as 1000:1000.",
 		`<td class="l-main">User</td><td class="dim l-sub" data-label="Now">1000:1000</td><td class="l-sub" data-label="After">10001:10001</td>`,
 		`<td class="l-main">Image</td>`, "Its own, kept over testapp's", `<span class="nowrap">memory 768 MB</span>`, `<span class="nowrap">TZ</span>`,
@@ -1123,8 +1125,24 @@ func TestChangingATenantsApp(t *testing.T) {
 	}
 	// The disk limit it lost stays said, as at risk, until one is set: on
 	// its page, in the tenants list and on the overview.
-	if !strings.Contains(after, "It runs with no disk limit</span>, which the other tenants have") || !strings.Contains(after, `<span class="st warn">none</span>`) {
+	if !strings.Contains(after, "It runs with no disk limit</span>, which the other tenants have") || !strings.Contains(after, `href="/tenants/atlas/settings?set=diskGB#diskGB" class="button small">Set its disk limit</a>`) {
 		t.Fatalf("after the change, its lost limit is not said:\n%s", after)
+	}
+	// Its Container section says each limit as the reviews do: CPUs too.
+	for _, want := range []string{`<dt>CPU limit</dt><dd class="num">1 <span class="dim">node default</span>`, `<dt>Processes, most</dt><dd class="num">512 <span class="dim">node default</span>`,
+		`<dt>Disk limit</dt><dd class="num"><span class="st warn">none</span> <span class="dim">no default on fsn-1</span>`, `<dt>Memory limit</dt><dd class="num">768 MB</dd>`} {
+		if !strings.Contains(after, want) {
+			t.Fatalf("its Container section lacks %q:\n%s", want, after)
+		}
+	}
+	// Settings say them the same way, the risk on its row, which the link
+	// opens.
+	_, settings := get(t, server.URL+"/tenants/atlas/settings?set=diskGB")
+	for _, want := range []string{`<tr class="setting at-risk" id="diskGB">`, `<span class="st warn">none</span>`, "None: fsn-1 has no default", "Node default (fsn-1)",
+		`name="own-diskGB" value="on" class="own-switch" checked`, `id="f-diskGB" name="diskGB" value="" min="0" step="1" class="short" autocomplete="off" spellcheck="false" data-focus>`} {
+		if !strings.Contains(settings, want) {
+			t.Fatalf("its settings lack %q:\n%s", want, settings)
+		}
 	}
 	if _, list := get(t, server.URL+"/tenants?show=risk"); !strings.Contains(list, ">no disk limit</div>") {
 		t.Fatalf("the tenants at risk lack atlas:\n%s", list)
@@ -1136,7 +1154,12 @@ func TestChangingATenantsApp(t *testing.T) {
 	// runs as, so nothing is red; SESSION_KEY gets the value it kept.
 	_, back := get(t, server.URL+"/tenants/atlas/settings?do=review&app=web")
 	for _, want := range []string{"Review changing atlas to app web", "atlas&#39;s data at /data was written as 1000:1000, the user web runs as.",
-		"Its kept value again", "SESSION_KEY (secret)</span>: the value it had before", "Back: keep testapp</a>"} {
+		"Given back", "SESSION_KEY (secret)</span>: its value from before", "Back: keep testapp</a>",
+		// The limits it runs with on testapp, said as everywhere else.
+		`<td class="l-main">Processes</td><td class="dim l-sub" data-label="Now">512 (node default on fsn-1)</td><td class="l-sub" data-label="After">256</td>`,
+		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now">no limit (no default on fsn-1)</td><td class="l-sub" data-label="After">10 GB</td>`,
+		`<tr class="same"><td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1 (node default on fsn-1)</td>`,
+		"App testapp → web: 6 settings change; atlas restarts"} {
 		if !strings.Contains(back, want) {
 			t.Fatalf("the change back lacks %q:\n%s", want, back)
 		}
@@ -1225,5 +1248,38 @@ func TestOneCountPerNode(t *testing.T) {
 	}
 	if _, overview := get(t, server.URL+"/"); !strings.Contains(between(overview, ">nbg-1<", "</tr>"), `3 <span class="dim">· 4 copies</span>`) {
 		t.Fatalf("nbg-1 on the overview:\n%s", between(overview, ">nbg-1<", "</tr>"))
+	}
+}
+
+// A limit in effect is said one way, with where it comes from: the
+// tenant's own, its app's, its node's default, or none, a risk when other
+// tenants have one; not known when its node has not said its defaults.
+func TestLimitsInEffect(t *testing.T) {
+	status := &reconcile.Status{Defaults: spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512}}
+	got := limitsInEffect(spec.Limits{MemoryMB: 768, PIDs: 256}, spec.Limits{MemoryMB: 768}, "web", status, "fsn-1", map[string]bool{"disk": true})
+	want := []struct{ from, said, source, inEffect string }{
+		{fromOwn, "768 MB", "Tenant override", "768 MB"},
+		{fromNode, "1", "Node default (fsn-1)", "1 (node default on fsn-1)"},
+		{fromApp, "256", "Inherited from web", "256"},
+		{fromNone, "", "None: fsn-1 has no default", "no limit (no default on fsn-1)"},
+	}
+	for i, w := range want {
+		if l := got[i]; l.From != w.from || l.Said != w.said || l.Source() != w.source || l.InEffect() != w.inEffect {
+			t.Fatalf("%s: %+v, source %q, in effect %q", l.Key, l, l.Source(), l.InEffect())
+		}
+	}
+	if !got[3].Risk || got[0].Risk || got[1].Risk {
+		t.Fatalf("risks: %+v", got)
+	}
+	// No other tenant has a disk limit: none is no risk.
+	if l := limitsInEffect(spec.Limits{}, spec.Limits{}, "web", status, "fsn-1", map[string]bool{})[3]; l.Risk {
+		t.Fatalf("a limit nobody has said to be a risk: %+v", l)
+	}
+	// Its node has not said its defaults.
+	if l := limitsInEffect(spec.Limits{}, spec.Limits{}, "web", nil, "fsn-1", nil)[1]; l.From != fromUnknown || l.Risk || l.Short() != "not known" {
+		t.Fatalf("defaults not known: %+v", l)
+	}
+	if keys, field := risks(got); len(keys) != 1 || keys[0] != "disk" || field != "diskGB" {
+		t.Fatalf("risks %v, field %q", keys, field)
 	}
 }

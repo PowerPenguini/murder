@@ -1083,3 +1083,6 @@ input.confirm-field { max-width: 320px; }
 @media (max-width: 760px) { .pop .pop-title { display: none; } }
 /* A desktop pop-over with no room below its button opens above it. */
 @media (min-width: 761px) { .pop.up { top: auto; bottom: calc(100% + 6px); } }
+/* A limit it runs without that the others have: why, under its source. */
+.risk-why { display: block; margin-top: 2px; color: var(--soft); font-size: 12px; }
+table.changes tr.same td { color: var(--dim); }

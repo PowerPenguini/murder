@@ -75,7 +75,7 @@ func (d *DemoCluster) Usage(ctx context.Context) (api.UsageReport, error) {
 			if t.Node != n.Name || t.Archived() || t.Spec.Suspended {
 				continue
 			}
-			limits := t.Spec.Limits
+			limits := t.Spec.Limits.Or(demoDefaults)
 			at := now.Truncate(time.Minute).Add(-time.Minute)
 			p := demoPoint(t.Spec.Name, limits.MemoryMB, demoCores(limits.CPUs), at, time.Minute, d.demoMemory(t.Spec.Name, limits.MemoryMB, at.Add(time.Minute)))
 			r.Tenants[t.Spec.Name] = usage.Now{At: p.At, CPU: p.CPU, Memory: p.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
@@ -120,7 +120,7 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	}
 	now := time.Now()
 	end := now.Truncate(step)
-	limits := t.Spec.Limits
+	limits := t.Spec.Limits.Or(demoDefaults)
 	series := usage.Series{Tenant: name, Node: t.Node, Step: int(step / time.Second)}
 	for at := end.Add(-24 * time.Hour).Add(step); at.Before(end); at = at.Add(step) {
 		limit := d.limitAt(name, limits.MemoryMB, at.Add(step))
