@@ -96,6 +96,7 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 		if u, ok := use.Tenants[t.Spec.Name]; ok && !t.Archived() {
 			row.Use = &u
 		}
+		row.State = writable(row.State, row.Use)
 		if b, ok := use.Backups[t.Spec.Name]; ok {
 			b.Stale = b.Stale && !t.Archived()
 			row.Backup = &b

@@ -330,6 +330,9 @@ func tenantProblem(t api.Tenant, state tag) (string, bool) {
 	switch {
 	case state.Kind == "ok" || state.Kind == "mute":
 		return "", false
+	case state.Label == "cannot write":
+		// Its use says it, with its figures: the disk-full notice.
+		return "", false
 	case status == nil:
 		return "is in a state not known: its node does not answer", false
 	case state.Label == "unhealthy":

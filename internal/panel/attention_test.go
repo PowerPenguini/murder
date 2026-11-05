@@ -105,10 +105,12 @@ func TestAttentionOnThePages(t *testing.T) {
 	server := httptest.NewServer(s.Handler())
 	defer server.Close()
 	_, page := get(t, server.URL+"/")
+	page = said(page)
 	if !strings.Contains(page, `<ul class="attention">`) || !strings.Contains(page, "hel-1</a> failed") || !strings.Contains(page, "baltic-freight</a> is unhealthy") || !strings.Contains(page, "It blocks web&#39;s rollout of revision 3") {
 		t.Fatalf("the overview does not say what needs attention:\n%s", page)
 	}
 	_, page = get(t, server.URL+"/tenants/baltic-freight")
+	page = said(page)
 	if !strings.Contains(page, `class="nrow bad"`) || !strings.Contains(page, "<strong>It is unhealthy: out of memory 4m ago,") || !strings.Contains(page, `class="button primary">Raise web's memory limit</a>`) ||
 		!strings.Contains(page, "Only this tenant: raise its limit") || !strings.Contains(page, `href="/tenants/baltic-freight/logs?container=previous">Its last lines before the exit`) ||
 		!strings.Contains(page, "Likely web&#39;s 256 MB limit: 5 of the 6 tenants on it ran out of memory in 24 h.") || !strings.Contains(page, "<summary>Evidence and affected tenants</summary>") {

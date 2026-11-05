@@ -153,7 +153,7 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map
 		if l.Field == "diskGB" {
 			// What the limit must leave it, said beside its value; opened
 			// by a link, it starts at a value that leaves room.
-			full := disk.Fills(int(l.Value))
+			full := disk.Full()
 			if full {
 				f.Full = "Its data, " + nbsp(size(float64(disk.Used))) + ", fills it: it cannot write."
 			}

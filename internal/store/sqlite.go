@@ -1309,7 +1309,7 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 			return err
 		}
 		// In a cluster, where it runs is worth recording.
-		detail := overridesDetail(overrides)
+		detail := OverridesDetail(overrides)
 		if len(current.nodes) > 0 {
 			detail = strings.TrimSuffix("on node "+node+"; "+detail, "; ")
 		}
@@ -1321,9 +1321,10 @@ func (s *SQLite) Create(tenant NewTenant, actor string) (Record, error) {
 	return next.tenants[tenant.Name].clone(), nil
 }
 
-// overridesDetail names what a tenant overrides, without env values: the
-// audit log outlives tenants and may not keep credentials passed as env.
-func overridesDetail(overrides spec.Overrides) string {
+// OverridesDetail names what a tenant overrides, as its events say it,
+// without env values: the audit log outlives tenants and may not keep
+// credentials passed as env.
+func OverridesDetail(overrides spec.Overrides) string {
 	var parts []string
 	if overrides.Image != "" {
 		parts = append(parts, "image "+overrides.Image)
@@ -1378,7 +1379,7 @@ func (s *SQLite) Configure(name, app string, overrides spec.Overrides, generatio
 				return err
 			}
 		}
-		detail := overridesDetail(overrides)
+		detail := OverridesDetail(overrides)
 		if detail == "" {
 			detail = "no overrides"
 		}

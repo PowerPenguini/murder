@@ -74,6 +74,15 @@ func tenantState(t api.Tenant) tag {
 	return tag{t.Status.Phase, "warn"}
 }
 
+// writable is a tenant's state with what its use says: one whose data
+// fills its disk limit runs, but cannot write, and is not healthy.
+func writable(state tag, use *tenantUse) tag {
+	if use != nil && use.DiskFull() && state.Kind == "ok" {
+		return tag{"cannot write", "bad"}
+	}
+	return state
+}
+
 // replicaState says where the tenant's copy is, and whether it could take
 // over.
 func replicaState(t api.Tenant, cluster bool) tag {
@@ -208,6 +217,7 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 		if u, ok := use.Tenants[t.Spec.Name]; ok && !t.Archived() {
 			row.Use = &u
 		}
+		row.State = writable(row.State, row.Use)
 		if b, ok := use.Backups[t.Spec.Name]; ok {
 			// An archived tenant is backed up once, as it was archived.
 			b.Stale = b.Stale && !t.Archived()
@@ -302,6 +312,7 @@ func (s *Server) triage(nodes api.Nodes, tenants []api.Tenant, use clusterUse, a
 		if u, ok := use.Tenants[t.Spec.Name]; ok && !t.Archived() {
 			row.Use = &u
 		}
+		row.State = writable(row.State, row.Use)
 		if b, ok := use.Backups[t.Spec.Name]; ok {
 			b.Stale = b.Stale && !t.Archived()
 			row.Backup = &b
@@ -310,6 +321,42 @@ func (s *Server) triage(nodes api.Nodes, tenants []api.Tenant, use clusterUse, a
 	}
 	notices, _, states := joinApps(attentionOf(views, rows, clustered, now), apps, tenants, events, now)
 	return notices, failingNodes(use), badApps(states)
+}
+
+// diskWhy says where a tenant's disk limit comes from, in one line: "Its
+// 2 GB limit was set by jan (panel) 3m ago.", "Its 2 GB limit is web's.";
+// "" when it has none.
+func diskWhy(t api.Tenant, events []store.Event, now time.Time) string {
+	l := limitsOf(t, nil)[3]
+	if l.Value <= 0 {
+		return ""
+	}
+	said := "Its " + nbsp(l.Said) + " limit"
+	switch l.From {
+	case fromOwn:
+		// The change that gave it: the oldest of the newest changes of its
+		// settings that all name it (each names every limit it has).
+		mark := "diskGB=" + strconv.Itoa(int(l.Value))
+		var set *store.Event
+		for i, e := range events {
+			if e.Tenant != t.Spec.Name || (e.Action != "tenant.updated" && e.Action != "tenant.created") {
+				continue
+			}
+			if !strings.Contains(e.Detail, mark) {
+				break
+			}
+			set = &events[i]
+		}
+		if set != nil {
+			return said + " was set by " + who(set.Actor) + " " + ago(now, set.At) + " ago."
+		}
+		return said + " is its own."
+	case fromApp:
+		return said + " is " + t.App + "'s."
+	case fromNode:
+		return said + " is " + t.Node + "'s default."
+	}
+	return ""
 }
 
 // badApps counts the apps something is wrong with.
@@ -359,6 +406,21 @@ func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []s
 			}
 		}
 		return nil
+	}
+	// A tenant whose data fills its disk limit: where that limit comes
+	// from, and who set it when.
+	for i := range notices {
+		n := &notices[i]
+		if n.Node || n.App || n.Primary == nil || n.Primary.Label != "Raise its disk limit" {
+			continue
+		}
+		for _, t := range tenants {
+			if t.Spec.Name == n.Subject {
+				if why := diskWhy(t, events, now); why != "" {
+					n.Subs = append([]sub{{Short: why, Text: why}}, n.Subs...)
+				}
+			}
+		}
 	}
 	for _, app := range apps {
 		state := appState{}
@@ -766,6 +828,9 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		data.Problem = ""
 	}
 	data.Head = s.withApps(ctx, r, s.headOf(t, nodes, "overview"))
+	if data.DiskFull != "" && data.Head.State.Kind == "ok" {
+		data.State, data.Head.State = tag{"cannot write", "bad"}, tag{"cannot write", "bad"}
+	}
 	p := s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data)
 	// What the action did is said by the operation line, not twice.
 	if data.Operation != nil && s.now().Sub(data.Operation.Event.At) < time.Minute {
@@ -1285,8 +1350,13 @@ func breakable(text string) template.HTML {
 // "acme-logistics".
 var nodeName = regexp.MustCompile(`\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+\b`)
 
-// keepNames says text with each such name kept whole on one line: a
-// narrow cell breaks around "fsn-1", never at its hyphen.
+// sizeSaid is a figure with its unit: "1.4 GB", "256 MB", "3 GB".
+var sizeSaid = regexp.MustCompile(`\b(\d+(?:\.\d+)?) (B|KB|MB|GB|TB|cores?)\b`)
+
+// keepNames says text with each such name kept whole on one line, and
+// each figure with its unit: a narrow cell or a phone's line breaks around
+// "fsn-1" and "1.4 GB", never inside them.
 func keepNames(text string) template.HTML {
-	return template.HTML(nodeName.ReplaceAllString(template.HTMLEscapeString(text), `<span class="nowrap">$0</span>`))
+	kept := nodeName.ReplaceAllString(template.HTMLEscapeString(text), `<span class="nowrap">$0</span>`)
+	return template.HTML(sizeSaid.ReplaceAllString(kept, "$1\u00a0$2"))
 }

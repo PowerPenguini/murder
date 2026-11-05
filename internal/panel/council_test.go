@@ -156,6 +156,7 @@ func TestSettingsSayTheirSource(t *testing.T) {
 	form := url.Values{"owns": {"1"}, "generation": {generation}, "app": {"web"}, "own-memoryMB": {"on"}, "memoryMB": {"1100"}, "env": {"TZ=Europe/Berlin\nFEATURE_PLANNER=on"}, "secrets": {"ADMIN_PASSWORD password 20"}}
 	form.Set("do", "review")
 	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	body = said(body)
 	if !strings.Contains(body, "Review 1 change to atlas") || !strings.Contains(body, "768 MB, tenant override") || !strings.Contains(body, "1100 MB, tenant override") || !strings.Contains(body, "Save and restart atlas") {
 		t.Fatalf("the review:\n%s", body)
 	}
@@ -284,6 +285,7 @@ func newServerOf(t *testing.T, cluster *DemoCluster) *httptest.Server {
 func TestCauseTenantAndRolloutJoin(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, page := get(t, server.URL+"/")
+	page = said(page)
 	for _, want := range []string{"It blocks web&#39;s rollout of revision 3: baltic-freight moved in wave 2 (a tenth) and is not healthy, so wave 3 (half) waits.", "web&#39;s limit is likely too low: 5 of the 6 tenants on its 256 MB limit ran out of memory",
 		"atlas keeps its own 768 MB", "test-staging is held on its revision", `class="button primary">Raise web&#39;s memory limit</a>`, "/apps/web?memoryMB=512#spec", "Only this tenant: raise its limit",
 		"baltic-freight</a> is unhealthy: out of memory 4m ago,", "Likely web&#39;s 256 MB limit: 5 of the 6 tenants on it ran out of memory in 24 h."} {
@@ -1084,8 +1086,8 @@ func TestChangingATenantsApp(t *testing.T) {
 	// was written by another user than testapp runs as.
 	_, body = get(t, server.URL+"/tenants/atlas/settings?do=review&app=testapp")
 	for _, want := range []string{"Review changing atlas to app testapp", "<th>Now, on web</th><th>After, on testapp</th>",
-		"App web → testapp: 6 settings change: 3 get new values, 3 go (the disk limit, DATA_DIR, SESSION_KEY (secret))", "atlas would run with no disk limit:", "Set it in",
-		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now">10 GB</td><td class="l-sub" data-label="After"><span class="st warn">no limit (no default on <span class="nowrap">fsn-1</span>)</span>`,
+		"App web → testapp: 6 settings change; 3 get new values and 3 go: the disk limit, DATA_DIR and the secret SESSION_KEY; atlas restarts", "atlas would run with no disk limit:", "Set it in",
+		"<td class=\"l-main\">Disk</td><td class=\"dim l-sub\" data-label=\"Now\">10\u00a0GB</td><td class=\"l-sub\" data-label=\"After\"><span class=\"st warn\">no limit (no default on <span class=\"nowrap\">fsn-1</span>)</span>",
 		`<td class="l-main">Processes</td><td class="dim l-sub" data-label="Now">256</td><td class="l-sub" data-label="After">512 (node default on <span class="nowrap">fsn-1</span>)</td>`,
 		`<tr class="same"><td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1</td><td class="l-sub" data-label="After"><span class="dim">same: 1 (node default on <span class="nowrap">fsn-1</span>)</span>`,
 		"testapp runs as 10001:10001, but atlas's data at /data was written as 1000:1000.",
@@ -1151,7 +1153,7 @@ func TestChangingATenantsApp(t *testing.T) {
 		t.Fatalf("the risk does not say what to set:\n%s", after)
 	}
 	review := url.Values{"do": {"review"}, "generation": {between(settings, `name="generation" value="`, `"`)}, "app": {"testapp"}, "owns": {"1"}, "own-memoryMB": {"on"}, "memoryMB": {"768"}, "own-diskGB": {"on"}, "diskGB": {"20"}}
-	if _, body := submit(t, client, server, "/tenants/atlas/settings", review, server.URL); !strings.Contains(body, `<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now"><span class="st warn">no limit (no default on <span class="nowrap">fsn-1</span>)</span></td><td class="l-sub" data-label="After">20 GB, tenant override</td>`) || strings.Contains(body, "the node&#39;s default") {
+	if _, body := submit(t, client, server, "/tenants/atlas/settings", review, server.URL); !strings.Contains(said(body), `<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now"><span class="st warn">no limit (no default on fsn-1)</span></td><td class="l-sub" data-label="After">20 GB, tenant override</td>`) || strings.Contains(body, "the node&#39;s default") || !strings.Contains(body, `<p class="summary-line">It ends the missing disk limit; `) {
 		t.Fatalf("the settings review of a disk limit:\n%s", body)
 	}
 	if _, list := get(t, server.URL+"/tenants?show=risk"); !strings.Contains(list, ">no disk limit</div>") {
@@ -1167,7 +1169,7 @@ func TestChangingATenantsApp(t *testing.T) {
 		"Given back", "SESSION_KEY (secret)</span>: its value from before", "Back: keep testapp</a>",
 		// The limits it runs with on testapp, said as everywhere else.
 		`<td class="l-main">Processes</td><td class="dim l-sub" data-label="Now">512 (node default on <span class="nowrap">fsn-1</span>)</td><td class="l-sub" data-label="After">256</td>`,
-		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now"><span class="st warn">no limit (no default on <span class="nowrap">fsn-1</span>)</span></td><td class="l-sub" data-label="After">10 GB</td>`,
+		"<td class=\"l-main\">Disk</td><td class=\"dim l-sub\" data-label=\"Now\"><span class=\"st warn\">no limit (no default on <span class=\"nowrap\">fsn-1</span>)</span></td><td class=\"l-sub\" data-label=\"After\">10\u00a0GB</td>",
 		`<tr class="same"><td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1 (node default on <span class="nowrap">fsn-1</span>)</td>`,
 		"App testapp → web: 6 settings change; it ends the missing disk limit; atlas restarts"} {
 		if !strings.Contains(back, want) {
@@ -1239,10 +1241,10 @@ func TestAnAppChangeWarnsOfTheOwnerAsRead(t *testing.T) {
 // the app's page.
 func TestOneBlockedWaveSentence(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
-	const said = "baltic-freight moved in wave 2 (a tenth) and is not healthy, so wave 3 (half) waits."
+	const sentence = "baltic-freight moved in wave 2 (a tenth) and is not healthy, so wave 3 (half) waits."
 	for _, path := range []string{"/tenants/baltic-freight", "/", "/apps/web"} {
-		if _, page := get(t, server.URL+path); !strings.Contains(page, said) {
-			t.Fatalf("%s does not say %q:\n%s", path, said, page)
+		if _, page := get(t, server.URL+path); !strings.Contains(said(page), sentence) {
+			t.Fatalf("%s does not say %q:\n%s", path, sentence, page)
 		}
 	}
 }
@@ -1256,8 +1258,8 @@ func TestOneCountPerNode(t *testing.T) {
 		!strings.Contains(node, `Keeps copies of</div><div class="v num">4 tenants`) {
 		t.Fatalf("nbg-1's page:\n%s", node)
 	}
-	if _, overview := get(t, server.URL+"/"); !strings.Contains(between(overview, ">nbg-1<", "</tr>"), `3 <span class="dim">· 4 copies</span>`) {
-		t.Fatalf("nbg-1 on the overview:\n%s", between(overview, ">nbg-1<", "</tr>"))
+	if _, overview := get(t, server.URL+"/"); !strings.Contains(between(overview, `href="/nodes/nbg-1">nbg-1</a>`, "</tr>"), `3 <span class="dim">· 4 copies</span>`) {
+		t.Fatalf("nbg-1 on the overview:\n%s", between(overview, `href="/nodes/nbg-1">nbg-1</a>`, "</tr>"))
 	}
 }
 
@@ -1313,6 +1315,7 @@ func TestADiskLimitBelowItsDataIsNotSet(t *testing.T) {
 	form.Set("do", "review")
 	form.Set("diskGB", "1")
 	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	body = said(body)
 	for _, want := range []string{"1 GB is less than the 1.4 GB atlas holds: its node does not set a disk limit below its data.", "Give it at least 3 GB, twice its data; the other tenants have 10 GB.",
 		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now">10 GB, inherited from web</td><td class="l-sub" data-label="After">1 GB, tenant override</td>`,
 		`<input type="hidden" name="suggest" value="10"><button type="submit" name="do" value="usedisk" class="primary">Use 10 GB instead</button>`} {
@@ -1344,6 +1347,7 @@ func TestADiskLimitBelowItsDataIsNotSet(t *testing.T) {
 	use := fields(body)
 	use.Set("do", "usedisk")
 	_, again := submit(t, client, server, "/tenants/atlas/settings", use, server.URL)
+	again = said(again)
 	for _, want := range []string{`data-label="After">10 GB, tenant override</td>`, "Saving sets it on atlas's data at once: atlas keeps running, nothing restarts.", `class="primary">Save</button>`} {
 		if !strings.Contains(again, want) {
 			t.Fatalf("the review with the suggested limit lacks %q:\n%s", want, again)
@@ -1387,6 +1391,7 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, page := get(t, server.URL+"/tenants/atlas")
+	page = said(page)
 	for _, want := range []string{"It cannot write: its data, 2 GB, fills its 2 GB disk limit.", `class="button primary">Raise its disk limit</a>`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("atlas's page lacks %q:\n%s", want, page)
@@ -1420,11 +1425,29 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 		t.Fatalf("the broken tenants lack atlas:\n%s", list)
 	}
 	_, overview := get(t, server.URL+"/")
+	overview = said(overview)
 	if !strings.Contains(overview, "atlas</a> cannot write: its data, 2 GB, fills its 2 GB disk limit") || !strings.Contains(overview, "Raise its disk limit") {
 		t.Fatalf("the overview lacks atlas:\n%s", overview)
 	}
 	if !strings.Contains(overview, `title="3 tenants broken"`) {
 		t.Fatalf("the broken count does not count atlas:\n%s", between(overview, `<nav class="menu"`, "</nav>"))
+	}
+	// Why, in a line: who gave it the limit its data fills.
+	if item := between(overview, `>atlas</a> cannot write`, "</li>"); !strings.Contains(item, "Its 2 GB limit was set by jan (panel) ") {
+		t.Fatalf("the overview does not say whose limit it is:\n%s", item)
+	}
+	// Not healthy: in the overview's figure, the tenants list's count, its
+	// State, its head; its Data on a phone's card.
+	if !strings.Contains(overview, `<div class="n">4<small> / 6</small></div><div class="l">tenants healthy</div>`) {
+		t.Fatalf("the overview counts atlas healthy:\n%s", between(overview, `class="figure"`, "</section>"))
+	}
+	_, list := get(t, server.URL+"/tenants")
+	row := between(list, `href="/tenants/atlas">atlas</a>`, "</tr>")
+	if !strings.Contains(list, "· 4 healthy") || !strings.Contains(row, `<span class="st bad">cannot write</span>`) || !strings.Contains(row, `class="barcell l-sub phone-only" data-label="Data"`) {
+		t.Fatalf("the tenants list counts atlas healthy:\n%s\n%s", between(list, `<p class="lead">`, "</p>"), row)
+	}
+	if !strings.Contains(between(page, `<div class="title">`, "</div>"), `<span class="st bad">cannot write</span>`) {
+		t.Fatalf("atlas's head:\n%s", between(page, `<div class="title">`, "</div>"))
 	}
 	// Raised from where the fix landed, 10 as suggested: it writes again,
 	// at once, and nothing restarted.
@@ -1433,7 +1456,7 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 	form.Set("do", "review")
 	form.Set("diskGB", between(disk, `id="f-diskGB" name="diskGB" value="`, `"`))
 	_, review := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
-	if !strings.Contains(review, `data-label="After">10 GB, tenant override</td>`) || !strings.Contains(review, "nothing restarts") {
+	if !strings.Contains(said(review), `data-label="After">10 GB, tenant override</td>`) || !strings.Contains(review, "nothing restarts") || !strings.Contains(review, `<p class="summary-line">It lets atlas write again; atlas keeps running.</p>`) {
 		t.Fatalf("the raise's review:\n%s", between(review, "<h2>Review", "</form>"))
 	}
 	save := url.Values{"do": {"save"}}

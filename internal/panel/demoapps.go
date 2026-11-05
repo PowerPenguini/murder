@@ -355,10 +355,13 @@ func (a *demoActor) Configure(_ context.Context, name string, request api.Tenant
 	if request.App == t.App && request.Overrides.Equal(t.Overrides) {
 		return api.Applied{Tenant: t}, nil
 	}
-	// As the store says it: another app is named in the event.
-	detail := ""
+	// As the store says it: its overrides, another app named first.
+	detail := store.OverridesDetail(request.Overrides.Normalized())
+	if detail == "" {
+		detail = "no overrides"
+	}
 	if request.App != t.App {
-		detail = "app " + t.App + " → " + request.App
+		detail = "app " + t.App + " → " + request.App + "; " + detail
 	}
 	// Its disk limit alone changes: its node sets it on the volume as it
 	// runs, no new container (the reconciler leaves it out of the

@@ -199,12 +199,14 @@ func othersHave(t api.Tenant, tenants []api.Tenant, key string) float64 {
 // bytes (-1 not measured), what the others have, and a value to suggest:
 // what the others have, or twice its data, whichever is more.
 type diskRoom struct {
-	Used          int64
+	// Limit is the limit its volume has, in bytes, as its node reports
+	// it (0 none or not reported).
+	Used, Limit   int64
 	Others, Least int
 }
 
-func diskRoomOf(t api.Tenant, tenants []api.Tenant, used int64) diskRoom {
-	r := diskRoom{Used: used, Others: int(othersHave(t, tenants, "disk"))}
+func diskRoomOf(t api.Tenant, tenants []api.Tenant, used, limit int64) diskRoom {
+	r := diskRoom{Used: used, Limit: limit, Others: int(othersHave(t, tenants, "disk"))}
 	if used > 0 {
 		r.Least = int((2*used + (1 << 30) - 1) >> 30)
 	}
@@ -213,6 +215,9 @@ func diskRoomOf(t api.Tenant, tenants []api.Tenant, used int64) diskRoom {
 
 // Suggest is a disk limit, in GB, that leaves it room: 0 if nothing says.
 func (r diskRoom) Suggest() int { return max(r.Others, r.Least) }
+
+// Full says its data fills the limit its volume has: it cannot write.
+func (r diskRoom) Full() bool { return r.Limit > 0 && r.Used >= r.Limit }
 
 // Fills says its data fills a disk limit of gb: it cannot write (0 is
 // no limit).

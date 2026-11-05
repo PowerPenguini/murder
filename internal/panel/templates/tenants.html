@@ -40,7 +40,8 @@
         <td class="l-main"><a class="row-link" href="/tenants/{{.Spec.Name}}">{{.Spec.Name}}</a> <span class="dim small">{{.App}}</span>{{if .Reason}}<div class="reason{{if .ReasonBad}} bad{{end}}"><span class="st {{if .ReasonBad}}bad{{else}}warn{{end}}"></span>{{.Reason}}</div>{{end}}</td>
         <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         {{with .Use}}
-        <td class="barcell l-sub" data-label="Memory"><div class="barline">{{template "bar" .Memory}}<span class="num{{if ge .Memory.Width 90.0}} red{{end}}">{{.MemoryText}}{{with .MemoryLimit}} <span class="dim of">of {{.}}</span>{{end}}</span></div></td>
+        {{if .DiskFull}}<td class="barcell l-sub phone-only" data-label="Data"><div class="barline">{{with .Data}}{{template "bar" .}}{{end}}<span class="num red">{{.DataText}}{{with .DataLimit}} <span class="dim of">of {{.}}</span>{{end}}</span></div></td>{{end}}
+        <td class="barcell l-sub{{if .DiskFull}} hide-narrow{{end}}" data-label="Memory"><div class="barline">{{template "bar" .Memory}}<span class="num{{if ge .Memory.Width 90.0}} red{{end}}">{{.MemoryText}}{{with .MemoryLimit}} <span class="dim of">of {{.}}</span>{{end}}</span></div></td>
         <td class="barcell hide-narrow hide-mid"><div class="barline">{{template "bar" .CPU}}<span class="num">{{.CPUText}}</span></div></td>
         <td class="num hide-narrow hide-wide">{{.Requests}}</td>
         {{else}}<td class="faint l-sub" data-label="Memory">{{if .Archived}}not running{{else}}not measured{{end}}</td><td class="faint hide-narrow hide-mid">none</td><td class="num faint hide-narrow hide-wide">none</td>{{end}}

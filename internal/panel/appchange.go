@@ -216,11 +216,15 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm, limited map[string
 				name := f.Field
 				if f.Loses {
 					name = "the " + strings.ToLower(f.Field) + " limit"
+				} else if secret, ok := strings.CutSuffix(name, " (secret)"); ok {
+					name = "the secret " + secret
 				}
 				goes = append(goes, name)
 			}
 		}
-		c.Summary += ": " + strconv.Itoa(changed) + " get new values, " + strconv.Itoa(gone) + " go (" + strings.Join(goes, ", ") + ")"
+		// No brackets in brackets: "3 go: the disk limit, DATA_DIR and the
+		// secret SESSION_KEY".
+		c.Summary += "; " + strconv.Itoa(changed) + " get new values and " + strconv.Itoa(gone) + " go: " + joinAnd(goes)
 	}
 	if len(fixes) > 0 {
 		c.Summary += "; it ends the missing " + strings.Join(fixes, ", ") + " limit"

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -201,6 +202,15 @@ func TestReadingSettings(t *testing.T) {
 }
 
 // between is the text of page between before and after.
+// keptWhole is the markup that keeps a name or a figure whole on a line.
+var keptWhole = regexp.MustCompile(`<span class="nowrap">([^<]*)</span>`)
+
+// said is a page as its words read: without what keeps a name ("fsn-1")
+// or a figure ("1.4 GB") whole on its line.
+func said(page string) string {
+	return strings.ReplaceAll(keptWhole.ReplaceAllString(page, "$1"), "\u00a0", " ")
+}
+
 func between(page, before, after string) string {
 	_, rest, ok := strings.Cut(page, before)
 	if !ok {

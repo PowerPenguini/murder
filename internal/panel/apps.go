@@ -834,8 +834,10 @@ type settingsData struct {
 	Review    []settingChange
 	Reviewing bool
 	// Live says they change only its disk limit, which its node sets as
-	// it runs: nothing restarts.
-	Live bool
+	// it runs: nothing restarts. Fixes says what they put right ("It lets
+	// atlas write again; atlas keeps running"), "" if nothing.
+	Live  bool
+	Fixes string
 	// Token binds the save to the values reviewed; Restarts says they
 	// give it a new container, not only new rollout flags.
 	Token    string
@@ -962,9 +964,33 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 		data.Token = reviewToken(t.Spec.Name, form)
 		data.Live = form.diskOnly(t)
 		data.Restarts = form.containerChanged(t) && !data.Live
+		// What it puts right, said first: a limit it no longer lacks, a
+		// disk it can write to again.
+		var fixes []string
+		if gb := diskAfter(t, appSpec, form); data.Disk.Full() && int64(gb)<<30 > data.Disk.Used {
+			fixes = append(fixes, "it lets "+t.Spec.Name+" write again")
+		}
+		for _, c := range data.Review {
+			if c.FromRisk && !c.Risk {
+				fixes = append(fixes, "it ends the missing "+strings.ToLower(c.Field)+" limit")
+			}
+		}
+		if len(fixes) > 0 && data.DiskShort == "" {
+			data.Fixes = strings.Join(fixes, "; ")
+			switch {
+			case data.Restarts:
+				data.Fixes += "; " + t.Spec.Name + " restarts, its data stays"
+			case data.Live && !t.Archived():
+				data.Fixes += "; " + t.Spec.Name + " keeps running"
+			}
+			data.Fixes = strings.ToUpper(data.Fixes[:1]) + data.Fixes[1:]
+		}
 	}
 	if nodes, err := s.backend.Nodes(ctx); err == nil {
 		data.Head = s.headOf(t, nodes, "settings")
+		if data.Disk.Full() && data.Head.State.Kind == "ok" {
+			data.Head.State = tag{"cannot write", "bad"}
+		}
 	} else {
 		data.Head = s.headOf(t, api.Nodes{}, "settings")
 	}
@@ -1269,11 +1295,11 @@ func (d *reviewDrafts) get(app, id string) (string, bool) {
 // diskRoom reads what a disk limit must leave tenant t: its data's size, as
 // its node measured it, and what the other tenants of all have.
 func (s *Server) diskRoom(ctx context.Context, t api.Tenant, all []api.Tenant) diskRoom {
-	used := int64(-1)
+	used, limit := int64(-1), int64(0)
 	if u, ok := s.usageNow(ctx).Tenants[t.Spec.Name]; ok {
-		used = u.DiskUsed
+		used, limit = u.DiskUsed, u.DiskLimit
 	}
-	return diskRoomOf(t, all, used)
+	return diskRoomOf(t, all, used, limit)
 }
 
 // appSpecOf is app's spec, empty if it cannot be read.

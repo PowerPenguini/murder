@@ -34,6 +34,7 @@
     <div class="actions"><button type="submit" name="do" value="save" class="danger">Change {{$t.Spec.Name}} to {{.To}}</button>{{if $d.FromMenu}}<a href="/tenants/{{$t.Spec.Name}}" class="button">Back: keep {{.From}}</a>{{else}}<button type="submit" name="do" value="edit" formnovalidate>Keep editing</button>{{end}}</div>
     {{else}}
     <h2>Review {{plural (len $d.Review) "change" "changes"}} to {{$t.Spec.Name}}</h2>
+    {{with $d.Fixes}}<p class="summary-line">{{.}}.</p>{{end}}
     {{with $d.DiskShort}}<div class="notice bad" role="alert"><p class="flat"><span class="lead-in">{{.}}.</span></p>{{with $d.Disk.Suggest}}<p class="flat spaced">Give it at least {{$d.Disk.Least}} GB, twice its data{{if $d.Disk.Others}}; the other tenants have {{$d.Disk.Others}} GB{{end}}.</p>{{end}}</div>{{end}}
     <table class="list changes">
       <thead><tr><th>Setting</th><th>Now</th><th>After</th></tr></thead>
