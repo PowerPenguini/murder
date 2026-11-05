@@ -221,8 +221,8 @@ The states, in `domain list` and the panel: `verifying` (not checked yet),
 `pending` (its DNS does not point at the cluster, said why; with
 `edge.tls` not `acme`, no certificate is ordered), `issuing`, `active`,
 `renewing` (due, or a renewal failed: the certificate is still served
-until it expires) and `failed` (the CA refused it, said why, with the next
-attempt). Each change is in the audit log (`domain.added`,
+until it expires) and `failed` (ordering it failed, say the CA could not
+reach the name; said why, with the next attempt). Each change is in the audit log (`domain.added`,
 `domain.verified`, `domain.pending`, `domain.issued`, `domain.renewed`,
 `domain.failed`, `domain.removed`). On the leader, `/metrics` has
 `murder_domain_state`, `murder_domain_certificate_expiry_timestamp_seconds`

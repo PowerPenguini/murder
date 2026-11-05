@@ -30,6 +30,9 @@ type DomainAgent interface {
 	CheckDomain(ctx context.Context, tenant, name string) error
 }
 
+// The agent's client adds and removes domains.
+var _ DomainAgent = (*api.Client)(nil)
+
 // domainsView is a tenant's Domains box.
 type domainsView struct {
 	Tenant api.Tenant
@@ -89,7 +92,7 @@ func domainState(d api.Domain, now time.Time) (tag, bool) {
 		}
 		return tag{"Renewing", "busy"}, false
 	case store.DomainFailed:
-		return tag{"Certificate refused", "bad"}, true
+		return tag{"Certificate failed", "bad"}, true
 	}
 	return tag{d.State, "mute"}, false
 }

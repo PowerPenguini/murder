@@ -384,7 +384,7 @@ func (m *Manager) order(ctx context.Context, d store.Domain, renewal bool) {
 		failed := ordering
 		failed.Attempts = d.Attempts + 1
 		failed.NextAt = now.Add(backoff(failed.Attempts, orderFirst, orderMost))
-		failed.Detail = "the CA refused it: " + oneLine(err.Error())
+		failed.Detail = "ordering its certificate failed: " + oneLine(err.Error())
 		if !renewal {
 			failed.State = store.DomainFailed
 		}

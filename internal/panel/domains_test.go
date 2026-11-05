@@ -122,11 +122,27 @@ func TestDomainStates(t *testing.T) {
 		{api.Domain{State: store.DomainRenewing}, "Renewing", false},
 		{api.Domain{State: store.DomainRenewing, Attempts: 2, NotAfter: now.Add(time.Hour)}, "Renewal failing", true},
 		{api.Domain{State: store.DomainRenewing, Attempts: 2, NotAfter: now.Add(-time.Hour)}, "Certificate expired", true},
-		{api.Domain{State: store.DomainFailed}, "Certificate refused", true},
+		{api.Domain{State: store.DomainFailed}, "Certificate failed", true},
 	} {
 		state, bad := domainState(c.domain, now)
 		if state.Label != c.label || bad != c.bad || bad != (state.Kind == "bad") {
 			t.Errorf("%+v: %+v %v", c.domain, state, bad)
 		}
+	}
+}
+
+// The audit log says what happened to a tenant's domains in words, and a
+// failed certificate among the failures.
+func TestDomainEventsAreSaid(t *testing.T) {
+	for action, want := range map[string]string{"domain.added": "domain added", "domain.issued": "domain's certificate issued", "domain.failed": "domain's certificate failed"} {
+		if got := actionText(action); got != want {
+			t.Errorf("%s said %q", action, got)
+		}
+	}
+	if !failureEvent("domain.failed") || failureEvent("domain.pending") {
+		t.Error("the failures are not the failed certificates")
+	}
+	if got := (eventRow{Event: store.Event{Tenant: "acme", Action: "domain.renewed"}}).Predicate(); got != "had a domain's certificate renewed" {
+		t.Errorf("predicate %q", got)
 	}
 }
