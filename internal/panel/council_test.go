@@ -392,7 +392,7 @@ func TestOperationIsFollowed(t *testing.T) {
 	_, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"roll"}, "confirm": {"acme-logistics"}}, server.URL)
 	// One line says it: no flash, no "It is starting" box beside it.
 	if !strings.Contains(body, "its new container is starting") || strings.Contains(body, "is restarting in a new container") || strings.Contains(body, "It is starting") ||
-		!strings.Contains(body, "no figures yet: they show once it reports") || !strings.Contains(body, "previous container, at ") || strings.Contains(body, `data-rest="now `) {
+		!strings.Contains(body, "No figures yet: they show once it reports.") || !strings.Contains(body, "previous container, at ") || strings.Contains(body, `data-rest="now `) {
 		t.Fatalf("after a restart:\n%s", body)
 	}
 	// Settled, it says so.
@@ -466,7 +466,7 @@ func TestSettingsProposalIsNotInEffect(t *testing.T) {
 func TestTenantRowsSayWhy(t *testing.T) {
 	server := newServerOf(t, NewDemoCluster())
 	_, page := get(t, server.URL+"/tenants?show=broken")
-	if !strings.Contains(page, `<div class="reason bad"><span class="st bad"></span>last backup failed, newest 3h old</div>`) || !strings.Contains(page, "out of memory 4m ago; blocks web&#39;s rollout") {
+	if !strings.Contains(page, `<div class="reason bad"><span class="st bad"></span>backup failed; newest 3h old</div>`) || !strings.Contains(page, "out of memory 4m ago; blocks web&#39;s rollout") {
 		t.Fatalf("broken rows:\n%s", page)
 	}
 	_, page = get(t, server.URL+"/tenants?show=risk")

@@ -35,8 +35,7 @@
 <div class="page" id="live">
 {{with .Cluster.Frozen}}<div class="frozen">Changes are frozen: {{.}}</div>{{end}}
 <main id="main">
-{{with .Problem}}<div class="notice bad" role="alert">{{.}}</div>{{end}}
-{{with .Done}}<div class="notice" role="status">{{.}}</div>{{end}}
+{{if not (headFirst .Data)}}{{template "page-notices" .}}{{end}}
 {{template "content" .}}
 </main>
 </div>
@@ -56,3 +55,6 @@
     <a href="/access" {{if eq .Section "access"}}class="on" aria-current="page"{{end}}>Access</a>
 {{end}}
 {{define "section"}}{{if eq .Section "overview"}}Overview{{else if eq .Section "tenants"}}Tenants{{else if eq .Section "apps"}}Apps{{else if eq .Section "events"}}Events{{else if eq .Section "cluster"}}Cluster{{else if eq .Section "access"}}Access{{else}}Menu{{end}}{{end}}
+
+{{define "page-notices"}}{{with .Problem}}<div class="notice bad" role="alert">{{.}}</div>{{end}}
+{{with .Done}}<div class="notice" role="status">{{.}}</div>{{end}}{{end}}

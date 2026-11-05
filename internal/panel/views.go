@@ -710,6 +710,11 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// A tenant a rollout just moved, starting: its rollout line says so in
+	// a word ("Starting: it moved…"), not a notice of its own.
+	if data.StartingNow && !data.Broken && data.Place != nil && data.Place.Moved && strings.HasPrefix(data.Problem, "It is starting") {
+		data.Problem = ""
+	}
 	data.Head = s.withApps(ctx, r, s.headOf(t, nodes, "overview"))
 	p := s.pageFor(w, r, t.Spec.Name, "tenants", nodes, data)
 	// What the action did is said by the operation line, not twice.
@@ -891,11 +896,20 @@ func (s *Server) funcs() template.FuncMap {
 		"imageShort": func(ref string) string { _, short := ImageParts(ref); return short },
 		"breakable":  breakable,
 		"waveSaid":   store.WaveSaid,
-		"marksJSON":  func(marks []mark) string { return jsonOf(marks) },
-		"groups":     groupEvents,
-		"lower":      strings.ToLower,
-		"wavename":   waveName,
-		"sub":        func(a, b int) int { return a - b },
+		// A tenant's pages say what an action did under their header, so
+		// the header never moves between states of one page.
+		"headFirst": func(d any) bool {
+			switch d.(type) {
+			case tenantData, *tenantData, settingsData, *settingsData, logsData, *logsData:
+				return true
+			}
+			return false
+		},
+		"marksJSON": func(marks []mark) string { return jsonOf(marks) },
+		"groups":    groupEvents,
+		"lower":     strings.ToLower,
+		"wavename":  waveName,
+		"sub":       func(a, b int) int { return a - b },
 		"others": func(n api.Nodes) string {
 			var out []string
 			for _, node := range n.Nodes {

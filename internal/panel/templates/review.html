@@ -87,7 +87,7 @@
 
 <section>
   <div class="head"><h2>Its data</h2></div>
-  <p class="flat">Each tenant keeps its data as it moves, and a snapshot of it is taken first. A new image may change that data as it starts (a migration): going back to an older revision later does not undo it. Restore data snapshot, on the app's page while the rollout runs, puts the snapshot back, losing what was written since.</p>
+  <p class="flat">Each tenant keeps its data as it moves, and a snapshot of it is taken first. A new image may change that data as it starts (a migration): going back to an older revision later does not undo it. While the rollout runs, the "Restore data snapshot" button on <a href="/apps/{{$a.Name}}#rollout">{{$a.Name}}'s page</a> puts the snapshot back, losing what was written since.</p>
 </section>
 {{end}}
 

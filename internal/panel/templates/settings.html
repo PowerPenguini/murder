@@ -1,5 +1,6 @@
 {{define "content"}}{{$d := .Data}}{{$t := $d.Tenant}}{{$f := $d.Form}}
 {{template "tenant-head" $d.Head}}
+{{template "page-notices" .}}
 
 {{if and $d.Reviewing (or $d.Review $d.AppChange)}}
 <section data-still data-review class="near">

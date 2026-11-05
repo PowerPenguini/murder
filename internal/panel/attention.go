@@ -173,9 +173,9 @@ func attentionOf(nodes []nodeView, rows []tenantRow, clustered bool, now time.Ti
 				text = "its last backup failed"
 				if !b.None {
 					text += "; the newest is " + ago(now, b.Last) + " old"
-					n.Reasons = append(n.Reasons, "last backup failed, newest "+ago(now, b.Last)+" old")
+					n.Reasons = append(n.Reasons, "backup failed; newest "+nbsp(ago(now, b.Last)+" old"))
 				} else {
-					n.Reasons = append(n.Reasons, "last backup failed, none yet")
+					n.Reasons = append(n.Reasons, "backup failed; none\u00a0yet")
 				}
 				if cause, _ := b.Cause(); cause != "" {
 					n.Subs = append(n.Subs, sub{Short: cause, Text: cause, Bad: true})

@@ -327,8 +327,8 @@ ul.attention li:first-child { border-top: 0; }
 ul.attention li.broken { background: var(--bad-wash); }
 ul.attention li > .st { flex: none; padding-top: 1px; }
 ul.attention li > .st::before { margin-right: 0; }
-ul.attention a.subject { font-weight: 600; text-decoration: none; }
-ul.attention a.subject:hover { text-decoration: underline; }
+ul.attention a.subject { font-weight: 600; text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 3px; }
+ul.attention a.subject:hover { text-decoration-color: currentColor; }
 ul.attention li.broken a.subject { color: var(--bad); }
 .fixes { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); margin-top: 6px; font-size: 13px; }
 .fixes a { color: var(--soft); }
@@ -532,7 +532,7 @@ details.event dl.pairs { margin-top: var(--s3); padding: var(--s3) var(--pad-x);
   .pagehead { align-items: flex-start; }
   .pagehead .title { flex: 1 1 100%; }
   .pagehead nav.tabs { order: 4; flex: 1 0 100%; margin: 0; gap: var(--s5); }
-  .pagehead .actions { order: 3; margin-left: 0; }
+  .pagehead .actions, .pagehead .title + .actions { order: 3; margin-left: 0; }
   .pagehead > .lead { order: 2; }
   table.settings td.own, table.env td.end { white-space: normal; width: auto; }
   table.settings td.own .check { margin-bottom: var(--s2); }
@@ -1058,3 +1058,11 @@ input.confirm-field { max-width: 320px; }
   table.settings.grid .row-act { float: none; grid-column: 1 / -1; grid-row: 3; justify-self: end; line-height: normal; margin: 0; }
   table.settings.grid tr.setting:has(.own-switch:checked) .row-act { grid-row: 5; }
 }
+.stat-caption { margin: 6px 0 0; font-size: 12.5px; color: var(--dim); max-width: 34ch; }
+/* In a problem box the typed form reads as part of it: its sentence at the
+   box's own size and colour, at the field's measure. */
+.problem .inline-form .hint { font-size: inherit; color: inherit; max-width: 440px; }
+/* A chart's nearby list, open in place, lengthens only its own figure: the
+   chart beside it does not stretch. */
+.charts > figure.chart { align-self: start; }
+.warn-notice .st:empty::before, .op-owner .st:empty::before { margin-right: var(--s2); }

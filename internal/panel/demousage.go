@@ -77,7 +77,7 @@ func (d *DemoCluster) Usage(ctx context.Context) (api.UsageReport, error) {
 			}
 			limits := t.Spec.Limits
 			at := now.Truncate(time.Minute).Add(-time.Minute)
-			p := demoPoint(t.Spec.Name, limits.MemoryMB, limits.CPUs, at, time.Minute, d.demoMemory(t.Spec.Name, limits.MemoryMB, at.Add(time.Minute)))
+			p := demoPoint(t.Spec.Name, limits.MemoryMB, demoCores(limits.CPUs), at, time.Minute, d.demoMemory(t.Spec.Name, limits.MemoryMB, at.Add(time.Minute)))
 			r.Tenants[t.Spec.Name] = usage.Now{At: p.At, CPU: p.CPU, Memory: p.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
 				NetRx: p.NetRx, NetTx: p.NetTx, DiskUsed: demoData, Requests: p.Requests, Errors: p.Errors, P95: p.P95}
 			memory += p.Memory
@@ -124,7 +124,7 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	series := usage.Series{Tenant: name, Node: t.Node, Step: int(step / time.Second)}
 	for at := end.Add(-24 * time.Hour).Add(step); at.Before(end); at = at.Add(step) {
 		limit := d.limitAt(name, limits.MemoryMB, at.Add(step))
-		p := demoPoint(name, limit, limits.CPUs, at, step, d.demoMemory(name, limit, at.Add(step)))
+		p := demoPoint(name, limit, demoCores(limits.CPUs), at, step, d.demoMemory(name, limit, at.Add(step)))
 		// The step's least, read each minute: a kill within it shows.
 		if name == "baltic-freight" {
 			low := float64(p.Memory)
@@ -145,7 +145,7 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	// last minute, so the tenants list, the overview and this page give
 	// the same numbers.
 	minute := now.Truncate(time.Minute).Add(-time.Minute)
-	m := demoPoint(name, limits.MemoryMB, limits.CPUs, minute, time.Minute, d.demoMemory(name, limits.MemoryMB, minute.Add(time.Minute)))
+	m := demoPoint(name, limits.MemoryMB, demoCores(limits.CPUs), minute, time.Minute, d.demoMemory(name, limits.MemoryMB, minute.Add(time.Minute)))
 	k := int64(step / time.Minute)
 	newest := &series.Points[len(series.Points)-1]
 	newest.CPU, newest.Memory, newest.P95 = m.CPU, m.Memory, m.P95
@@ -238,3 +238,12 @@ func (d *DemoCluster) peakIn(name string, limitMB int, at time.Time, step time.D
 // demoData is a tenant's data size: what its volume holds, whatever its
 // limit, which another app may not set.
 const demoData = int64(10) << 30 / 7
+
+// demoCores is what a tenant's use is drawn against: its limit, or a core
+// when its app sets none, as a real tenant's use does not stop at zero.
+func demoCores(limit float64) float64 {
+	if limit <= 0 {
+		return 1
+	}
+	return limit
+}
