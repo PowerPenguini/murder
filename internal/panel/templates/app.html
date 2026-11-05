@@ -40,8 +40,8 @@
         <td class="l-main"><a class="row-link" href="/tenants/{{.Name}}">{{.Name}}</a></td>
         <td class="l-side"><span class="st {{.State.Kind}}">{{.State.Label}}</span></td>
         <td class="l-sub" data-label="Runs">{{if .Moved}}{{.To}} <span class="dim">(from {{.From}})</span>{{else if .Held}}<span class="dim">{{.From}}, held</span>{{else if eq .From .To}}{{.To}}{{else}}<span class="dim">{{.From}}</span>{{end}}</td>
-        <td class="hide-narrow hide-mid">{{if .Wave}}{{.WaveName}}{{else}}<span class="faint">none</span>{{end}}</td>
-        <td class="l-sub" data-label="Result">{{if .Moved}}{{if eq .Kind "ok"}}{{.Result}}{{else}}<span class="st {{.Kind}}">{{.Result}}</span>{{end}}{{else if .Held}}<span class="dim">stays: it is held</span>{{else if eq .From .To}}<span class="dim">ran it already</span>{{else}}<span class="dim">waits for {{lower .WaveName}}</span>{{end}}</td>
+        <td class="hide-narrow hide-mid">{{if .Wave}}{{.Wave}}. {{.WaveName}}{{else}}<span class="faint">none</span>{{end}}</td>
+        <td class="l-sub" data-label="Result">{{if .Moved}}{{if eq .Kind "ok"}}{{.Result}}{{else}}<span class="st {{.Kind}}">{{.Result}}</span>{{end}}{{else if .Held}}<span class="dim">stays: it is held</span>{{else if eq .From .To}}<span class="dim">ran it already</span>{{else}}<span class="dim">waits for {{waveSaid .Wave .WaveName}}</span>{{end}}</td>
       </tr>
     {{end}}
     </tbody>

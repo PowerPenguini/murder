@@ -929,7 +929,7 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 		found := false
 		for _, app := range apps {
 			if app.Name == form.App {
-				change := appChangeOf(t, app, form)
+				change := appChangeOf(t, app, form, limited)
 				data.AppChange, found = &change, true
 				data.FromMenu = r.Method == http.MethodGet
 			}

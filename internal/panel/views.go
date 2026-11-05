@@ -930,6 +930,7 @@ func (s *Server) funcs() template.FuncMap {
 		"imageRepo":  func(ref string) string { r, _ := ImageParts(ref); return r },
 		"imageShort": func(ref string) string { _, short := ImageParts(ref); return short },
 		"breakable":  breakable,
+		"names":      keepNames,
 		"waveSaid":   store.WaveSaid,
 		"blocked":    rolloutBlocked,
 		"setLimit":   setLimit,
@@ -1263,4 +1264,14 @@ func breakable(text string) template.HTML {
 	escaped := template.HTMLEscapeString(text)
 	escaped = digestText.ReplaceAllString(escaped, `<span class="nowrap">$0</span>`)
 	return template.HTML(strings.ReplaceAll(escaped, "@", "<wbr>@"))
+}
+
+// nodeName is a node's or tenant's name in running text: "fsn-1",
+// "acme-logistics".
+var nodeName = regexp.MustCompile(`\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+\b`)
+
+// keepNames says text with each such name kept whole on one line: a
+// narrow cell breaks around "fsn-1", never at its hyphen.
+func keepNames(text string) template.HTML {
+	return template.HTML(nodeName.ReplaceAllString(template.HTMLEscapeString(text), `<span class="nowrap">$0</span>`))
 }

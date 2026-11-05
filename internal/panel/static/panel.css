@@ -512,7 +512,7 @@ details.event dl.pairs { margin-top: var(--s3); padding: var(--s3) var(--pad-x);
   table.list td.l-sub { display: block; grid-column: 1 / -1; font-size: 13.5px; }
   /* A label and its value: the value wraps in its own column. */
   table.list td.l-sub[data-label] { padding-left: 112px; }
-  table.list td.l-sub[data-label]::before { content: attr(data-label); display: inline-block; width: 112px; margin-left: -112px; padding-right: var(--s2); color: var(--dim); font-size: 12.5px; vertical-align: top; }
+  table.list td.l-sub[data-label]::before { content: attr(data-label); display: inline-block; box-sizing: border-box; width: 112px; margin-left: -112px; padding-right: var(--s2); color: var(--dim); font-size: 12.5px; vertical-align: top; }
   table.list td.l-sub .keys { display: inline-flex; }
   table.list td.l-sub.barcell .barline { display: inline-flex; }
   table.list td.l-sub.barcell::before { vertical-align: middle; }
@@ -761,7 +761,7 @@ table#tenants td.l-main > a, table#tenants td.l-main > .dim { white-space: nowra
 .proposed-notice .actions { margin-top: var(--s3); }
 
 /* ── a page's notices: one area, one style, the wrong first ── */
-.notices { display: grid; gap: 1px; margin: var(--s4) 0 0; background: var(--bg); }
+.notices { display: grid; gap: var(--s4); margin: var(--s4) 0 0; background: var(--bg); }
 .nrow { padding: var(--pad-y) var(--pad-x); background: var(--raised); box-shadow: inset 2px 0 0 var(--soft); }
 .nrow.bad { background: var(--bad-wash); box-shadow: inset 2px 0 0 var(--bad); }
 .nrow .lead-in { font-weight: 600; }

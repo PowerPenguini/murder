@@ -114,7 +114,7 @@ func TestRolloutProgress(t *testing.T) {
 		t.Fatalf("moved a wave without the name: wave %d", app.Rollout.Wave)
 	}
 	_, page := get(t, server.URL+"/apps/web")
-	for _, want := range []string{`<li class="done"><span class="wn">1. Canaries</span>`, `<li class="blocked"><span class="wn">2. A tenth</span><span class="wc">1 tenant · blocked by baltic-freight</span>`, "moved, not healthy: blocks the next wave", "waits for half", "stays: it is held", "so wave 3 (half) waits. It moves once baltic-freight has been healthy on revision 3 for a minute", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
+	for _, want := range []string{`<li class="done"><span class="wn">1. Canaries</span>`, `<li class="blocked"><span class="wn">2. A tenth</span><span class="wc">1 tenant · blocked by baltic-freight</span>`, "moved, not healthy: blocks the next wave", "waits for wave 3 (half)", "stays: it is held", "so wave 3 (half) waits. It moves once baltic-freight has been healthy on revision 3 for a minute", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, page)
 		}
@@ -1084,10 +1084,10 @@ func TestChangingATenantsApp(t *testing.T) {
 	// was written by another user than testapp runs as.
 	_, body = get(t, server.URL+"/tenants/atlas/settings?do=review&app=testapp")
 	for _, want := range []string{"Review changing atlas to app testapp", "<th>Now, on web</th><th>After, on testapp</th>",
-		"App web → testapp: 3 settings change, 3 go (1 limit: disk)", "atlas would run with no disk limit:", "Set it in",
-		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now">10 GB</td><td class="l-sub" data-label="After"><span class="st warn">no limit (no default on fsn-1)</span>`,
-		`<td class="l-main">Processes</td><td class="dim l-sub" data-label="Now">256</td><td class="l-sub" data-label="After">512 (node default on fsn-1)</td>`,
-		`<tr class="same"><td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1</td><td class="l-sub" data-label="After"><span class="dim">1 (node default on fsn-1): the same value</span>`,
+		"App web → testapp: 6 settings change: 3 get new values, 3 go (the disk limit, DATA_DIR, SESSION_KEY (secret))", "atlas would run with no disk limit:", "Set it in",
+		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now">10 GB</td><td class="l-sub" data-label="After"><span class="st warn">no limit (no default on <span class="nowrap">fsn-1</span>)</span>`,
+		`<td class="l-main">Processes</td><td class="dim l-sub" data-label="Now">256</td><td class="l-sub" data-label="After">512 (node default on <span class="nowrap">fsn-1</span>)</td>`,
+		`<tr class="same"><td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1</td><td class="l-sub" data-label="After"><span class="dim">same: 1 (node default on <span class="nowrap">fsn-1</span>)</span>`,
 		"testapp runs as 10001:10001, but atlas's data at /data was written as 1000:1000.",
 		`<td class="l-main">User</td><td class="dim l-sub" data-label="Now">1000:1000</td><td class="l-sub" data-label="After">10001:10001</td>`,
 		`<td class="l-main">Image</td>`, "Its own, kept over testapp's", `<span class="nowrap">memory 768 MB</span>`, `<span class="nowrap">TZ</span>`,
@@ -1151,7 +1151,7 @@ func TestChangingATenantsApp(t *testing.T) {
 		t.Fatalf("the risk does not say what to set:\n%s", after)
 	}
 	review := url.Values{"do": {"review"}, "generation": {between(settings, `name="generation" value="`, `"`)}, "app": {"testapp"}, "owns": {"1"}, "own-memoryMB": {"on"}, "memoryMB": {"768"}, "own-diskGB": {"on"}, "diskGB": {"20"}}
-	if _, body := submit(t, client, server, "/tenants/atlas/settings", review, server.URL); !strings.Contains(body, `<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now">no limit (no default on fsn-1)</td><td class="l-sub" data-label="After">20 GB, tenant override</td>`) || strings.Contains(body, "the node&#39;s default") {
+	if _, body := submit(t, client, server, "/tenants/atlas/settings", review, server.URL); !strings.Contains(body, `<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now"><span class="st warn">no limit (no default on <span class="nowrap">fsn-1</span>)</span></td><td class="l-sub" data-label="After">20 GB, tenant override</td>`) || strings.Contains(body, "the node&#39;s default") {
 		t.Fatalf("the settings review of a disk limit:\n%s", body)
 	}
 	if _, list := get(t, server.URL+"/tenants?show=risk"); !strings.Contains(list, ">no disk limit</div>") {
@@ -1166,10 +1166,10 @@ func TestChangingATenantsApp(t *testing.T) {
 	for _, want := range []string{"Review changing atlas to app web", "atlas&#39;s data at /data was written as 1000:1000, the user web runs as.",
 		"Given back", "SESSION_KEY (secret)</span>: its value from before", "Back: keep testapp</a>",
 		// The limits it runs with on testapp, said as everywhere else.
-		`<td class="l-main">Processes</td><td class="dim l-sub" data-label="Now">512 (node default on fsn-1)</td><td class="l-sub" data-label="After">256</td>`,
-		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now">no limit (no default on fsn-1)</td><td class="l-sub" data-label="After">10 GB</td>`,
-		`<tr class="same"><td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1 (node default on fsn-1)</td>`,
-		"App testapp → web: 6 settings change; atlas restarts"} {
+		`<td class="l-main">Processes</td><td class="dim l-sub" data-label="Now">512 (node default on <span class="nowrap">fsn-1</span>)</td><td class="l-sub" data-label="After">256</td>`,
+		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now"><span class="st warn">no limit (no default on <span class="nowrap">fsn-1</span>)</span></td><td class="l-sub" data-label="After">10 GB</td>`,
+		`<tr class="same"><td class="l-main">CPUs</td><td class="dim l-sub" data-label="Now">1 (node default on <span class="nowrap">fsn-1</span>)</td>`,
+		"App testapp → web: 6 settings change; it ends the missing disk limit; atlas restarts"} {
 		if !strings.Contains(back, want) {
 			t.Fatalf("the change back lacks %q:\n%s", want, back)
 		}
@@ -1218,19 +1218,19 @@ func TestEventsNameTheirWave(t *testing.T) {
 func TestAnAppChangeWarnsOfTheOwnerAsRead(t *testing.T) {
 	now := api.Tenant{App: "web", Spec: spec.Tenant{Name: "atlas", User: "1000:1000", DataPath: "/data"}}
 	to := api.App{Name: "testapp", Spec: spec.Tenant{Image: "x", User: "10001:10001"}}
-	if c := appChangeOf(now, to, settingsForm{}); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "is not known: its node has not said") {
+	if c := appChangeOf(now, to, settingsForm{}, nil); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "is not known: its node has not said") {
 		t.Fatalf("no status: %+v", c)
 	}
 	now.Status = &reconcile.Status{}
-	if c := appChangeOf(now, to, settingsForm{}); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "was not read (it may be empty)") {
+	if c := appChangeOf(now, to, settingsForm{}, nil); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "was not read (it may be empty)") {
 		t.Fatalf("not read: %+v", c)
 	}
 	now.Status.DataOwner, now.Status.DataMixed = "1000:1000", true
-	if c := appChangeOf(now, to, settingsForm{}); c.OwnerNow != "1000:1000" || c.OwnerAfter != "10001:10001" || !c.OwnerMixed {
+	if c := appChangeOf(now, to, settingsForm{}, nil); c.OwnerNow != "1000:1000" || c.OwnerAfter != "10001:10001" || !c.OwnerMixed {
 		t.Fatalf("read, another owner: %+v", c)
 	}
 	now.Status.DataOwner = "10001:10001"
-	if c := appChangeOf(now, to, settingsForm{}); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "the user testapp runs as") {
+	if c := appChangeOf(now, to, settingsForm{}, nil); c.OwnerAfter != "" || !strings.Contains(c.OwnerNote, "the user testapp runs as") {
 		t.Fatalf("read, the new app's own user: %+v", c)
 	}
 }

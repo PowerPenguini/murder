@@ -48,12 +48,13 @@ type appField struct {
 	Field, Now, After string
 	Loses, Gone       bool
 	// Same says its value stays; only where it comes from changes.
-	Same bool
+	// NowRisk says it runs without this limit now, which others have.
+	Same, NowRisk bool
 }
 
 // appChangeOf composes what tenant t would run on app to, with the
 // overrides the form holds.
-func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
+func appChangeOf(t api.Tenant, to api.App, form settingsForm, limited map[string]bool) appChange {
 	overrides, _ := form.overrides()
 	now := t.Spec
 	after := spec.Compose(to.Spec, t.Spec.Name, overrides)
@@ -97,20 +98,24 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 	// Each limit as it is in effect now and would be: the one account the
 	// settings, its page and its risks give. A limit whose value stays but
 	// whose source changes is shown, in grey, and not counted.
-	nowLimits := limitsOf(t, map[string]bool{})
-	afterLimits := limitsInEffect(after.Limits, overrides.Limits, to.Name, t.Status, t.Node, nil)
+	nowLimits := limitsOf(t, limited)
+	afterLimits := limitsInEffect(after.Limits, overrides.Limits, to.Name, t.Status, t.Node, limited)
 	var limits []appField
+	var fixes []string
 	for i, n := range nowLimits {
 		a := afterLimits[i]
-		row := appField{Field: n.Label, Now: n.InEffect(), After: a.InEffect()}
+		row := appField{Field: n.Label, Now: n.InEffect(), After: a.InEffect(), NowRisk: n.Risk}
 		switch {
 		case n.Value == a.Value && n.From == a.From:
 			continue
 		case n.Value == a.Value:
-			row.Same = true
+			row.Same, row.After = true, "same: "+a.InEffect()
 		case a.From == fromNone:
 			row.Loses = true
 			lost = append(lost, n.Key)
+		}
+		if n.Risk && a.Value > 0 {
+			fixes = append(fixes, n.Key)
 		}
 		limits = append(limits, row)
 	}
@@ -201,12 +206,24 @@ func appChangeOf(t api.Tenant, to api.App, form settingsForm) appChange {
 		}
 	}
 	c.Unlimited, c.OneLost = strings.Join(lost, ", "), len(lost) == 1
-	c.Summary = "App " + t.App + " → " + to.Name + ": " + plural(changed, "setting changes", "settings change")
+	// Plainly: how many change, how many of those only get new values and
+	// which go; and a risk it ends.
+	c.Summary = "App " + t.App + " → " + to.Name + ": " + plural(changed+gone, "setting changes", "settings change")
 	if gone > 0 {
-		c.Summary += ", " + strconv.Itoa(gone) + " go"
-		if len(lost) > 0 {
-			c.Summary += " (" + plural(len(lost), "limit", "limits") + ": " + c.Unlimited + ")"
+		var goes []string
+		for _, f := range c.Fields {
+			if f.Gone || f.Loses {
+				name := f.Field
+				if f.Loses {
+					name = "the " + strings.ToLower(f.Field) + " limit"
+				}
+				goes = append(goes, name)
+			}
 		}
+		c.Summary += ": " + strconv.Itoa(changed) + " get new values, " + strconv.Itoa(gone) + " go (" + strings.Join(goes, ", ") + ")"
+	}
+	if len(fixes) > 0 {
+		c.Summary += "; it ends the missing " + strings.Join(fixes, ", ") + " limit"
 	}
 	c.Summary += "; " + t.Spec.Name + " restarts, its data stays"
 	return c

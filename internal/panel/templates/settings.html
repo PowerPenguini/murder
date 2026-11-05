@@ -19,7 +19,7 @@
     {{with .Unlimited}}<div class="notice warn-notice" role="status"><p class="flat"><span class="st warn"></span><span class="lead-in">{{$t.Spec.Name}} would run with no {{.}} limit:</span> {{$c.To}} sets none, and {{$t.Node}} has no default. Without it, it can take what the node's other tenants need. Set {{if $c.OneLost}}it{{else}}them{{end}} in <a href="/apps/{{$c.To}}">{{$c.To}}'s spec</a>, or as {{$t.Spec.Name}}'s own, first.</p></div>{{end}}
     <table class="list changes">
       <thead><tr><th>Setting</th><th>Now, on {{.From}}</th><th>After, on {{.To}}</th></tr></thead>
-      <tbody>{{range .Fields}}<tr{{if .Same}} class="same"{{end}}><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.Now}}</td><td class="l-sub" data-label="After">{{if .Loses}}<span class="st warn">{{.After}}</span>{{else if .Same}}<span class="dim">{{.After}}: the same value</span>{{else}}{{.After}}{{end}}</td></tr>{{end}}
+      <tbody>{{range .Fields}}<tr{{if .Same}} class="same"{{end}}><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{if .NowRisk}}<span class="st warn">{{names .Now}}</span>{{else}}{{names .Now}}{{end}}</td><td class="l-sub" data-label="After">{{if .Loses}}<span class="st warn">{{names .After}}</span>{{else if .Same}}<span class="dim">{{names .After}}</span>{{else}}{{names .After}}{{end}}</td></tr>{{end}}
       {{range $d.Review}}{{if or (eq .Field "Canary") (eq .Field "Held")}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="After">{{.To}}</td></tr>{{end}}{{end}}</tbody>
     </table>
     <dl class="carry">
@@ -37,7 +37,7 @@
     {{with $d.DiskShort}}<div class="notice bad" role="alert"><p class="flat"><span class="lead-in">{{.}}.</span></p>{{with $d.Disk.Suggest}}<p class="flat spaced">Give it at least {{$d.Disk.Least}} GB{{if $d.Disk.Others}}; the other tenants have {{$d.Disk.Others}} GB{{end}}.</p>{{end}}</div>{{end}}
     <table class="list changes">
       <thead><tr><th>Setting</th><th>Now</th><th>After</th></tr></thead>
-      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{.From}}</td><td class="l-sub" data-label="After">{{if .Risk}}<span class="st warn">{{.To}}</span>{{else}}{{.To}}{{end}}</td></tr>{{end}}</tbody>
+      <tbody>{{range $d.Review}}<tr><td class="l-main">{{.Field}}</td><td class="dim l-sub" data-label="Now">{{if .FromRisk}}<span class="st warn">{{names .From}}</span>{{else}}{{names .From}}{{end}}</td><td class="l-sub" data-label="After">{{if .Risk}}<span class="st warn">{{names .To}}</span>{{else}}{{names .To}}{{end}}</td></tr>{{end}}</tbody>
     </table>
     <p class="hint">{{if $d.Restarts}}Saving gives {{$t.Spec.Name}} a new container{{if $t.Archived}} once it is restored{{else}}: it answers no request for the few seconds it starts{{end}}. Its data stays.{{else}}Rollout flags change no container: they count from {{$t.App}}'s next rollout.{{end}} Exactly these values are saved; to change them, keep editing.</p>
     {{if $d.DiskShort}}<p class="hint flat">Saving it stops {{$t.Spec.Name}} writing. Type {{$t.Spec.Name}} to confirm.</p>
