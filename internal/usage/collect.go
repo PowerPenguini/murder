@@ -31,8 +31,10 @@ type Collector struct {
 	Tenants func() []Tenant
 	Pid     func(ctx context.Context, container string) (int, error)
 	// Disk tells the size of a tenant's data, ok=false if the volume
-	// driver cannot; nil when none can.
-	Disk func(ctx context.Context, tenant string) (used int64, ok bool, err error)
+	// driver cannot; nil when none can. Its limit is the one its volume
+	// enforces (0 none), which is not the spec's when the volume refused
+	// that one; -1 when the driver does not tell, and the spec's counts.
+	Disk func(ctx context.Context, tenant string) (used, limit int64, ok bool, err error)
 	Log  *slog.Logger
 	Now  func() time.Time
 
@@ -107,13 +109,16 @@ func (c *Collector) Collect(ctx context.Context) {
 		names[t.Name] = true
 		if measureDisk {
 			call, cancel := context.WithTimeout(ctx, callTimeout)
-			used, ok, err := c.Disk(call, t.Name)
+			used, limit, ok, err := c.Disk(call, t.Name)
 			cancel()
 			if err == nil {
 				if !ok {
 					used = -1
 				}
-				c.Recorder.Disk(t.Name, used, t.DiskLimit, now)
+				if limit < 0 {
+					limit = t.DiskLimit
+				}
+				c.Recorder.Disk(t.Name, used, limit, now)
 			} else {
 				c.Log.Debug("measure a tenant's data", "tenant", t.Name, "error", err)
 			}

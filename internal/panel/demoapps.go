@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -359,6 +360,32 @@ func (a *demoActor) Configure(_ context.Context, name string, request api.Tenant
 	if request.App != t.App {
 		detail = "app " + t.App + " → " + request.App
 	}
+	// Its disk limit alone changes: its node sets it on the volume as it
+	// runs, no new container (the reconciler leaves it out of the
+	// container's inputs). One below its data the volume refuses, as ZFS
+	// does: it keeps the limit it had, and the node warns.
+	beforeOverrides := t.Overrides
+	beforeOverrides.Limits.DiskGB = request.Overrides.Limits.DiskGB
+	live := request.App == t.App && request.Overrides.Equal(beforeOverrides) && t.Status != nil
+	used, kept := a.diskOf(t)
+	warning := ""
+	if gb := composed.Limits.Or(demoDefaults).DiskGB; gb > 0 && int64(gb)<<30 < used {
+		warning = "disk limit not applied: " + strconv.Itoa(gb) + " GB: cannot set property for 'tank/murder/" + name + "': size is less than current used or reserved space"
+	}
+	a.mu.Lock()
+	if a.diskKept == nil {
+		a.diskKept = map[string]int{}
+	}
+	if warning != "" {
+		a.diskKept[name] = int(kept >> 30)
+	} else {
+		delete(a.diskKept, name)
+	}
+	a.mu.Unlock()
+	var status reconcile.Status
+	if t.Status != nil {
+		status = *t.Status
+	}
 	changed, err := a.change(name, "tenant.updated", detail, func(t *api.Tenant) error {
 		suspended := t.Spec.Suspended
 		// As the store: every secret it was given keeps its value, kept or
@@ -373,6 +400,21 @@ func (a *demoActor) Configure(_ context.Context, name string, request api.Tenant
 		t.Spec.Suspended = suspended
 		return nil
 	})
+	if err == nil && (live || warning != "") {
+		a.mu.Lock()
+		t := a.tenants[name]
+		if live {
+			// The same container: its node's word, at the new generation.
+			status.Generation, status.CheckedAt = t.Generation, time.Now()
+			t.Status = &status
+		}
+		if t.Status != nil {
+			t.Status.Warning = warning
+		}
+		a.tenants[name] = t
+		changed = t
+		a.mu.Unlock()
+	}
 	return api.Applied{Tenant: changed, Changed: err == nil}, err
 }
 

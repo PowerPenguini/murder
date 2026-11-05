@@ -254,8 +254,12 @@ func operationOf(t api.Tenant, events []store.Event, now time.Time) *operation {
 			op.State, op.Kind = "archived", "mute"
 		case status == nil:
 			op.State, op.Kind = "waiting for its node to say how it runs", "warn"
-		case status.Phase == "starting" || (status.Generation != 0 && status.Generation < t.Generation):
+		case status.Phase == "starting":
 			op.State, op.Kind = "its new container is starting", "busy"
+		case status.Generation != 0 && status.Generation < t.Generation:
+			// Its node has not taken the change up yet: a new container,
+			// or (a disk limit alone) none.
+			op.State, op.Kind = "its node is applying it", "busy"
 		case status.Phase == "running" && status.Healthy:
 			op.State, op.Kind = "done: it runs healthy", "ok"
 		case status.Phase == "running":

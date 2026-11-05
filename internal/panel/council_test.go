@@ -1294,46 +1294,107 @@ func TestLimitsInEffect(t *testing.T) {
 	}
 }
 
-// A disk limit its data already fills is warned of in red and needs the
-// tenant's name typed; once saved, the tenant is broken everywhere until
-// the limit is raised, and its change is not "done".
-func TestADiskLimitItsDataFills(t *testing.T) {
+// settingsValues is a tenant's settings form as it stands, as the review
+// sends it: the values a test changes before reviewing.
+func settingsValues(t api.Tenant) url.Values {
+	f := formOf(t)
+	return url.Values{"generation": {strconv.FormatInt(f.Generation, 10)}, "app": {f.App}, "image": {f.Image}, "env": {f.Env}, "secrets": {f.Secrets},
+		"memoryMB": {f.MemoryMB}, "cpus": {f.CPUs}, "pids": {f.PIDs}, "diskGB": {f.DiskGB}, "flags": {"1"}, "canary": {f.Canary}, "hold": {f.Hold}}
+}
+
+// A disk limit at or below the data a tenant holds is one its node does
+// not set (ZFS refuses such a refquota): the review says so in red, offers
+// a limit that leaves room, and nothing saves it. One set behind the
+// panel's back is said as its node refused it: it keeps the one it had.
+func TestADiskLimitBelowItsDataIsNotSet(t *testing.T) {
 	cluster, server, client := newAppsPanel(t)
 	atlas, _ := cluster.Get(context.Background(), "atlas")
-	form := url.Values{"do": {"review"}, "generation": {strconv.FormatInt(atlas.Generation, 10)}, "app": {"web"}, "owns": {"1"}, "own-memoryMB": {"on"}, "memoryMB": {"768"}, "own-diskGB": {"on"}, "diskGB": {"1"}}
+	form := settingsValues(atlas)
+	form.Set("do", "review")
+	form.Set("diskGB", "1")
 	_, body := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
-	for _, want := range []string{"1 GB is less than the 1.4 GB atlas holds: it could no longer write until the limit is raised.", "Give it at least 3 GB; the other tenants have 10 GB.",
+	for _, want := range []string{"1 GB is less than the 1.4 GB atlas holds: its node does not set a disk limit below its data.", "Give it at least 3 GB, twice its data; the other tenants have 10 GB.",
 		`<td class="l-main">Disk</td><td class="dim l-sub" data-label="Now">10 GB, inherited from web</td><td class="l-sub" data-label="After">1 GB, tenant override</td>`,
-		"Saving it stops atlas writing. Type atlas to confirm.", `class="danger">Save and restart atlas</button>`} {
+		`<input type="hidden" name="suggest" value="10"><button type="submit" name="do" value="usedisk" class="primary">Use 10 GB instead</button>`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the review of a too small disk limit lacks %q:\n%s", want, body)
 		}
 	}
-	save := url.Values{"do": {"save"}}
-	for _, name := range []string{"generation", "reviewed", "app", "image", "memoryMB", "cpus", "pids", "diskGB", "env", "secrets", "flags", "canary", "hold"} {
-		save.Set(name, html.UnescapeString(between(body, `name="`+name+`" value="`, `"`)))
+	if strings.Contains(body, `value="save"`) {
+		t.Fatalf("a disk limit below its data can be saved:\n%s", between(body, `<div class="actions">`, "</div>"))
 	}
-	if _, refused := submit(t, client, server, "/tenants/atlas/settings", save, server.URL); !strings.Contains(refused, "type atlas to give it a disk limit its data already fills") {
-		t.Fatalf("saved without the name typed:\n%s", refused)
+	fields := func(page string) url.Values {
+		values := url.Values{}
+		for _, name := range []string{"generation", "reviewed", "app", "image", "memoryMB", "cpus", "pids", "diskGB", "env", "secrets", "flags", "canary", "hold", "suggest"} {
+			values.Set(name, html.UnescapeString(between(page, `name="`+name+`" value="`, `"`)))
+		}
+		return values
+	}
+	save := fields(body)
+	save.Set("do", "save")
+	save.Set("confirm", "atlas")
+	if _, refused := submit(t, client, server, "/tenants/atlas/settings", save, server.URL); !strings.Contains(refused, "its node does not set a disk limit below its data: give atlas more than 1.4 GB") {
+		t.Fatalf("a disk limit below its data was saved:\n%s", refused)
 	}
 	if still, _ := cluster.Get(context.Background(), "atlas"); still.Overrides.Limits.DiskGB != 0 {
-		t.Fatalf("saved a disk limit of %d GB without the name typed", still.Overrides.Limits.DiskGB)
+		t.Fatalf("saved a disk limit of %d GB below its data", still.Overrides.Limits.DiskGB)
 	}
-	save.Set("confirm", "atlas")
-	submit(t, client, server, "/tenants/atlas/settings", save, server.URL)
-	// Broken everywhere: its page, the tenants list, the overview, the
-	// side bar's count; and its change is not "done: it runs healthy".
+	// "Use 10 GB instead": the same review with 10 GB, which saves at once,
+	// with no restart: a disk limit alone is set on its data as it runs.
+	use := fields(body)
+	use.Set("do", "usedisk")
+	_, again := submit(t, client, server, "/tenants/atlas/settings", use, server.URL)
+	for _, want := range []string{`data-label="After">10 GB, tenant override</td>`, "Saving sets it on atlas's data at once: atlas keeps running, nothing restarts.", `class="primary">Save</button>`} {
+		if !strings.Contains(again, want) {
+			t.Fatalf("the review with the suggested limit lacks %q:\n%s", want, again)
+		}
+	}
+	saved := fields(again)
+	saved.Set("do", "save")
+	submit(t, client, server, "/tenants/atlas/settings", saved, server.URL)
+	if after, _ := cluster.Get(context.Background(), "atlas"); after.Overrides.Limits.DiskGB != 10 || after.Status.Phase != "running" || after.Status.Generation != after.Generation {
+		t.Fatalf("after a disk limit alone: %+v, status %+v", after.Overrides.Limits, after.Status)
+	}
+	if _, page := get(t, server.URL+"/tenants/atlas"); !strings.Contains(between(page, `id="operation"`, "</div>"), "done: it runs healthy") {
+		t.Fatalf("a disk limit set live is not done:\n%s", between(page, `id="operation"`, "</div>"))
+	}
+	// Set behind the panel's back, below its data: its node did not set
+	// it, and it is not broken.
+	atlas, _ = cluster.Get(context.Background(), "atlas")
+	overrides := atlas.Overrides
+	overrides.Limits.DiskGB = 1
+	if _, err := cluster.AsApps("root").Configure(context.Background(), "atlas", api.TenantRequest{App: atlas.App, Overrides: overrides, Generation: atlas.Generation}); err != nil {
+		t.Fatal(err)
+	}
 	_, page := get(t, server.URL+"/tenants/atlas")
-	for _, want := range []string{"It cannot write: its data, 1.4 GB, fills its 1 GB disk limit.", `class="button primary">Raise its disk limit</a>`} {
+	if !strings.Contains(page, "Its node did not set its 1 GB disk limit</span>: ZFS sets none below what its data holds, 1.4 GB. It keeps the limit it had: 10 GB.") || strings.Contains(page, "cannot write") {
+		t.Fatalf("a refused disk limit:\n%s", between(page, `<div class="notices"`, "<section"))
+	}
+}
+
+// A tenant whose data grows to fill its disk limit cannot write: broken
+// everywhere, said once on its page, with the fix that lands in the field,
+// until the limit is raised.
+func TestADiskLimitItsDataFills(t *testing.T) {
+	cluster, server, client := newAppsPanel(t)
+	atlas, _ := cluster.Get(context.Background(), "atlas")
+	overrides := atlas.Overrides
+	overrides.Limits.DiskGB = 2
+	if _, err := cluster.AsApps("jan").Configure(context.Background(), "atlas", api.TenantRequest{App: atlas.App, Overrides: overrides, Generation: atlas.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cluster.FillDisk("atlas"); err != nil {
+		t.Fatal(err)
+	}
+	_, page := get(t, server.URL+"/tenants/atlas")
+	for _, want := range []string{"It cannot write: its data, 2 GB, fills its 2 GB disk limit.", `class="button primary">Raise its disk limit</a>`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("atlas's page lacks %q:\n%s", want, page)
 		}
 	}
-	// Once its new container runs, its change is still not "done".
-	time.Sleep(demoStart + time.Second)
 	// The red notice says it once; the operation line only records the
-	// save, in grey.
-	if _, page = get(t, server.URL+"/tenants/atlas"); strings.Contains(page, "done: it runs healthy") || !strings.Contains(page, `<div class="nrow" role="status" id="operation"><span class="lead-in">Settings saved</span> by you`) ||
+	// save, in grey: never "done".
+	if strings.Contains(page, "done: it runs healthy") || !strings.Contains(page, `<div class="nrow" role="status" id="operation"><span class="lead-in">Settings saved</span> by jan`) ||
 		!strings.Contains(between(page, `id="operation"`, "</div>"), ": it runs. ") {
 		t.Fatalf("a tenant that cannot write said done:\n%s", between(page, `id="operation"`, "</div>"))
 	}
@@ -1349,8 +1410,8 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 	// said in red.
 	_, raise := get(t, server.URL+setLimit("atlas", "diskGB"))
 	disk := between(raise, `id="diskGB"`, "</tr>")
-	for _, want := range []string{`<span class="st bad">1 GB</span>`, "<span class=\"risk-why bad\">Its data, 1.4\u00a0GB, fills it: it cannot write.</span>", `id="f-diskGB" name="diskGB" value="10"`, "data-focus",
-		"suggested: 10\u00a0GB, as the other tenants have; now 1\u00a0GB, which its 1.4\u00a0GB of data fills"} {
+	for _, want := range []string{`<span class="st bad">2 GB</span>`, "<span class=\"risk-why bad\">Its data, 2\u00a0GB, fills it: it cannot write.</span>", `id="f-diskGB" name="diskGB" value="10"`, "data-focus",
+		"suggested: 10\u00a0GB, as the other tenants have; now 2\u00a0GB, which its 2\u00a0GB of data fills"} {
 		if !strings.Contains(disk, want) {
 			t.Fatalf("the Raise landing's Disk row lacks %q:\n%s", want, disk)
 		}
@@ -1359,10 +1420,28 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 		t.Fatalf("the broken tenants lack atlas:\n%s", list)
 	}
 	_, overview := get(t, server.URL+"/")
-	if !strings.Contains(overview, "atlas</a> cannot write: its data, 1.4 GB, fills its 1 GB disk limit") || !strings.Contains(overview, "Raise its disk limit") {
+	if !strings.Contains(overview, "atlas</a> cannot write: its data, 2 GB, fills its 2 GB disk limit") || !strings.Contains(overview, "Raise its disk limit") {
 		t.Fatalf("the overview lacks atlas:\n%s", overview)
 	}
 	if !strings.Contains(overview, `title="3 tenants broken"`) {
 		t.Fatalf("the broken count does not count atlas:\n%s", between(overview, `<nav class="menu"`, "</nav>"))
+	}
+	// Raised from where the fix landed, 10 as suggested: it writes again,
+	// at once, and nothing restarted.
+	atlas, _ = cluster.Get(context.Background(), "atlas")
+	form := settingsValues(atlas)
+	form.Set("do", "review")
+	form.Set("diskGB", between(disk, `id="f-diskGB" name="diskGB" value="`, `"`))
+	_, review := submit(t, client, server, "/tenants/atlas/settings", form, server.URL)
+	if !strings.Contains(review, `data-label="After">10 GB, tenant override</td>`) || !strings.Contains(review, "nothing restarts") {
+		t.Fatalf("the raise's review:\n%s", between(review, "<h2>Review", "</form>"))
+	}
+	save := url.Values{"do": {"save"}}
+	for _, name := range []string{"generation", "reviewed", "app", "image", "memoryMB", "cpus", "pids", "diskGB", "env", "secrets", "flags", "canary", "hold"} {
+		save.Set(name, html.UnescapeString(between(review, `name="`+name+`" value="`, `"`)))
+	}
+	submit(t, client, server, "/tenants/atlas/settings", save, server.URL)
+	if _, page = get(t, server.URL+"/tenants/atlas"); strings.Contains(page, "cannot write") || !strings.Contains(between(page, `id="operation"`, "</div>"), "done: it runs healthy") {
+		t.Fatalf("raised, atlas:\n%s", between(page, `<div class="notices"`, "<section"))
 	}
 }

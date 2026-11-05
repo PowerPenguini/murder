@@ -40,14 +40,15 @@ func newCollector(st store.Store, reconciler *reconcile.Reconciler, rt runtime.R
 			return state.Pid, err
 		},
 	}
-	// The zfs driver tells a tenant's data's size; plain directories would
-	// have to be walked.
+	// The zfs driver tells a tenant's data's size, and the limit set on it
+	// (the spec's, unless ZFS refused it); plain directories would have to
+	// be walked.
 	if sized, ok := volumes.(interface {
-		Used(ctx context.Context, tenant string) (int64, error)
+		Used(ctx context.Context, tenant string) (used, limit int64, err error)
 	}); ok {
-		collector.Disk = func(ctx context.Context, tenant string) (int64, bool, error) {
-			used, err := sized.Used(ctx, tenant)
-			return used, err == nil, err
+		collector.Disk = func(ctx context.Context, tenant string) (int64, int64, bool, error) {
+			used, limit, err := sized.Used(ctx, tenant)
+			return used, limit, err == nil, err
 		}
 	}
 	return collector

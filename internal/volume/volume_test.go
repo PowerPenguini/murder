@@ -108,6 +108,9 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) ([]byte, e
 			}
 			return value
 		}
+		if args[5] == "referenced,refquota" {
+			return []byte(strconv.FormatInt(d.used, 10) + "\n" + strconv.FormatInt(d.refquota, 10) + "\n"), nil
+		}
 		canmount := d.canmount
 		if canmount == "" {
 			canmount = "on"
@@ -253,6 +256,16 @@ func TestZFSEnsureSnapshotRemove(t *testing.T) {
 	fake.datasets["tank/murder/acme"].mounted = false
 	if got, err := volumes.Ensure(ctx, "acme", uid, gid, 2); !errors.Is(err, ErrDiskLimit) || got != path || !fake.datasets["tank/murder/acme"].mounted {
 		t.Fatalf("Ensure below usage = %q, %v", got, err)
+	}
+	// What it holds, and the limit set: none still, not the 2 GB refused.
+	if used, limit, err := volumes.Used(ctx, "acme"); err != nil || used != 3<<30 || limit != 0 {
+		t.Fatalf("Used after a refused limit = %d, %d, %v", used, limit, err)
+	}
+	if _, err := volumes.Ensure(ctx, "acme", uid, gid, 4); err != nil {
+		t.Fatal(err)
+	}
+	if used, limit, err := volumes.Used(ctx, "acme"); err != nil || used != 3<<30 || limit != 4<<30 {
+		t.Fatalf("Used after a limit set = %d, %d, %v", used, limit, err)
 	}
 	if exists, err := volumes.Exists(ctx, "acme"); err != nil || !exists {
 		t.Fatalf("Exists = %v, %v", exists, err)

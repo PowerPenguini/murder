@@ -31,18 +31,20 @@ await send("Page.enable"); await send("Runtime.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
 const results = [];
 const check = (name, ok, detail) => { results.push(ok); console.log((ok ? "ok   " : "FAIL ") + name + (detail ? ": " + detail : "")); };
-// Gives atlas a disk limit its data fills, through the settings' review
-// and its typed save, as a person would.
+// Gives atlas a disk limit of 2 GB, through the settings' review, then has
+// its data grow to fill it (the demo's /demo/fill), as data grows into a
+// limit set long ago.
 const fillAtlas = async () => {
   await go("/tenants/atlas");
   await ev(`(async () => {
     const page = new DOMParser().parseFromString(await (await fetch("/tenants/atlas/settings")).text(), "text/html");
     const body = new URLSearchParams(new FormData(page.querySelector("#settings")));
-    body.set("own-diskGB", "on"); body.set("diskGB", "1"); body.set("do", "review");
+    body.set("own-diskGB", "on"); body.set("diskGB", "2"); body.set("do", "review");
     const review = new DOMParser().parseFromString(await (await fetch("/tenants/atlas/settings", { method: "POST", body })).text(), "text/html");
     const save = new URLSearchParams(new FormData(review.querySelector("form.review-box")));
-    save.set("do", "save"); save.set("confirm", "atlas");
+    save.set("do", "save");
     await fetch("/tenants/atlas/settings", { method: "POST", body: save });
+    await fetch("/demo/fill?tenant=atlas", { method: "POST" });
     return 1;
   })()`);
 };

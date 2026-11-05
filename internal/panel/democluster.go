@@ -31,6 +31,47 @@ type DemoCluster struct {
 	// Pace is how long the demo's slow work takes, as an upgrade's install
 	// or a backup: for watching jobs; none in tests.
 	Pace time.Duration
+	// diskKept is the disk limit, in GB, a tenant's volume keeps while its
+	// node refuses the one its spec gives (below its data), as ZFS does;
+	// data is its data's size, when not demoData (FillDisk).
+	diskKept map[string]int
+	data     map[string]int64
+}
+
+// diskOf is a tenant's data's size and the disk limit its volume has, in
+// bytes, as its node reports them.
+func (d *DemoCluster) diskOf(t api.Tenant) (used, limit int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	used, limit = demoData, int64(t.Spec.Limits.Or(demoDefaults).DiskGB)<<30
+	if n, ok := d.data[t.Spec.Name]; ok {
+		used = n
+	}
+	if gb, ok := d.diskKept[t.Spec.Name]; ok {
+		limit = int64(gb) << 30
+	}
+	return used, limit
+}
+
+// FillDisk has a tenant's data grow to its disk limit, as data grows into
+// a limit set long ago: the demo of a tenant that cannot write. It fails
+// for a tenant without a disk limit.
+func (d *DemoCluster) FillDisk(name string) error {
+	t, err := d.Get(context.Background(), name)
+	if err != nil {
+		return err
+	}
+	_, limit := d.diskOf(t)
+	if limit == 0 {
+		return &api.Error{Status: 409, Message: "tenant " + name + " has no disk limit to fill"}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.data == nil {
+		d.data = map[string]int64{}
+	}
+	d.data[name] = limit
+	return nil
 }
 
 func NewDemoCluster() *DemoCluster {

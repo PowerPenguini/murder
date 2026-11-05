@@ -1626,6 +1626,30 @@ func TestWhatTheContainerDoesNotUseReplacesNothing(t *testing.T) {
 	}
 }
 
+// A tenant given only another disk limit keeps its container: the limit is
+// set on its volume as it runs, and the pass reports the new generation.
+func TestADiskLimitAloneIsAppliedLive(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	f.reconcile(t)
+	running := f.runtime.only(t).ID
+	f.runtime.takeEvents()
+	changed, _, err := f.store.Configure("acme", record.App, spec.Overrides{Limits: spec.Limits{DiskGB: 20}}, record.Generation, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if events := f.runtime.takeEvents(); len(events) != 0 || f.runtime.only(t).ID != running {
+		t.Fatalf("a disk limit alone touched the container: %v", events)
+	}
+	if f.volumes.diskGB["acme"] != 20 {
+		t.Fatalf("disk limit on the volume = %d GB", f.volumes.diskGB["acme"])
+	}
+	if status, _ := f.reconciler.Status("acme"); status.Generation != changed.Generation || status.Phase != PhaseRunning || status.Limits.DiskGB != 20 {
+		t.Fatalf("status = %+v, want generation %d", status, changed.Generation)
+	}
+}
+
 func TestNoPurgeWhileFrozen(t *testing.T) {
 	f := newFixture(t)
 	f.create(t, "acme")

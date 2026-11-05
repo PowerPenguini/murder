@@ -78,8 +78,9 @@ func (d *DemoCluster) Usage(ctx context.Context) (api.UsageReport, error) {
 			limits := t.Spec.Limits.Or(demoDefaults)
 			at := now.Truncate(time.Minute).Add(-time.Minute)
 			p := demoPoint(t.Spec.Name, limits.MemoryMB, demoCores(limits.CPUs), at, time.Minute, d.demoMemory(t.Spec.Name, limits.MemoryMB, at.Add(time.Minute)))
+			used, limit := d.diskOf(t)
 			r.Tenants[t.Spec.Name] = usage.Now{At: p.At, CPU: p.CPU, Memory: p.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
-				NetRx: p.NetRx, NetTx: p.NetTx, DiskUsed: demoData, DiskLimit: int64(limits.DiskGB) << 30, Requests: p.Requests, Errors: p.Errors, P95: p.P95}
+				NetRx: p.NetRx, NetTx: p.NetTx, DiskUsed: used, DiskLimit: limit, Requests: p.Requests, Errors: p.Errors, P95: p.P95}
 			memory += p.Memory
 			cpu += p.CPU
 		}
@@ -151,8 +152,9 @@ func (d *DemoCluster) TenantUsage(ctx context.Context, name string, step time.Du
 	newest.CPU, newest.Memory, newest.P95 = m.CPU, m.Memory, m.P95
 	newest.Requests, newest.Errors, newest.NetRx, newest.NetTx = m.Requests*k, m.Errors*k, m.NetRx*k, m.NetTx*k
 	last := *newest
+	used, limit := d.diskOf(t)
 	series.Now = usage.Now{At: last.At, CPU: last.CPU, Memory: last.Memory, MemoryLimit: int64(limits.MemoryMB) << 20, CPULimit: limits.CPUs,
-		DiskUsed: demoData, DiskLimit: int64(limits.DiskGB) << 30, Requests: last.Requests / int64(step.Minutes()), Errors: last.Errors / int64(step.Minutes()), P95: last.P95}
+		DiskUsed: used, DiskLimit: limit, Requests: last.Requests / int64(step.Minutes()), Errors: last.Errors / int64(step.Minutes()), P95: last.P95}
 	return series, nil
 }
 

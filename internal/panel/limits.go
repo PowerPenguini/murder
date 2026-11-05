@@ -219,10 +219,14 @@ func (r diskRoom) Suggest() int { return max(r.Others, r.Least) }
 func (r diskRoom) Fills(gb int) bool { return gb > 0 && r.Used > 0 && int64(gb)<<30 <= r.Used }
 
 // Short says why a disk limit of gb is too small for its data, "" if it
-// is not (0 is no limit).
+// is not (0 is no limit): ZFS sets no refquota below what a dataset holds.
 func (r diskRoom) Short(tenant string, gb int) string {
 	if !r.Fills(gb) {
 		return ""
 	}
-	return strconv.Itoa(gb) + " GB is less than the " + size(float64(r.Used)) + " " + tenant + " holds: it could no longer write until the limit is raised"
+	than := " is less than the "
+	if int64(gb)<<30 == r.Used {
+		than = " is no more than the "
+	}
+	return strconv.Itoa(gb) + " GB" + than + size(float64(r.Used)) + " " + tenant + " holds: its node does not set a disk limit below its data"
 }

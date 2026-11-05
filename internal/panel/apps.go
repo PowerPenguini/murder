@@ -562,6 +562,18 @@ func (f settingsForm) containerChanged(t api.Tenant) bool {
 	return f != was
 }
 
+// diskOnly says the form changes the tenant's disk limit and nothing else
+// its container is made of: its node sets the limit on its data as it
+// runs (the reconciler leaves it out of the container's inputs).
+func (f settingsForm) diskOnly(t api.Tenant) bool {
+	was := formOf(t)
+	if f.DiskGB == was.DiskGB {
+		return false
+	}
+	f.DiskGB = was.DiskGB
+	return !f.containerChanged(t)
+}
+
 func formOf(t api.Tenant) settingsForm {
 	o := t.Overrides
 	form := settingsForm{App: t.App, Image: o.Image, Generation: t.Generation, Canary: onOff(t.Canary), Hold: onOff(t.Hold), Flags: true}
@@ -821,6 +833,9 @@ type settingsData struct {
 	// Reviewing says it was.
 	Review    []settingChange
 	Reviewing bool
+	// Live says they change only its disk limit, which its node sets as
+	// it runs: nothing restarts.
+	Live bool
 	// Token binds the save to the values reviewed; Restarts says they
 	// give it a new container, not only new rollout flags.
 	Token    string
@@ -945,7 +960,8 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request, t api.Tena
 		data.Review = settingChanges(t, appSpec, form, limited)
 		data.DiskShort = data.Disk.Short(t.Spec.Name, diskAfter(t, appSpec, form))
 		data.Token = reviewToken(t.Spec.Name, form)
-		data.Restarts = form.containerChanged(t)
+		data.Live = form.diskOnly(t)
+		data.Restarts = form.containerChanged(t) && !data.Live
 	}
 	if nodes, err := s.backend.Nodes(ctx); err == nil {
 		data.Head = s.headOf(t, nodes, "settings")
@@ -1007,9 +1023,17 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		r.Form.Set("blank", strconv.Itoa(env))
 		r.Form.Set("blanksecret", strconv.Itoa(secrets))
 		s.settingsPage(w, r, t, form, "", http.StatusOK)
-	case "review", "edit":
+	case "review", "edit", "usedisk":
 		// What the form changes, shown before it is saved; or back to it.
 		form := formFrom(r).withFlags(t)
+		// A disk limit its data fills, reviewed again with the one
+		// suggested ("Use 10 GB instead").
+		if r.FormValue("do") == "usedisk" {
+			if gb, err := strconv.Atoi(r.FormValue("suggest")); err == nil && gb > 0 {
+				form.DiskGB = strconv.Itoa(gb)
+			}
+			r.Form.Set("do", "review")
+		}
 		if _, err := form.overrides(); err != nil {
 			s.settingsPage(w, r, t, form, err.Error(), http.StatusUnprocessableEntity)
 			return
@@ -1045,11 +1069,11 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 			refuse("these are not the values you reviewed: review them again before saving")
 			return
 		}
-		// A disk limit its data already fills stops it writing: its name
-		// typed, as for any change that can stop it serving.
-		if s.diskRoom(ctx, t, nil).Short(name, diskAfter(t, s.appSpecOf(ctx, r, t.App), form)) != "" && strings.TrimSpace(r.FormValue("confirm")) != name {
+		// A disk limit its data already fills is one its node does not set
+		// (ZFS refuses a refquota below what the dataset holds): not saved.
+		if room := s.diskRoom(ctx, t, nil); room.Short(name, diskAfter(t, s.appSpecOf(ctx, r, t.App), form)) != "" {
 			r.Form.Set("do", "review")
-			refuse("type " + name + " to give it a disk limit its data already fills")
+			refuse("its node does not set a disk limit below its data: give " + name + " more than " + size(float64(room.Used)))
 			return
 		}
 		// Another app is a new spec on its data: its name typed, as for

@@ -18,6 +18,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
+	"github.com/PowerPenguini/murder/internal/volume"
 )
 
 // tag is a status as the panel shows it: a word and its weight.
@@ -626,6 +627,9 @@ type tenantData struct {
 	// DiskFull says its data fills its disk limit ("cannot write: its
 	// data, 1.4 GB, fills its 1 GB disk limit"), "" if not.
 	DiskFull string
+	// DiskRefused is the disk limit its node did not set ("1 GB"), one
+	// below its data, which ZFS refuses; Kept the limit its data has.
+	DiskRefused, DiskKept string
 	// Limits are the limits it runs with, as every page says them;
 	// Unlimited names those it runs without that others have ("disk"), and
 	// RiskField the settings row of the first.
@@ -730,12 +734,22 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 			op.State, op.Kind = "it runs", "warn"
 		}
 	}
+	// A disk limit its node did not set: it runs with the one it had.
+	if st := t.Status; st != nil {
+		if rest, ok := strings.CutPrefix(st.Warning, volume.ErrDiskLimit.Error()+": "); ok {
+			data.DiskRefused, _, _ = strings.Cut(rest, ": ")
+			data.DiskKept = "none"
+			if use != nil && use.DataLimit != "" {
+				data.DiskKept = use.DataLimit
+			}
+		}
+	}
 	// While the new container a person asked for starts, the operation
 	// line says it all: what was wrong was of the old one.
 	if op := data.Operation; op != nil && op.Kind == "busy" {
 		data.Problem, data.Broken, data.AppMemory, data.Evidence = "", false, nil, nil
 	}
-	if st := t.Status; st != nil && !t.Spec.Suspended && (st.Phase == "starting" || (st.Generation != 0 && st.Generation < t.Generation)) {
+	if st := t.Status; st != nil && !t.Spec.Suspended && st.Phase == "starting" {
 		data.StartingNow = true
 		// The charts' last values are the old container's.
 		if use != nil {

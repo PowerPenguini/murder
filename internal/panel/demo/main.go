@@ -54,8 +54,8 @@ func main() {
 		}
 		log.Info("an invitation", "url", url+"/enroll#"+people.Invite("ewa"))
 	}
-	log.Info("the demo panel serves", "url", url, "connection lost", url+"/?demo=offline", "signed out", url+"/?demo=signedout")
-	if err := http.ListenAndServe(*listen, demoStates(server.Handler())); err != nil {
+	log.Info("the demo panel serves", "url", url, "connection lost", url+"/?demo=offline", "signed out", url+"/?demo=signedout", "a full disk", "POST "+url+"/demo/fill?tenant=NAME")
+	if err := http.ListenAndServe(*listen, demoStates(server.Handler(), cluster)); err != nil {
 		log.Error("serve", "error", err)
 		os.Exit(1)
 	}
@@ -64,8 +64,20 @@ func main() {
 // demoStates lets a page show what it does when the node it follows stops
 // answering, or its session ends: with ?demo=offline (or signedout) in its
 // address, the page loads, and its following of the cluster then fails so.
-func demoStates(next http.Handler) http.Handler {
+//
+// POST /demo/fill?tenant=NAME has a tenant's data grow to its disk limit,
+// as data grows into a limit set long ago: the demo of a tenant that
+// cannot write.
+func demoStates(next http.Handler, cluster *panel.DemoCluster) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/demo/fill" && r.Method == http.MethodPost {
+			if err := cluster.FillDisk(r.URL.Query().Get("tenant")); err != nil {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.Header.Get("X-Murder-Live") != "" {
 			switch r.URL.Query().Get("demo") {
 			case "offline":

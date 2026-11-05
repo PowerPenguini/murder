@@ -293,8 +293,10 @@ func TestReadingTheKernel(t *testing.T) {
 		Tenants: func() []Tenant {
 			return []Tenant{{Name: "web", Container: "abc123", CPULimit: 2, DiskLimit: 10 << 30}, {Name: "idle"}}
 		},
-		Pid:  func(context.Context, string) (int, error) { pids++; return 42, nil },
-		Disk: func(_ context.Context, tenant string) (int64, bool, error) { return 1 << 30, tenant == "web", nil }}
+		Pid: func(context.Context, string) (int, error) { pids++; return 42, nil },
+		Disk: func(_ context.Context, tenant string) (int64, int64, bool, error) {
+			return 1 << 30, -1, tenant == "web", nil
+		}}
 	collector.Collect(context.Background())
 	collector.Now = func() time.Time { return t0.Add(time.Minute) }
 	collector.Collect(context.Background())
@@ -394,5 +396,26 @@ func TestAStepKeepsItsLowestMemoryAndItsLimit(t *testing.T) {
 	minutes, _ := r.Series("web", time.Minute, t0.Add(6*time.Minute))
 	if first := minutes.Points[0]; first.MemoryLow != 240<<20 || first.MemoryLimit != 256<<20 {
 		t.Fatalf("first minute: %+v", first)
+	}
+}
+
+// A tenant's disk limit is reported as its volume has it: a limit the
+// volume refused (one below its data) is not the one in force.
+func TestTheDiskLimitIsTheVolumes(t *testing.T) {
+	recorder := NewRecorder("n1")
+	limit := int64(-1)
+	collector := &Collector{Recorder: recorder, Reader: Reader{Proc: t.TempDir(), Cgroup: t.TempDir()}, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return t0 },
+		Tenants: func() []Tenant { return []Tenant{{Name: "web", DiskLimit: 1 << 30}} },
+		Pid:     func(context.Context, string) (int, error) { return 0, nil },
+		Disk:    func(context.Context, string) (int64, int64, bool, error) { return 3 << 29, limit, true, nil }}
+	collector.Collect(context.Background())
+	if web := recorder.tenants["web"].now; web.DiskLimit != 1<<30 {
+		t.Fatalf("a volume that does not tell its limit: %+v", web)
+	}
+	limit = 0
+	collector.Now = func() time.Time { return t0.Add(DiskEvery) }
+	collector.Collect(context.Background())
+	if web := recorder.tenants["web"].now; web.DiskLimit != 0 || web.DiskUsed != 3<<29 {
+		t.Fatalf("the refused limit reported: %+v", web)
 	}
 }
