@@ -348,7 +348,8 @@ belongs to the cluster with a certificate of an authority derived from the
 master key, issued over its own identity key, which the state pins to its
 name ([Node identity](#node-identity)). `murder key rotate` replaces the
 master key on every node without stopping one
-([Rotate the master key](operations.md#rotate-the-master-key)). Give each node a `cluster:` section:
+([Rotate the master key](operations.md#rotate-the-master-key)). Give each node a `cluster:` section (a node set up alone moves its
+top-level `publicAddresses` into it, as `cluster.publicAddresses`):
 
 ```yaml
 cluster:
