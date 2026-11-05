@@ -151,18 +151,18 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map
 			// What the limit must leave it, said beside its value; opened
 			// by a link, it starts at a value that leaves room.
 			if disk.Used > 0 {
-				f.Note = "its data: " + size(float64(disk.Used))
+				f.Note = "its data: " + nbsp(size(float64(disk.Used)))
 			}
 			if open && disk.Suggest() > 0 {
 				f.Value, f.Inherit = strconv.Itoa(disk.Suggest()), strconv.Itoa(disk.Suggest())
-				f.Note = "suggested: " + strconv.Itoa(disk.Suggest()) + " GB"
+				f.Note = "suggested: " + strconv.Itoa(disk.Suggest()) + "\u00a0GB"
 				if disk.Others > 0 && disk.Suggest() == disk.Others {
 					f.Note += ", as the other tenants have"
 				} else if disk.Least > 0 {
 					f.Note += ", twice its data"
 				}
 				if disk.Used > 0 {
-					f.Note += "; its data: " + size(float64(disk.Used))
+					f.Note += "; its data: " + nbsp(size(float64(disk.Used)))
 				}
 			}
 		}

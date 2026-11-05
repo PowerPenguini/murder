@@ -1140,7 +1140,7 @@ func TestChangingATenantsApp(t *testing.T) {
 	_, settings := get(t, server.URL+"/tenants/atlas/settings?set=diskGB")
 	for _, want := range []string{`<tr class="setting at-risk" id="diskGB">`, `<span class="st warn">none</span>`, "None: fsn-1 has no default", "Node default (fsn-1)",
 		`name="own-diskGB" value="on" class="own-switch" checked`, `id="f-diskGB" name="diskGB" value="10" data-inherit="10" min="0" step="1" class="short" autocomplete="off" spellcheck="false" data-focus>`,
-		"suggested: 10 GB, as the other tenants have; its data: 1.4 GB"} {
+		"suggested: 10\u00a0GB, as the other tenants have; its data: 1.4\u00a0GB"} {
 		if !strings.Contains(settings, want) {
 			t.Fatalf("its settings lack %q:\n%s", want, settings)
 		}
