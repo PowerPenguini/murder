@@ -182,7 +182,8 @@ p.empty { padding: var(--s4) 0; margin: 0; }
 table.kv td:first-child { width: 32%; }
 table.rows tbody tr { position: relative; }
 table.rows tbody tr:hover { background: var(--raised); }
-a.row-link { text-decoration: none; font-weight: 500; }
+a.row-link { font-weight: 500; text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 3px; }
+a.row-link:hover { text-decoration-color: currentColor; }
 a.row-link::after { content: ""; position: absolute; inset: 0; }
 td .small { font-size: 12.5px; }
 .count-line { font-size: 13px; margin: 0 0 var(--s2); }
@@ -1076,9 +1077,10 @@ input.confirm-field { max-width: 320px; }
 .warn-notice .st:empty::before, .op-owner .st:empty::before { margin-right: var(--s2); }
 /* A review's stacked notices: 16 px apart, as on the app review, and 24 px
    before its table. */
-.review-box > .notice, .review-box > .owner-note { margin: 0 0 var(--s4); }
-.review-box > .summary-line { margin-bottom: var(--s4); }
-.review-box > .notice + table, .review-box > .owner-note + table { margin-top: var(--s5); }
+/* A review's blocks keep its grid's 16 px apart, no margins of their own;
+   its table and the list after it 24 px (the gap and 8 px). */
+.review-box > *, .review-box > p.summary-line, .review-box > dl.carry { margin-top: 0; margin-bottom: 0; }
+.review-box > table, .review-box > dl.carry { margin-top: var(--s2); }
 /* A pop-over's own title on a desktop; a phone's sheet head says it. */
 @media (max-width: 760px) { .pop .pop-title { display: none; } }
 /* A desktop pop-over with no room below its button opens above it. */
@@ -1086,3 +1088,6 @@ input.confirm-field { max-width: 320px; }
 /* A limit it runs without that the others have: why, under its source. */
 .risk-why { display: block; margin-top: 2px; color: var(--soft); font-size: 12px; }
 table.changes tr.same td { color: var(--dim); }
+/* On a phone the top bar's status keeps to one line: "Paused · 1s"; its
+   reason is in its title, as the whole sentence always is. */
+@media (max-width: 760px) { .livestate .why { display: none; } }

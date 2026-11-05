@@ -684,7 +684,7 @@ func rolloutOf(app api.App, tenants []api.Tenant, events []store.Event, now time
 			v.Waits = "Paused: " + r.Reason + ". Nothing moves until it is resumed."
 		}
 	case len(v.Blockers) > 0:
-		v.Waits = rolloutBlocked(*r, v.Blockers) + " " + capital(store.WaveSaid(r.Wave+1, r.WaveName(r.Wave+1))) + " moves once " + strings.Join(v.Blockers, ", ") + " " + map[bool]string{true: "has", false: "have"}[len(v.Blockers) == 1] +
+		v.Waits = rolloutBlocked(*r, v.Blockers) + " It moves once " + strings.Join(v.Blockers, ", ") + " " + map[bool]string{true: "has", false: "have"}[len(v.Blockers) == 1] +
 			" been healthy on revision " + strconv.FormatInt(r.ToRevision, 10) + " for " + soak + "; a tenant not healthy within 5 minutes of its move pauses the rollout."
 	default:
 		who := store.WaveSaid(r.Wave, r.WaveName(r.Wave)) + " has"

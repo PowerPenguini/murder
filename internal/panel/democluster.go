@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,13 @@ func NewDemoCluster() *DemoCluster {
 		d.tenants[t.Spec.Name] = t
 	}
 	d.events, _ = d.Demo.Events(context.Background(), store.EventQuery{})
+	// hel-1 failed once, before its tenants failed over: a fixed time, as
+	// the events are, not one recomputed as the demo runs.
+	for _, e := range d.events {
+		if e.Action == "node.failed-over" && strings.HasPrefix(e.Detail, "hel-1") {
+			d.nodes.failed["hel-1"] = e.At.Add(-30 * time.Second)
+		}
+	}
 	d.demoApps()
 	return d
 }

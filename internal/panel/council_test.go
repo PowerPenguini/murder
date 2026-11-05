@@ -114,7 +114,7 @@ func TestRolloutProgress(t *testing.T) {
 		t.Fatalf("moved a wave without the name: wave %d", app.Rollout.Wave)
 	}
 	_, page := get(t, server.URL+"/apps/web")
-	for _, want := range []string{`<li class="done"><span class="wn">Canaries</span>`, `<li class="blocked"><span class="wn">A tenth</span><span class="wc">1 tenant · blocked by baltic-freight</span>`, "moved, not healthy: blocks the next wave", "waits for half", "stays: it is held", "Wave 3 (half) moves once baltic-freight has been healthy on revision 3 for a minute", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
+	for _, want := range []string{`<li class="done"><span class="wn">1. Canaries</span>`, `<li class="blocked"><span class="wn">2. A tenth</span><span class="wc">1 tenant · blocked by baltic-freight</span>`, "moved, not healthy: blocks the next wave", "waits for half", "stays: it is held", "so wave 3 (half) waits. It moves once baltic-freight has been healthy on revision 3 for a minute", "Move the next wave now", "baltic-freight is not healthy on revision 3. Moving the next wave now risks the same for kowalski-trans", "Restore data snapshot"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, page)
 		}
@@ -894,7 +894,7 @@ func TestTheBrokenFirstPace(t *testing.T) {
 	}
 	// The waves are named as the plan named them, on every page: the
 	// first, then the canaries.
-	for _, want := range []string{`<span class="wn">First, now</span><span class="wc">1 tenant · moving, watched</span>`, `<span class="wn">Canaries</span>`,
+	for _, want := range []string{`<span class="wn">1. First, now</span><span class="wc">1 tenant · moving, watched</span>`, `<span class="wn">2. Canaries</span>`,
 		"Canaries (acme-logistics) moves once baltic-freight has stayed healthy for two minutes, about "} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the rollout lacks %q:\n%s", want, body)

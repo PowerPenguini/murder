@@ -104,10 +104,10 @@
           <label class="check own-check"><input type="checkbox" name="secretown" value="{{.Name}}" class="own-switch" data-key="{{.Name}}"{{if .DraftOwn}} checked{{end}} aria-label="A secret of its own for {{.Name}}"><span class="sw" aria-hidden="true">Override</span></label>
           <span class="own-field"><select name="secretkind" data-key="{{.Name}}" aria-label="{{.Name}}: its kind">{{$k := .DraftKind}}{{range $d.Kinds}}<option{{if eq . $k}} selected{{end}}>{{.}}</option>{{end}}</select> <input type="number" name="secretbytes" value="{{if .DraftBytes}}{{.DraftBytes}}{{end}}" min="1" placeholder="length" class="tiny" data-key="{{.Name}}" aria-label="{{.Name}}: its length, in bytes"> <span class="dim small">bytes</span></span>
           {{if and (not $t.Archived) (or .Own .FromApp)}}<span class="row-act"><details class="menu-text">
-            <summary class="button small">New value…</summary>
+            <summary class="button small" aria-label="New value of {{.Name}}">New value…</summary>
             <div class="pop">
               <div class="stack">
-                <p class="flat strong">A new value of {{.Name}}</p>
+                <p class="flat strong pop-title">A new value of {{.Name}}</p>
                 <p class="hint flat">For {{$t.Spec.Name}} alone{{if not .Own}}: {{$t.App}}'s other tenants keep theirs{{end}}.</p>
                 <p class="flat">It restarts {{$t.Spec.Name}}; what the old value signed (sessions, a password) stops working. Type {{.Name}} to confirm.</p>
                 <input type="text" name="confirm" form="rotate-{{.Name}}" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">

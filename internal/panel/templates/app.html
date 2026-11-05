@@ -25,10 +25,10 @@
   </div>
   {{end}}
   <ol class="waves desktop-only spaced" aria-label="its waves">
-    {{range .Steps}}<li class="{{.State}}"><span class="wn">{{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{.Said}}</span></li>{{end}}
+    {{range $i, $w := .Steps}}<li class="{{.State}}"><span class="wn">{{add1 $i}}. {{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{.Said}}</span></li>{{end}}
   </ol>
-  <details class="howto phone-only spaced"><summary>Its waves: {{range $i, $w := .Steps}}{{if $i}}, {{end}}{{$w.Name}}{{if eq $w.State "now"}} (current){{end}}{{end}}</summary>
-    <ol class="waves spaced">{{range .Steps}}<li class="{{.State}}"><span class="wn">{{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{.Said}}</span></li>{{end}}</ol>
+  <details class="howto phone-only spaced"><summary>Its waves: {{range $i, $w := .Steps}}{{if $i}}, {{end}}{{add1 $i}}. {{$w.Name}}{{if eq $w.State "now"}} (current){{end}}{{end}}</summary>
+    <ol class="waves spaced">{{range $i, $w := .Steps}}<li class="{{.State}}"><span class="wn">{{add1 $i}}. {{.Name}}</span><span class="wc">{{plural .Count "tenant" "tenants"}} · {{.Said}}</span></li>{{end}}</ol>
   </details>
   {{with .Before}}<details class="howto spaced"><summary>Why the new revision is likely not the cause</summary><div class="panel spaced"><p class="flat">{{.}} Fix the cause and the rollout continues; or roll back to put every tenant on the revision before.</p>{{with $d.Memory}}{{if $.Edits}}<span class="fixes"><a href="{{.Href}}">Raise {{$a.Name}}'s memory limit</a></span>{{end}}{{end}}</div></details>{{end}}
   <input type="checkbox" id="allrows" class="sr phone-toggle"><label for="allrows" class="phone-only showall">Show all {{len .Rows}} tenants, not only those to look at</label>
