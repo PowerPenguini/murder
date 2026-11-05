@@ -27,6 +27,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 	measure "github.com/PowerPenguini/murder/internal/usage"
 )
@@ -102,6 +103,12 @@ func runEdge(args []string) error {
 			return err
 		}
 		proxy.WithRelay(credentials.RelayClient())
+	} else if loaded, err := secrets.LoadKey(cfg.MasterKeyFile); err == nil {
+		// Tenants' own domains' certificates have their keys sealed
+		// with it.
+		key = loaded
+	} else {
+		log.Warn("the master key cannot be read: tenants' own domains are served without their certificates", "error", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -109,7 +116,7 @@ func runEdge(args []string) error {
 	// A master key rotation changes the key file: the relay presents and
 	// trusts what it holds within a few seconds, ahead of the rotation's
 	// next step.
-	if key != nil {
+	if credentials != nil {
 		go key.Watch(ctx, edgeKeyCheckEvery, func() {
 			if err := credentials.Update(key.DeriveAll(clusterSeed), time.Now()); err != nil {
 				log.Error("follow the master key ring", "error", err)
@@ -198,6 +205,14 @@ func runEdge(args []string) error {
 			return nil // stopped while waiting
 		}
 		defer certificates.Close()
+		// Tenants' own domains are served with their own certificates,
+		// asked for by name; every other name with the wildcard.
+		certificates.ServeDomains(edge.NewDomainCertificates(table, func(domain, sealed string) (string, error) {
+			if key == nil {
+				return "", errors.New("the edge has no master key to open it with")
+			}
+			return key.Open(store.DomainKeyContext(domain), sealed)
+		}, log))
 		if upgrader.HasParent() {
 			// Its certificate is loaded: plain HTTP redirects at once, as
 			// the edge before it did, instead of answering "starting".

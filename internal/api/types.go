@@ -6,6 +6,7 @@ package api
 import (
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/domains"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -59,6 +60,50 @@ type Tenant struct {
 	// is restored.
 	ArchivedAt time.Time         `json:"archivedAt,omitzero"`
 	Status     *reconcile.Status `json:"status,omitempty"`
+	// Domains are the tenant's own host names, outside the base domain.
+	Domains []Domain `json:"domains,omitempty"`
+}
+
+// Domain is what the API shows of a tenant's own domain: never its
+// certificate's key.
+type Domain struct {
+	Name string `json:"name"`
+	// Display is the name as people read it, when it is not ASCII.
+	Display string `json:"display,omitempty"`
+	Tenant  string `json:"tenant"`
+	// State is verifying, pending, issuing, active, renewing or failed;
+	// Detail says why, Attempts counts the failures in a row and NextAt
+	// is when the cluster's leader looks at it again.
+	State    string    `json:"state"`
+	Detail   string    `json:"detail,omitempty"`
+	Attempts int       `json:"attempts,omitempty"`
+	NextAt   time.Time `json:"nextAt,omitzero"`
+	// CheckedAt is when its DNS was last checked; VerifiedAt when it was
+	// first seen to point at the cluster, from when the edges route it.
+	CheckedAt  time.Time `json:"checkedAt,omitzero"`
+	VerifiedAt time.Time `json:"verifiedAt,omitzero"`
+	// IssuedAt and NotAfter are its certificate's, once it has one.
+	IssuedAt time.Time `json:"issuedAt,omitzero"`
+	NotAfter time.Time `json:"notAfter,omitzero"`
+	// Records are the DNS records that point it at the cluster.
+	Records   []domains.Record `json:"records"`
+	CreatedAt time.Time        `json:"createdAt"`
+	CreatedBy string           `json:"createdBy"`
+}
+
+// Routed reports whether the edges route the domain to its tenant.
+func (d Domain) Routed() bool { return !d.VerifiedAt.IsZero() }
+
+// DomainRequest gives a tenant a domain of its own.
+type DomainRequest struct {
+	Name string `json:"name"`
+}
+
+// DomainAdded is the outcome of adding a domain.
+type DomainAdded struct {
+	Domain Domain `json:"domain"`
+	// Added is false when the tenant had the domain already.
+	Added bool `json:"added"`
 }
 
 // Archived reports whether the tenant is archived.

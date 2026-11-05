@@ -34,6 +34,9 @@ func Backend(record store.Record) (string, error) {
 // Host and URL are a tenant's public address.
 func (r *Reconciler) Host(tenant string) string { return tenant + "." + r.config.BaseDomain }
 
+// BaseDomain is the domain tenants have their names below.
+func (r *Reconciler) BaseDomain() string { return r.config.BaseDomain }
+
 func (r *Reconciler) URL(tenant string) string { return r.config.Scheme + "://" + r.Host(tenant) }
 
 func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtime.ContainerSpec, error) {

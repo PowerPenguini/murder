@@ -55,6 +55,17 @@ type Routes interface {
 	Route(tenant string) (Route, bool)
 }
 
+// Domains looks tenants' own host names up: the routes of a cluster with
+// custom domains implement it.
+type Domains interface {
+	Domain(host string) (DomainRoute, bool)
+}
+
+// Challenges looks ACME HTTP-01 challenges up by token.
+type Challenges interface {
+	Challenge(token string) (ChallengeRoute, bool)
+}
+
 // Proxy routes "<tenant>.<BaseDomain>" to the tenant's backend, or to the
 // edge of the node that runs it. Its reverse proxies are made once and
 // shared by every request, with copy buffers from a pool: a request costs
@@ -442,20 +453,68 @@ func (p *Proxy) Stats() *metrics.Edge { return p.stats }
 func (p *Proxy) Served() *metrics.Edge { return p.served }
 
 // Tenant returns the tenant a host name belongs to: exactly one label in
-// front of the base domain.
+// front of the base domain, or a tenant's own domain.
 func (p *Proxy) Tenant(host string) (string, bool) {
+	host = hostName(host)
+	label, ok := strings.CutSuffix(host, "."+p.baseDomain)
+	if ok && label != "" && !strings.Contains(label, ".") {
+		return label, true
+	}
+	if domain, ok := p.domain(host); ok {
+		return domain.Tenant, true
+	}
+	return "", false
+}
+
+// hostName is a request's host as names are kept: no port, lowercase, no
+// trailing dot.
+func hostName(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	label, ok := strings.CutSuffix(host, "."+p.baseDomain)
-	if !ok || label == "" || strings.Contains(label, ".") {
-		return "", false
-	}
-	return label, true
+	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
-func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) { p.serve(w, r, false) }
+// domain looks a tenant's own domain up, if the routes know domains.
+func (p *Proxy) domain(host string) (DomainRoute, bool) {
+	domains, ok := p.routes.(Domains)
+	if !ok || host == "" {
+		return DomainRoute{}, false
+	}
+	return domains.Domain(host)
+}
+
+// challengePath is where a CA asks for an HTTP-01 challenge's answer.
+const challengePath = "/.well-known/acme-challenge/"
+
+// answerChallenge answers a CA asking for an HTTP-01 challenge of one of
+// the tenants' domains, and reports whether it did. Any other request,
+// one for a tenant's own path below challengePath included, passes on.
+func (p *Proxy) answerChallenge(w http.ResponseWriter, r *http.Request) bool {
+	token, ok := strings.CutPrefix(r.URL.Path, challengePath)
+	if !ok || token == "" || r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	challenges, ok := p.routes.(Challenges)
+	if !ok {
+		return false
+	}
+	challenge, ok := challenges.Challenge(token)
+	if !ok || challenge.Domain != hostName(r.Host) {
+		return false
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, challenge.KeyAuth)
+	return true
+}
+
+func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.answerChallenge(w, r) {
+		return
+	}
+	p.serve(w, r, false)
+}
 
 // Relay serves other nodes' edges passing requests on to tenants this node
 // runs. The client's address and scheme are theirs to say: the TLS
@@ -693,8 +752,19 @@ func (p *Proxy) RedirectToHTTPS(ready func() bool) http.Handler {
 		if refuseConnect(w, r) {
 			return
 		}
+		// A CA checking a challenge asks over plain HTTP.
+		if p.answerChallenge(w, r) {
+			return
+		}
 		if _, ok := p.Tenant(r.Host); !ok {
 			http.Error(w, "unknown host", http.StatusNotFound)
+			return
+		}
+		// A tenant's own domain goes to HTTPS once it has its certificate;
+		// before, HTTPS would offer one for another name.
+		if domain, ok := p.domain(hostName(r.Host)); ok && domain.Certificate == "" {
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "this domain's certificate is on its way; try again shortly", http.StatusServiceUnavailable)
 			return
 		}
 		if !ready() {

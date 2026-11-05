@@ -81,8 +81,14 @@ type snapshot struct {
 	// keys they had, by name.
 	departed map[string]Departure
 	devices  map[string]Device
-	panel    panelState
-	images   map[string]bool
+	// domains are the tenants' own host names, by name; challenges the
+	// HTTP-01 challenges an order waits on, by token; accounts the
+	// cluster's ACME accounts, by CA.
+	domains    map[string]Domain
+	challenges map[string]Challenge
+	accounts   map[string]ACMEAccount
+	panel      panelState
+	images     map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
 	lastEvent int64
@@ -356,7 +362,7 @@ type querier interface {
 // load reads the whole state. It is small: one row per app and tenant.
 func load(q querier) (*snapshot, error) {
 	state := &snapshot{}
-	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadRevisions, loadRollouts, loadAllTenants, loadNodes, loadDevices, loadPanel, loadImages} {
+	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadRevisions, loadRollouts, loadAllTenants, loadNodes, loadDevices, loadDomains, loadACME, loadPanel, loadImages} {
 		if err := part(q, state); err != nil {
 			return nil, err
 		}
@@ -1520,7 +1526,7 @@ func (s *SQLite) ResealSecrets(reseal Resealer, actor string) (int, error) {
 		for _, name := range slices.Sorted(maps.Keys(current.tenants)) {
 			sealed := current.tenants[name].Sealed
 			for _, secret := range slices.Sorted(maps.Keys(sealed)) {
-				resealed, changed, err := reseal(name, secret, sealed[secret])
+				resealed, changed, err := reseal(SecretContext(name, secret), sealed[secret])
 				if err != nil {
 					return fmt.Errorf("tenant %s, secret %s: %w", name, secret, err)
 				}
@@ -1532,6 +1538,39 @@ func (s *SQLite) ResealSecrets(reseal Resealer, actor string) (int, error) {
 				}
 				count++
 			}
+		}
+		// The private keys of domains' certificates and of the cluster's
+		// ACME accounts, which no tenant's secret is.
+		for _, name := range slices.Sorted(maps.Keys(current.domains)) {
+			sealed := current.domains[name].Key
+			if sealed == "" {
+				continue
+			}
+			resealed, changed, err := reseal(DomainKeyContext(name), sealed)
+			if err != nil {
+				return fmt.Errorf("domain %s, its certificate's key: %w", name, err)
+			}
+			if !changed {
+				continue
+			}
+			if err := tx.Exec(`UPDATE domains SET key = ? WHERE name = ? AND key = ?`, resealed, name, sealed); err != nil {
+				return err
+			}
+			count++
+		}
+		for _, ca := range slices.Sorted(maps.Keys(current.accounts)) {
+			sealed := current.accounts[ca].Key
+			resealed, changed, err := reseal(AccountKeyContext(ca), sealed)
+			if err != nil {
+				return fmt.Errorf("ACME account at %s, its key: %w", ca, err)
+			}
+			if !changed {
+				continue
+			}
+			if err := tx.Exec(`UPDATE acme_accounts SET key = ? WHERE ca = ? AND key = ?`, resealed, ca, sealed); err != nil {
+				return err
+			}
+			count++
 		}
 		return event(tx, now, actor, "secrets.resealed", "", "", fmt.Sprintf("%d secrets sealed with the master key in use", count))
 	})

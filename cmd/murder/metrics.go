@@ -9,6 +9,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/cluster"
+	"github.com/PowerPenguini/murder/internal/domains"
 	"github.com/PowerPenguini/murder/internal/failover"
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/reconcile"
@@ -44,6 +45,8 @@ type agentMetrics struct {
 	releases *releases.Watcher
 	// usage is what the node's tenants use; nil in tests that measure none.
 	usage *measure.Recorder
+	// domains reports tenants' own domains, on the leader; nil in tests.
+	domains *domains.Manager
 }
 
 func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +121,9 @@ func (m *agentMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if m.releases != nil {
 		m.releases.WriteMetrics(out)
+	}
+	if m.domains != nil {
+		m.domains.WriteMetrics(out)
 	}
 	if m.digests != nil {
 		diverged := m.digests.Diverged()

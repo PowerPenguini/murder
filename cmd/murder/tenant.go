@@ -43,6 +43,10 @@ const tenantUsage = `Usage: murder tenant <command> [options]
   logs NAME [-tail N]    print the container's recent output
   logs NAME -previous    print the last lines its node kept of the container
                          before (one that exited, or was replaced or stopped)
+  domain add|list|check|remove NAME [DOMAIN]
+                         host names of the tenant's own, such as
+                         app.customer.com, with certificates the cluster
+                         orders and renews ("murder tenant domain" says more)
 
 Overrides (repeatable where it makes sense; set changes only what is given):
   -image REF             run this image instead of the app's (a canary)
@@ -98,6 +102,9 @@ func runTenant(args []string) error {
 	command, args := args[0], args[1:]
 	if command == "create" || command == "set" {
 		return configureTenant(command, args)
+	}
+	if command == "domain" {
+		return runDomain(args)
 	}
 	flags := flag.NewFlagSet("tenant "+command, flag.ContinueOnError)
 	socket := socketPath(flags)

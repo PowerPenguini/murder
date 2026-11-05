@@ -94,6 +94,9 @@ var partOf = map[string]string{
 	"admissions":        "nodes",
 	"departed_keys":     "nodes",
 	"devices":           "devices",
+	"domains":           "domains",
+	"acme_challenges":   "acme",
+	"acme_accounts":     "acme",
 	"images":            "images",
 	"panel_users":       "panel",
 	"panel_passkeys":    "panel",
@@ -108,6 +111,8 @@ var loaders = map[string]func(querier, *snapshot) error{
 	"rollouts":  loadRollouts,
 	"nodes":     loadNodes,
 	"devices":   loadDevices,
+	"domains":   loadDomains,
+	"acme":      loadACME,
 	"images":    loadImages,
 	"panel":     loadPanel,
 }
@@ -303,6 +308,9 @@ func snapshotDiff(whole, part *snapshot) string {
 	diff("admissions", whole.admissions, part.admissions)
 	diff("departed", whole.departed, part.departed)
 	diff("devices", whole.devices, part.devices)
+	diff("domains", whole.domains, part.domains)
+	diff("challenges", whole.challenges, part.challenges)
+	diff("accounts", whole.accounts, part.accounts)
 	diff("panel", whole.panel, part.panel)
 	if !reflect.DeepEqual(whole.images, part.images) {
 		out = append(out, fmt.Sprintf("images %v != %v", whole.images, part.images))

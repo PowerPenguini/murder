@@ -834,7 +834,7 @@ func TestSecretsAreSealedAgainInOneChange(t *testing.T) {
 	if len(a.Sealed) == 0 {
 		t.Fatal("the app has no secrets")
 	}
-	reseal := func(tenant, name, sealed string) (string, bool, error) {
+	reseal := func(context, sealed string) (string, bool, error) {
 		if strings.HasPrefix(sealed, "again:") {
 			return sealed, false, nil
 		}
@@ -864,7 +864,7 @@ func TestSecretsAreSealedAgainInOneChange(t *testing.T) {
 	if events[0].Action != "secrets.resealed" || events[0].Detail != "0 secrets sealed with the master key in use" {
 		t.Fatalf("events %+v", events)
 	}
-	failing := func(tenant, name, sealed string) (string, bool, error) { return "", false, errors.New("does not open") }
+	failing := func(context, sealed string) (string, bool, error) { return "", false, errors.New("does not open") }
 	if _, err := st.ResealSecrets(failing, "root"); err == nil || !strings.Contains(err.Error(), "does not open") {
 		t.Fatalf("a value that does not open: %v", err)
 	}

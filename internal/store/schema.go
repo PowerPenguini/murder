@@ -11,13 +11,19 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 16 in place.
-const schemaVersion = 17
+// versions 4 to 17 in place.
+const schemaVersion = 18
 
 // IdentitySchema is the schema version that pins each node's identity
 // key in the state: a node registers its key only once every node runs a
 // release of this version or later, which applies that write.
 const IdentitySchema = 16
+
+// DomainsSchema is the schema version that keeps tenants' own domains,
+// their certificates and the cluster's ACME account: the leader orders
+// and writes certificates only once every node runs a release of this
+// version or later, which applies those writes.
+const DomainsSchema = 18
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -271,6 +277,8 @@ CREATE TABLE secrets (
 	PRIMARY KEY (tenant, name)
 ) STRICT;
 
+` + domainTables + `
+
 -- The audit log. It outlives the tenants and apps it names.
 CREATE TABLE events (
 	id     INTEGER PRIMARY KEY,
@@ -515,6 +523,14 @@ func upgrade(db *sql.DB) error {
 		if _, err := tx.Exec(`ALTER TABLE rollouts ADD COLUMN first INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
+		version = 17
+	}
+	// Version 18 keeps tenants' own domains, their certificates, and the
+	// cluster's ACME account and challenges.
+	if version == 17 {
+		if _, err := tx.Exec(domainTables); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return err
@@ -661,7 +677,54 @@ func (e *eventIDs) readPage() error {
 }
 
 // ownObjects are the indexes and triggers of the schema; it has no views.
-var ownObjects = []string{"tenants_app", "tenants_node", "events_tenant", "events_app", "nodes_key_kept", "nodes_key_not_replaced", "events_id_bounded", "events_id_kept_bounded"}
+var ownObjects = []string{"tenants_app", "tenants_node", "events_tenant", "events_app", "nodes_key_kept", "nodes_key_not_replaced", "events_id_bounded", "events_id_kept_bounded", "domains_tenant"}
+
+// domainTables are the tables schema 18 added, as one script.
+const domainTables = `-- Host names of the tenants' own, outside the base domain, which every
+-- edge routes to their tenant once they were seen to point at the
+-- cluster. Each belongs to one tenant, and goes with it when it is
+-- purged. state says where getting its certificate is: verifying (not
+-- checked yet), pending (its DNS does not point at the cluster), issuing,
+-- active, renewing or failed; detail says why, attempts counts failures
+-- in a row, next_at is when the leader tries again. The certificate is
+-- PEM, its private key PEM sealed with the master key.
+CREATE TABLE domains (
+	name        TEXT PRIMARY KEY,
+	tenant      TEXT NOT NULL REFERENCES tenants (name) ON DELETE CASCADE,
+	created_at  TEXT NOT NULL,
+	created_by  TEXT NOT NULL,
+	state       TEXT NOT NULL CHECK (state IN ('verifying', 'pending', 'issuing', 'active', 'renewing', 'failed')),
+	detail      TEXT NOT NULL DEFAULT '',
+	attempts    INTEGER NOT NULL DEFAULT 0,
+	checked_at  TEXT,
+	next_at     TEXT,
+	verified_at TEXT,
+	certificate TEXT NOT NULL DEFAULT '',
+	key         TEXT NOT NULL DEFAULT '',
+	issued_at   TEXT,
+	not_after   TEXT
+) STRICT;
+
+CREATE INDEX domains_tenant ON domains (tenant);
+
+-- The cluster's account with each ACME CA it orders certificates from:
+-- its URL and its private key, PEM sealed with the master key.
+CREATE TABLE acme_accounts (
+	ca         TEXT PRIMARY KEY,
+	email      TEXT NOT NULL,
+	location   TEXT NOT NULL,
+	key        TEXT NOT NULL,
+	created_at TEXT NOT NULL
+) STRICT;
+
+-- HTTP-01 challenges an order waits on: every edge answers the CA's
+-- request for the token, for the domain, with the key authorization.
+CREATE TABLE acme_challenges (
+	token      TEXT PRIMARY KEY,
+	domain     TEXT NOT NULL REFERENCES domains (name) ON DELETE CASCADE,
+	key_auth   TEXT NOT NULL,
+	expires_at TEXT NOT NULL
+) STRICT;`
 
 // eventTriggers, of schema 16, keep events' ids, SQLite rowids, at most
 // 2^62. An event inserted without an id gets the largest one plus one,
