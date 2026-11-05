@@ -215,7 +215,14 @@
     const row = problem.closest("tr");
     const table = row && row.closest("table");
     const heading = table && table.previousElementSibling && table.previousElementSibling.matches(".head") ? table.previousElementSibling : null;
-    if (heading) {
+    // A row the screen already shows, below a phone's sticky bar, is not
+    // scrolled to: the page keeps its context (the tenant's name, its tabs).
+    const bar = document.querySelector(".side");
+    const top = bar && matchMedia("(max-width: 760px)").matches ? bar.getBoundingClientRect().bottom : 0;
+    const shown = (el) => { const r = el.getBoundingClientRect(); return r.top >= top && r.bottom <= innerHeight - 16; };
+    if (heading && shown(row) && shown(heading)) {
+      // In view already.
+    } else if (heading) {
       heading.scrollIntoView({ block: "start" });
       if (row.getBoundingClientRect().bottom > innerHeight - 16) row.scrollIntoView({ block: "center" });
     } else {

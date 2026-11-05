@@ -214,10 +214,14 @@ func diskRoomOf(t api.Tenant, tenants []api.Tenant, used int64) diskRoom {
 // Suggest is a disk limit, in GB, that leaves it room: 0 if nothing says.
 func (r diskRoom) Suggest() int { return max(r.Others, r.Least) }
 
+// Fills says its data fills a disk limit of gb: it cannot write (0 is
+// no limit).
+func (r diskRoom) Fills(gb int) bool { return gb > 0 && r.Used > 0 && int64(gb)<<30 <= r.Used }
+
 // Short says why a disk limit of gb is too small for its data, "" if it
 // is not (0 is no limit).
 func (r diskRoom) Short(tenant string, gb int) string {
-	if gb <= 0 || r.Used <= 0 || int64(gb)<<30 > r.Used {
+	if !r.Fills(gb) {
 		return ""
 	}
 	return strconv.Itoa(gb) + " GB is less than the " + size(float64(r.Used)) + " " + tenant + " holds: it could no longer write until the limit is raised"

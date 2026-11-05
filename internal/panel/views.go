@@ -722,11 +722,12 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// A container that cannot write is not "done": its data fills its
-	// disk limit.
+	// disk limit. The red notice says so, once; the operation line only
+	// records what was done.
 	if use != nil && use.Full != "" {
 		data.DiskFull = use.Full
 		if op := data.Operation; op != nil && op.Kind == "ok" {
-			op.State, op.Kind = "it runs, but "+use.Full, "bad"
+			op.State, op.Kind = "it runs", "warn"
 		}
 	}
 	// While the new container a person asked for starts, the operation

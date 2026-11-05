@@ -1331,8 +1331,29 @@ func TestADiskLimitItsDataFills(t *testing.T) {
 	}
 	// Once its new container runs, its change is still not "done".
 	time.Sleep(demoStart + time.Second)
-	if _, page = get(t, server.URL+"/tenants/atlas"); strings.Contains(page, "done: it runs healthy") || !strings.Contains(page, "it runs, but cannot write: its data, 1.4 GB, fills its 1 GB disk limit") {
+	// The red notice says it once; the operation line only records the
+	// save, in grey.
+	if _, page = get(t, server.URL+"/tenants/atlas"); strings.Contains(page, "done: it runs healthy") || !strings.Contains(page, `<div class="nrow" role="status" id="operation"><span class="lead-in">Settings saved</span> by you`) ||
+		!strings.Contains(between(page, `id="operation"`, "</div>"), ": it runs. ") {
 		t.Fatalf("a tenant that cannot write said done:\n%s", between(page, `id="operation"`, "</div>"))
+	}
+	if notices := between(page, `<div class="notices"`, "<section"); strings.Count(notices, "cannot write") != 1 || strings.Index(notices, "It cannot write") > strings.Index(notices, `id="operation"`) {
+		t.Fatalf("the notices say it cannot write other than once, first:\n%s", notices)
+	}
+	// Its Data figure comes first in Use now.
+	if use := between(page, `<h2 class="caps">Use now</h2>`, "</section>"); !strings.HasPrefix(strings.TrimSpace(between(use, `<div class="stats">`, "</div></div>")), `<div class="stat hot"><div class="caps">Data</div>`) {
+		t.Fatalf("Use now does not begin with its data:\n%s", use)
+	}
+	// "Raise its disk limit" lands in the field: its row opened, the
+	// caret in it with a value that leaves room, the limit its data fills
+	// said in red.
+	_, raise := get(t, server.URL+setLimit("atlas", "diskGB"))
+	disk := between(raise, `id="diskGB"`, "</tr>")
+	for _, want := range []string{`<span class="st bad">1 GB</span>`, "<span class=\"risk-why bad\">Its data, 1.4\u00a0GB, fills it: it cannot write.</span>", `id="f-diskGB" name="diskGB" value="10"`, "data-focus",
+		"suggested: 10\u00a0GB, as the other tenants have; now 1\u00a0GB, which its 1.4\u00a0GB of data fills"} {
+		if !strings.Contains(disk, want) {
+			t.Fatalf("the Raise landing's Disk row lacks %q:\n%s", want, disk)
+		}
 	}
 	if _, list := get(t, server.URL+"/tenants?show=broken"); !strings.Contains(list, ">data fills its disk limit") {
 		t.Fatalf("the broken tenants lack atlas:\n%s", list)

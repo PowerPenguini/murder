@@ -611,6 +611,7 @@ ol.waves.plan li { box-shadow: none; }
 /* ── settings: the value in effect, its source, and its own ── */
 table.settings td { vertical-align: middle; }
 table.settings td.own { width: 1%; white-space: nowrap; }
+table.settings td.own .caption { white-space: normal; }
 table.settings td.own .check { display: inline-flex; margin-right: var(--s3); vertical-align: middle; }
 table.settings .own-field { display: inline-flex; align-items: center; gap: 6px; }
 tr.setting:not(:has(.own-switch:checked)) .own-field { display: none; }
@@ -1087,6 +1088,7 @@ input.confirm-field { max-width: 320px; }
 @media (min-width: 761px) { .pop.up { top: auto; bottom: calc(100% + 6px); } }
 /* A limit it runs without that the others have: why, under its source. */
 .risk-why { display: block; margin-top: 2px; color: var(--soft); font-size: 12px; }
+.risk-why.bad { color: var(--bad); font-weight: 600; }
 table.changes tr.same td { color: var(--dim); }
 /* On a phone the top bar's status keeps to one line: "Paused · 1s"; its
    reason is in its title, as the whole sentence always is. */

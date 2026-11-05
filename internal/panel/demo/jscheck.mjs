@@ -31,6 +31,21 @@ await send("Page.enable"); await send("Runtime.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
 const results = [];
 const check = (name, ok, detail) => { results.push(ok); console.log((ok ? "ok   " : "FAIL ") + name + (detail ? ": " + detail : "")); };
+// Gives atlas a disk limit its data fills, through the settings' review
+// and its typed save, as a person would.
+const fillAtlas = async () => {
+  await go("/tenants/atlas");
+  await ev(`(async () => {
+    const page = new DOMParser().parseFromString(await (await fetch("/tenants/atlas/settings")).text(), "text/html");
+    const body = new URLSearchParams(new FormData(page.querySelector("#settings")));
+    body.set("own-diskGB", "on"); body.set("diskGB", "1"); body.set("do", "review");
+    const review = new DOMParser().parseFromString(await (await fetch("/tenants/atlas/settings", { method: "POST", body })).text(), "text/html");
+    const save = new URLSearchParams(new FormData(review.querySelector("form.review-box")));
+    save.set("do", "save"); save.set("confirm", "atlas");
+    await fetch("/tenants/atlas/settings", { method: "POST", body: save });
+    return 1;
+  })()`);
+};
 
 // 1.2: hover the memory plot near a mark, move down to its annotation: the reading stays.
 await go("/tenants/baltic-freight");
@@ -73,6 +88,20 @@ for (const width of [1440, 390]) {
 }
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
 
+// Where a disk limit link landed: the caret, the field's value, the row and
+// its table's heading against any sticky bar, the address's fragment.
+const landing = `JSON.stringify((() => {
+  const field = document.getElementById("f-diskGB"), row = document.getElementById("diskGB");
+  const head = row.closest("table").previousElementSibling;
+  const bar = document.querySelector(".side"), barBottom = innerWidth <= 760 ? bar.getBoundingClientRect().bottom : 0;
+  const r = row.getBoundingClientRect(), h = head.getBoundingClientRect();
+  return { focus: document.activeElement && document.activeElement.id, value: field.value, rowTop: Math.round(r.top), rowBottom: Math.round(r.bottom), headTop: Math.round(h.top), barBottom: Math.round(barBottom), height: innerHeight,
+    hash: location.hash, red: !!row.querySelector(".st.bad"), scrollY: Math.round(scrollY) };
+})())`;
+// On a desktop screen the row shows from the top: the page is not
+// scrolled away from the tenant's name.
+const inView = (l) => l.focus === "f-diskGB" && l.rowTop >= l.barBottom && l.rowBottom <= l.height && l.headTop >= l.barBottom && l.hash === "" && (l.barBottom > 0 || l.scrollY === 0);
+
 // Round 11: "Set its disk limit" lands with the caret in the Disk field,
 // and the row and its table's heading in view below any sticky bar.
 for (const width of [1440, 390]) {
@@ -82,14 +111,8 @@ for (const width of [1440, 390]) {
   await go("/tenants/atlas");
   await go("/tenants/atlas/settings?set=diskGB#diskGB");
   await sleep(400);
-  const landed = JSON.parse(await ev(`JSON.stringify((() => {
-    const field = document.getElementById("f-diskGB"), row = document.getElementById("diskGB");
-    const head = row.closest("table").previousElementSibling;
-    const bar = document.querySelector(".side"), barBottom = innerWidth <= 760 ? bar.getBoundingClientRect().bottom : 0;
-    const r = row.getBoundingClientRect(), h = head.getBoundingClientRect();
-    return { focus: document.activeElement && document.activeElement.id, value: field.value, rowTop: Math.round(r.top), rowBottom: Math.round(r.bottom), headTop: Math.round(h.top), barBottom: Math.round(barBottom), height: innerHeight };
-  })())`));
-  check(`the disk limit link at ${width}: caret in the field, row and heading in view`, landed.focus === "f-diskGB" && landed.rowTop >= landed.barBottom && landed.rowBottom <= landed.height && landed.headTop >= landed.barBottom, JSON.stringify(landed));
+  const landed = JSON.parse(await ev(landing));
+  check(`the disk limit link at ${width}: caret in the field, row and heading in view`, inView(landed), JSON.stringify(landed));
 }
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
 
@@ -118,5 +141,21 @@ check("two ArrowDowns reached every tenant now, focus kept", after2.pace === "no
 check("the address is a GET review with the pace", after2.url.includes("/apps/web/review?") && after2.url.includes("pace=now") && url1.includes("/apps/web/review?"), after2.url);
 dialogs = 0; await send("Page.reload"); await sleep(1500);
 check("a reload asks nothing and keeps the pace", dialogs === 0 && (await ev(`document.querySelector("input[name=pace]:checked").value`)) === "now");
+// Round 12: "Raise its disk limit", on a tenant whose data fills its disk
+// limit, lands as "Set" does, from the overview and from its page: the
+// caret in the field, a value that leaves room in it, the row red. Last:
+// it leaves atlas broken.
+await fillAtlas();
+for (const width of [1440, 390]) {
+  await send("Emulation.setDeviceMetricsOverride", { width, height: 844, deviceScaleFactor: 1, mobile: width < 600 });
+  for (const from of ["/", "/tenants/atlas"]) {
+    await go(from);
+    const href = await ev(`(() => { const a = [...document.querySelectorAll("a")].find((a) => a.textContent.trim() === "Raise its disk limit" && a.href.includes("/tenants/atlas/")); return a ? a.getAttribute("href") : ""; })()`);
+    await go(href || "/missing");
+    await sleep(400);
+    const raised = JSON.parse(await ev(landing));
+    check(`"Raise its disk limit" from ${from} at ${width}: caret in the field, 10 in it, the row red and in view`, href.includes("set=diskGB") && inView(raised) && raised.value === "10" && raised.red, JSON.stringify(raised));
+  }
+}
 ws.close(); chrome.kill(); await sleep(500);
 process.exit(results.every(Boolean) ? 0 : 1);

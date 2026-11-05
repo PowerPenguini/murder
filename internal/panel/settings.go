@@ -37,8 +37,9 @@ type settingField struct {
 	Inherit string
 	Risk    bool
 	Open    bool
-	// Note says what helps choose its value ("its data: 1.4 GB").
-	Note string
+	// Note says what helps choose its value ("its data: 1.4 GB"); Full
+	// that the limit in effect is one its data fills.
+	Note, Full string
 	// Kind, Step and Min shape the input.
 	Kind, Step, Min string
 }
@@ -139,7 +140,9 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map
 	for _, l := range limitsOf(t, limited) {
 		v := values[l.Field]
 		empty := slices.Contains(form.empty(), l.Field)
-		open := form.Open == l.Field && v[0] == ""
+		// Asked open (?set=, a fix link): its row opens and the caret lands
+		// in it, whether or not it has a value of its own.
+		open := form.Open == l.Field
 		inherit := ""
 		if l.Value > 0 {
 			inherit = strconv.FormatFloat(l.Value, 'f', -1, 64)
@@ -150,10 +153,14 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map
 		if l.Field == "diskGB" {
 			// What the limit must leave it, said beside its value; opened
 			// by a link, it starts at a value that leaves room.
+			full := disk.Fills(int(l.Value))
+			if full {
+				f.Full = "Its data, " + nbsp(size(float64(disk.Used))) + ", fills it: it cannot write."
+			}
 			if disk.Used > 0 {
 				f.Note = "its data: " + nbsp(size(float64(disk.Used)))
 			}
-			if open && disk.Suggest() > 0 {
+			if open && (v[0] == "" || full) && disk.Suggest() > 0 {
 				f.Value, f.Inherit = strconv.Itoa(disk.Suggest()), strconv.Itoa(disk.Suggest())
 				f.Note = "suggested: " + strconv.Itoa(disk.Suggest()) + "\u00a0GB"
 				if disk.Others > 0 && disk.Suggest() == disk.Others {
@@ -161,7 +168,10 @@ func settingFields(t api.Tenant, app spec.Tenant, form settingsForm, limited map
 				} else if disk.Least > 0 {
 					f.Note += ", twice its data"
 				}
-				if disk.Used > 0 {
+				switch {
+				case full:
+					f.Note += "; now " + nbsp(l.Said) + ", which its " + nbsp(size(float64(disk.Used))) + " of data fills"
+				case disk.Used > 0:
 					f.Note += "; its data: " + nbsp(size(float64(disk.Used)))
 				}
 			}
