@@ -1179,7 +1179,8 @@ func (s *Server) settingsAction(w http.ResponseWriter, r *http.Request) {
 		// it was set and nothing restarted, and a full disk's red notice
 		// is gone.
 		if live && !form.flagsChanged(t) && !t.Archived() {
-			http.Redirect(w, r, "/tenants/"+url.PathEscape(name)+"#operation", http.StatusSeeOther)
+			// No fragment: its line is near the top, under its name.
+			http.Redirect(w, r, "/tenants/"+url.PathEscape(name), http.StatusSeeOther)
 			return
 		}
 		// Another app: to its Overview, where the new container is followed.
