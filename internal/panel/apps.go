@@ -114,7 +114,7 @@ func (s *Server) appsPage(w http.ResponseWriter, r *http.Request, data appsData,
 			return
 		},
 	)
-	_, _, data.States = joinApps(nil, apps, tenants, events, s.now())
+	_, _, data.States = joinApps(nil, apps, tenants, events, s.now(), "")
 	// The broken first, then by name.
 	slices.SortFunc(apps, func(a, b api.App) int {
 		if x, y := data.States[a.Name].Bad, data.States[b.Name].Bad; x != y {

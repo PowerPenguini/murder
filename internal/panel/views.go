@@ -269,7 +269,7 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 			for _, app := range apps {
 				data.Apps = append(data.Apps, app.Name)
 			}
-			data.Attention, data.Rollouts, data.AppStates = joinApps(data.Attention, apps, tenants, events, now)
+			data.Attention, data.Rollouts, data.AppStates = joinApps(data.Attention, apps, tenants, events, now, s.actor(userOf(r)))
 		}
 	}
 	data.Show, data.Query, data.ByName = tenantFilter(r)
@@ -319,14 +319,14 @@ func (s *Server) triage(nodes api.Nodes, tenants []api.Tenant, use clusterUse, a
 		}
 		rows = append(rows, row)
 	}
-	notices, _, states := joinApps(attentionOf(views, rows, clustered, now), apps, tenants, events, now)
+	notices, _, states := joinApps(attentionOf(views, rows, clustered, now), apps, tenants, events, now, "")
 	return notices, failingNodes(use), badApps(states)
 }
 
 // diskWhy says where a tenant's disk limit comes from, in one line: "Its
-// 2 GB limit was set by jan (panel) 3m ago.", "Its 2 GB limit is web's.";
-// "" when it has none.
-func diskWhy(t api.Tenant, events []store.Event, now time.Time) string {
+// 2 GB limit was set by jan (panel) 3m ago." (by you, when me set it),
+// "Its 2 GB limit is web's."; "" when it has none.
+func diskWhy(t api.Tenant, events []store.Event, now time.Time, me string) string {
 	l := limitsOf(t, nil)[3]
 	if l.Value <= 0 {
 		return ""
@@ -348,7 +348,11 @@ func diskWhy(t api.Tenant, events []store.Event, now time.Time) string {
 			set = &events[i]
 		}
 		if set != nil {
-			return said + " was set by " + who(set.Actor) + " " + ago(now, set.At) + " ago."
+			by := who(set.Actor)
+			if sameActor(set.Actor, me) {
+				by = "you"
+			}
+			return said + " was set by " + by + " " + ago(now, set.At) + " ago."
 		}
 		return said + " is its own."
 	case fromApp:
@@ -396,7 +400,7 @@ type appState struct {
 // app-wide cause that explains no broken tenant stays its own at-risk row.
 // It returns the notices, the rollouts under way that are not blocked, and
 // each app's state.
-func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []store.Event, now time.Time) ([]notice, []rolloutNote, map[string]appState) {
+func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []store.Event, now time.Time, me string) ([]notice, []rolloutNote, map[string]appState) {
 	states := map[string]appState{}
 	var notes []rolloutNote
 	find := func(name string) *notice {
@@ -416,7 +420,7 @@ func joinApps(notices []notice, apps []api.App, tenants []api.Tenant, events []s
 		}
 		for _, t := range tenants {
 			if t.Spec.Name == n.Subject {
-				if why := diskWhy(t, events, now); why != "" {
+				if why := diskWhy(t, events, now, me); why != "" {
 					n.Subs = append([]sub{{Short: why, Text: why}}, n.Subs...)
 				}
 			}

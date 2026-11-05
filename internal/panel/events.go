@@ -219,7 +219,7 @@ func (r eventRow) Oldest() store.Event {
 func groupEvents(events []store.Event) []eventRow {
 	var rows []eventRow
 	for _, e := range events {
-		e.Detail = namedWave(e)
+		e.Detail = overridesSaid(namedWave(e), e.Action)
 		if n := len(rows); n > 0 {
 			last := &rows[n-1]
 			if last.Action == e.Action && last.Detail == e.Detail && byPeople(last.Event) == byPeople(e) && last.Actor == e.Actor {
@@ -239,6 +239,48 @@ func groupEvents(events []store.Event) []eventRow {
 		rows = append(rows, eventRow{Event: e})
 	}
 	return rows
+}
+
+// storedLimits is the store's word for a tenant's own limits in its
+// settings' events: "limits memoryMB=768 cpus=0 pids=0 diskGB=2".
+var storedLimits = regexp.MustCompile(`limits memoryMB=(\d+) cpus=([\d.]+) pids=(\d+) diskGB=(\d+)`)
+
+// overridesSaid says a tenant's settings event as people read it: "its
+// own: env FEATURE_PLANNER, TZ; secret ADMIN_PASSWORD; memory 768 MB, disk
+// 2 GB", not the store's "overrides: env FEATURE_PLANNER,TZ; secrets
+// ADMIN_PASSWORD; limits memoryMB=768 cpus=0 pids=0 diskGB=2".
+func overridesSaid(detail, action string) string {
+	if action != "tenant.updated" && action != "tenant.created" {
+		return detail
+	}
+	var parts []string
+	for _, part := range strings.Split(detail, "; ") {
+		part = strings.Replace(part, "overrides: ", "its own: ", 1)
+		if m := storedLimits.FindStringSubmatchIndex(part); m != nil {
+			var limits []string
+			for i, unit := range []string{"memory %s MB", "CPUs %s", "processes %s", "disk %s GB"} {
+				if value := part[m[2+2*i]:m[3+2*i]]; value != "0" {
+					limits = append(limits, strings.Replace(unit, "%s", value, 1))
+				}
+			}
+			if len(limits) == 0 {
+				limits = []string{"no limits"}
+			}
+			part = part[:m[0]] + strings.Join(limits, ", ") + part[m[1]:]
+		}
+		for _, kind := range []string{"env ", "secrets "} {
+			if rest, ok := strings.CutPrefix(strings.TrimPrefix(part, "its own: "), kind); ok {
+				names := strings.Split(rest, ",")
+				label := strings.TrimSpace(kind)
+				if kind == "secrets " && len(names) == 1 {
+					label = "secret"
+				}
+				part = strings.TrimSuffix(part, kind+rest) + label + " " + strings.Join(names, ", ")
+			}
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // numberedWave is a rollout's move as events said it before they named
