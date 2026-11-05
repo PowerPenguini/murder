@@ -209,16 +209,19 @@ func (r eventRow) AppPredicate() string {
 // what changed ("disk limit 2 GB → 10 GB"), its whole own set left to the
 // opened record.
 func (r eventRow) Brief() string {
-	if !strings.Contains(r.Detail, "changes: ") {
+	if r.Action != "tenant.updated" && r.Action != "tenant.created" {
 		return r.Detail
 	}
+	// What comes before its whole own set: another app, what changed.
 	var parts []string
 	for _, part := range strings.Split(r.Detail, "; ") {
-		if rest, ok := strings.CutPrefix(part, "changes: "); ok {
-			parts = append(parts, rest)
-		} else if !strings.HasPrefix(part, "its own: ") && part != "no overrides" {
-			parts = append(parts, part)
+		if strings.HasPrefix(part, "its own: ") || part == "no overrides" {
+			break
 		}
+		parts = append(parts, strings.TrimPrefix(part, "changes: "))
+	}
+	if len(parts) == 0 {
+		return r.Detail
 	}
 	return strings.Join(parts, "; ")
 }

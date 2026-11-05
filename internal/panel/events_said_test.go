@@ -1,6 +1,10 @@
 package panel
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/PowerPenguini/murder/internal/store"
+)
 
 // A tenant's settings event says its own settings as people read them.
 func TestOverridesSaid(t *testing.T) {
@@ -18,5 +22,20 @@ func TestOverridesSaid(t *testing.T) {
 	}
 	if got := overridesSaid("limits memoryMB=1 cpus=0 pids=0 diskGB=0", "app.updated"); got != "limits memoryMB=1 cpus=0 pids=0 diskGB=0" {
 		t.Errorf("another action's detail changed: %q", got)
+	}
+}
+
+// An events line says what a settings change changed; its opened record
+// says the whole set.
+func TestBriefSaysTheChange(t *testing.T) {
+	for _, c := range []struct{ detail, want string }{
+		{"changes: disk limit 2 GB → 10 GB; overrides: env FEATURE_PLANNER,TZ; secrets ADMIN_PASSWORD; limits memoryMB=768 cpus=0 pids=0 diskGB=10", "disk limit 2 GB → 10 GB"},
+		{"app web → testapp; overrides: env TZ", "app web → testapp"},
+		{"overrides: env TZ", "its own: env TZ"},
+	} {
+		e := store.Event{Action: "tenant.updated", Detail: c.detail}
+		if got := groupEvents([]store.Event{e})[0].Brief(); got != c.want {
+			t.Errorf("%q: brief %q, want %q", c.detail, got, c.want)
+		}
 	}
 }
