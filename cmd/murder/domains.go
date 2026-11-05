@@ -41,7 +41,14 @@ func newDomainManager(cfg config.Agent, st *store.SQLite, key *secrets.Key, memb
 			manager.CA = certmagic.LetsEncryptProductionCA
 		}
 	case edge.TLSInternal:
-		manager.NoCA = "it points at the cluster, but no certificate is ordered: edge.tls.mode is internal, not acme, on the leader"
+		// With a CA and an email set, as for a test cluster whose wildcard
+		// is the internal CA's, domains still get certificates from that
+		// CA, such as Let's Encrypt's staging one.
+		if cfg.Edge.TLS.CA != "" && cfg.Edge.TLS.Email != "" {
+			manager.CA, manager.Email = cfg.Edge.TLS.CA, cfg.Edge.TLS.Email
+			break
+		}
+		manager.NoCA = "it points at the cluster, but no certificate is ordered: edge.tls.mode is internal, not acme, and sets no ca and email, on the leader"
 	default:
 		manager.NoCA = "it points at the cluster and is served over plain HTTP: edge.tls is off on the leader, so no certificate is ordered"
 	}

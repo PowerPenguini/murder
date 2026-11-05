@@ -492,7 +492,7 @@ const challengePath = "/.well-known/acme-challenge/"
 // one for a tenant's own path below challengePath included, passes on.
 func (p *Proxy) answerChallenge(w http.ResponseWriter, r *http.Request) bool {
 	token, ok := strings.CutPrefix(r.URL.Path, challengePath)
-	if !ok || token == "" || r.Method != http.MethodGet && r.Method != http.MethodHead {
+	if !ok || !acmeToken(token) || r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
 	challenges, ok := p.routes.(Challenges)
@@ -506,6 +506,21 @@ func (p *Proxy) answerChallenge(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Set("Content-Type", "text/plain")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, challenge.KeyAuth)
+	return true
+}
+
+// acmeToken reports whether token can be an ACME challenge's token:
+// base64url characters only (RFC 8555, section 8.3), so nothing else is
+// looked up as one.
+func acmeToken(token string) bool {
+	if token == "" || len(token) > 256 {
+		return false
+	}
+	for _, c := range token {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
 	return true
 }
 

@@ -129,6 +129,14 @@ func TestChallengesAndRedirectsOfOwnDomains(t *testing.T) {
 	if response, _ := get(t, noRedirect, plain.URL+"/.well-known/acme-challenge/tok-2", "new.customer.com"); response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("another token: %s", response.Status)
 	}
+	for _, token := range []string{"tok-1/", "tok-1%2F", "tok.1"} {
+		if response, body := get(t, noRedirect, plain.URL+"/.well-known/acme-challenge/"+token, "new.customer.com"); body == "tok-1.thumb" {
+			t.Fatalf("token %q answered: %s", token, response.Status)
+		}
+	}
+	if !acmeToken("LoqXcYV8q5ONbJQxbmR7SCTNo3tiAXDfowyjxAjEuX0") || acmeToken("a/b") || acmeToken("a.b") || acmeToken("") {
+		t.Fatal("acmeToken")
+	}
 	if response, _ := get(t, noRedirect, plain.URL+"/.well-known/acme-challenge/tok-1", "else.customer.com"); response.StatusCode != http.StatusNotFound {
 		t.Fatalf("an unknown host: %s", response.Status)
 	}

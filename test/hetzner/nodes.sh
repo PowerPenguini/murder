@@ -23,6 +23,9 @@
 # With .state/dns-zone naming a zone of the project's Hetzner Cloud DNS (any
 # name: Hetzner's name servers answer for it undelegated), the base domain is
 # that zone and the leader keeps its wildcard records; `dns` reads them.
+# DOMAINS_CA and DOMAINS_EMAIL at deploy have tenants' own domains get
+# certificates from that CA (say Let's Encrypt's staging one) though the
+# wildcard stays the internal CA's.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -98,6 +101,7 @@ edge:
   tls:
     mode: internal
     storage: /var/lib/murder/certs
+$(if [[ -n ${DOMAINS_CA:-} ]]; then printf '    ca: %s\n    email: %s\n' "$DOMAINS_CA" "${DOMAINS_EMAIL:?DOMAINS_EMAIL with DOMAINS_CA}"; fi)
 cluster:
   address: $(private_ip "$node"):7400
   dir: /var/lib/murder/cluster
