@@ -22,6 +22,7 @@ Node commands:
   panel      serve the administration panel
   admin      the devices that reach the panel through its tunnel
   firewall   load the tenant firewall (murder-firewall.service runs it at boot)
+  doctor     check how safely the node is set up; changes nothing
   restore    put a backup in place of the node's database (agent stopped)
   cluster    show, start, join or leave a cluster of nodes
   node       show this node's identity key in its cluster
@@ -69,6 +70,8 @@ func run(args []string) error {
 		return runAdmin(args[1:])
 	case "firewall":
 		return runFirewall(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
 	case "app":
 		return runApp(args[1:])
 	case "events":

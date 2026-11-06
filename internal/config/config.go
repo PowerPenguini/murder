@@ -19,6 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/records"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/strictyaml"
@@ -60,9 +61,16 @@ type Agent struct {
 	// keeps tenants from opening connections to the host, other than to
 	// the edge ports, and to private and link-local addresses, which
 	// include the cloud's metadata service and other servers.
-	Firewall string  `yaml:"firewall"`
-	Volumes  Volumes `yaml:"volumes"`
-	Edge     Edge    `yaml:"edge"`
+	Firewall string `yaml:"firewall"`
+	// HostFirewall, if set, has the same firewall drop what reaches the
+	// host from anywhere other than a tenant network, unless it goes to
+	// SSH, the edge, the panel's tunnel or a port listed here; the cluster
+	// and relay ports, and metrics not on loopback, stay open to private
+	// networks only. Off by default: it would close ports the host serves
+	// besides Murder.
+	HostFirewall *HostFirewall `yaml:"hostFirewall"`
+	Volumes      Volumes       `yaml:"volumes"`
+	Edge         Edge          `yaml:"edge"`
 	// Metrics, if set, is where the agent serves /metrics for Prometheus
 	// or VictoriaMetrics: tenant names and their traffic, so a loopback or
 	// private address. Tenants cannot reach it while the firewall is on.
@@ -134,6 +142,94 @@ func registriesProblems(registries []Registry) []string {
 		}
 	}
 	return problems
+}
+
+// HostFirewall lists what reaches the host besides Murder's own ports.
+type HostFirewall struct {
+	// SSH are the ports sshd listens on, open to everyone; 22 by default.
+	// A port missing here locks SSH out (connections already open stay).
+	SSH []int `yaml:"ssh"`
+	// Open are more ports open to everyone, and Private more ports open
+	// to private networks only, as "9100/tcp" or "53/udp".
+	Open    []string `yaml:"open"`
+	Private []string `yaml:"private"`
+}
+
+// HostRules is what the host firewall lets in; nil when hostFirewall is
+// unset.
+func (a Agent) HostRules() (*firewall.Host, error) {
+	h := a.HostFirewall
+	if h == nil {
+		return nil, nil
+	}
+	var problems []string
+	rules := &firewall.Host{}
+	for _, port := range h.SSH {
+		if port < 1 || port > 65535 {
+			problems = append(problems, fmt.Sprintf("hostFirewall.ssh: %d is not a port", port))
+		}
+		rules.PublicTCP = append(rules.PublicTCP, port)
+	}
+	if len(h.SSH) == 0 {
+		problems = append(problems, "hostFirewall.ssh must name the SSH ports, or the firewall locks SSH out")
+	}
+	edgePorts, err := a.EdgePorts()
+	if err != nil {
+		problems = append(problems, err.Error())
+	}
+	rules.PublicTCP = append(rules.PublicTCP, edgePorts...)
+	if t := a.Panel.Tunnel; t != nil {
+		rules.PublicUDP = append(rules.PublicUDP, t.Port)
+	}
+	if a.Cluster != nil {
+		if _, port, err := net.SplitHostPort(a.Cluster.Address); err == nil {
+			if number, err := strconv.Atoi(port); err == nil {
+				rules.PrivateTCP = append(rules.PrivateTCP, number)
+			}
+		}
+		rules.PrivateTCP = append(rules.PrivateTCP, a.Edge.RelayPort)
+	}
+	// Metrics on loopback need no rule; on another address they are for a
+	// scraper on the private network.
+	for _, address := range []string{a.Metrics, a.Edge.Metrics} {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			continue
+		}
+		if ip, err := netip.ParseAddr(host); err == nil && ip.IsLoopback() || host == "localhost" {
+			continue
+		}
+		if number, err := strconv.Atoi(port); err == nil {
+			rules.PrivateTCP = append(rules.PrivateTCP, number)
+		}
+	}
+	for _, list := range []struct {
+		name     string
+		entries  []string
+		tcp, udp *[]int
+	}{
+		{"open", h.Open, &rules.PublicTCP, &rules.PublicUDP},
+		{"private", h.Private, &rules.PrivateTCP, &rules.PrivateUDP},
+	} {
+		for _, entry := range list.entries {
+			port, protocol, _ := strings.Cut(entry, "/")
+			number, err := strconv.Atoi(port)
+			switch {
+			case err != nil || number < 1 || number > 65535:
+				problems = append(problems, fmt.Sprintf("hostFirewall.%s: %q needs a port, such as 9100/tcp", list.name, entry))
+			case protocol == "tcp":
+				*list.tcp = append(*list.tcp, number)
+			case protocol == "udp":
+				*list.udp = append(*list.udp, number)
+			default:
+				problems = append(problems, fmt.Sprintf("hostFirewall.%s: %q needs /tcp or /udp", list.name, entry))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return nil, errors.New(strings.Join(problems, "; "))
+	}
+	return rules, nil
 }
 
 // Backups keeps tenants' data and the cluster's state in an S3 bucket,
@@ -403,6 +499,14 @@ func Parse(data []byte) (Agent, error) {
 			t.KeyFile = "/var/lib/murder/panel/tunnel.key"
 		}
 	}
+	// A bare "hostFirewall:" is null, which leaves the pointer nil: it asks
+	// for the firewall with every default all the same.
+	if agent.HostFirewall == nil && bareKey(data, "hostFirewall") {
+		agent.HostFirewall = &HostFirewall{}
+	}
+	if h := agent.HostFirewall; h != nil && h.SSH == nil {
+		h.SSH = []int{22}
+	}
 	if agent.Cluster != nil {
 		if agent.Cluster.Dir == "" {
 			agent.Cluster.Dir = "/var/lib/murder/cluster"
@@ -515,6 +619,13 @@ func (a Agent) Validate() error {
 	}
 	if a.Firewall == FirewallNftables {
 		if _, err := a.EdgePorts(); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if a.HostFirewall != nil {
+		if a.Firewall != FirewallNftables {
+			problems = append(problems, "hostFirewall needs firewall: nftables, whose table it is part of")
+		} else if _, err := a.HostRules(); err != nil {
 			problems = append(problems, err.Error())
 		}
 	}
@@ -671,4 +782,14 @@ func publicProblems(key string, values []string) []string {
 		}
 	}
 	return problems
+}
+
+// bareKey reports whether the document's top level has key with no value.
+func bareKey(data []byte, key string) bool {
+	var top map[string]yaml.Node
+	if yaml.Unmarshal(data, &top) != nil {
+		return false
+	}
+	node, ok := top[key]
+	return ok && node.ShortTag() == "!!null"
 }

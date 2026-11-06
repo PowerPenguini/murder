@@ -744,8 +744,12 @@ func loadFirewall(ctx context.Context, cfg config.Agent, subnets []netip.Prefix)
 	if err != nil {
 		return err
 	}
+	host, err := cfg.HostRules()
+	if err != nil {
+		return err
+	}
 	sources := append([]netip.Prefix{netip.MustParsePrefix(cfg.NetworkPool)}, subnets...)
-	return firewall.Apply(ctx, sources, edgePorts, firewall.Resolvers())
+	return firewall.Apply(ctx, sources, edgePorts, firewall.Resolvers(), host)
 }
 
 func storeSubnets(st store.Store) []netip.Prefix {

@@ -77,6 +77,7 @@ missing, and how to get it):
 ```bash
 curl -fsSL https://github.com/PowerPenguini/murder/releases/latest/download/install.sh | sudo sh
 sudo murder setup -domain example.com
+sudo murder doctor        # what is left to harden; changes nothing
 ```
 
 `install.sh` puts the release's binary for the server's architecture at

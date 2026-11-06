@@ -168,6 +168,23 @@ func (d *Docker) do(ctx context.Context, call request, out any) error {
 	}
 }
 
+// EngineInfo is what the engine says about itself that bears on how
+// safely it runs tenants.
+type EngineInfo struct {
+	// LiveRestoreEnabled keeps containers running while the engine
+	// restarts, as on a package upgrade.
+	LiveRestoreEnabled bool `json:"LiveRestoreEnabled"`
+	// SecurityOptions are such as "name=apparmor", "name=seccomp,profile=builtin".
+	SecurityOptions []string `json:"SecurityOptions"`
+}
+
+// Info asks the engine about itself.
+func (d *Docker) Info(ctx context.Context) (EngineInfo, error) {
+	var info EngineInfo
+	err := d.do(ctx, request{method: http.MethodGet, path: "/info"}, &info)
+	return info, err
+}
+
 // ownLabels adds the managed and node labels to labels.
 func (d *Docker) ownLabels(labels map[string]string) map[string]string {
 	owned := maps.Clone(labels)
@@ -360,13 +377,8 @@ func (d *Docker) Latest(ctx context.Context, tag string) (string, error) {
 // LiveRestore reports whether the engine keeps containers running while it
 // restarts.
 func (d *Docker) LiveRestore(ctx context.Context) (bool, error) {
-	var info struct {
-		LiveRestoreEnabled bool `json:"LiveRestoreEnabled"`
-	}
-	if err := d.do(ctx, request{method: http.MethodGet, path: "/info"}, &info); err != nil {
-		return false, err
-	}
-	return info.LiveRestoreEnabled, nil
+	info, err := d.Info(ctx)
+	return info.LiveRestoreEnabled, err
 }
 
 // familiar shortens a Docker Hub repository the way the engine reports it:

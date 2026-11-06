@@ -35,6 +35,7 @@ func newFakeHost() *fakeHost {
 			"nft --version":                                                          "nftables v1.0.9",
 			"zpool list -H -o name":                                                  "tank\n",
 			"sysctl -q -p " + SysctlFile:                                             "",
+			"sysctl -q -e -p " + HardeningFile:                                       "",
 			"systemctl daemon-reload":                                                "",
 			"zfs create -p tank/murder/tenants":                                      "",
 		},
@@ -232,7 +233,7 @@ func TestStepsInstallEverything(t *testing.T) {
 		t.Fatal("the master key and database were not made")
 	}
 	for path, mode := range map[string]fs.FileMode{
-		Binary: 0o755, ConfigFile: 0o644, HetznerTokenFile: 0o600, SysctlFile: 0o644, DockerDropIn: 0o644,
+		Binary: 0o755, ConfigFile: 0o644, HetznerTokenFile: 0o600, SysctlFile: 0o644, HardeningFile: 0o644, DockerDropIn: 0o644,
 		UnitDir + "/murder-agent.service": 0o644, UnitDir + "/murder-panel.service": 0o644, UnitDir + "/murder-backup.timer": 0o644,
 	} {
 		if _, ok := host.files[path]; !ok || host.modes[path] != mode {

@@ -69,7 +69,7 @@ func TestTenantReachesOnlyTheInternetAndTheEdge(t *testing.T) {
 		t.Fatal("a tenant cannot reach the host even without the rules; the test proves nothing")
 	}
 	for range 2 { // loading twice replaces the table
-		if err := Apply(ctx, []netip.Prefix{pool}, []int{8099}, Resolvers()); err != nil {
+		if err := Apply(ctx, []netip.Prefix{pool}, []int{8099}, Resolvers(), nil); err != nil {
 			t.Fatal(err)
 		}
 	}

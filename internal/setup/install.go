@@ -187,7 +187,7 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 			return host.WriteFile(Binary, data, 0o755)
 		})
 	}
-	files := "install the systemd units and the sysctl settings"
+	files := "install the systemd units, the sysctl settings and the kernel hardening"
 	if in.ZFSPool != "" {
 		files += ", and have Docker start after ZFS has mounted"
 	}
@@ -202,6 +202,8 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 			switch {
 			case name == "murder-sysctl.conf":
 				target = SysctlFile
+			case name == "murder-hardening.conf":
+				target = HardeningFile
 			case name == "docker-after-zfs.conf":
 				if in.ZFSPool == "" {
 					continue
@@ -221,6 +223,11 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 		}
 		if _, err := host.Run(ctx, "sysctl", "-q", "-p", SysctlFile); err != nil {
 			return fmt.Errorf("apply %s: %w", SysctlFile, err)
+		}
+		// A kernel may lack a key the hardening names (IPv6 turned off, no
+		// BPF): -e skips those, and doctor names what stays unhardened.
+		if _, err := host.Run(ctx, "sysctl", "-q", "-e", "-p", HardeningFile); err != nil {
+			return fmt.Errorf("apply %s: %w", HardeningFile, err)
 		}
 		_, err = host.Run(ctx, "systemctl", "daemon-reload")
 		return err

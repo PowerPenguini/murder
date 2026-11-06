@@ -14,6 +14,10 @@ registries:                        # private registries: images are pulled with 
 # registryAuthFile: /etc/murder/registry.json   # or a docker config.json with "auths"
 networkPool: 10.240.0.0/16         # one /28 per tenant network (the tenant at .2); must not overlap host or Docker networks
 firewall: nftables                 # keeps tenants from the host and private networks; off only for development
+# hostFirewall:                    # also drop what reaches the host but SSH, the edge, the panel's tunnel and these
+#   ssh: [22]                      # every port sshd listens on, or SSH is locked out
+#   open: ["9100/tcp"]             # more ports open to everyone
+#   private: ["9100/tcp"]          # more ports open to private networks only (the cluster's are already)
 metrics: 127.0.0.1:9464            # /metrics for Prometheus or VictoriaMetrics (tenant names: keep it private); unset = off
 
 volumes:

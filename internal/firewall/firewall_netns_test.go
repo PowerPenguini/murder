@@ -126,7 +126,7 @@ func TestRulesInNamespaces(t *testing.T) {
 			t.Fatalf("without rules the tenant cannot reach %s; the test proves nothing", address)
 		}
 	}
-	if err := Apply(context.Background(), []netip.Prefix{netip.MustParsePrefix("10.249.0.0/16")}, []int{8099}, []netip.Addr{netip.MustParseAddr("10.77.0.2")}); err != nil {
+	if err := Apply(context.Background(), []netip.Prefix{netip.MustParsePrefix("10.249.0.0/16")}, []int{8099}, []netip.Addr{netip.MustParseAddr("10.77.0.2")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for address, want := range map[string]bool{
@@ -143,6 +143,61 @@ func TestRulesInNamespaces(t *testing.T) {
 	// The host still reaches the tenant, as the edge and health checks do.
 	if !hostReaches("10.249.0.2:8080") {
 		t.Error("the host cannot reach the tenant")
+	}
+	t.Log(run("nft", "list", "table", "inet", Table))
+
+	// With the host firewall, the outside (the private network stands in
+	// for the internet, the tenant network for itself) reaches the host
+	// only on the open ports, and private ports only from a private address.
+	// 8098 is the public port, 8099 the edge, 8097 a private one, 8096
+	// closed.
+	for _, address := range []string{"0.0.0.0:8097", "0.0.0.0:8096"} {
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { listener.Close() })
+		go acceptAll(listener)
+	}
+	lanReaches := func(address string) bool {
+		host, port, _ := net.SplitHostPort(address)
+		err := exec.Command("nsenter", "--target", lan, "--net", "python3", "-c",
+			"import socket,sys\ntry:\n socket.create_connection(('"+host+"',"+port+"),timeout=2).close()\nexcept OSError:\n sys.exit(1)").Run()
+		return err == nil
+	}
+	pings := func(pid, address string) bool {
+		return exec.Command("nsenter", "--target", pid, "--net", "ping", "-c", "1", "-W", "2", address).Run() == nil
+	}
+	host := &Host{PublicTCP: []int{8098, 8099}, PublicUDP: []int{51820}, PrivateTCP: []int{8097}, PrivateUDP: []int{8125}}
+	if err := Apply(context.Background(), []netip.Prefix{netip.MustParsePrefix("10.249.0.0/16")}, []int{8099}, []netip.Addr{netip.MustParseAddr("10.77.0.2")}, host); err != nil {
+		t.Fatal(err)
+	}
+	for address, want := range map[string]bool{
+		"10.77.0.1:8098": true,  // open to all
+		"10.77.0.1:8099": true,  // the edge
+		"10.77.0.1:8097": true,  // private, from a private address
+		"10.77.0.1:8096": false, // closed
+	} {
+		if got := lanReaches(address); got != want {
+			t.Errorf("the private network reaches %s: %v, want %v", address, got, want)
+		}
+	}
+	// The tenant rules still decide the tenant's traffic.
+	for address, want := range map[string]bool{
+		"10.249.0.1:8099": true,
+		"10.249.0.1:8098": false,
+		"10.249.0.1:8097": false,
+		"10.77.0.2:53":    true,
+	} {
+		if got := reaches(address); got != want {
+			t.Errorf("with the host firewall, the tenant reaches %s: %v, want %v", address, got, want)
+		}
+	}
+	if !hostReaches("10.249.0.2:8080") || !hostReaches("127.0.0.1:8096") {
+		t.Error("the host cannot reach the tenant or itself")
+	}
+	if _, err := exec.LookPath("ping"); err == nil && !pings(lan, "10.77.0.1") {
+		t.Error("the host does not answer ping")
 	}
 	t.Log(run("nft", "list", "table", "inet", Table))
 }

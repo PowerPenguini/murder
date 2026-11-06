@@ -22,5 +22,42 @@ StateDirectory=murder
 StateDirectoryMode=0700
 LimitNOFILE=65536
 
+# The edge faces the internet, so it runs with the least the host allows
+# it. It writes only below /var/lib/murder (certificates, its saved
+# routes) and /run/murder-edge (PID file, a failed handover's reason),
+# which StateDirectory and RuntimeDirectory keep writable; it reads the
+# config, the master key and the DNS token, and talks to the agent on its
+# socket. Moving edge.tls.storage, edge.routes or edge.pidFile elsewhere
+# needs a ReadWritePaths= for it in a drop-in. It stays root (it owns the
+# key files and binds 80 and 443) but keeps no capability other than
+# binding low ports.
+# The agent and the panel keep none of this: an upgrade has them replace
+# /usr/local/bin/murder, and the agent runs nft and drives Docker.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# A refused system call fails with an error the edge logs, rather than
+# killing it in the middle of a handover.
+SystemCallErrorNumber=EPERM
+
 [Install]
 WantedBy=multi-user.target
