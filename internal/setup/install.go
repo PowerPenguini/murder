@@ -198,17 +198,9 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 		}
 		for _, file := range files {
 			name := file.Name()
-			target := path.Join(UnitDir, name)
-			switch {
-			case name == "murder-sysctl.conf":
-				target = SysctlFile
-			case name == "murder-hardening.conf":
-				target = HardeningFile
-			case name == "docker-after-zfs.conf":
-				if in.ZFSPool == "" {
-					continue
-				}
-				target = DockerDropIn
+			target := Target(name)
+			if target == DockerDropIn && in.ZFSPool == "" {
+				continue
 			}
 			data, err := deploy.Files.ReadFile(name)
 			if err != nil {

@@ -36,6 +36,7 @@ func newFakeHost() *fakeHost {
 			"zpool list -H -o name":                                                  "tank\n",
 			"sysctl -q -p " + SysctlFile:                                             "",
 			"sysctl -q -e -p " + HardeningFile:                                       "",
+			"sysctl -q -e -p " + SysctlFile:                                          "",
 			"systemctl daemon-reload":                                                "",
 			"zfs create -p tank/murder/tenants":                                      "",
 		},

@@ -289,7 +289,7 @@ func checkEdgeConfined(ctx context.Context, h Host) []Result {
 			if strings.TrimSpace(value) == "1" {
 				return []Result{{OK, "services", "the edge runs confined", ""}}
 			}
-			return []Result{{Warning, "services", "the edge runs unconfined: its unit predates deploy/murder-edge.service, or it has not restarted since", "install deploy/murder-edge.service, systemctl daemon-reload, systemctl restart murder-edge"}}
+			return []Result{{Warning, "services", "the edge runs unconfined: it has not restarted since its unit gained its limits (the agent brings the unit up to date at start)", "systemctl restart murder-edge (open requests get edge.drain to finish)"}}
 		}
 	}
 	return nil

@@ -35,6 +35,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/rollout"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/setup"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 	measure "github.com/PowerPenguini/murder/internal/usage"
@@ -103,6 +104,7 @@ func runAgent(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	refreshInstall(log)
 	key, err := secrets.LoadKey(cfg.MasterKeyFile)
 	if err != nil {
 		return err
@@ -790,4 +792,28 @@ func runFirewall(args []string) error {
 func privateHost(host string) bool {
 	address, err := netip.ParseAddr(host)
 	return err != nil || address.IsLoopback() || address.IsPrivate()
+}
+
+// refreshInstall brings the node's units and sysctl settings to this
+// release's: an upgrade replaces the binary only, and the agent is the
+// first of it to run. Only a node installed at the usual place, as root.
+func refreshInstall(log *slog.Logger) {
+	host := setup.System{}
+	if executable, err := host.Executable(); err != nil || executable != setup.Binary || !host.Root() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	replaced, err := setup.Refresh(ctx, host)
+	if len(replaced) > 0 {
+		log.Info("brought the install files up to this release", "files", replaced)
+	}
+	if slices.Contains(replaced, setup.Target("murder-edge.service")) {
+		// A reload hands over to a child of the old edge, which keeps the
+		// old unit's confinement; only a start under the new unit has it.
+		log.Warn("murder-edge.service changed: `systemctl restart murder-edge` runs the edge under it (open requests get edge.drain to finish)")
+	}
+	if err != nil {
+		log.Warn("could not bring the install files up to this release", "err", err)
+	}
 }
