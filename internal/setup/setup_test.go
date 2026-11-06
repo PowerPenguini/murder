@@ -35,7 +35,7 @@ func newFakeHost() *fakeHost {
 			"nft --version":                                                          "nftables v1.0.9",
 			"zpool list -H -o name":                                                  "tank\n",
 			"sysctl -q -p " + SysctlFile:                                             "",
-			"sysctl -q -p " + HardeningFile:                                          "",
+			"sysctl -q -e -p " + HardeningFile:                                       "",
 			"systemctl daemon-reload":                                                "",
 			"zfs create -p tank/murder/tenants":                                      "",
 		},

@@ -221,10 +221,13 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 				return err
 			}
 		}
-		for _, file := range []string{SysctlFile, HardeningFile} {
-			if _, err := host.Run(ctx, "sysctl", "-q", "-p", file); err != nil {
-				return fmt.Errorf("apply %s: %w", file, err)
-			}
+		if _, err := host.Run(ctx, "sysctl", "-q", "-p", SysctlFile); err != nil {
+			return fmt.Errorf("apply %s: %w", SysctlFile, err)
+		}
+		// A kernel may lack a key the hardening names (IPv6 turned off, no
+		// BPF): -e skips those, and doctor names what stays unhardened.
+		if _, err := host.Run(ctx, "sysctl", "-q", "-e", "-p", HardeningFile); err != nil {
+			return fmt.Errorf("apply %s: %w", HardeningFile, err)
 		}
 		_, err = host.Run(ctx, "systemctl", "daemon-reload")
 		return err

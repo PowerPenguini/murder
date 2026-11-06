@@ -377,13 +377,8 @@ func (d *Docker) Latest(ctx context.Context, tag string) (string, error) {
 // LiveRestore reports whether the engine keeps containers running while it
 // restarts.
 func (d *Docker) LiveRestore(ctx context.Context) (bool, error) {
-	var info struct {
-		LiveRestoreEnabled bool `json:"LiveRestoreEnabled"`
-	}
-	if err := d.do(ctx, request{method: http.MethodGet, path: "/info"}, &info); err != nil {
-		return false, err
-	}
-	return info.LiveRestoreEnabled, nil
+	info, err := d.Info(ctx)
+	return info.LiveRestoreEnabled, err
 }
 
 // familiar shortens a Docker Hub repository the way the engine reports it:

@@ -105,7 +105,9 @@ func owners(h Host) map[string]string {
 // reaches it is root on the host.
 var dockerAPIPorts = []int{2375, 2376}
 
-func checkListeners(cfg config.Agent, h Host, sshPorts []int) []Result {
+// checkListeners names what listens on public addresses. hostRules says
+// whether the host firewall drops what reaches them.
+func checkListeners(cfg config.Agent, h Host, sshPorts []int, hostRules bool) []Result {
 	expected := map[string][]int{"tcp": sshPorts, "udp": {68, 546}} // DHCP clients
 	if len(sshPorts) == 0 {
 		expected["tcp"] = []int{22}
@@ -121,13 +123,14 @@ func checkListeners(cfg config.Agent, h Host, sshPorts []int) []Result {
 		expected["udp"] = append(expected["udp"], rules.PublicUDP...)
 	}
 	names := owners(h)
+	sockets := listening(h)
 	var results []Result
 	// sshd -T names the Port settings only (checkSSH reports those): a
 	// ListenAddress with a port of its own shows here, on any address, as
 	// the firewall drops it from private networks too.
 	if f := cfg.HostFirewall; f != nil {
 		var closed []string
-		for _, s := range listening(h) {
+		for _, s := range sockets {
 			if s.protocol == "tcp" && names[s.inode] == "sshd" && !s.address.IsLoopback() && !slices.Contains(f.SSH, s.port) && !slices.Contains(sshPorts, s.port) && !slices.Contains(closed, strconv.Itoa(s.port)) {
 				closed = append(closed, strconv.Itoa(s.port))
 			}
@@ -138,7 +141,7 @@ func checkListeners(cfg config.Agent, h Host, sshPorts []int) []Result {
 	}
 	seen := map[string]bool{}
 	var unexpected, dropped []string
-	for _, s := range listening(h) {
+	for _, s := range sockets {
 		key := fmt.Sprintf("%s/%d", s.protocol, s.port)
 		if !public(s.address) || slices.Contains(expected[s.protocol], s.port) || seen[key] {
 			continue
@@ -157,7 +160,7 @@ func checkListeners(cfg config.Agent, h Host, sshPorts []int) []Result {
 			results = append(results, Result{Warning, "listeners", "a container publishes " + label + " to the internet, past any host firewall", "publish it on 127.0.0.1 or a private address instead"})
 		case cfg.HostFirewall != nil && names[s.inode] == "sshd":
 			// Reported above if the firewall drops it.
-		case cfg.HostFirewall != nil:
+		case hostRules:
 			dropped = append(dropped, label)
 		case s.port == 5355 || s.port == 5353:
 			// systemd-resolved answers LLMNR (5355) and mDNS (5353) on

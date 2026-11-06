@@ -324,6 +324,12 @@ hostFirewall: {open: [9100/tcp, 3478/udp], private: [8125/udp]}
 			t.Errorf("%s = %v, want %v", name, got, pair[1])
 		}
 	}
+	// A bare key, as the example's line uncommented alone, takes the defaults.
+	if bare, err := Parse([]byte("baseDomain: example.com\nhostFirewall:\n")); err != nil {
+		t.Fatal(err)
+	} else if bare.HostFirewall == nil || !slices.Equal(bare.HostFirewall.SSH, []int{22}) {
+		t.Errorf("bare hostFirewall: %+v", bare.HostFirewall)
+	}
 	if plain, err := Parse([]byte("baseDomain: example.com\n")); err != nil {
 		t.Fatal(err)
 	} else if rules, err := plain.HostRules(); rules != nil || err != nil {

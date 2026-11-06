@@ -499,6 +499,11 @@ func Parse(data []byte) (Agent, error) {
 			t.KeyFile = "/var/lib/murder/panel/tunnel.key"
 		}
 	}
+	// A bare "hostFirewall:" is null, which leaves the pointer nil: it asks
+	// for the firewall with every default all the same.
+	if agent.HostFirewall == nil && bareKey(data, "hostFirewall") {
+		agent.HostFirewall = &HostFirewall{}
+	}
 	if h := agent.HostFirewall; h != nil && h.SSH == nil {
 		h.SSH = []int{22}
 	}
@@ -777,4 +782,14 @@ func publicProblems(key string, values []string) []string {
 		}
 	}
 	return problems
+}
+
+// bareKey reports whether the document's top level has key with no value.
+func bareKey(data []byte, key string) bool {
+	var top map[string]yaml.Node
+	if yaml.Unmarshal(data, &top) != nil {
+		return false
+	}
+	node, ok := top[key]
+	return ok && node.ShortTag() == "!!null"
 }

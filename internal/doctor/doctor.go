@@ -95,12 +95,13 @@ const BackupDir = "/var/backups/murder"
 func Check(ctx context.Context, cfg config.Agent, configPath string, h Host) []Result {
 	var results []Result
 	results = append(results, checkFiles(cfg, configPath, h)...)
-	results = append(results, checkFirewall(ctx, cfg, h)...)
+	firewallResults, hostRules := checkFirewall(ctx, cfg, h)
+	results = append(results, firewallResults...)
 	results = append(results, checkUnits(ctx, cfg, h)...)
 	results = append(results, checkBackups(cfg, h)...)
 	sshResults, sshPorts := checkSSH(ctx, cfg, h)
 	results = append(results, sshResults...)
-	results = append(results, checkListeners(cfg, h, sshPorts)...)
+	results = append(results, checkListeners(cfg, h, sshPorts, hostRules)...)
 	results = append(results, checkDocker(ctx, h)...)
 	results = append(results, checkUpdates(ctx, h)...)
 	results = append(results, checkKernel(h)...)
@@ -182,6 +183,18 @@ func checkFiles(cfg config.Agent, configPath string, h Host) []Result {
 			results = append(results, Result{Failure, "files", fmt.Sprintf("%s (a secret) is %04o and user %d's", s.path, mode, owner(info)), fmt.Sprintf("chown root:root %s && chmod 600 %s", s.path, s.path)})
 		}
 	}
+	// Whoever may write a directory may put another file in place of one
+	// in it.
+	dirs := []string{filepath.Dir(configPath)}
+	for _, s := range secrets(cfg) {
+		dirs = append(dirs, filepath.Dir(s.path))
+	}
+	slices.Sort(dirs)
+	for _, dir := range slices.Compact(dirs) {
+		if info, err := os.Stat(h.path(dir)); err == nil && (info.Mode().Perm()&0o022 != 0 || owner(info) != h.Owner) {
+			results = append(results, Result{Failure, "files", fmt.Sprintf("%s is %04o and user %d's: whoever may write it replaces the config or a secret in it", dir, info.Mode().Perm(), owner(info)), "chown root:root " + dir + " && chmod go-w " + dir})
+		}
+	}
 	if info, err := os.Stat(h.path(configPath)); err == nil && (info.Mode().Perm()&0o022 != 0 || owner(info) != h.Owner) {
 		results = append(results, Result{Failure, "files", fmt.Sprintf("%s is %04o and user %d's: whoever may write it runs code as root", configPath, info.Mode().Perm(), owner(info)), "chown root:root " + configPath + " && chmod 644 " + configPath})
 	}
@@ -196,28 +209,35 @@ func checkFiles(cfg config.Agent, configPath string, h Host) []Result {
 	return results
 }
 
-func checkFirewall(ctx context.Context, cfg config.Agent, h Host) []Result {
+// checkFirewall also reports whether the host firewall drops what reaches
+// the host: it is configured, and loaded or (without root) not seen
+// unloaded.
+func checkFirewall(ctx context.Context, cfg config.Agent, h Host) ([]Result, bool) {
 	if cfg.Firewall != config.FirewallNftables {
-		return []Result{{Failure, "firewall", "the tenant firewall is off: tenants reach the host's services, private networks and the cloud's metadata service", "set firewall: nftables"}}
+		return []Result{{Failure, "firewall", "the tenant firewall is off: tenants reach the host's services, private networks and the cloud's metadata service", "set firewall: nftables"}}, false
 	}
 	var results []Result
+	hostRules := cfg.HostFirewall != nil
 	output, err := h.Run(ctx, "nft", "list", "table", "inet", "murder")
 	switch {
 	case missingTool(err):
+		hostRules = false
 		results = append(results, Result{Failure, "firewall", "nft is not installed: the agent cannot load the tenant firewall", "apt install nftables"})
 	case err != nil && !h.Privileged:
 		results = append(results, Result{Skipped, "firewall", "cannot list the loaded rules", "run as root"})
 	case err != nil:
+		hostRules = false
 		results = append(results, Result{Failure, "firewall", "the tenant firewall is not loaded: " + firstLine(output), "systemctl restart murder-firewall murder-agent"})
 	case cfg.HostFirewall != nil && !bytes.Contains(output, []byte("iif \"lo\" accept")):
+		hostRules = false
 		results = append(results, Result{Warning, "firewall", "the host firewall is configured but not loaded yet", "systemctl restart murder-agent murder-firewall: the agent reads the config at start and loads its rules every 15 s"})
 	default:
 		results = append(results, Result{OK, "firewall", "the tenant firewall is loaded", ""})
 	}
 	if cfg.HostFirewall == nil {
-		results = append(results, Result{Warning, "firewall", "the host firewall is off: every port the host listens on is open to the internet", "set hostFirewall in the config (see README), or filter in the provider's firewall"})
+		results = append(results, Result{Warning, "firewall", "the host firewall is off: every port the host listens on is open to the internet", "set hostFirewall in the config (see docs/operations.md), or filter in the provider's firewall"})
 	}
-	return results
+	return results, hostRules
 }
 
 func firstLine(output []byte) string {
@@ -328,13 +348,16 @@ func checkSSH(ctx context.Context, cfg config.Agent, h Host) ([]Result, []int) {
 		settings[key] = value
 	}
 	var results []Result
+	passwords := settings["passwordauthentication"] == "yes" || settings["kbdinteractiveauthentication"] == "yes" && settings["usepam"] == "yes"
 	if settings["passwordauthentication"] == "yes" {
 		results = append(results, Result{Failure, "ssh", "SSH takes passwords, which bots guess around the clock", "PasswordAuthentication no in /etc/ssh/sshd_config.d/murder.conf, then systemctl reload ssh"})
 	}
 	if settings["kbdinteractiveauthentication"] == "yes" && settings["usepam"] == "yes" {
 		results = append(results, Result{Warning, "ssh", "SSH takes keyboard-interactive logins, which PAM answers with a password", "KbdInteractiveAuthentication no in /etc/ssh/sshd_config.d/murder.conf"})
 	}
-	if settings["permitrootlogin"] == "yes" {
+	// With no password login at all, "yes" lets root in by key only, as
+	// prohibit-password does.
+	if settings["permitrootlogin"] == "yes" && passwords {
 		results = append(results, Result{Failure, "ssh", "root may log in over SSH with a password", "PermitRootLogin prohibit-password in /etc/ssh/sshd_config.d/murder.conf"})
 	}
 	if f := cfg.HostFirewall; f != nil {
@@ -363,7 +386,10 @@ func checkDocker(ctx context.Context, h Host) []Result {
 	if !info.LiveRestoreEnabled {
 		results = append(results, Result{Warning, "docker", "restarting Docker, as an upgrade of it does, stops every tenant until it is back", `"live-restore": true in /etc/docker/daemon.json, then systemctl reload docker`})
 	}
-	if !slices.ContainsFunc(info.SecurityOptions, func(option string) bool { return strings.HasPrefix(option, "name=seccomp") }) {
+	// Docker names an unconfined profile too: name=seccomp,profile=unconfined.
+	if !slices.ContainsFunc(info.SecurityOptions, func(option string) bool {
+		return strings.HasPrefix(option, "name=seccomp") && !strings.Contains(option, "profile=unconfined")
+	}) {
 		results = append(results, Result{Warning, "docker", "containers run without a seccomp profile", "remove seccomp-profile: unconfined from /etc/docker/daemon.json"})
 	}
 	if members := groupMembers(h, "docker"); len(members) > 0 {

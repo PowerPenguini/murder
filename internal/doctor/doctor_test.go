@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/deploy"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/runtime"
 )
@@ -142,7 +144,7 @@ func TestListeners(t *testing.T) {
 		}
 	}
 	cfg := parse(t, "edge: {tls: {mode: internal}}\n")
-	results := checkListeners(cfg, h, []int{22, 2222})
+	results := checkListeners(cfg, h, []int{22, 2222}, false)
 	if !has(results, Failure, "Docker API listens on tcp/2375") ||
 		!has(results, Warning, "tcp/5355 answers name lookups") ||
 		!has(results, Warning, "publishes tcp/8080 (docker-proxy)") ||
@@ -162,14 +164,19 @@ func TestListeners(t *testing.T) {
 	// Behind the host firewall, 9100 is dropped from outside; the
 	// published port is not. An sshd on a port hostFirewall.ssh leaves
 	// out (a ListenAddress sshd -T does not report as a port) fails.
-	results = checkListeners(parse(t, "edge: {tls: {mode: internal}}\nhostFirewall: {}\n"), h, []int{22})
+	results = checkListeners(parse(t, "edge: {tls: {mode: internal}}\nhostFirewall: {}\n"), h, []int{22}, true)
 	if !has(results, OK, "tcp/9100 (node_exporter)") || !has(results, Warning, "tcp/8080") || !has(results, Failure, "sshd listens on port 2222") {
 		t.Errorf("with the host firewall: %+v", results)
 	}
 	// A port sshd -T named is checkSSH's to report, not reported twice.
-	results = checkListeners(parse(t, "edge: {tls: {mode: internal}}\nhostFirewall: {}\n"), h, []int{22, 2222})
+	results = checkListeners(parse(t, "edge: {tls: {mode: internal}}\nhostFirewall: {}\n"), h, []int{22, 2222}, true)
 	if has(results, Failure, "sshd listens") {
 		t.Errorf("sshd's port reported twice: %+v", results)
+	}
+	// Configured but not loaded yet, the firewall drops nothing.
+	results = checkListeners(parse(t, "edge: {tls: {mode: internal}}\nhostFirewall: {}\n"), h, []int{22}, false)
+	if has(results, OK, "drops") || !has(results, Warning, "tcp/9100 (node_exporter)") {
+		t.Errorf("host firewall not loaded: %+v", results)
 	}
 }
 
@@ -198,6 +205,11 @@ func TestSSH(t *testing.T) {
 	if results, _ := checkSSH(context.Background(), parse(t, ""), h); !has(results, Skipped, "cannot read") {
 		t.Errorf("not root: %+v", results)
 	}
+	// Root by key only: "yes" with no password login lets in no password.
+	h = fakeHost(t, map[string]string{"sshd -T": "port 22\npasswordauthentication no\nkbdinteractiveauthentication no\npermitrootlogin yes\nusepam yes\n"})
+	if results, _ := checkSSH(context.Background(), parse(t, ""), h); has(results, Failure, "root may log in") {
+		t.Errorf("root by key only: %+v", results)
+	}
 }
 
 func TestFiles(t *testing.T) {
@@ -216,6 +228,16 @@ func TestFiles(t *testing.T) {
 	if has(results, Failure, "master.key") {
 		t.Errorf("the master key is fine: %+v", results)
 	}
+	// A directory others may write lets them put a file in place of one.
+	h = fakeHost(t, nil)
+	write(t, h, "/etc/murder/master.key", "key", 0o600)
+	write(t, h, "/etc/murder/agent.yaml", "", 0o644)
+	if err := os.Chmod(h.path("/etc/murder"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if results := checkFiles(parse(t, ""), "/etc/murder/agent.yaml", h); !has(results, Failure, "/etc/murder is 0777") {
+		t.Errorf("writable directory: %+v", results)
+	}
 	// A registry's token and the node's identity key are secrets too.
 	h = fakeHost(t, nil)
 	write(t, h, "/etc/murder/master.key", "key", 0o600)
@@ -229,6 +251,39 @@ func TestFiles(t *testing.T) {
 	results = checkFiles(parse(t, "registryAuthFile: /etc/murder/registry.json\n"), "/etc/murder/agent.yaml", fakeHost(t, nil))
 	if !has(results, Failure, "master.key is missing") || len(results) != 1 {
 		t.Errorf("missing: %+v", results)
+	}
+}
+
+// The settings checked are those deploy/murder-hardening.conf sets (its
+// default.* twins apply to interfaces made later), and its values pass.
+func TestKernelSettingsMatchTheHardening(t *testing.T) {
+	data, err := deploy.Files.ReadFile("murder-hardening.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := map[string]int{}
+	for line := range strings.Lines(string(data)) {
+		key, value, ok := strings.Cut(line, "=")
+		if line = strings.TrimSpace(line); !ok || strings.HasPrefix(line, "#") {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			t.Fatalf("%q: %v", line, err)
+		}
+		if key = strings.TrimSpace(key); !strings.Contains(key, ".default.") {
+			set[key] = n
+		}
+	}
+	for _, setting := range kernelSettings {
+		value, ok := set[setting.name]
+		if !ok || !setting.good(value) {
+			t.Errorf("%s: the file sets %d (%v), doctor wants %s", setting.name, value, ok, setting.want)
+		}
+		delete(set, setting.name)
+	}
+	if len(set) > 0 {
+		t.Errorf("set but not checked: %v", set)
 	}
 }
 
@@ -280,6 +335,19 @@ func TestDocker(t *testing.T) {
 	if !has(results, Warning, "stops every tenant") || !has(results, Warning, "seccomp") || !has(results, Warning, "alice, bob") {
 		t.Errorf("results = %+v", results)
 	}
+	// An unconfined profile is named too, and filters nothing.
+	h.Engine = func(context.Context) (runtime.EngineInfo, error) {
+		return runtime.EngineInfo{LiveRestoreEnabled: true, SecurityOptions: []string{"name=seccomp,profile=unconfined"}}, nil
+	}
+	if results := checkDocker(context.Background(), h); !has(results, Warning, "seccomp") {
+		t.Errorf("unconfined: %+v", results)
+	}
+	h.Engine = func(context.Context) (runtime.EngineInfo, error) {
+		return runtime.EngineInfo{LiveRestoreEnabled: true, SecurityOptions: []string{"name=apparmor", "name=seccomp,profile=builtin"}}, nil
+	}
+	if results := checkDocker(context.Background(), h); has(results, Warning, "seccomp") {
+		t.Errorf("builtin profile: %+v", results)
+	}
 	h.Engine = func(context.Context) (runtime.EngineInfo, error) {
 		return runtime.EngineInfo{}, errors.New("no socket")
 	}
@@ -307,12 +375,12 @@ func TestCheckOnABareMachine(t *testing.T) {
 func TestFirewallLoaded(t *testing.T) {
 	loaded := "table inet murder {\n\tchain input {\n\t\tiif \"lo\" accept\n\t}\n}\n"
 	h := fakeHost(t, map[string]string{"nft list table inet murder": loaded})
-	if results := checkFirewall(context.Background(), parse(t, "hostFirewall: {}\n"), h); len(results) != 1 || !has(results, OK, "loaded") {
-		t.Errorf("loaded: %+v", results)
+	if results, hostRules := checkFirewall(context.Background(), parse(t, "hostFirewall: {}\n"), h); len(results) != 1 || !has(results, OK, "loaded") || !hostRules {
+		t.Errorf("loaded: %+v, %v", results, hostRules)
 	}
 	h = fakeHost(t, map[string]string{"nft list table inet murder": "table inet murder {\n}\n"})
-	if results := checkFirewall(context.Background(), parse(t, "hostFirewall: {}\n"), h); !has(results, Warning, "not loaded yet") {
-		t.Errorf("host rules missing: %+v", results)
+	if results, hostRules := checkFirewall(context.Background(), parse(t, "hostFirewall: {}\n"), h); !has(results, Warning, "not loaded yet") || hostRules {
+		t.Errorf("host rules missing: %+v, %v", results, hostRules)
 	}
 }
 

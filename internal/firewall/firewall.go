@@ -102,8 +102,12 @@ func (h *Host) rules() string {
 	b.WriteString("\t\tct state established,related accept\n")
 	b.WriteString("\t\tct state invalid drop\n")
 	b.WriteString("\t\tmeta l4proto { icmp, ipv6-icmp } accept\n")
-	// A DHCP client's lease renewals; IPv6 ones come from a link-local
-	// server.
+	// A DHCP client's offers and acks. A reply to a broadcast request
+	// matches no connection, and a server may answer from any address (a
+	// cloud's often sits off the node's network), so the source port is all
+	// there is to go by, as in ufw's rules: what reaches port 68 is the
+	// DHCP client's alone, and port 68 is open without this firewall too.
+	// IPv6 ones come from a link-local server.
 	b.WriteString("\t\tudp sport 67 udp dport 68 accept\n")
 	b.WriteString("\t\tip6 saddr fe80::/10 udp sport 547 udp dport 546 accept\n")
 	for _, open := range []struct {
