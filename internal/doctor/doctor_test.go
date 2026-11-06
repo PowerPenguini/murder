@@ -216,6 +216,15 @@ func TestFiles(t *testing.T) {
 	if has(results, Failure, "master.key") {
 		t.Errorf("the master key is fine: %+v", results)
 	}
+	// A registry's token and the node's identity key are secrets too.
+	h = fakeHost(t, nil)
+	write(t, h, "/etc/murder/master.key", "key", 0o600)
+	write(t, h, "/etc/murder/ghcr.token", "token", 0o640)
+	write(t, h, "/var/lib/murder/cluster/node.key", "key", 0o644)
+	results = checkFiles(parse(t, "registries: [{host: ghcr.io, username: u, tokenFile: /etc/murder/ghcr.token}]\ncluster: {address: 10.0.0.2:7400, dir: /var/lib/murder/cluster}\n"), "/etc/murder/agent.yaml", h)
+	if !has(results, Failure, "/etc/murder/ghcr.token (a secret) is 0640") || !has(results, Failure, "/var/lib/murder/cluster/node.key (a secret) is 0644") {
+		t.Errorf("registry token and identity key: %+v", results)
+	}
 	// A missing master key fails; a missing optional secret is no news.
 	results = checkFiles(parse(t, "registryAuthFile: /etc/murder/registry.json\n"), "/etc/murder/agent.yaml", fakeHost(t, nil))
 	if !has(results, Failure, "master.key is missing") || len(results) != 1 {

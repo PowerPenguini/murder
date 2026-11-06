@@ -17,12 +17,15 @@ import (
 
 // Paths a node is installed at.
 const (
-	Binary       = "/usr/local/bin/murder"
-	ConfigDir    = "/etc/murder"
-	ConfigFile   = "/etc/murder/agent.yaml"
-	UnitDir      = "/etc/systemd/system"
-	SysctlFile   = "/etc/sysctl.d/90-murder.conf"
-	DockerDropIn = "/etc/systemd/system/docker.service.d/murder.conf"
+	Binary     = "/usr/local/bin/murder"
+	ConfigDir  = "/etc/murder"
+	ConfigFile = "/etc/murder/agent.yaml"
+	UnitDir    = "/etc/systemd/system"
+	SysctlFile = "/etc/sysctl.d/90-murder.conf"
+	// HardeningFile keeps the kernel from taking redirects and source
+	// routes, and its addresses, log and BPF from users.
+	HardeningFile = "/etc/sysctl.d/91-murder-hardening.conf"
+	DockerDropIn  = "/etc/systemd/system/docker.service.d/murder.conf"
 	// DNSTokenFile and HetznerTokenFile hold the tokens setup is given.
 	DNSTokenFile     = "/etc/murder/dns.token"
 	HetznerTokenFile = "/etc/murder/hetzner.token"

@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/runtime"
 )
@@ -127,12 +128,18 @@ func secrets(cfg config.Agent) []secret {
 	}
 	optional(cfg.Edge.TLS.DNSTokenFile)
 	optional(cfg.RegistryAuthFile)
+	for _, r := range cfg.Registries {
+		optional(r.TokenFile)
+	}
 	if b := cfg.Backups; b != nil {
 		optional(b.AccessKeyFile)
 		optional(b.SecretKeyFile)
 		optional(b.IdentityFile)
 	}
 	if c := cfg.Cluster; c != nil {
+		if c.Dir != "" {
+			optional(cluster.IdentityPath(c.Dir))
+		}
 		if c.DNS != nil {
 			optional(c.DNS.TokenFile)
 		}

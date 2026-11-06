@@ -10,7 +10,8 @@ Murder needs: systemd, Docker 25 or newer, nftables and, unless told
 the missing ones and the commands that install them. Then it:
 
 - installs the binary as `/usr/local/bin/murder`, the systemd units, the
-  sysctl settings and, with ZFS, the Docker drop-in, all from the binary;
+  sysctl settings, the kernel hardening (see [Harden the node](#harden-the-node))
+  and, with ZFS, the Docker drop-in, all from the binary;
 - turns on Docker's `live-restore` (in `/etc/docker/daemon.json`, the
   rest kept, the old file beside it as `daemon.json.before-murder`; a
   reload, no container restarts): a restart of Docker, as its upgrade
@@ -45,6 +46,8 @@ sudo apt install nftables               # the agent loads the tenant firewall wi
 sudo install -m 0755 murder /usr/local/bin/murder
 sudo install -m 0644 deploy/murder-sysctl.conf /etc/sysctl.d/90-murder.conf
 sudo sysctl -p /etc/sysctl.d/90-murder.conf
+sudo install -m 0644 deploy/murder-hardening.conf /etc/sysctl.d/91-murder-hardening.conf
+sudo sysctl -p /etc/sysctl.d/91-murder-hardening.conf
 sudo install -d -m 0755 /etc/murder
 sudo install -m 0644 deploy/agent.example.yaml /etc/murder/agent.yaml   # then edit it
 sudo murder init                       # creates the master key (store a copy offline) and an empty database
@@ -93,7 +96,8 @@ with its fix; it exits 1 when one failed.
   (no ICMP redirects, loose reverse path filtering, SYN cookies, kernel
   addresses, log and BPF kept from users; `ip_forward` stays on for
   Docker), and that the clock is synchronised, which certificates, passkeys
-  and the cluster rely on.
+  and the cluster rely on. `murder setup` installs them; on a node
+  installed by hand:
 
 ```bash
 sudo install -m 0644 deploy/murder-hardening.conf /etc/sysctl.d/91-murder-hardening.conf
