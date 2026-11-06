@@ -290,3 +290,55 @@ func TestANodeAloneNamesItsPublicAddresses(t *testing.T) {
 		t.Fatalf("publicAddresses = %v", agent.PublicAddresses)
 	}
 }
+
+// The host firewall opens SSH (22 unless listed), the edge, the tunnel and
+// the listed ports to everyone, and the cluster, relay and non-loopback
+// metrics ports to private networks only.
+func TestHostFirewall(t *testing.T) {
+	agent, err := Parse([]byte(`
+baseDomain: example.com
+edge: {tls: {mode: internal}, metrics: 10.0.0.2:9465}
+metrics: 127.0.0.1:9464
+cluster: {address: 10.0.0.2:7400}
+panel: {tunnel: {address: 10.77.0.1}}
+hostFirewall: {open: [9100/tcp, 3478/udp], private: [8125/udp]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := agent.HostRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(agent.HostFirewall.SSH, []int{22}) {
+		t.Errorf("ssh = %v", agent.HostFirewall.SSH)
+	}
+	for name, pair := range map[string][2][]int{
+		"public tcp":  {rules.PublicTCP, {22, 80, 443, 9100}},
+		"public udp":  {rules.PublicUDP, {3478, 51820}},
+		"private tcp": {rules.PrivateTCP, {7400, 7402, 9465}},
+		"private udp": {rules.PrivateUDP, {8125}},
+	} {
+		got := slices.Sorted(slices.Values(pair[0]))
+		if !slices.Equal(got, pair[1]) {
+			t.Errorf("%s = %v, want %v", name, got, pair[1])
+		}
+	}
+	if plain, err := Parse([]byte("baseDomain: example.com\n")); err != nil {
+		t.Fatal(err)
+	} else if rules, err := plain.HostRules(); rules != nil || err != nil {
+		t.Errorf("without hostFirewall: %v, %v", rules, err)
+	}
+	for _, bad := range []string{
+		"hostFirewall: {ssh: []}",
+		"hostFirewall: {ssh: [70000]}",
+		"hostFirewall: {open: [9100]}",
+		"hostFirewall: {open: [9100/sctp]}",
+		"hostFirewall: {private: [x/tcp]}",
+		"firewall: off\nhostFirewall: {}",
+	} {
+		if _, err := Parse([]byte("baseDomain: example.com\n" + bad + "\n")); err == nil || !strings.Contains(err.Error(), "hostFirewall") {
+			t.Errorf("%s: %v", bad, err)
+		}
+	}
+}

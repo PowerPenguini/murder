@@ -51,7 +51,80 @@ sudo murder init                       # creates the master key (store a copy of
 sudo install -m 0644 deploy/murder-firewall.service deploy/murder-agent.service deploy/murder-edge.service \
   deploy/murder-backup.service deploy/murder-backup.timer /etc/systemd/system/
 sudo systemctl enable --now murder-firewall murder-agent murder-edge murder-backup.timer
+sudo murder doctor                     # what is left to harden; changes nothing
 ```
+
+## Harden the node
+
+`murder doctor` checks how safely the node is set up, and changes nothing:
+it needs neither the agent nor Docker running, and runs best as root (what
+it cannot see as another user it skips and says so). Each finding comes
+with its fix; it exits 1 when one failed.
+
+- **Murder's files.** The master key and every token are root's and `0600`,
+  the config is writable by root only (whoever writes it runs code as
+  root) and the database's directory is `0700`.
+- **The firewall.** The tenant firewall is on and loaded, and the host
+  firewall is on (or another firewall filters the host's ports).
+- **Services and backups.** Murder's units start at boot, the database was
+  copied in the last 3 hours and tenants are backed up to a bucket.
+- **SSH.** From sshd's effective configuration (`sshd -T`, so `Include` and
+  `Match` count): no passwords, no root login with one, and every port
+  sshd listens on open in `hostFirewall.ssh` (from `sshd -T`, and from the
+  sockets sshd holds, which a `ListenAddress` with its own port adds).
+- **Listeners.** What listens on a public or any address besides SSH, the
+  edge and the panel's tunnel, by process. The Docker API over TCP fails
+  (whoever reaches it is root); a port a container publishes is flagged
+  even with the host firewall, as Docker forwards it before the host's
+  rules see it.
+- **Docker.** `live-restore`, so a Docker upgrade does not stop tenants;
+  seccomp; members of the `docker` group, who are root in all but name.
+- **Updates.** On Debian and Ubuntu, that `unattended-upgrades` installs
+  security updates, and whether one waits for a reboot.
+- **The edge's confinement.** Whether the running edge is confined (see
+  [security](security.md)). A node installed before reinstalls
+  `deploy/murder-edge.service`, then `systemctl daemon-reload` and
+  `systemctl restart murder-edge`: a reload hands over to a child of the
+  old, unconfined process, so only a restart confines it (open requests
+  get `edge.drain` to finish). `journalctl -u murder-edge` then shows any
+  call the filter refused, and one `systemctl reload murder-edge` proves
+  the handover still works.
+- **Kernel and clock.** The settings `deploy/murder-hardening.conf` sets
+  (no ICMP redirects, loose reverse path filtering, SYN cookies, kernel
+  addresses, log and BPF kept from users; `ip_forward` stays on for
+  Docker), and that the clock is synchronised, which certificates, passkeys
+  and the cluster rely on.
+
+```bash
+sudo install -m 0644 deploy/murder-hardening.conf /etc/sysctl.d/91-murder-hardening.conf
+sudo sysctl --system
+```
+
+The host firewall is off by default, as it closes every port the host
+serves besides SSH and Murder's. With `hostFirewall` set, the same table
+drops what reaches the host from outside unless it goes to SSH (port 22,
+or `hostFirewall.ssh`), the edge ports, the panel's tunnel or a port in
+`hostFirewall.open`; the cluster port, the relay port and metrics not on
+loopback (and `hostFirewall.private`) are open to private networks only.
+Replies, loopback, ICMP and DHCP pass. It covers IPv4 and IPv6.
+
+```yaml
+hostFirewall:
+  ssh: [22]
+  open: ["9100/tcp"]        # to everyone
+  private: ["9100/tcp"]     # to private networks only
+```
+
+Run `murder doctor` first, which fails if sshd listens on a port
+`hostFirewall.ssh` leaves out, then turn it on with `systemctl restart
+murder-agent murder-firewall` (tenants keep running): the agent reads the
+config only at start, and loads its rules again every 15 seconds, so
+restarting `murder-firewall` alone is undone within 15 seconds. SSH
+connections already open survive. Locked out all the same, from the
+provider's console: remove `hostFirewall` from the config and run the same
+restart (`nft delete table inet murder` alone is undone by the agent as
+well). Other containers on the host (outside Murder's tenant networks)
+reach only the private ports.
 
 ## Upgrade Murder
 

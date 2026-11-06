@@ -10,7 +10,7 @@ import (
 )
 
 func TestRules(t *testing.T) {
-	rules := Rules([]netip.Prefix{netip.MustParsePrefix("10.240.0.0/16")}, []int{443, 80, 80}, []netip.Addr{netip.MustParseAddr("10.0.2.3"), netip.MustParseAddr("10.0.2.3")})
+	rules := Rules([]netip.Prefix{netip.MustParsePrefix("10.240.0.0/16")}, []int{443, 80, 80}, []netip.Addr{netip.MustParseAddr("10.0.2.3"), netip.MustParseAddr("10.0.2.3")}, nil)
 	for _, want := range []string{
 		"table inet murder\ndelete table inet murder\ntable inet murder {",
 		"ip saddr { 10.240.0.0/16 } ct state established,related accept",
@@ -28,7 +28,7 @@ func TestRules(t *testing.T) {
 	if strings.Index(rules, "established") > strings.Index(rules, "counter drop") {
 		t.Fatalf("rules drop before accepting replies:\n%s", rules)
 	}
-	if without := Rules([]netip.Prefix{netip.MustParsePrefix("10.240.0.0/16")}, nil, nil); strings.Contains(without, "dport") {
+	if without := Rules([]netip.Prefix{netip.MustParsePrefix("10.240.0.0/16")}, nil, nil, nil); strings.Contains(without, "dport") {
 		t.Fatalf("rules without edge ports:\n%s", without)
 	}
 }
@@ -39,7 +39,7 @@ func TestRulesParse(t *testing.T) {
 		t.Skip("nft is not installed")
 	}
 	command := exec.Command("nft", "--check", "-f", "-")
-	command.Stdin = strings.NewReader(Rules([]netip.Prefix{netip.MustParsePrefix("10.240.0.0/16")}, []int{80, 443}, []netip.Addr{netip.MustParseAddr("10.0.2.3")}))
+	command.Stdin = strings.NewReader(Rules([]netip.Prefix{netip.MustParsePrefix("10.240.0.0/16")}, []int{80, 443}, []netip.Addr{netip.MustParseAddr("10.0.2.3")}, testHost))
 	output, err := command.CombinedOutput()
 	if err != nil && strings.Contains(string(output), "Operation not permitted") {
 		t.Skip("nft --check needs privileges here")
@@ -70,8 +70,43 @@ func TestResolvers(t *testing.T) {
 
 // Tenant subnets left outside the pool by an earlier pool are covered too.
 func TestRulesCoverEverySource(t *testing.T) {
-	rules := Rules([]netip.Prefix{netip.MustParsePrefix("10.250.0.0/16"), netip.MustParsePrefix("10.240.0.16/28"), netip.MustParsePrefix("10.250.0.0/16")}, nil, nil)
+	rules := Rules([]netip.Prefix{netip.MustParsePrefix("10.250.0.0/16"), netip.MustParsePrefix("10.240.0.16/28"), netip.MustParsePrefix("10.250.0.0/16")}, nil, nil, nil)
 	if !strings.Contains(rules, "ip saddr { 10.240.0.16/28, 10.250.0.0/16 } counter drop") {
 		t.Fatalf("rules:\n%s", rules)
+	}
+}
+
+var testHost = &Host{PublicTCP: []int{443, 22, 80}, PublicUDP: []int{51820}, PrivateTCP: []int{7402, 7400}}
+
+// With a host, what is not a tenant's is let in by the list and dropped
+// otherwise, after the tenant rules; without one, the input chain is as
+// before.
+func TestHostRules(t *testing.T) {
+	sources := []netip.Prefix{netip.MustParsePrefix("10.240.0.0/16")}
+	rules := Rules(sources, []int{80, 443}, nil, testHost)
+	tenantDrop := strings.Index(rules, "ip saddr { 10.240.0.0/16 } counter drop")
+	for _, want := range []string{
+		"\t\tiif lo accept\n\t\tct state established,related accept\n\t\tct state invalid drop\n",
+		"meta l4proto { icmp, ipv6-icmp } accept",
+		"udp sport 67 udp dport 68 accept",
+		"ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept",
+		"\t\ttcp dport { 22, 80, 443 } accept\n",
+		"\t\tudp dport { 51820 } accept\n",
+		"ip saddr { 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 7400, 7402 } accept",
+		"ip6 saddr { fc00::/7, fe80::/10 } tcp dport { 7400, 7402 } accept",
+		"\t\tcounter drop\n\t}\n\tchain forward",
+	} {
+		index := strings.Index(rules, want)
+		if index < 0 {
+			t.Errorf("rules lack %q:\n%s", want, rules)
+		} else if index < tenantDrop {
+			t.Errorf("%q comes before the tenant rules:\n%s", want, rules)
+		}
+	}
+	if strings.Contains(rules, "udp dport { } ") || strings.Contains(rules, "{  }") {
+		t.Errorf("rules hold an empty set:\n%s", rules)
+	}
+	if without := Rules(sources, []int{80, 443}, nil, nil); strings.Contains(without, "iif lo") || !strings.Contains(without, "ip saddr { 10.240.0.0/16 } counter drop\n\t}\n\tchain forward") {
+		t.Errorf("rules without a host:\n%s", without)
 	}
 }

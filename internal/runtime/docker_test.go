@@ -706,3 +706,17 @@ func TestTheRestartPolicyIsReadAndChanged(t *testing.T) {
 		t.Fatalf("update = %v, %v", update, err)
 	}
 }
+
+func TestInfo(t *testing.T) {
+	engine, docker := newFakeEngine(t)
+	engine.handlers["GET /info"] = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"LiveRestoreEnabled":true,"SecurityOptions":["name=apparmor","name=seccomp,profile=builtin"],"Containers":3}`))
+	}
+	info, err := docker.Info(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.LiveRestoreEnabled || len(info.SecurityOptions) != 2 || info.SecurityOptions[1] != "name=seccomp,profile=builtin" {
+		t.Fatalf("info = %+v", info)
+	}
+}

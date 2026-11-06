@@ -34,6 +34,19 @@
     `go test -tags netns ./internal/firewall` loads it in network
     namespaces of its own (no root needed) and probes from a tenant
     network, and a test in the test VM probes from a real container.
+- **The host lets in only what it serves, if asked.** With `hostFirewall`
+  set (see [Harden the node](operations.md#harden-the-node)), the same table drops traffic to the host
+  other than SSH, the edge, the panel's tunnel and the cluster's ports
+  from private networks. The netns test checks it from outside as well.
+- **The edge runs confined.** It faces the internet, so
+  `murder-edge.service` keeps it to binding low ports
+  (`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`), a read-only system
+  (`ProtectSystem=strict`; it writes below `/var/lib/murder` and
+  `/run/murder-edge` only), no new privileges, the system calls of an
+  ordinary service and its own `/tmp` and devices
+  (`systemd-analyze security` rates it 2.0, from 9.4). The agent and the
+  panel replace the binary during an upgrade, and the agent runs nft and
+  drives Docker, so they are not confined the same way.
 - **Tenant data is out of reach of host users.** Data directories sit below a
   root-only (`0700`) directory, and ZFS datasets are created with `setuid=off`
   and `devices=off`. A setuid file a tenant writes there is useless to host
