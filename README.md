@@ -51,6 +51,10 @@ between servers, to you; Murder does it with ZFS. An app is configuration
   reach each other, the host or private networks (nftables).
   [Security model](docs/security.md)
 - **Metrics** in the Prometheus format, and an audit log of who changed what.
+- **An access register.** Reading a tenant's secrets, logs or backups takes
+  a purpose and a ticket, and is recorded before any data goes out: the
+  extract to give a customer is one command.
+  [Record access to tenants' data](docs/operations.md#record-access-to-tenants-data)
 
 ## Status
 

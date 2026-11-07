@@ -1,6 +1,18 @@
 {{define "content"}}{{$d := .Data}}{{$n := $d.Tenant}}
 {{template "tenant-head" $d.Head}}
 {{template "page-notices" .}}
+{{if $d.Ask}}
+<section class="near access-ask">
+  <h2>Why read {{$n}}'s logs?</h2>
+  <p class="lead">Its logs are its customer's data. Reading them is recorded in the access register first: who, when, why, and at whose request. The customer may ask for these records. One record covers your reads of these logs for an hour.</p>
+  <form method="post" class="stack spaced">
+    <label class="field">Purpose <input type="text" name="purpose" value="{{$d.Purpose}}" required maxlength="500" placeholder="the customer's export fails since Monday" autocomplete="off"></label>
+    <label class="field"><span>Ticket: the customer's request, or <code>incident</code> or <code>legal</code> when no customer asked</span>
+      <input type="text" name="ticket" value="{{$d.Ticket}}" required maxlength="200" class="short" placeholder="ZD-1234" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+    <div><button type="submit" class="primary">Record and read the logs</button></div>
+  </form>
+</section>
+{{else}}
 <section data-still class="near logview">
   {{if $d.Previous}}<nav class="seg which" aria-label="which container's lines">
     <a href="{{$d.Link "container" ""}}"{{if not $d.Showing}} class="on" aria-current="true"{{end}}>Current<span class="desktop-inline"> container</span></a>
@@ -24,6 +36,7 @@
     </div>
   </form>
   <div id="log-state"{{if $d.Follow}} data-live{{end}}>
+    {{with $d.Grant}}<p class="hint" id="log-access">Read under access {{.ID}} of the register, for “{{.Purpose}}” ({{.Ticket}}), recorded {{ago .At}} ago.</p>{{end}}
     {{if $d.Showing}}{{with $d.Previous}}
     <p class="count-line dim" id="log-lines-count">{{if or $d.Query (ne $d.Level "all")}}{{len $d.Lines}} of {{plural $d.All "line" "lines"}} match{{else}}{{plural $d.All "line" "lines"}}{{end}}, the last of its previous container, kept by its node as it went{{if .Cut}}: older lines were dropped (it keeps 1000 lines or 64 KB){{end}}</p>
     <p class="hint">{{$d.PreviousWhy}} These lines stay until its next container goes.</p>
@@ -44,4 +57,5 @@
     {{end}}
   </div>
 </section>
+{{end}}
 {{end}}

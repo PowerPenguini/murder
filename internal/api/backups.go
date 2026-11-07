@@ -27,6 +27,9 @@ func (r BackupResult) Label() string {
 type ReplaceRequest struct {
 	Tenant string `json:"tenant"`
 	Copy   string `json:"copy"`
+	// Access is the restore's entry in the access register, recorded
+	// before its backup was read (access.RestoreGrantFor).
+	Access int64 `json:"access,omitempty"`
 }
 
 // ReplaceResult is a replacement: Aside is the dataset what the tenant had
@@ -44,9 +47,10 @@ func (c *Client) RunBackups(ctx context.Context) ([]BackupResult, error) {
 	return results, err
 }
 
-// ReplaceTenant makes copy the data of an archived tenant of this node.
-func (c *Client) ReplaceTenant(ctx context.Context, tenant, copy string) (ReplaceResult, error) {
+// ReplaceTenant makes copy the data of an archived tenant of this node;
+// grant is the restore's entry in the access register.
+func (c *Client) ReplaceTenant(ctx context.Context, tenant, copy string, grant int64) (ReplaceResult, error) {
 	var result ReplaceResult
-	err := c.do(ctx, http.MethodPost, "/v1/backups/replace", ReplaceRequest{Tenant: tenant, Copy: copy}, &result)
+	err := c.do(ctx, http.MethodPost, "/v1/backups/replace", ReplaceRequest{Tenant: tenant, Copy: copy, Access: grant}, &result)
 	return result, err
 }

@@ -3,6 +3,21 @@
 - **The CLI is root-equivalent.** Anyone who can use the API socket (root, or
   members of `socketGroup`) controls every tenant on the node, including its
   secrets and data.
+- **Staff access to tenants' data is recorded.** Reading a tenant's
+  secrets, logs or backups, or a copy of the state, through Murder needs a
+  purpose and a ticket, and the agent records the access in the replicated
+  audit log before it hands any data out; it refuses the read if it cannot
+  record it ([the access register](operations.md#record-access-to-tenants-data)).
+  This binds people who use Murder's commands and panel, not root: root on
+  a node reaches tenants' data around Murder (`docker exec`, the datasets,
+  backups decrypted by hand). Recording such access with `murder access log`
+  is an organizational rule, not a technical control. The person named is
+  the one sudo names (`SUDO_USER`) or the panel's signed-in person; give
+  each operator an account of their own. The register is as trustworthy as
+  those who can write the state: root on any node holds the master key and
+  could, like any member, write events or remove them on every node; the
+  copies of the state in the backup bucket (locked, in production) keep
+  what was there.
 - **Tenants never run as root.** Specs that set user 0 are refused, and
   images must not default to root.
 - **Every container is locked down.** It drops all capabilities, runs with

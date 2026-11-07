@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/reconcile"
@@ -31,6 +32,10 @@ import (
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/volume"
 )
+
+// recorded is the proof the tests' reads give: the access register
+// records each read with it.
+var recorded = access.Proof{Purpose: "a test", Ticket: "incident"}
 
 // memoryRuntime runs nothing; it only remembers containers.
 type memoryRuntime struct {
@@ -303,7 +308,7 @@ func TestCreatePinsDefaultsAndHidesSecrets(t *testing.T) {
 	if created.Spec.Port != 8080 || created.Spec.DataPath != "/data" || created.Spec.Tmpfs["/tmp"] == "" || created.Spec.WritableRoot {
 		t.Fatalf("defaults were not stored: %+v", created.Spec)
 	}
-	secret, err := f.client.Secret(ctx, "acme", "SESSION_SECRET")
+	secret, err := f.client.Secret(ctx, "acme", "SESSION_SECRET", recorded)
 	if err != nil || len(secret) != 64 {
 		t.Fatalf("secret = %q, %v", secret, err)
 	}
@@ -354,7 +359,7 @@ func TestErrorsMapToStatusCodes(t *testing.T) {
 	malformed.Overrides.Image = "Not An Image"
 	_, err = f.client.Create(ctx, malformed)
 	checkStatus(t, "malformed image", err, 400)
-	_, err = f.client.Secret(ctx, "acme", "NOPE")
+	_, err = f.client.Secret(ctx, "acme", "NOPE", recorded)
 	checkStatus(t, "missing secret", err, 404)
 	_, err = f.client.Configure(ctx, "other", api.TenantRequest{App: "web"})
 	checkStatus(t, "configure missing", err, 404)
@@ -433,7 +438,7 @@ func TestConfigureKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
 	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
+	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET", recorded)
 	same, err := f.client.Configure(ctx, "acme", api.TenantRequest{App: "web"})
 	if err != nil || same.Changed || same.Tenant.Generation != 1 {
 		t.Fatalf("an unchanged tenant = %+v, %v", same, err)
@@ -449,10 +454,10 @@ func TestConfigureKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
 	if !replaced.Tenant.Spec.Suspended {
 		t.Fatal("configuring a tenant resumed it")
 	}
-	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
+	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET", recorded); after != before {
 		t.Fatal("configure regenerated an existing secret")
 	}
-	password, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD")
+	password, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD", recorded)
 	if err != nil || len(password) != 20 {
 		t.Fatalf("new secret = %q, %v", password, err)
 	}
@@ -463,14 +468,14 @@ func TestConfigureKeepsSecretsSuspensionAndSkipsNoOps(t *testing.T) {
 	if _, err := f.client.Configure(ctx, "acme", next); err != nil {
 		t.Fatal(err)
 	}
-	if again, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); err != nil || again != password {
+	if again, err := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD", recorded); err != nil || again != password {
 		t.Fatalf("a secret removed and added back changed its value: %v", err)
 	}
 	rotated, err := f.client.Rotate(ctx, "acme", "ADMIN_PASSWORD")
 	if err != nil || rotated.Generation <= replaced.Tenant.Generation {
 		t.Fatalf("rotate = %+v, %v", rotated, err)
 	}
-	if fresh, _ := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD"); fresh == password || len(fresh) != 20 {
+	if fresh, _ := f.client.Secret(ctx, "acme", "ADMIN_PASSWORD", recorded); fresh == password || len(fresh) != 20 {
 		t.Fatal("rotate kept the old value")
 	}
 }
@@ -485,7 +490,7 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.dataRoot, "acme", "data.db"), []byte("customer data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET")
+	before, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET", recorded)
 	if err := f.client.Archive(ctx, "acme"); err != nil {
 		t.Fatal(err)
 	}
@@ -502,8 +507,8 @@ func TestArchiveRestorePurge(t *testing.T) {
 	}
 	// What acts on a running tenant refuses an archived one.
 	_, suspendErr := f.client.Suspend(ctx, "acme", true)
-	_, secretErr := f.client.Secret(ctx, "acme", "SESSION_SECRET")
-	_, logsErr := f.client.Logs(ctx, "acme", 10)
+	_, secretErr := f.client.Secret(ctx, "acme", "SESSION_SECRET", recorded)
+	_, logsErr := f.client.Logs(ctx, "acme", 10, recorded)
 	for what, err := range map[string]error{"suspend": suspendErr, "secret": secretErr, "logs": logsErr} {
 		if apiErr, ok := err.(*api.Error); !ok || apiErr.Status != 409 || !strings.Contains(apiErr.Message, "archived") {
 			t.Fatalf("%s an archived tenant = %v", what, err)
@@ -522,7 +527,7 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if err != nil || !restored.ArchivedAt.IsZero() || restored.Spec.Suspended || restored.Spec.Env["TZ"] != "UTC" {
 		t.Fatalf("restore = %+v, %v", restored, err)
 	}
-	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after != before {
+	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET", recorded); after != before {
 		t.Fatal("restore did not bring back the tenant's secrets")
 	}
 	if data, err := os.ReadFile(filepath.Join(f.dataRoot, "acme", "data.db")); err != nil || string(data) != "customer data" {
@@ -544,7 +549,7 @@ func TestArchiveRestorePurge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create after purge = %v", err)
 	}
-	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET"); after == before {
+	if after, _ := f.client.Secret(ctx, "acme", "SESSION_SECRET", recorded); after == before {
 		t.Fatal("a fresh tenant reused a purged tenant's secret")
 	}
 	if record, _ := f.store.Get(fresh.Tenant.Spec.Name); record.DataImage != "" {
@@ -556,7 +561,10 @@ func TestArchiveRestorePurge(t *testing.T) {
 	}
 	var actions []string
 	for _, e := range events {
-		actions = append(actions, e.Action)
+		// Its secrets read on the way are in the access register.
+		if !strings.HasPrefix(e.Action, "access.") {
+			actions = append(actions, e.Action)
+		}
 	}
 	if strings.Join(actions, ",") != "tenant.created,tenant.purged,tenant.archived,tenant.restored,tenant.updated,tenant.archived,tenant.created" {
 		t.Fatalf("events = %v", actions)
@@ -596,7 +604,7 @@ func TestSuspendLogsAndRoutes(t *testing.T) {
 	// Reconcile reports the unreachable health endpoint but still records the
 	// container, which logs needs.
 	_ = f.client.Reconcile(ctx)
-	if logs, err := f.client.Logs(ctx, "acme", 10); err != nil || string(logs) != "logs of c-acme\n" {
+	if logs, err := f.client.Logs(ctx, "acme", 10, recorded); err != nil || string(logs) != "logs of c-acme\n" {
 		t.Fatalf("logs = %q, %v", logs, err)
 	}
 	route, ok := (Routes{Store: f.store}).Route("acme")
@@ -623,7 +631,7 @@ func TestSuspendLogsAndRoutes(t *testing.T) {
 	if away, err := f.client.Get(ctx, "away"); err != nil || away.Node != "other-node" || !away.Elsewhere || away.Status != nil || away.Address != "" {
 		t.Fatalf("away = %+v, %v", away, err)
 	}
-	if _, err := f.client.Logs(ctx, "away", 10); err == nil || !strings.Contains(err.Error(), "runs on node other-node") {
+	if _, err := f.client.Logs(ctx, "away", 10, recorded); err == nil || !strings.Contains(err.Error(), "runs on node other-node") {
 		t.Fatalf("logs of a tenant elsewhere: %v", err)
 	}
 }

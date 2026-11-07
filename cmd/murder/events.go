@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -35,6 +36,10 @@ func runEvents(args []string) error {
 	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(table, "ID\tTIME\tACTOR\tACTION\tTENANT\tAPP\tDETAIL")
 	for _, event := range events {
+		// An access's detail is JSON, for the register: said as a line.
+		if entry, ok := access.FromEvent(event); ok {
+			event.Detail = entry.Said()
+		}
 		fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", event.ID, event.At.Local().Format(time.DateTime), event.Actor, event.Action, event.Tenant, event.App, event.Detail)
 	}
 	return table.Flush()

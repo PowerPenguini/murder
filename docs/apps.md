@@ -200,10 +200,11 @@ Day-to-day operations:
 murder app list                         # apps, their tenants, images and newer images found
 murder tenant list                      # app, state, health, image, URL; archived tenants too
 murder tenant show acme
-murder tenant secret acme ADMIN_PASSWORD
+murder tenant secret acme ADMIN_PASSWORD -reason "set up their SSO" -ticket ZD-1234   # recorded in the access register
 murder tenant rotate acme ADMIN_PASSWORD -wait 3m   # new value; the container restarts
-murder tenant logs acme -tail 100
-murder tenant logs acme -previous      # the last lines of the container before (it exited, or was replaced)
+murder tenant logs acme -tail 100 -reason "export fails" -ticket ZD-1234
+murder tenant logs acme -tail 100 -access 4711    # again, under that entry of the register, for an hour
+murder tenant logs acme -previous -reason "it keeps exiting" -ticket incident   # the last lines of the container before
 murder tenant suspend acme              # stop it, keep its address (visitors get 503)
 murder tenant resume acme -wait 3m
 murder tenant archive acme              # take it out of service; data, secrets and overrides are kept
@@ -216,7 +217,12 @@ murder app rollback web -wait 3m        # back to the revision before the curren
 murder app rollout web                  # how web's rollout goes
 murder app delete web                   # once no tenant (live or archived) runs it
 murder events -tenant acme              # the audit log: who changed what, and when
+murder access list -tenant acme -format csv   # who read acme's data, when, why (see operations.md)
 ```
+
+A tenant's secrets, logs and backups are its customer's data: reading them
+through Murder takes a purpose and a ticket, and is recorded in the access
+register first ([Record access to tenants' data](operations.md#record-access-to-tenants-data)).
 
 Each time a tenant's app exits and its node starts it again, the audit log
 says so once, with the exit code and, for a kill, the memory limit it ran

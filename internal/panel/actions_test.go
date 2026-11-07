@@ -145,6 +145,7 @@ func TestActingOnTenants(t *testing.T) {
 		t.Fatalf("an action from elsewhere: %d", response.StatusCode)
 	}
 	// Logs, without terminal escapes.
+	openLogs(t, client, server, "newco")
 	response, err := client.Get(server.URL + "/tenants/newco/logs")
 	if err != nil {
 		t.Fatal(err)

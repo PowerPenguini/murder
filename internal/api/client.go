@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -304,10 +305,45 @@ func (c *Client) Purge(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, tenantPath(name), nil, nil)
 }
 
-func (c *Client) Secret(ctx context.Context, name, key string) (string, error) {
+// Secret reads one of a tenant's secret values, recorded in the access
+// register with proof.
+func (c *Client) Secret(ctx context.Context, name, key string, proof access.Proof) (string, error) {
 	var secret SecretValue
-	err := c.do(ctx, http.MethodGet, tenantPath(name)+"/secrets/"+url.PathEscape(key), nil, &secret)
+	err := c.do(ctx, http.MethodGet, withProof(tenantPath(name)+"/secrets/"+url.PathEscape(key), url.Values{}, proof), nil, &secret)
 	return secret.Value, err
+}
+
+// withProof is path with query and a proof that the read is recorded.
+func withProof(path string, query url.Values, proof access.Proof) string {
+	proof.AddTo(query)
+	if len(query) == 0 {
+		return path
+	}
+	return path + "?" + query.Encode()
+}
+
+// RecordAccess records an access to a tenant's data in the register.
+func (c *Client) RecordAccess(ctx context.Context, request access.Request) (access.Entry, error) {
+	var entry access.Entry
+	return entry, c.do(ctx, http.MethodPost, "/v1/access", request, &entry)
+}
+
+// Accesses lists the register, oldest first: a tenant's accesses and
+// those of every tenant (all for ""), recorded since since (all for zero).
+func (c *Client) Accesses(ctx context.Context, tenant string, since time.Time) ([]access.Entry, error) {
+	values := url.Values{}
+	if tenant != "" {
+		values.Set("tenant", tenant)
+	}
+	if !since.IsZero() {
+		values.Set("since", since.UTC().Format(time.RFC3339Nano))
+	}
+	path := "/v1/access"
+	if len(values) > 0 {
+		path += "?" + values.Encode()
+	}
+	var entries []access.Entry
+	return entries, c.do(ctx, http.MethodGet, path, nil, &entries)
 }
 
 // Rotate gives one of a tenant's secrets a new value.
@@ -322,25 +358,33 @@ func (c *Client) Rotate(ctx context.Context, name, key string) (Tenant, error) {
 	return tenant, c.do(ctx, http.MethodPost, tenantPath(name)+"/secrets/"+url.PathEscape(key)+"/rotate", nil, &tenant)
 }
 
-func (c *Client) Logs(ctx context.Context, name string, tail int) ([]byte, error) {
+// Logs are the last lines of a tenant's container, recorded in the access
+// register with proof.
+func (c *Client) Logs(ctx context.Context, name string, tail int, proof access.Proof) ([]byte, error) {
 	var output []byte
-	return output, c.do(ctx, http.MethodGet, tenantPath(name)+"/logs?tail="+strconv.Itoa(tail), nil, &output)
+	return output, c.do(ctx, http.MethodGet, withProof(tenantPath(name)+"/logs", url.Values{"tail": {strconv.Itoa(tail)}}, proof), nil, &output)
 }
 
 // PreviousLogs are the last lines of a tenant's previous container; a 404
 // when its node kept none.
-func (c *Client) PreviousLogs(ctx context.Context, name string) (PreviousLogs, error) {
+func (c *Client) PreviousLogs(ctx context.Context, name string, proof access.Proof) (PreviousLogs, error) {
 	var previous PreviousLogs
-	return previous, c.do(ctx, http.MethodGet, tenantPath(name)+"/logs?previous=1", nil, &previous)
+	return previous, c.do(ctx, http.MethodGet, withProof(tenantPath(name)+"/logs", url.Values{"previous": {"1"}}, proof), nil, &previous)
 }
 
 func (c *Client) Reconcile(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/reconcile", nil, nil)
 }
 
-// Backup writes a copy of the agent's database to w.
-func (c *Client) Backup(ctx context.Context, w io.Writer) error {
-	return c.do(ctx, http.MethodGet, "/v1/backup", nil, w)
+// Backup writes a copy of the agent's database to w: every tenant's sealed
+// secrets are in it, so it is recorded in the access register with proof,
+// unless it is the scheduled copy kept on the node.
+func (c *Client) Backup(ctx context.Context, w io.Writer, proof access.Proof, scheduled bool) error {
+	query := url.Values{}
+	if scheduled {
+		query.Set("scheduled", "1")
+	}
+	return c.do(ctx, http.MethodGet, withProof("/v1/backup", query, proof), nil, w)
 }
 
 // responseError is the agent's refusal, if it refused.

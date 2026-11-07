@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/edge"
@@ -305,8 +306,14 @@ func TestTenantLifecycleOnDocker(t *testing.T) {
 	if _, value := n.request(t, http.MethodGet, tenant, "/value", ""); value != "kept" {
 		t.Fatalf("data after resume = %q", value)
 	}
-	if _, err := n.client.Logs(ctx, tenant, 20); err != nil {
+	if _, err := n.client.Logs(ctx, tenant, 20, access.Proof{}); err == nil {
+		t.Fatal("logs read without a reason")
+	}
+	if _, err := n.client.Logs(ctx, tenant, 20, access.Proof{Purpose: "an integration test", Ticket: "incident"}); err != nil {
 		t.Fatalf("logs: %v", err)
+	}
+	if entries, err := n.client.Accesses(ctx, tenant, time.Time{}); err != nil || len(entries) != 1 || entries[0].Kind != access.Logs {
+		t.Fatalf("the access register: %+v %v", entries, err)
 	}
 
 	// Archive removes the container and network and keeps the data;

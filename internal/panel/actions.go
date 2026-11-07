@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/store"
 )
@@ -26,10 +27,12 @@ type ActionAgent interface {
 	Archive(ctx context.Context, name string) error
 	Restore(ctx context.Context, name string) (api.Tenant, error)
 	Purge(ctx context.Context, name string) error
-	Logs(ctx context.Context, name string, tail int) ([]byte, error)
-	// PreviousLogs are the last lines its node kept of the tenant's
-	// previous container; a 404 when it kept none.
-	PreviousLogs(ctx context.Context, name string) (api.PreviousLogs, error)
+	// Logs and PreviousLogs read under an entry of the access register;
+	// RecordAccess records one. PreviousLogs are the last lines its node
+	// kept of the tenant's previous container; a 404 when it kept none.
+	Logs(ctx context.Context, name string, tail int, proof access.Proof) ([]byte, error)
+	PreviousLogs(ctx context.Context, name string, proof access.Proof) (api.PreviousLogs, error)
+	RecordAccess(ctx context.Context, request access.Request) (access.Entry, error)
 }
 
 // typed says the name typed to confirm an action is the one asked for:
@@ -249,6 +252,12 @@ type logsData struct {
 	Previous        *api.PreviousLogs
 	Showing         bool
 	PreviousProblem string
+	// Ask says the page asks why the logs are read, for the access
+	// register, before it shows them; Purpose and Ticket are what was
+	// given, if anything. Grant is the entry the page reads under.
+	Ask             bool
+	Purpose, Ticket string
+	Grant           access.Entry
 }
 
 // Link is this page's address with some of its choices changed: pairs of
@@ -360,13 +369,27 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	var nodes api.Nodes
 	var previous api.PreviousLogs
 	var previousErr error
-	agent := s.Actions(s.actor(userOf(r)))
+	user := userOf(r)
+	// A tenant's logs are its customer's data: read under an entry of the
+	// access register, which the page asks for first.
+	grant, granted := s.grants.get(user, name, s.now())
+	if !granted {
+		s.askAccess(w, r, name, "", "", "", http.StatusOK)
+		return
+	}
+	proof := access.Proof{Grant: grant.ID}
+	agent := s.Actions(s.actor(user))
 	if err := all(
-		func() (err error) { data, err = agent.Logs(ctx, name, tail); return },
-		func() error { previous, previousErr = agent.PreviousLogs(ctx, name); return nil },
+		func() (err error) { data, err = agent.Logs(ctx, name, tail, proof); return },
+		func() error { previous, previousErr = agent.PreviousLogs(ctx, name, proof); return nil },
 		func() (err error) { t, err = s.backend.Get(ctx, name); return },
 		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
 	); err != nil {
+		if refusedAccess(err) {
+			s.grants.drop(user, name)
+			s.askAccess(w, r, name, err.Error(), grant.Purpose, grant.Ticket, http.StatusOK)
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}
@@ -382,7 +405,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		head.State = writable(head.State, &u)
 	}
 	logs := logsData{Tenant: name, Tail: tail, Head: head, Level: q.Get("level"), Query: strings.TrimSpace(q.Get("q")),
-		Follow: q.Get("follow") != "", ReadAt: s.now()}
+		Follow: q.Get("follow") != "", ReadAt: s.now(), Grant: grant}
 	if logs.Level != "warn" && logs.Level != "error" {
 		logs.Level = "all"
 	}

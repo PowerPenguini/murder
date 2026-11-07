@@ -3,8 +3,10 @@ package apiserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 )
 
@@ -49,6 +51,15 @@ func (s *Server) replaceTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	var request api.ReplaceRequest
 	if !readJSON(w, r, &request) {
+		return
+	}
+	// Putting a backup back follows reading it, which the restore
+	// recorded first: it names that entry.
+	if request.Access == 0 {
+		writeError(w, statusError{http.StatusForbidden, fmt.Errorf("%w: a restore names its entry in the access register, recorded before its backup was read", access.ErrNoGrant)})
+		return
+	}
+	if !s.proven(w, r, access.Proof{Grant: request.Access}, access.BackupRestore, request.Tenant, "") {
 		return
 	}
 	result, err := s.backups.ReplaceTenant(r.Context(), request.Tenant, request.Copy)

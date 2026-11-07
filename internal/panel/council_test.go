@@ -240,6 +240,8 @@ func TestNodePageAndBackups(t *testing.T) {
 func TestLogsFilter(t *testing.T) {
 	cluster := NewDemoCluster()
 	server := newServerOf(t, cluster)
+	openLogs(t, http.DefaultClient, server, "baltic-freight")
+	openLogs(t, http.DefaultClient, server, "acme-logistics")
 	_, page := get(t, server.URL+"/tenants/baltic-freight/logs?level=error")
 	if !strings.Contains(page, "0 of 16 lines match") || strings.Contains(page, "slow query") {
 		t.Fatalf("errors only, of the current container:\n%s", page)

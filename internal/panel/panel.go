@@ -63,6 +63,9 @@ func staticURL(name string) string { return "/static/" + name + "?v=" + staticVe
 type Server struct {
 	// drafts keeps the app specs under review, for their review's address.
 	drafts reviewDrafts
+	// grants are the accesses to tenants' logs recorded for the people
+	// signed in.
+	grants accessGrants
 
 	// Name is the panel's host name in its tunnel; requests are answered
 	// only as it or as a loopback name.
@@ -127,6 +130,7 @@ func (s *Server) Handler() http.Handler {
 		pages.HandleFunc("POST /tenants", s.createTenant)
 		pages.HandleFunc("POST /tenants/{name}", s.tenantAction)
 		pages.HandleFunc("GET /tenants/{name}/logs", s.logs)
+		pages.HandleFunc("POST /tenants/{name}/logs", s.recordLogsAccess)
 	}
 	if s.Apps != nil {
 		pages.HandleFunc("GET /apps", s.apps)

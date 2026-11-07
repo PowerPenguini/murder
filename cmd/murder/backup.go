@@ -12,10 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/store"
+	"golang.org/x/term"
 )
 
 // backupName matches the backups "murder backup" writes; their names sort
@@ -35,8 +37,11 @@ func runBackup(args []string) error {
 	flags := flag.NewFlagSet("backup", flag.ContinueOnError)
 	socket := socketPath(flags)
 	keep := flags.Int("keep", 48, "backups to keep in the directory, newest first; 0 keeps all")
+	reason := addReasonFlags(flags, "a copy made by hand")
+	scheduled := flags.Bool("scheduled", false, "the copy murder-backup.timer keeps on this node, recorded in no access register")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: murder backup [-keep n] <directory>")
+		fmt.Fprintln(flags.Output(), "Usage: murder backup [-keep n] (-reason TEXT -ticket REF | -scheduled) <directory>")
+		fmt.Fprintln(flags.Output(), "\nThe copy holds every tenant's sealed secrets: one made by hand is recorded in\nthe access register. murder-backup.timer's own copies, kept on this node for\nroot alone, are -scheduled.")
 		flags.PrintDefaults()
 	}
 	positional, err := parseInterspersed(flags, args)
@@ -48,6 +53,20 @@ func runBackup(args []string) error {
 		return flag.ErrHelp
 	}
 	dir := positional[0]
+	// murder-backup.service of releases before the register runs this
+	// without -scheduled: systemd says it runs it, with no terminal.
+	if !*scheduled && *reason.reason == "" && *reason.ticket == "" && os.Getenv("INVOCATION_ID") != "" && !term.IsTerminal(int(os.Stdin.Fd())) {
+		*scheduled = true
+		fmt.Fprintln(os.Stderr, "taken as -scheduled, run by systemd: install deploy/murder-backup.service of this release, which says so")
+	}
+	proof := reason.proof()
+	if *scheduled {
+		if proof.Given() {
+			return errors.New("-scheduled is the timer's copy, recorded nowhere: give it no -reason or -ticket")
+		}
+	} else if _, err := reason.request(access.State, "", ""); err != nil {
+		return fmt.Errorf("%w\n(murder-backup.timer's copies are -scheduled)", err)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -57,7 +76,7 @@ func runBackup(args []string) error {
 		return err
 	}
 	defer os.Remove(temp.Name())
-	err = api.NewClient(*socket).Backup(context.Background(), temp)
+	err = asOperator(api.NewClient(*socket)).Backup(context.Background(), temp, proof, *scheduled)
 	if err = errors.Join(err, temp.Sync(), temp.Close()); err != nil {
 		return fmt.Errorf("back up the database: %w", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -33,6 +34,9 @@ var actions = map[string]string{
 	"tenant.moving": "moving", "tenant.moved": "moved", "tenant.move-cancelled": "move undone",
 	"tenant.failed-over": "failed over to its copy", "tenant.restarted": "restarted after it exited",
 	"tenant.replica": "copy placed", "tenant.replica-moving": "copy moving", "tenant.replica-ready": "copy ready",
+	"access.state": "copy of the whole state read", "access.secret": "secret read", "access.logs": "logs read",
+	"access.backup-verify": "backup read through", "access.backup-restore": "backup put back", "access.backup-forget": "backups deleted",
+	"access.manual": "data reached outside Murder",
 }
 
 // actionText is an action as people say it.
@@ -126,6 +130,9 @@ var predicates = map[string]string{
 	"domain.added": "was given a domain", "domain.removed": "had a domain removed", "domain.verified": "has a domain pointing here",
 	"domain.pending": "has a domain waiting for its DNS", "domain.issued": "got a domain's certificate", "domain.renewed": "had a domain's certificate renewed",
 	"domain.failed": "could not get a domain's certificate",
+	"access.secret": "had a secret read", "access.logs": "had its logs read", "access.backup-verify": "had its backup read through",
+	"access.backup-restore": "had its data put back from a backup", "access.backup-forget": "had its backups deleted",
+	"access.manual": "had its data reached outside Murder",
 }
 
 // eventRow is one row of an events table: an event, or a run of the same
@@ -247,6 +254,10 @@ func groupEvents(events []store.Event) []eventRow {
 	var rows []eventRow
 	for _, e := range events {
 		e.Detail = overridesSaid(namedWave(e), e.Action)
+		// An access's detail is JSON, for the register: said as a line.
+		if entry, ok := access.FromEvent(e); ok {
+			e.Detail = accessSaid(entry)
+		}
 		if n := len(rows); n > 0 {
 			last := &rows[n-1]
 			if last.Action == e.Action && last.Detail == e.Detail && byPeople(last.Event) == byPeople(e) && last.Actor == e.Actor {
@@ -349,4 +360,21 @@ func rolloutBlocked(r store.Rollout, blockers []string) string {
 		who, verb = strings.Join(blockers[:len(blockers)-1], ", ")+" and "+blockers[len(blockers)-1], "are"
 	}
 	return who + " moved in " + store.WaveSaid(r.Wave, r.WaveName(r.Wave)) + " and " + verb + " not healthy, so " + store.WaveSaid(r.Wave+1, r.WaveName(r.Wave+1)) + " waits."
+}
+
+// accessSaid is an access of the register as its event's detail says it:
+// what, why and at whose request.
+func accessSaid(e access.Entry) string {
+	said := ""
+	if e.What != "" {
+		said = e.What + " · "
+	}
+	said += "“" + e.Purpose + "” · ticket " + e.Ticket
+	if !e.AccessedAt.IsZero() {
+		said += " · accessed " + e.AccessedAt.UTC().Format("2006-01-02 15:04") + " UTC"
+	}
+	if e.Offline != "" {
+		said += " · recorded offline first"
+	}
+	return said
 }

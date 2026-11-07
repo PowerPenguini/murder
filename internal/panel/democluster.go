@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
@@ -332,7 +333,32 @@ func (a *demoActor) Purge(_ context.Context, name string) error {
 	return nil
 }
 
-func (a *demoActor) Logs(_ context.Context, name string, tail int) ([]byte, error) {
+// RecordAccess records an access in the demo's audit log, as the agent
+// does in the register.
+func (a *demoActor) RecordAccess(_ context.Context, request access.Request) (access.Entry, error) {
+	if err := request.Normalize(); err != nil {
+		return access.Entry{}, &api.Error{Status: 403, Message: err.Error()}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.record(request.Kind.Action(), request.Tenant, request.Detail())
+	a.events[0].App = ""
+	entry, _ := access.FromEvent(a.events[0])
+	return entry, nil
+}
+
+// demoGranted refuses a read of the demo's logs without an access.
+func demoGranted(proof access.Proof) error {
+	if proof.Grant == 0 {
+		return &api.Error{Status: 403, Message: "not recorded in the access register"}
+	}
+	return nil
+}
+
+func (a *demoActor) Logs(_ context.Context, name string, tail int, proof access.Proof) ([]byte, error) {
+	if err := demoGranted(proof); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	var lines []byte
 	if name == "baltic-freight" {
@@ -355,7 +381,10 @@ func (a *demoActor) Logs(_ context.Context, name string, tail int) ([]byte, erro
 // PreviousLogs: baltic-freight's node kept the lines of the container the
 // kernel killed 4m ago; no other tenant's container went while the agent
 // kept them.
-func (a *demoActor) PreviousLogs(_ context.Context, name string) (api.PreviousLogs, error) {
+func (a *demoActor) PreviousLogs(_ context.Context, name string, proof access.Proof) (api.PreviousLogs, error) {
+	if err := demoGranted(proof); err != nil {
+		return api.PreviousLogs{}, err
+	}
 	if name != "baltic-freight" {
 		return api.PreviousLogs{}, &api.Error{Status: 404, Message: "tenant " + name + ": no previous container's lines are kept"}
 	}

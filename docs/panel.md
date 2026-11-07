@@ -131,7 +131,9 @@ To try the pages without a cluster: `go run ./internal/panel/demo`.
   so. A form sent once is not sent again while it
   works; wide tables scroll on a phone. Events say their actions in words
   (the code on hover) and can show only what people did; a tenant's logs
-  filter, with warnings and errors standing out; the cluster says whether
+  open once the person says why and at whose request, which the access
+  register records (one entry serves their reads of those logs for an
+  hour); they filter, with warnings and errors standing out; the cluster says whether
   its nodes run one release; an error page says what happened and what to
   do. Charts are SVG drawn by
   the server (`charts.go`) in one grey ramp, validated as an ordinal ramp on
