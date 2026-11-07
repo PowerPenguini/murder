@@ -567,9 +567,11 @@ sudo murder backup -reason "move to new hardware" -ticket incident /root/copy
 The agent checks everything else first, records the access (the person sudo
 names, as `jan via root`), and only then hands the data out: if the access
 cannot be recorded (no quorum, say), nothing is read. While an upgrade has
-changes frozen (a minute or so), nothing is recorded either, so nothing is
-read: rolling the upgrade back puts back the database from before it, which
-would lose the record. The panel asks for the
+changes frozen (a minute or so), no new access is recorded either, so none
+is read that needs one: rolling the upgrade back puts back the database from
+before it, which would lose the record. An entry recorded before the freeze
+(`-access ID`, the panel's) still serves its reads: the database from before
+holds it. The panel asks for the
 purpose and the ticket before it shows a tenant's logs; its entry serves that
 person's reads of those logs for an hour, so a page that follows new lines
 records one entry. The socket's panel, where no one signs in, also asks who
