@@ -333,9 +333,20 @@ TLS-ALPN-01 is not used.
 `murder backup <directory>` asks the agent for a copy of the database as it
 is at one moment (a plain copy of a live database can be torn), checks it and
 keeps it as `murder-<UTC time>.db`, removing all but the newest 48 (`-keep`).
-`murder-backup.timer` runs it every hour into `/var/backups/murder`; copy that
-directory off the server as well. The database holds secrets only sealed: keep
-the master key apart from it, offline.
+`murder-backup.timer` has the agent keep one every hour in
+`/var/backups/murder` (`murder backup -scheduled /var/backups/murder`); copy
+that directory off the server as well. The database holds secrets only
+sealed: keep the master key apart from it, offline.
+
+A copy holds every tenant's sealed secrets, so one made by hand is an access
+to every tenant's data: `murder backup -reason TEXT -ticket REF <directory>`
+records it in the [access register](#record-access-to-tenants-data) first.
+The timer's copies are the system's own keeping, recorded nowhere: the agent
+writes them itself into `/var/backups/murder`, readable by root alone as the
+database is, and hands them to no one. `-scheduled` writes there only, and
+`murder backup /var/backups/murder` without `-scheduled` (the unit of an
+earlier release) is taken as the timer's. Opening one of those copies to read
+a tenant's data is an access, recorded by hand (`murder access log`).
 
 To restore, stop the agent and put a backup in place:
 
@@ -458,11 +469,17 @@ backups:
 sudo murder backups setup                       # make the bucket, or check it fits the mode
 sudo murder backups now                         # this node's tenants, now
 sudo murder backups list acme
-sudo murder backups verify acme -identity key.txt   # read it through as a restore would, compare it with its snapshot
+sudo murder backups verify acme -identity key.txt -reason "restore drill" -ticket OPS-12   # read it through as a restore would, compare it with its snapshot
 sudo murder tenant archive acme
-sudo murder backups restore acme -at 2026-11-01T18:50:55Z -identity key.txt
+sudo murder backups restore acme -at 2026-11-01T18:50:55Z -identity key.txt -reason "data deleted by mistake" -ticket ZD-1234
 sudo murder tenant restore acme
 ```
+
+`verify`, `restore`, `state` and `forget` read or delete a tenant's data
+(`state`, every tenant's), so each records the access in the
+[access register](#record-access-to-tenants-data) through the agent before
+it decrypts anything, and refuses when it cannot. The agent's own weekly
+verifications (`identityFile`) are the system's, recorded nowhere.
 
 A restore unpacks the backup into a new dataset, apart from the tenant's
 data. The agent then puts it in the tenant's place, checking once more that
@@ -519,3 +536,106 @@ Limits to know:
   Raise `lockFor` to lock longer, which also costs longer.
 - One backup holds at most about 156 GiB compressed (10,000 parts of 16 MiB,
   the S3 limit).
+
+## Record access to tenants' data
+
+A tenant's data (its secrets, its logs, its backups, a copy of the state
+with every tenant's sealed secrets) is its customer's. People who run the
+cluster reach it only when the customer asks, during an incident, or when
+the law requires it, and each such access is recorded in the **access
+register**: who, when, which tenant, what, why, and at whose request. A
+customer can be given their tenant's entries.
+
+The register is part of the audit log: each access is an event of action
+`access.<kind>` (`secret`, `logs`, `backup-verify`, `backup-restore`,
+`backup-forget`, `state`, `manual`), replicated to every node and kept, as
+every event is. `murder events` shows them among the rest.
+
+**Every read through Murder is recorded first, or refused.** Each command
+that reads a tenant's data takes `-reason` (why) and `-ticket` (the
+customer's ticket the read answers, or `incident` or `legal`, each perhaps
+followed by `:REF`, when no customer asked):
+
+```bash
+sudo murder tenant secret acme ADMIN_PASSWORD -reason "set up their SSO" -ticket ZD-1234
+sudo murder tenant logs acme -reason "export fails since Monday" -ticket ZD-1234
+sudo murder tenant logs acme -access 4711          # again, under the same entry, for an hour
+sudo murder backups verify acme -identity key.txt -reason "restore drill" -ticket incident:INC-7
+sudo murder backup -reason "move to new hardware" -ticket incident /root/copy
+```
+
+The agent checks everything else first, records the access (the person sudo
+names, as `jan via root`), and only then hands the data out: if the access
+cannot be recorded (no quorum, say), nothing is read. While an upgrade has
+changes frozen (a minute or so), no new access is recorded either, so none
+is read that needs one: rolling the upgrade back puts back the database from
+before it, which would lose the record. An entry recorded before the freeze
+(`-access ID`, the panel's) still serves its reads: the database from before
+holds it. The panel asks for the
+purpose and the ticket before it shows a tenant's logs; its entry serves that
+person's reads of those logs for an hour, so a page that follows new lines
+records one entry. The socket's panel, where no one signs in, also asks who
+reads (`jan (panel socket)` in the register), and keeps each browser's
+entries apart. A read may name an entry recorded before (`-access ID`,
+the panel does so) only for the same thing, by the same person, within an
+hour (a day for the restore that recorded it). `backups verify`, `restore`,
+`state` and `forget` talk to the bucket themselves: they record the access
+through the agent before they decrypt anything.
+
+**Access outside Murder is recorded by hand.** Root on a node can reach a
+tenant's data around Murder: `docker exec` into its container, its dataset
+under `/srv/murder/tenants/<tenant>` (or the ZFS mountpoint), a backup
+decrypted with `age` by hand, a copy of the database read with the master
+key. Murder cannot stop that. **The rule is organizational: nobody reaches a
+tenant's data any other way than through the commands above unless they
+record it with `murder access log`**, before, or as soon as they can:
+
+```bash
+sudo murder access log -tenant acme -what "docker exec into its container" -reason "a stuck job" -ticket incident:INC-9
+sudo murder access log -tenant acme -what "read its dataset's files" -reason "court order" -ticket legal:12/2026 -at 2026-11-07T08:30:00Z
+```
+
+**The customer's extract.** `murder access list` gives the register, oldest
+first: with `-tenant`, the tenant's entries and those of copies of the whole
+state (every tenant's, shown as tenant `*`); `-since` (a date or RFC 3339)
+starts it later; `-format csv` or `json` makes the file to send. A CSV
+cell that begins with `=`, `+`, `-` or `@` is written with a `'` before it,
+so a spreadsheet does not take it for a formula.
+
+```bash
+sudo murder access list -tenant acme -since 2026-01-01 -format csv > acme-access.csv
+```
+
+Columns: `id`, `recorded_at` (when the agent recorded it), `accessed_at`
+(when the access was: the same, or as `-at` or an offline record says),
+`actor`, `tenant`, `kind`, `what`, `purpose`, `ticket`, `offline_record`.
+
+**Without an agent.** In a disaster recovery the agent may be down, or the
+cluster without a quorum, or changes frozen by an upgrade that failed, so
+nothing can be recorded. `backups verify`, `backups state` and `access log`
+take `-offline`: when the agent cannot record the access (it does not
+answer, answers that it cannot write, or that changes are frozen; never when
+it refuses the access itself), the access is written to
+`/var/lib/murder/access-offline.jsonl` on that host instead (readable by root
+only, on disk before the read goes ahead) and a warning says so. Once the
+agent records again, `sudo murder access sync` records each one (its time as
+when the access was, its person as the record says) and empties the file;
+the agent records each record once, however many syncs send it, on whichever
+node. A line cut short (a full disk, say) is no record: the next one starts
+on a line of its own, and a sync leaves the damaged line in the file and
+says so, for a person to read and record with `murder access log`. `murder
+doctor` warns while records or damaged lines wait in the file. `restore` and `forget` need the agent anyway, and
+take no `-offline`. Restoring the state by hand (`murder restore`) is done
+with the agent stopped: record the copy you read with `backups state
+-offline`, and sync once the agent runs.
+
+What the register does not record:
+
+- the system's own work: scheduled and on-request backups, the agent's
+  weekly verifications, replication and moves between nodes, the edge
+  serving requests;
+- what root does on a node around Murder, unless recorded by hand (the rule
+  above);
+- reads by Murder releases before the register, during a rolling upgrade:
+  a node of an older release still serves a secret or logs without asking
+  why, until it runs this release.

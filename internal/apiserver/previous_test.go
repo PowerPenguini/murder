@@ -26,7 +26,7 @@ func TestPreviousContainersLines(t *testing.T) {
 	}
 	_ = f.client.Reconcile(ctx)
 	var refused *api.Error
-	if _, err := f.client.PreviousLogs(ctx, "acme"); !errors.As(err, &refused) || refused.Status != 404 || !strings.Contains(err.Error(), "no previous container's lines are kept on node test-node") {
+	if _, err := f.client.PreviousLogs(ctx, "acme", recorded); !errors.As(err, &refused) || refused.Status != 404 || !strings.Contains(err.Error(), "no previous container's lines are kept on node test-node") {
 		t.Fatalf("before any container went: %v", err)
 	}
 	if _, err := f.client.Suspend(ctx, "acme", true); err != nil {
@@ -37,11 +37,11 @@ func TestPreviousContainersLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = f.client.Reconcile(ctx)
-	previous, err := f.client.PreviousLogs(ctx, "acme")
+	previous, err := f.client.PreviousLogs(ctx, "acme", recorded)
 	if err != nil || previous.Why != "stopped" || previous.Container != "c-acme" || previous.Lines != "logs of c-acme\n" || previous.At.IsZero() {
 		t.Fatalf("after a suspension: %+v, %v", previous, err)
 	}
-	if logs, err := f.client.Logs(ctx, "acme", 10); err != nil || string(logs) != "logs of c-acme\n" {
+	if logs, err := f.client.Logs(ctx, "acme", 10, recorded); err != nil || string(logs) != "logs of c-acme\n" {
 		t.Fatalf("a new container's lines: %q, %v", logs, err)
 	}
 
@@ -53,11 +53,11 @@ func TestPreviousContainersLines(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.previousDir, "acme.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previous, err = f.client.PreviousLogs(ctx, "acme")
+	previous, err = f.client.PreviousLogs(ctx, "acme", recorded)
 	if err != nil || previous.Why != "exited" || previous.ExitCode != 137 || !previous.OOMKilled || !previous.ExitedAt.Equal(exited) || previous.Lines != "ERROR cannot allocate memory\n" {
 		t.Fatalf("after an exit: %+v, %v", previous, err)
 	}
-	if logs, err := f.client.Logs(ctx, "acme", 10); err != nil || string(logs) != "logs of c-acme since 2026-11-04T15:20:00Z\n" {
+	if logs, err := f.client.Logs(ctx, "acme", 10, recorded); err != nil || string(logs) != "logs of c-acme since 2026-11-04T15:20:00Z\n" {
 		t.Fatalf("the current run's lines: %q, %v", logs, err)
 	}
 
@@ -68,7 +68,7 @@ func TestPreviousContainersLines(t *testing.T) {
 	if _, err := f.store.Create(store.NewTenant{Name: "away", App: "web", Node: "other-node"}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.PreviousLogs(ctx, "away"); err == nil || !strings.Contains(err.Error(), "runs on node other-node") {
+	if _, err := f.client.PreviousLogs(ctx, "away", recorded); err == nil || !strings.Contains(err.Error(), "runs on node other-node") {
 		t.Fatalf("the previous lines of a tenant elsewhere: %v", err)
 	}
 }

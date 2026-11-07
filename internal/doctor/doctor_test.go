@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/deploy"
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/runtime"
 )
@@ -418,5 +419,20 @@ func TestEdgeConfined(t *testing.T) {
 	stopped := fakeHost(t, map[string]string{"systemctl show -p MainPID --value murder-edge.service": "0\n"})
 	if results := checkEdgeConfined(context.Background(), stopped); results != nil {
 		t.Errorf("stopped: %+v", results)
+	}
+}
+
+// Accesses written offline, not in the register yet, are a warning until
+// they are synced.
+func TestOfflineAccessesWait(t *testing.T) {
+	h := fakeHost(t, nil)
+	if results := checkOfflineAccesses(h); len(results) != 0 {
+		t.Fatalf("none waiting: %+v", results)
+	}
+	if _, err := access.WriteOffline(h.path(access.OfflineFile), access.Request{Kind: access.State, Purpose: "cluster lost", Ticket: "incident"}, "root", "", h.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if results := checkOfflineAccesses(h); !has(results, Warning, "an access to a tenant's data waits") || results[0].Fix != "murder access sync" {
+		t.Fatalf("one waiting: %+v", results)
 	}
 }

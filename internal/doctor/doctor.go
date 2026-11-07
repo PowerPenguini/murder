@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/runtime"
@@ -99,6 +100,7 @@ func Check(ctx context.Context, cfg config.Agent, configPath string, h Host) []R
 	results = append(results, firewallResults...)
 	results = append(results, checkUnits(ctx, cfg, h)...)
 	results = append(results, checkBackups(cfg, h)...)
+	results = append(results, checkOfflineAccesses(h)...)
 	sshResults, sshPorts := checkSSH(ctx, cfg, h)
 	results = append(results, sshResults...)
 	results = append(results, checkListeners(cfg, h, sshPorts, hostRules)...)
@@ -319,6 +321,29 @@ func checkBackups(cfg config.Agent, h Host) []Result {
 		results = append(results, Result{Warning, "backups", "tenants' data is not backed up off the node: a lost disk loses it", "set backups in the config (see README)"})
 	}
 	return results
+}
+
+// checkOfflineAccesses warns of accesses to tenants' data written to the
+// node's offline file while the agent could not record them: the register
+// misses them until they are synced.
+func checkOfflineAccesses(h Host) []Result {
+	records, damaged, err := access.ReadOffline(h.path(access.OfflineFile))
+	switch {
+	case errors.Is(err, os.ErrPermission):
+		return []Result{{Skipped, "access register", "cannot read " + access.OfflineFile, "run as root"}}
+	case err != nil:
+		return []Result{{Warning, "access register", "the offline file of accesses cannot be read: " + err.Error(), "murder access sync"}}
+	case len(damaged) > 0:
+		return []Result{{Warning, "access register", fmt.Sprintf("%s holds %d damaged lines and %d records not in the register yet", access.OfflineFile, len(damaged), len(records)),
+			"murder access sync; record the damaged lines' accesses with murder access log, then remove them"}}
+	case len(records) > 0:
+		said := fmt.Sprintf("%d accesses to tenants' data wait", len(records))
+		if len(records) == 1 {
+			said = "an access to a tenant's data waits"
+		}
+		return []Result{{Warning, "access register", said + " in " + access.OfflineFile + ", not in the register yet", "murder access sync"}}
+	}
+	return nil
 }
 
 // checkSSH reads sshd's effective configuration, and returns the ports

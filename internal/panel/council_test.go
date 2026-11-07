@@ -240,6 +240,11 @@ func TestNodePageAndBackups(t *testing.T) {
 func TestLogsFilter(t *testing.T) {
 	cluster := NewDemoCluster()
 	server := newServerOf(t, cluster)
+	jar, _ := cookiejar.New(nil)
+	reader := &http.Client{Jar: jar}
+	openLogs(t, reader, server, "baltic-freight")
+	openLogs(t, reader, server, "acme-logistics")
+	get := func(t *testing.T, url string) (*http.Response, string) { t.Helper(); return getWith(t, reader, url) }
 	_, page := get(t, server.URL+"/tenants/baltic-freight/logs?level=error")
 	if !strings.Contains(page, "0 of 16 lines match") || strings.Contains(page, "slow query") {
 		t.Fatalf("errors only, of the current container:\n%s", page)

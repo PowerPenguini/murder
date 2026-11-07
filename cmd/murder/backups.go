@@ -15,6 +15,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/backup"
 	"github.com/PowerPenguini/murder/internal/config"
@@ -27,16 +28,23 @@ const backupsUsage = `Usage: murder backups <command> [arguments]
                               or check that it fits the mode
   now                         back this node's tenants up now
   list TENANT                 the tenant's backups
-  verify TENANT -identity F   read the newest backup through and compare
+  verify TENANT -identity F [-offline]
+                              read the newest backup through and compare
                               every file with the snapshot it was made of
   restore TENANT -at TIME -identity F
                               put an archived tenant's data back as it was at
                               TIME (RFC 3339); what it had is kept aside
-  state [-at TIME] -identity F -out FILE
+  state [-at TIME] -identity F -out FILE [-offline]
                               write a copy of the cluster's state
   forget TENANT -yes          delete every backup of a purged tenant (in
                               production, those locked stay until their
                               locks end)
+
+verify, restore, state and forget take -reason TEXT and -ticket REF: each is
+recorded in the access register through the agent before a backup is read
+("murder access" says more). With -offline, verify and state go ahead when
+the agent cannot record them, such as in a disaster recovery: the access is
+written to this host's offline file, for "murder access sync" later.
   destroy -yes                delete every backup and the bucket (test mode
                               only: production backups are locked)
 
@@ -62,9 +70,15 @@ func runBackups(args []string) error {
 	at := flags.String("at", "", "restore as of this time (RFC 3339)")
 	out := flags.String("out", "", "with state: write the copy here")
 	yes := flags.Bool("yes", false, "with destroy or forget: really delete")
+	reason := addReasonFlags(flags, "verify, restore, state and forget")
+	offline := flags.Bool("offline", false, "with verify and state: if the agent cannot record the access, write it to the offline file")
+	offlineFile := flags.String("offline-file", access.OfflineFile, "the offline file of accesses not recorded yet")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
 		return err
+	}
+	if *offline && command != "verify" && command != "state" {
+		return fmt.Errorf("backups %s needs the agent: -offline is for verify and state", command)
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -77,6 +91,15 @@ func runBackups(args []string) error {
 	// then removes its copy.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
+	// Reading a backup decrypts a tenant's data: recorded in the access
+	// register first, before anything is decrypted.
+	record := func(kind access.Kind, tenant string) (access.Entry, error) {
+		request, err := reason.request(kind, tenant, "")
+		if err != nil {
+			return access.Entry{}, err
+		}
+		return recordAccess(ctx, api.NewClient(cfg.Socket), request, *offline, *offlineFile)
+	}
 	if command == "now" {
 		results, err := api.NewClient(cfg.Socket).RunBackups(ctx)
 		if err != nil {
@@ -138,6 +161,9 @@ func runBackups(args []string) error {
 		if err != nil {
 			return err
 		}
+		if _, err := record(access.BackupVerify, name); err != nil {
+			return err
+		}
 		verified, err := backups.Verify(ctx, name, zfs.Dataset(name), key)
 		if err != nil {
 			return err
@@ -160,20 +186,24 @@ func runBackups(args []string) error {
 				return fmt.Errorf("-at: %w", err)
 			}
 		}
+		// Only an archived tenant of this node: nothing runs on its data,
+		// and the agent's backups leave it alone. The agent checks again
+		// when it puts the backup in place.
+		client := asOperator(api.NewClient(cfg.Socket))
+		tenantRecord, err := client.Get(ctx, name)
+		if err != nil {
+			return err
+		}
+		if !tenantRecord.Archived() || tenantRecord.Elsewhere {
+			return fmt.Errorf("tenant %s must be archived, on this node: murder tenant archive %s, on node %s", name, name, tenantRecord.Node)
+		}
 		key, err := identity()
 		if err != nil {
 			return err
 		}
-		// Only an archived tenant of this node: nothing runs on its data,
-		// and the agent's backups leave it alone. The agent checks again
-		// when it puts the backup in place.
-		client := api.NewClient(cfg.Socket)
-		record, err := client.Get(ctx, name)
+		entry, err := record(access.BackupRestore, name)
 		if err != nil {
 			return err
-		}
-		if !record.Archived() || record.Elsewhere {
-			return fmt.Errorf("tenant %s must be archived, on this node: murder tenant archive %s, on node %s", name, name, record.Node)
 		}
 		// The download, into a copy apart from the tenant's data, holds
 		// nothing up; the agent then swaps it in, between its own work.
@@ -181,7 +211,17 @@ func runBackups(args []string) error {
 		if err != nil {
 			return err
 		}
-		replaced, err := client.ReplaceTenant(ctx, name, copy)
+		// A download of many hours may outlast its entry: one more is
+		// recorded, rather than the download lost.
+		if time.Since(entry.At) > access.RestoreGrantFor-time.Hour {
+			if entry, err = record(access.BackupRestore, name); err != nil {
+				if discard := backups.DiscardCopy(context.WithoutCancel(ctx), copy); discard != nil {
+					return fmt.Errorf("%w; remove copy %s too: %w", err, copy, discard)
+				}
+				return err
+			}
+		}
+		replaced, err := client.ReplaceTenant(ctx, name, copy, entry.ID)
 		if err == nil && replaced.Error != "" {
 			err = errors.New(replaced.Error)
 		}
@@ -223,6 +263,11 @@ func runBackups(args []string) error {
 		if err != nil {
 			return err
 		}
+		if _, err := record(access.State, ""); err != nil {
+			file.Close()
+			os.Remove(*out)
+			return err
+		}
 		if err := backups.GetState(ctx, chosen, key, file); err != nil {
 			file.Close()
 			os.Remove(*out)
@@ -242,6 +287,9 @@ func runBackups(args []string) error {
 		}
 		if !*yes {
 			return fmt.Errorf("forget deletes every backup of %s: add -yes", name)
+		}
+		if _, err := record(access.BackupForget, name); err != nil {
+			return err
 		}
 		deleted, err := backups.Forget(ctx, name)
 		fmt.Fprintf(stdout, "deleted %d backups of %s\n", deleted, name)

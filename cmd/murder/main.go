@@ -34,8 +34,10 @@ Client commands (talk to the local agent):
   app        apply, list, show and delete apps (specs shared by tenants)
   tenant     create, configure, suspend, archive, restore and purge tenants
   events     show the audit log: who changed what, and when
+  access     the register of staff access to tenants' data: record, list
   reconcile  run one reconcile pass now and report its errors
-  backup     save a copy of the agent's database to a directory
+  backup     save a copy of the agent's database to a directory (recorded
+             in the access register, but for -scheduled)
   backups    back tenants up to an S3 bucket, list, verify and restore them
 
 Run "murder <command> -h" for a command's options.
@@ -94,6 +96,8 @@ func run(args []string) error {
 		return runUpgrade(args[1:])
 	case "backups":
 		return runBackups(args[1:])
+	case "access":
+		return runAccess(args[1:])
 	case "version":
 		return runVersion(args[1:])
 	case "-h", "--help", "help":

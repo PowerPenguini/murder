@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 )
@@ -32,7 +33,9 @@ const tenantUsage = `Usage: murder tenant <command> [options]
   archive NAME           take a tenant out of service, keeping data, secrets and overrides
   restore NAME           bring an archived tenant back with its data and secrets
   purge NAME -yes        delete an archived tenant and its data for good
-  secret NAME KEY        print one generated secret
+  secret NAME KEY -reason TEXT -ticket REF
+                         print one generated secret; the read is recorded
+                         in the access register ("murder access" says more)
   rotate NAME KEY        give a secret a new value (the container restarts)
   move NAME -to NODE     move a tenant with its data to another node of the
                          cluster; it is away for seconds, and requests wait
@@ -40,8 +43,12 @@ const tenantUsage = `Usage: murder tenant <command> [options]
                          release of Murder changed in containers; -all rolls
                          this node's tenants one at a time, each healthy
                          before the next (-wait, 5m by default)
-  logs NAME [-tail N]    print the container's recent output
-  logs NAME -previous    print the last lines its node kept of the container
+  logs NAME [-tail N] -reason TEXT -ticket REF
+                         print the container's recent output; the read is
+                         recorded in the access register (-access ID reads
+                         again for an hour under the same entry)
+  logs NAME -previous -reason TEXT -ticket REF
+                         print the last lines its node kept of the container
                          before (one that exited, or was replaced or stopped)
   domain add|list|check|remove NAME [DOMAIN]
                          host names of the tenant's own, such as
@@ -115,6 +122,8 @@ func runTenant(args []string) error {
 	asJSON := flags.Bool("json", false, "with list: print JSON")
 	all := flags.Bool("all", false, "with roll: every tenant this node runs")
 	to := flags.String("to", "", "with move: the node to move to")
+	reason := addReasonFlags(flags, "secret and logs")
+	grant := flags.Int64("access", 0, "with logs: an access recorded before (its ID), instead of -reason and -ticket, for an hour")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
 		return err
@@ -197,7 +206,10 @@ func runTenant(args []string) error {
 		if err := need(2); err != nil {
 			return err
 		}
-		value, err := client.Secret(ctx, positional[0], positional[1])
+		if _, err := reason.request(access.Secret, positional[0], positional[1]); err != nil {
+			return err
+		}
+		value, err := asOperator(client).Secret(ctx, positional[0], positional[1], reason.proof())
 		if err != nil {
 			return err
 		}
@@ -249,8 +261,18 @@ func runTenant(args []string) error {
 		if err := need(1); err != nil {
 			return err
 		}
+		proof := access.Proof{Grant: *grant}
+		if *grant == 0 {
+			if _, err := reason.request(access.Logs, positional[0], ""); err != nil {
+				return err
+			}
+			proof = reason.proof()
+		} else if *reason.reason != "" || *reason.ticket != "" {
+			return errors.New("give -access, an access recorded before, or -reason and -ticket, not both")
+		}
+		client := asOperator(client)
 		if *previous {
-			kept, err := client.PreviousLogs(ctx, positional[0])
+			kept, err := client.PreviousLogs(ctx, positional[0], proof)
 			if err != nil {
 				return err
 			}
@@ -268,7 +290,7 @@ func runTenant(args []string) error {
 			_, err = io.WriteString(stdout, kept.Lines)
 			return err
 		}
-		output, err := client.Logs(ctx, positional[0], *tail)
+		output, err := client.Logs(ctx, positional[0], *tail, proof)
 		if err != nil {
 			return err
 		}

@@ -19,9 +19,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/localbackup"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
@@ -67,11 +69,22 @@ type Server struct {
 	keys Keys
 	// lastBackup is when a backup was last sent whole, in Unix nanoseconds.
 	lastBackup atomic.Int64
+	// clock is the time, for the access register's grants; nil is the
+	// system's.
+	clock func() time.Time
+	// backupDir keeps the scheduled copies of the database.
+	backupDir string
 }
 
 // NewServer returns the API server.
 func NewServer(st store.Store, reconciler *reconcile.Reconciler, rt runtime.Runtime, key *secrets.Key, log *slog.Logger) *Server {
-	return &Server{store: st, reconciler: reconciler, runtime: rt, key: key, log: log, stopping: make(chan struct{}), caughtUp: make(chan struct{})}
+	return &Server{store: st, reconciler: reconciler, runtime: rt, key: key, log: log, stopping: make(chan struct{}), caughtUp: make(chan struct{}), backupDir: localbackup.Dir}
+}
+
+// WithBackupDir keeps the scheduled copies of the database in dir.
+func (s *Server) WithBackupDir(dir string) *Server {
+	s.backupDir = dir
+	return s
 }
 
 // CaughtUp says this node has caught up with its cluster since it
@@ -97,7 +110,10 @@ func (s *Server) Handler() http.Handler {
 	s.upgradeRoutes(mux)
 	s.usageRoutes(mux)
 	s.domainRoutes(mux)
-	mux.HandleFunc("GET /v1/routes", s.routes)
+	s.accessRoutes(mux)
+	// Routes carry tenants' domains' private keys, sealed: for the edge,
+	// which runs as root, not for the socket's group.
+	mux.HandleFunc("GET /v1/routes", rootOnly(s.routes))
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
 	mux.HandleFunc("PUT /v1/apps/{name}", s.putApp)
@@ -130,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	// The whole database: panel secrets and sign-in state too, which only
 	// root reads.
 	mux.HandleFunc("GET /v1/backup", rootOnly(s.backup))
+	mux.HandleFunc("POST /v1/backup/scheduled", rootOnly(s.scheduledBackup))
 	mux.HandleFunc("POST /v1/backups/run", rootOnly(s.runBackups))
 	mux.HandleFunc("POST /v1/backups/replace", rootOnly(s.replaceTenant))
 	return mux
@@ -757,6 +774,9 @@ func (s *Server) secret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if !s.recorded(w, r, access.Secret, name, key) {
+		return
+	}
 	s.log.Info("secret read", "tenant", name, "secret", key, "actor", actor(r))
 	writeJSON(w, http.StatusOK, api.SecretValue{Value: value})
 }
@@ -807,6 +827,9 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+		if !s.recorded(w, r, access.Logs, name, "") {
+			return
+		}
 		writeJSON(w, http.StatusOK, api.PreviousLogs{Container: kept.Container, Image: kept.Image, Why: kept.Why,
 			ExitedAt: kept.ExitedAt, ExitKnown: kept.ExitKnown, ExitCode: kept.ExitCode, OOMKilled: kept.OOMKilled, MemoryMB: kept.MemoryMB,
 			At: kept.At, Cut: kept.Cut, Lines: string(kept.Lines)})
@@ -824,6 +847,9 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	status, ok := s.reconciler.Status(name)
 	if !ok || status.ContainerID == "" {
 		writeError(w, notFound(fmt.Errorf("tenant %s has no container", name)))
+		return
+	}
+	if !s.recorded(w, r, access.Logs, name, "") {
 		return
 	}
 	// A container started again in place after its app exited holds the
@@ -890,7 +916,14 @@ func (s *Server) reconcileNow(w http.ResponseWriter, r *http.Request) {
 // backup streams a copy of the database. A failure before the first byte is
 // an error response; one after it cuts the connection, so the client never
 // takes a partial copy for a whole one.
-func (s *Server) backup(w http.ResponseWriter, _ *http.Request) {
+//
+// The copy holds every tenant's sealed secrets, and goes where its client
+// takes it: it is recorded in the access register (?purpose=&ticket=, or
+// ?access=ID). murder-backup.timer's copies are scheduledBackup's.
+func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
+	if !s.recorded(w, r, access.State, "", "") {
+		return
+	}
 	w.Header().Set("Content-Type", "application/vnd.sqlite3")
 	out := &countingWriter{w: w}
 	if err := s.store.Backup(out); err != nil {
@@ -903,6 +936,31 @@ func (s *Server) backup(w http.ResponseWriter, _ *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 	s.lastBackup.Store(time.Now().UnixNano())
+}
+
+// scheduledBackup keeps a copy of the database in this node's backup
+// directory (?keep= the newest so many), as murder-backup.timer asks: the
+// system's own keeping, readable by root alone as the database itself is,
+// and handed to no one, so recorded in no access register. Taking one out
+// of that directory to read is an access, recorded by hand.
+func (s *Server) scheduledBackup(w http.ResponseWriter, r *http.Request) {
+	keep := 48
+	if value := r.URL.Query().Get("keep"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 || parsed > 10000 {
+			writeError(w, badRequest(errors.New("keep must be 0-10000")))
+			return
+		}
+		keep = parsed
+	}
+	path, info, err := localbackup.Write(s.backupDir, keep, time.Now(), s.store.Backup)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.lastBackup.Store(time.Now().UnixNano())
+	s.log.Info("scheduled copy of the database", "path", path, "actor", actor(r))
+	writeJSON(w, http.StatusOK, api.LocalBackup{Path: path, Node: info.Node, Tenants: info.Tenants})
 }
 
 // LastBackup returns when a backup was last sent whole since the agent

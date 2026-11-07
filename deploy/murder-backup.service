@@ -6,6 +6,8 @@ After=murder-agent.service
 [Service]
 Type=oneshot
 # Keeps two days of hourly copies. Copy the directory off the server too:
-# a backup on the disk it protects is lost with it.
-ExecStart=/usr/local/bin/murder backup -keep 48 /var/backups/murder
+# a backup on the disk it protects is lost with it. These copies are the
+# system's own keeping (-scheduled), recorded in no access register;
+# opening one to read a tenant's data is an access: murder access log.
+ExecStart=/usr/local/bin/murder backup -scheduled -keep 48 /var/backups/murder
 UMask=0077
