@@ -6,14 +6,17 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/user"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 const accessUsage = `Usage: murder access <command> [options]
@@ -108,8 +111,11 @@ func recordAccess(ctx context.Context, client *api.Client, request access.Reques
 		return entry, nil
 	}
 	var answer *api.Error
+	// Changes frozen (an upgrade under way, which a rollback could undo)
+	// is the agent unable to record, not a refusal of the access.
+	frozen := errors.As(err, &answer) && answer.Status == http.StatusConflict && strings.Contains(answer.Message, store.ErrFrozen.Error())
 	switch {
-	case errors.As(err, &answer) && answer.Status >= 400 && answer.Status < 500:
+	case errors.As(err, &answer) && answer.Status >= 400 && answer.Status < 500 && !frozen:
 		return access.Entry{}, fmt.Errorf("the access register refused this access: %w", err)
 	case !offline:
 		return access.Entry{}, fmt.Errorf("the access register could not record this access, so it is not made: %w", err)

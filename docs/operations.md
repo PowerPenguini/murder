@@ -333,18 +333,20 @@ TLS-ALPN-01 is not used.
 `murder backup <directory>` asks the agent for a copy of the database as it
 is at one moment (a plain copy of a live database can be torn), checks it and
 keeps it as `murder-<UTC time>.db`, removing all but the newest 48 (`-keep`).
-`murder-backup.timer` runs it every hour into `/var/backups/murder`
-(`murder backup -scheduled`); copy that directory off the server as well. The
-database holds secrets only sealed: keep the master key apart from it,
-offline.
+`murder-backup.timer` has the agent keep one every hour in
+`/var/backups/murder` (`murder backup -scheduled /var/backups/murder`); copy
+that directory off the server as well. The database holds secrets only
+sealed: keep the master key apart from it, offline.
 
 A copy holds every tenant's sealed secrets, so one made by hand is an access
 to every tenant's data: `murder backup -reason TEXT -ticket REF <directory>`
 records it in the [access register](#record-access-to-tenants-data) first.
-The timer's copies are the system's own keeping, recorded nowhere; a unit of
-an earlier release, which runs `murder backup` without `-scheduled`, is
-taken as the timer's when its process runs in `murder-backup.service`'s
-control group (`/proc/self/cgroup`), and only then.
+The timer's copies are the system's own keeping, recorded nowhere: the agent
+writes them itself into `/var/backups/murder`, readable by root alone as the
+database is, and hands them to no one. `-scheduled` writes there only, and
+`murder backup /var/backups/murder` without `-scheduled` (the unit of an
+earlier release) is taken as the timer's. Opening one of those copies to read
+a tenant's data is an access, recorded by hand (`murder access log`).
 
 To restore, stop the agent and put a backup in place:
 
@@ -564,7 +566,10 @@ sudo murder backup -reason "move to new hardware" -ticket incident /root/copy
 
 The agent checks everything else first, records the access (the person sudo
 names, as `jan via root`), and only then hands the data out: if the access
-cannot be recorded (no quorum, say), nothing is read. The panel asks for the
+cannot be recorded (no quorum, say), nothing is read. While an upgrade has
+changes frozen (a minute or so), nothing is recorded either, so nothing is
+read: rolling the upgrade back puts back the database from before it, which
+would lose the record. The panel asks for the
 purpose and the ticket before it shows a tenant's logs; its entry serves that
 person's reads of those logs for an hour, so a page that follows new lines
 records one entry. The socket's panel, where no one signs in, also asks who
@@ -604,10 +609,11 @@ Columns: `id`, `recorded_at` (when the agent recorded it), `accessed_at`
 `actor`, `tenant`, `kind`, `what`, `purpose`, `ticket`, `offline_record`.
 
 **Without an agent.** In a disaster recovery the agent may be down, or the
-cluster without a quorum, so nothing can be recorded. `backups verify`,
-`backups state` and `access log` take `-offline`: when the agent cannot
-record the access (it does not answer, or answers that it cannot write; never
-when it refuses the access itself), the access is written to
+cluster without a quorum, or changes frozen by an upgrade that failed, so
+nothing can be recorded. `backups verify`, `backups state` and `access log`
+take `-offline`: when the agent cannot record the access (it does not
+answer, answers that it cannot write, or that changes are frozen; never when
+it refuses the access itself), the access is written to
 `/var/lib/murder/access-offline.jsonl` on that host instead (readable by root
 only, on disk before the read goes ahead) and a warning says so. Once the
 agent records again, `sudo murder access sync` records each one (its time as

@@ -377,14 +377,24 @@ func (c *Client) Reconcile(ctx context.Context) error {
 }
 
 // Backup writes a copy of the agent's database to w: every tenant's sealed
-// secrets are in it, so it is recorded in the access register with proof,
-// unless it is the scheduled copy kept on the node.
-func (c *Client) Backup(ctx context.Context, w io.Writer, proof access.Proof, scheduled bool) error {
-	query := url.Values{}
-	if scheduled {
-		query.Set("scheduled", "1")
-	}
-	return c.do(ctx, http.MethodGet, withProof("/v1/backup", query, proof), nil, w)
+// secrets are in it, so it is recorded in the access register with proof.
+func (c *Client) Backup(ctx context.Context, w io.Writer, proof access.Proof) error {
+	return c.do(ctx, http.MethodGet, withProof("/v1/backup", url.Values{}, proof), nil, w)
+}
+
+// LocalBackup is a copy of the database the agent keeps on its node.
+type LocalBackup struct {
+	Path    string `json:"path"`
+	Node    string `json:"node"`
+	Tenants int    `json:"tenants"`
+}
+
+// ScheduledBackup has the agent keep a copy of its database in its node's
+// backup directory, root's alone, and all but the newest keep removed (0
+// keeps all): the system's own keeping, which no one is handed.
+func (c *Client) ScheduledBackup(ctx context.Context, keep int) (LocalBackup, error) {
+	var kept LocalBackup
+	return kept, c.do(ctx, http.MethodPost, "/v1/backup/scheduled?keep="+strconv.Itoa(keep), nil, &kept)
 }
 
 // responseError is the agent's refusal, if it refused.

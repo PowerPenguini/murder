@@ -8,6 +8,11 @@
   purpose and a ticket, and the agent records the access in the replicated
   audit log before it hands any data out; it refuses the read if it cannot
   record it ([the access register](operations.md#record-access-to-tenants-data)).
+  One exception is deliberate: in a disaster recovery, `backups verify`
+  and `backups state` with `-offline` read a backup once the access is on
+  that host's disk, in a file `murder access sync` records later, when the
+  agent cannot record it. The route table the edge reads carries tenants'
+  domains' private keys, sealed: only root (the edge) reads it.
   This binds people who use Murder's commands and panel, not root: root on
   a node reaches tenants' data around Murder (`docker exec`, the datasets,
   backups decrypted by hand). Recording such access with `murder access log`

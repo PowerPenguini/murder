@@ -5,65 +5,37 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
-	"strings"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/localbackup"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
-// backupName matches the backups "murder backup" writes; their names sort
-// by time.
-var backupName = regexp.MustCompile(`^murder-\d{8}T\d{6}Z\.db$`)
+// scheduledDir is where the agent keeps scheduled copies; tests replace it
+// along with the agent's.
+var scheduledDir = localbackup.Dir
 
-// partialPrefix starts the name of a backup being received; staleAfter is
-// when one is left from a run that died, not one still running.
-const (
-	partialPrefix = ".murder-backup-"
-	staleAfter    = time.Hour
-)
-
-// cgroupFile names the control group of this process, and with it the
-// systemd unit that runs it; tests replace it.
-var cgroupFile = "/proc/self/cgroup"
-
-// backupUnit is the unit murder-backup.timer starts.
-const backupUnit = "murder-backup.service"
-
-// runByBackupUnit says murder-backup.service runs this process: systemd
-// keeps a service's processes in its own control group
-// (0::/system.slice/murder-backup.service).
-func runByBackupUnit() bool {
-	data, err := os.ReadFile(cgroupFile)
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasSuffix(strings.TrimSpace(line), "/"+backupUnit) {
-			return true
-		}
-	}
-	return false
-}
-
-// runBackup asks the agent for a copy of its database and keeps it in a
-// directory as murder-<UTC time>.db, removing all but the newest keep.
+// runBackup keeps a copy of the agent's database in a directory as
+// murder-<UTC time>.db, removing all but the newest keep. A copy taken by
+// hand is an access to every tenant's data, recorded in the register;
+// murder-backup.timer's (-scheduled) the agent keeps in its node's backup
+// directory itself, handed to no one.
 func runBackup(args []string) error {
 	flags := flag.NewFlagSet("backup", flag.ContinueOnError)
 	socket := socketPath(flags)
 	keep := flags.Int("keep", 48, "backups to keep in the directory, newest first; 0 keeps all")
 	reason := addReasonFlags(flags, "a copy made by hand")
-	scheduled := flags.Bool("scheduled", false, "the copy murder-backup.timer keeps on this node, recorded in no access register")
+	scheduled := flags.Bool("scheduled", false, "the copy murder-backup.timer has the agent keep in "+localbackup.Dir+", recorded in no access register")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: murder backup [-keep n] (-reason TEXT -ticket REF | -scheduled) <directory>")
-		fmt.Fprintln(flags.Output(), "\nThe copy holds every tenant's sealed secrets: one made by hand is recorded in\nthe access register. murder-backup.timer's own copies, kept on this node for\nroot alone, are -scheduled.")
+		fmt.Fprintln(flags.Output(), "Usage: murder backup [-keep n] -reason TEXT -ticket REF <directory>\n       murder backup [-keep n] -scheduled "+localbackup.Dir)
+		fmt.Fprintln(flags.Output(), "\nThe copy holds every tenant's sealed secrets: one made by hand is recorded in\nthe access register. murder-backup.timer's copies the agent keeps itself, in\n"+localbackup.Dir+", for root alone (-scheduled).")
 		flags.PrintDefaults()
 	}
 	positional, err := parseInterspersed(flags, args)
@@ -75,86 +47,37 @@ func runBackup(args []string) error {
 		return flag.ErrHelp
 	}
 	dir := positional[0]
-	// murder-backup.service of releases before the register runs this
-	// without -scheduled: the unit's cgroup says it is that unit.
-	if !*scheduled && *reason.reason == "" && *reason.ticket == "" && runByBackupUnit() {
-		*scheduled = true
-		fmt.Fprintln(os.Stderr, "taken as -scheduled, run by systemd: install deploy/murder-backup.service of this release, which says so")
-	}
 	proof := reason.proof()
+	// murder-backup.service of releases before the register runs this
+	// without -scheduled, into the node's backup directory.
+	if !*scheduled && !proof.Given() && filepath.Clean(dir) == scheduledDir {
+		*scheduled = true
+	}
+	ctx := context.Background()
 	if *scheduled {
 		if proof.Given() {
 			return errors.New("-scheduled is the timer's copy, recorded nowhere: give it no -reason or -ticket")
 		}
-	} else if _, err := reason.request(access.State, "", ""); err != nil {
+		if filepath.Clean(dir) != scheduledDir {
+			return fmt.Errorf("the agent keeps scheduled copies in %s, not %s: a copy elsewhere is made by hand, with -reason and -ticket", scheduledDir, dir)
+		}
+		kept, err := api.NewClient(*socket).ScheduledBackup(ctx, *keep)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "backed up node %s (%d tenants) to %s\n", kept.Node, kept.Tenants, kept.Path)
+		return nil
+	}
+	if _, err := reason.request(access.State, "", ""); err != nil {
 		return fmt.Errorf("%w\n(murder-backup.timer's copies are -scheduled)", err)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	removeStalePartials(dir)
-	temp, err := os.CreateTemp(dir, partialPrefix+"*")
+	client := asOperator(api.NewClient(*socket))
+	path, info, err := localbackup.Write(dir, *keep, time.Now(), func(w io.Writer) error { return client.Backup(ctx, w, proof) })
 	if err != nil {
-		return err
-	}
-	defer os.Remove(temp.Name())
-	err = asOperator(api.NewClient(*socket)).Backup(context.Background(), temp, proof, *scheduled)
-	if err = errors.Join(err, temp.Sync(), temp.Close()); err != nil {
-		return fmt.Errorf("back up the database: %w", err)
-	}
-	info, err := store.CheckBackup(temp.Name())
-	if err != nil {
-		return fmt.Errorf("the agent's copy is not usable: %w", err)
-	}
-	path := filepath.Join(dir, "murder-"+time.Now().UTC().Format("20060102T150405Z")+".db")
-	if err := os.Rename(temp.Name(), path); err != nil {
-		return err
-	}
-	if err := syncDir(dir); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "backed up node %s (%d tenants) to %s\n", info.Node, info.Tenants, path)
-	if *keep == 0 {
-		return nil
-	}
-	return pruneBackups(dir, filepath.Base(path), *keep)
-}
-
-// pruneBackups removes all but the newest keep backups in dir, never the one
-// just written (a clock set back would make it sort first), nor files of
-// other names. Another run may have removed some already.
-func pruneBackups(dir, written string, keep int) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	var backups []string
-	for _, entry := range entries {
-		if backupName.MatchString(entry.Name()) && entry.Name() != written {
-			backups = append(backups, entry.Name())
-		}
-	}
-	slices.Sort(backups)
-	for _, old := range backups[:max(len(backups)-(keep-1), 0)] {
-		if err := os.Remove(filepath.Join(dir, old)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove an old backup: %w", err)
-		}
-	}
 	return nil
-}
-
-// removeStalePartials removes backups a run that died left half received.
-func removeStalePartials(dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err == nil && strings.HasPrefix(entry.Name(), partialPrefix) && time.Since(info.ModTime()) > staleAfter {
-			_ = os.Remove(filepath.Join(dir, entry.Name()))
-		}
-	}
 }
 
 // runRestore puts a backup in place of the node's database while the agent

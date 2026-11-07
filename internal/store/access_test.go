@@ -6,28 +6,32 @@ import (
 	"time"
 )
 
-// An access is recorded while changes are frozen, as of the first schema
-// version of batches, so every node applies it during an upgrade; it is
-// found again by its ID, and listed with the tenant's and the copies of the
-// whole state, not with other tenants'.
-func TestAccessesAreRecordedFrozenOrNot(t *testing.T) {
+// An access is recorded as of the first schema version of batches, so
+// every node applies it during an upgrade, but not while changes are
+// frozen: a rollback of the upgrade would lose it. It is found again by its
+// ID, and listed with the tenant's and the copies of the whole state, not
+// with other tenants'.
+func TestAccessesAreRecordedUnlessFrozen(t *testing.T) {
 	st, _ := withApp(t, options())
 	entries := logged(t, st)
 	if err := st.Freeze("upgrade to abc", "alice"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Access("acme", "access.logs", `{"purpose":"export fails","ticket":"ZD-1"}`, "jan via root", false); !errors.Is(err, ErrFrozen) {
+		t.Fatalf("an access while frozen: %v", err)
+	}
+	if err := st.Thaw("alice"); err != nil {
+		t.Fatal(err)
+	}
 	first, err := st.Access("acme", "access.logs", `{"purpose":"export fails","ticket":"ZD-1"}`, "jan via root", false)
 	if err != nil {
-		t.Fatalf("an access while frozen: %v", err)
+		t.Fatal(err)
 	}
 	if last := (*entries)[len(*entries)-1]; last.Schema != firstBatchSchema {
 		t.Fatalf("an access is written as of schema version %d", last.Schema)
 	}
 	if first.ID == 0 || first.Action != "access.logs" || first.Tenant != "acme" || first.Actor != "jan via root" || first.At.IsZero() {
 		t.Fatalf("recorded: %+v", first)
-	}
-	if err := st.Thaw("alice"); err != nil {
-		t.Fatal(err)
 	}
 	state, err := st.Access("", "access.state", `{"purpose":"restore drill","ticket":"incident"}`, "root", false)
 	if err != nil {

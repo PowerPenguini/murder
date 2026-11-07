@@ -21,6 +21,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/apiserver"
+	"github.com/PowerPenguini/murder/internal/localbackup"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -60,7 +61,11 @@ func registerAgent(t *testing.T) (string, *store.SQLite) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: apiserver.NewServer(st, nil, nil, key, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler(), ConnContext: apiserver.ConnContext}
+	backups := filepath.Join(dir, "backups")
+	scheduledDir = backups
+	t.Cleanup(func() { scheduledDir = localbackup.Dir })
+	agent := apiserver.NewServer(st, nil, nil, key, slog.New(slog.NewTextHandler(io.Discard, nil))).WithBackupDir(backups)
+	server := &http.Server{Handler: agent.Handler(), ConnContext: apiserver.ConnContext}
 	go server.Serve(listener)
 	t.Cleanup(func() { server.Close() })
 	return socket, st
@@ -111,8 +116,8 @@ func TestTenantSecretIsRecorded(t *testing.T) {
 	}
 }
 
-// A copy of the database made by hand is recorded; the timer's is not,
-// also when an older unit runs it without -scheduled.
+// A copy of the database made by hand is recorded; the timer's the agent
+// keeps itself, also when an older unit asks for it without -scheduled.
 func TestBackupByHandIsRecorded(t *testing.T) {
 	socket, _ := registerAgent(t)
 	capture(t)
@@ -123,41 +128,34 @@ func TestBackupByHandIsRecorded(t *testing.T) {
 	if err := run([]string{"backup", "-socket", socket, "-scheduled", "-reason", "x", dir}); err == nil {
 		t.Fatal("a scheduled copy with a reason")
 	}
+	// A scheduled copy goes where the agent keeps them, nowhere else.
+	if err := run([]string{"backup", "-socket", socket, "-scheduled", dir}); err == nil || !strings.Contains(err.Error(), scheduledDir) {
+		t.Fatalf("a scheduled copy elsewhere: %v", err)
+	}
 	if err := run([]string{"backup", "-socket", socket, "-reason", "new hardware", "-ticket", "incident", dir}); err != nil {
 		t.Fatal(err)
 	}
 	if got := registered(t, socket, "acme"); len(got) != 1 || got[0].Kind != access.State || got[0].Tenant != "" {
 		t.Fatalf("recorded: %+v", got)
 	}
-	if err := run([]string{"backup", "-socket", socket, "-scheduled", dir}); err != nil {
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("copies by hand: %d", len(entries))
+	}
+	if err := run([]string{"backup", "-socket", socket, "-scheduled", scheduledDir}); err != nil {
 		t.Fatal(err)
 	}
-	// Run by another unit: a copy by hand still.
-	other := filepath.Join(t.TempDir(), "cgroup")
-	if err := os.WriteFile(other, []byte("0::/system.slice/something-else.service\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cgroupFile = other
-	t.Cleanup(func() { cgroupFile = "/proc/self/cgroup" })
-	if err := run([]string{"backup", "-socket", socket, dir}); err == nil {
-		t.Fatal("a copy by another unit taken as the timer's")
-	}
-	// The unit of a release before, without -scheduled: systemd runs it in
-	// its own control group.
-	if err := os.WriteFile(other, []byte("0::/system.slice/murder-backup.service\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := run([]string{"backup", "-socket", socket, dir}); err != nil {
+	// The unit of a release before: no -scheduled, the backup directory.
+	if err := run([]string{"backup", "-socket", socket, "-keep", "48", scheduledDir + "/"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := registered(t, socket, ""); len(got) != 1 {
 		t.Fatalf("scheduled copies recorded: %+v", got)
 	}
-	if entries, _ := os.ReadDir(dir); len(entries) == 0 {
-		t.Fatal("no copies")
+	if entries, _ := os.ReadDir(scheduledDir); len(entries) == 0 {
+		t.Fatal("no scheduled copies")
 	}
 	unit, err := deploy.Files.ReadFile("murder-backup.service")
-	if err != nil || !strings.Contains(string(unit), "murder backup -scheduled ") {
+	if err != nil || !strings.Contains(string(unit), "murder backup -scheduled -keep 48 "+localbackup.Dir) {
 		t.Fatalf("the unit does not say -scheduled: %v", err)
 	}
 }
@@ -379,5 +377,27 @@ func captureStderr(t *testing.T) func() string {
 	return func() string {
 		finish()
 		return collected.String()
+	}
+}
+
+// While an upgrade froze changes, the agent cannot record an access (a
+// rollback would lose it): -offline writes it down on the node instead.
+func TestAFrozenAgentTakesAccessesOffline(t *testing.T) {
+	socket, st := registerAgent(t)
+	capture(t)
+	if err := st.Freeze("upgrade to abc", "test"); err != nil {
+		t.Fatal(err)
+	}
+	offline := filepath.Join(t.TempDir(), "access-offline.jsonl")
+	args := []string{"access", "log", "-socket", socket, "-offline-file", offline, "-tenant", "acme", "-what", "docker logs", "-reason", "the upgrade fails", "-ticket", "incident"}
+	if err := run(args); err == nil || !strings.Contains(err.Error(), "could not record") {
+		t.Fatalf("frozen, without -offline: %v", err)
+	}
+	captureStderr(t)
+	if err := run(append(args, "-offline")); err != nil {
+		t.Fatal(err)
+	}
+	if records, _, _ := access.ReadOffline(offline); len(records) != 1 {
+		t.Fatalf("offline: %+v", records)
 	}
 }

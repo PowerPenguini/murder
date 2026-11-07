@@ -16,7 +16,10 @@ const accessPrefix = "access."
 // tenant) in the audit log, as an event of action, which starts with
 // "access.", and returns the event. It is written as of the first schema
 // version of batches, as Note is: every release applies it, so an access
-// is recorded while the cluster upgrades, and while changes are frozen.
+// is recorded while the cluster upgrades. It is refused while changes are
+// frozen (ErrFrozen), as other changes are: a rollback of the upgrade
+// that froze them puts back the database from before, which would lose
+// the access, not the data read.
 // With once, an access of the same action, tenant and detail recorded
 // before is returned instead of a second: the write is computed against
 // the state it is applied to, so two such writes racing on any nodes
@@ -27,7 +30,7 @@ func (s *SQLite) Access(tenant, action, detail, actor string, once bool) (Event,
 	}
 	var at time.Time
 	var before int64
-	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+	_, err := s.writeAs(firstBatchSchema, true, false, func(tx *recorder, current *snapshot, now time.Time) error {
 		at, before = now, 0
 		if once {
 			err := s.db.QueryRow(`SELECT id FROM events WHERE tenant = ? AND action = ? AND detail = ? AND id <= ? ORDER BY id LIMIT 1`,

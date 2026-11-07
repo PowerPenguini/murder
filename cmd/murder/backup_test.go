@@ -67,7 +67,7 @@ func TestBackupAndRestore(t *testing.T) {
 		}
 	}
 	out := capture(t)
-	if err := run([]string{"backup", "-socket", socket, "-scheduled", "-keep", "2", backups}); err != nil {
+	if err := run([]string{"backup", "-socket", socket, "-reason", "a test", "-ticket", "incident", "-keep", "2", backups}); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(backups)

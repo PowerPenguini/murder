@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +93,7 @@ func TestAReadTheRegisterCannotRecordIsRefused(t *testing.T) {
 		t.Fatalf("logs read unrecorded: %q %v", logs, err)
 	}
 	var copy bytes.Buffer
-	if err := client.Backup(ctx, &copy, proof, false); err == nil || copy.Len() != 0 {
+	if err := client.Backup(ctx, &copy, proof); err == nil || copy.Len() != 0 {
 		t.Fatalf("a copy of the state unrecorded: %d bytes, %v", copy.Len(), err)
 	}
 	if _, err := client.RecordAccess(ctx, access.Request{Tenant: "acme", Kind: access.Manual, What: "docker exec", Purpose: "x", Ticket: "incident"}); err == nil {
@@ -131,7 +133,7 @@ func TestAGrantServesItsOwnReadsForAnHour(t *testing.T) {
 		"another person":    func() error { _, err := f.client.WithActor("anna").Logs(ctx, "acme", 10, grant); return err },
 		"another tenant":    func() error { _, err := jan.Logs(ctx, "globex", 10, grant); return err },
 		"a secret":          func() error { _, err := jan.Secret(ctx, "acme", "SESSION_SECRET", grant); return err },
-		"the state":         func() error { return jan.Backup(ctx, &bytes.Buffer{}, grant, false) },
+		"the state":         func() error { return jan.Backup(ctx, &bytes.Buffer{}, grant) },
 		"an unknown access": func() error { _, err := jan.Logs(ctx, "acme", 10, access.Proof{Grant: entry.ID + 1000}); return err },
 	} {
 		checkStatus(t, name, read(), http.StatusForbidden)
@@ -180,19 +182,38 @@ func TestACopyOfTheStateIsRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	var copy bytes.Buffer
-	checkStatus(t, "a copy unrecorded", f.client.Backup(ctx, &copy, access.Proof{}, false), http.StatusForbidden)
-	checkStatus(t, "a scheduled copy with a purpose", f.client.Backup(ctx, &copy, access.Proof{Purpose: "x", Ticket: "y"}, true), http.StatusBadRequest)
+	checkStatus(t, "a copy unrecorded", f.client.Backup(ctx, &copy, access.Proof{}), http.StatusForbidden)
+	// What once let the timer's copy through hands nothing out now.
+	recorder := httptest.NewRecorder()
+	f.handler.ServeHTTP(recorder, httptest.NewRequest("GET", "/v1/backup?scheduled=1", nil))
+	if recorder.Code != http.StatusForbidden || recorder.Body.Len() > 1000 {
+		t.Fatalf("a copy said to be scheduled: %d, %d bytes", recorder.Code, recorder.Body.Len())
+	}
 	if copy.Len() != 0 {
 		t.Fatal("a refused copy sent")
 	}
-	if err := f.client.Backup(ctx, &copy, access.Proof{}, true); err != nil || copy.Len() == 0 {
-		t.Fatalf("the scheduled copy: %v", err)
+	// The timer's copy the agent keeps itself, root's alone; it hands
+	// nothing out, and is recorded nowhere.
+	dir := t.TempDir()
+	f.server.WithBackupDir(dir)
+	kept, err := f.client.ScheduledBackup(ctx, 2)
+	if err != nil || filepath.Dir(kept.Path) != dir || kept.Tenants != 1 || kept.Node != "test-node" {
+		t.Fatalf("the scheduled copy: %+v %v", kept, err)
+	}
+	if info, err := os.Stat(kept.Path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("the copy: %v %v", info, err)
 	}
 	if got := accessesOf(t, f, ""); len(got) != 0 {
 		t.Fatalf("the scheduled copy recorded: %+v", got)
 	}
+	someone := context.WithValue(context.Background(), uidKey{}, agentUID+1)
+	recorder = httptest.NewRecorder()
+	f.handler.ServeHTTP(recorder, httptest.NewRequest("POST", "/v1/backup/scheduled", nil).WithContext(someone))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("a scheduled copy by someone not root: %d", recorder.Code)
+	}
 	copy.Reset()
-	if err := f.client.Backup(ctx, &copy, access.Proof{Purpose: "move to new hardware", Ticket: "incident:INC-7"}, false); err != nil || copy.Len() == 0 {
+	if err := f.client.Backup(ctx, &copy, access.Proof{Purpose: "move to new hardware", Ticket: "incident:INC-7"}); err != nil || copy.Len() == 0 {
 		t.Fatalf("a copy by hand: %v", err)
 	}
 	// It shows in every tenant's extract.
@@ -283,5 +304,35 @@ func TestRecordingAnAccess(t *testing.T) {
 	since, err := f.client.Accesses(ctx, "", all[1].At)
 	if err != nil || len(since) != 1 || since[0].ID != all[1].ID {
 		t.Fatalf("since: %+v %v", since, err)
+	}
+}
+
+// Routes carry tenants' domains' sealed private keys: for the edge, as
+// root, not for the socket's group.
+func TestOnlyRootReadsTheRoutes(t *testing.T) {
+	f := newAPIFixture(t)
+	someone := context.WithValue(context.Background(), uidKey{}, agentUID+1)
+	recorder := httptest.NewRecorder()
+	f.handler.ServeHTTP(recorder, httptest.NewRequest("GET", "/v1/routes", nil).WithContext(someone))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("routes for someone not root: %d", recorder.Code)
+	}
+}
+
+// While changes are frozen (an upgrade, which a rollback may undo with the
+// database from before), no access is recorded, so nothing is read.
+func TestNothingIsReadWhileFrozen(t *testing.T) {
+	f := withApp(t)
+	ctx := context.Background()
+	if _, err := f.client.Create(ctx, tenantOf("acme")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Freeze("upgrade to abc", "test"); err != nil {
+		t.Fatal(err)
+	}
+	value, err := f.client.Secret(ctx, "acme", "SESSION_SECRET", recorded)
+	checkStatus(t, "a secret while frozen", err, http.StatusConflict)
+	if value != "" || err == nil || !strings.Contains(err.Error(), "changes are frozen") {
+		t.Fatalf("read while frozen: %q %v", value, err)
 	}
 }

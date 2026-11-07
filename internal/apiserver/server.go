@@ -23,6 +23,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/localbackup"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
@@ -71,11 +72,19 @@ type Server struct {
 	// clock is the time, for the access register's grants; nil is the
 	// system's.
 	clock func() time.Time
+	// backupDir keeps the scheduled copies of the database.
+	backupDir string
 }
 
 // NewServer returns the API server.
 func NewServer(st store.Store, reconciler *reconcile.Reconciler, rt runtime.Runtime, key *secrets.Key, log *slog.Logger) *Server {
-	return &Server{store: st, reconciler: reconciler, runtime: rt, key: key, log: log, stopping: make(chan struct{}), caughtUp: make(chan struct{})}
+	return &Server{store: st, reconciler: reconciler, runtime: rt, key: key, log: log, stopping: make(chan struct{}), caughtUp: make(chan struct{}), backupDir: localbackup.Dir}
+}
+
+// WithBackupDir keeps the scheduled copies of the database in dir.
+func (s *Server) WithBackupDir(dir string) *Server {
+	s.backupDir = dir
+	return s
 }
 
 // CaughtUp says this node has caught up with its cluster since it
@@ -102,7 +111,9 @@ func (s *Server) Handler() http.Handler {
 	s.usageRoutes(mux)
 	s.domainRoutes(mux)
 	s.accessRoutes(mux)
-	mux.HandleFunc("GET /v1/routes", s.routes)
+	// Routes carry tenants' domains' private keys, sealed: for the edge,
+	// which runs as root, not for the socket's group.
+	mux.HandleFunc("GET /v1/routes", rootOnly(s.routes))
 	mux.HandleFunc("GET /v1/apps", s.listApps)
 	mux.HandleFunc("GET /v1/apps/{name}", s.getApp)
 	mux.HandleFunc("PUT /v1/apps/{name}", s.putApp)
@@ -135,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	// The whole database: panel secrets and sign-in state too, which only
 	// root reads.
 	mux.HandleFunc("GET /v1/backup", rootOnly(s.backup))
+	mux.HandleFunc("POST /v1/backup/scheduled", rootOnly(s.scheduledBackup))
 	mux.HandleFunc("POST /v1/backups/run", rootOnly(s.runBackups))
 	mux.HandleFunc("POST /v1/backups/replace", rootOnly(s.replaceTenant))
 	return mux
@@ -905,19 +917,11 @@ func (s *Server) reconcileNow(w http.ResponseWriter, r *http.Request) {
 // an error response; one after it cuts the connection, so the client never
 // takes a partial copy for a whole one.
 //
-// The copy holds every tenant's sealed secrets: it is recorded in the
-// access register (?purpose=&ticket=, or ?access=ID), unless it is the
-// scheduled one (?scheduled=1), which murder-backup.timer keeps on this
-// node, readable by root alone as the database itself is. That one is
-// the system's own keeping, not a person's access to tenants' data.
+// The copy holds every tenant's sealed secrets, and goes where its client
+// takes it: it is recorded in the access register (?purpose=&ticket=, or
+// ?access=ID). murder-backup.timer's copies are scheduledBackup's.
 func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("scheduled") != "" {
-		if proof, err := access.ProofFrom(r.URL.Query()); err != nil || proof.Given() {
-			writeError(w, badRequest(errors.New("a scheduled copy is recorded in no access register: give no purpose, ticket or access")))
-			return
-		}
-		s.log.Info("scheduled copy of the database", "actor", actor(r))
-	} else if !s.recorded(w, r, access.State, "", "") {
+	if !s.recorded(w, r, access.State, "", "") {
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.sqlite3")
@@ -932,6 +936,31 @@ func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 	s.lastBackup.Store(time.Now().UnixNano())
+}
+
+// scheduledBackup keeps a copy of the database in this node's backup
+// directory (?keep= the newest so many), as murder-backup.timer asks: the
+// system's own keeping, readable by root alone as the database itself is,
+// and handed to no one, so recorded in no access register. Taking one out
+// of that directory to read is an access, recorded by hand.
+func (s *Server) scheduledBackup(w http.ResponseWriter, r *http.Request) {
+	keep := 48
+	if value := r.URL.Query().Get("keep"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 || parsed > 10000 {
+			writeError(w, badRequest(errors.New("keep must be 0-10000")))
+			return
+		}
+		keep = parsed
+	}
+	path, info, err := localbackup.Write(s.backupDir, keep, time.Now(), s.store.Backup)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.lastBackup.Store(time.Now().UnixNano())
+	s.log.Info("scheduled copy of the database", "path", path, "actor", actor(r))
+	writeJSON(w, http.StatusOK, api.LocalBackup{Path: path, Node: info.Node, Tenants: info.Tenants})
 }
 
 // LastBackup returns when a backup was last sent whole since the agent
