@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/deploy"
 	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/apiserver"
@@ -131,8 +132,21 @@ func TestBackupByHandIsRecorded(t *testing.T) {
 	if err := run([]string{"backup", "-socket", socket, "-scheduled", dir}); err != nil {
 		t.Fatal(err)
 	}
-	// The unit of a release before: systemd runs it, with no terminal.
-	t.Setenv("INVOCATION_ID", "0123456789abcdef")
+	// Run by another unit: a copy by hand still.
+	other := filepath.Join(t.TempDir(), "cgroup")
+	if err := os.WriteFile(other, []byte("0::/system.slice/something-else.service\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cgroupFile = other
+	t.Cleanup(func() { cgroupFile = "/proc/self/cgroup" })
+	if err := run([]string{"backup", "-socket", socket, dir}); err == nil {
+		t.Fatal("a copy by another unit taken as the timer's")
+	}
+	// The unit of a release before, without -scheduled: systemd runs it in
+	// its own control group.
+	if err := os.WriteFile(other, []byte("0::/system.slice/murder-backup.service\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := run([]string{"backup", "-socket", socket, dir}); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +156,7 @@ func TestBackupByHandIsRecorded(t *testing.T) {
 	if entries, _ := os.ReadDir(dir); len(entries) == 0 {
 		t.Fatal("no copies")
 	}
-	unit, err := os.ReadFile("../../deploy/murder-backup.service")
+	unit, err := deploy.Files.ReadFile("murder-backup.service")
 	if err != nil || !strings.Contains(string(unit), "murder backup -scheduled ") {
 		t.Fatalf("the unit does not say -scheduled: %v", err)
 	}
@@ -163,10 +177,10 @@ func TestAccessLogAndList(t *testing.T) {
 	if !strings.Contains(out.String(), "recorded access") {
 		t.Fatalf("said: %q", out)
 	}
-	if _, err := st.Access("", "access.state", (access.Request{Kind: access.State, Purpose: "restore drill", Ticket: "incident"}).Detail(), "root"); err != nil {
+	if _, err := st.Access("", "access.state", (access.Request{Kind: access.State, Purpose: "restore drill", Ticket: "incident"}).Detail(), "root", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Access("globex", "access.logs", (access.Request{Tenant: "globex", Kind: access.Logs, Purpose: "theirs", Ticket: "ZD-2"}).Detail(), "root"); err != nil {
+	if _, err := st.Access("globex", "access.logs", (access.Request{Tenant: "globex", Kind: access.Logs, Purpose: "theirs", Ticket: "ZD-2"}).Detail(), "root", false); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
@@ -231,7 +245,7 @@ func TestOfflineAccessesAreSyncedOnce(t *testing.T) {
 	if !strings.Contains(stderr(), "WARNING") || !strings.Contains(stderr(), "murder access sync") {
 		t.Fatalf("said quietly: %q", stderr())
 	}
-	records, err := access.ReadOffline(offline)
+	records, _, err := access.ReadOffline(offline)
 	if err != nil || len(records) != 1 || records[0].Operator != "jan" || records[0].What != "read its dataset" {
 		t.Fatalf("offline: %+v %v", records, err)
 	}
@@ -269,6 +283,24 @@ func TestOfflineAccessesAreSyncedOnce(t *testing.T) {
 	out.Reset()
 	if err := run([]string{"access", "sync", "-socket", socket, "-offline-file", offline}); err != nil || !strings.Contains(out.String(), "no accesses wait") {
 		t.Fatalf("nothing to sync: %v %q", err, out)
+	}
+	// A record its writer wrote as themselves, not through sudo, is theirs
+	// when root syncs it; a damaged line stays, and the sync says so.
+	t.Setenv("SUDO_USER", "")
+	theirs := access.OfflineRecord{ID: "THEIRS", At: time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC), Actor: "ewa",
+		Request: access.Request{Tenant: "acme", Kind: access.Manual, What: "read its files", Purpose: "x", Ticket: "incident"}}
+	line, _ = json.Marshal(theirs)
+	if err := os.WriteFile(offline, append(append(line, '\n'), []byte(`{"id":"TORN","purp`)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"access", "sync", "-socket", socket, "-offline-file", offline}); err == nil || !strings.Contains(err.Error(), "1 lines") {
+		t.Fatalf("a damaged line unsaid: %v", err)
+	}
+	if got := registered(t, socket, "acme"); len(got) != 2 || got[1].Actor != "ewa via "+me(t) || got[1].Offline != "THEIRS" {
+		t.Fatalf("synced: %+v", got)
+	}
+	if records, damaged, _ := access.ReadOffline(offline); len(records) != 0 || len(damaged) != 1 {
+		t.Fatalf("left: %+v %q", records, damaged)
 	}
 }
 
@@ -313,7 +345,7 @@ func TestBackupsReadsAreRecordedFirst(t *testing.T) {
 	captureStderr(t)
 	// The bucket is nowhere either: the read fails after the record.
 	_ = runBackups([]string{"verify", "acme", "-config", configPath, "-identity", identity, "-reason", "drill", "-ticket", "incident", "-offline", "-offline-file", offline})
-	if records, err := access.ReadOffline(offline); err != nil || len(records) != 1 || records[0].Kind != access.BackupVerify || records[0].Tenant != "acme" {
+	if records, _, err := access.ReadOffline(offline); err != nil || len(records) != 1 || records[0].Kind != access.BackupVerify || records[0].Tenant != "acme" {
 		t.Fatalf("offline: %+v %v", records, err)
 	}
 }

@@ -1,7 +1,6 @@
 package access
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
@@ -54,9 +53,17 @@ func WriteOffline(path string, request Request, actor, operator string, now time
 		return OfflineRecord{}, err
 	}
 	defer unlock()
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return OfflineRecord{}, err
+	}
+	// A write cut short before (a full disk) left a line unended: this
+	// one starts on a line of its own, and that one stays damaged.
+	if info, statErr := file.Stat(); statErr == nil && info.Size() > 0 {
+		last := make([]byte, 1)
+		if _, err := file.ReadAt(last, info.Size()-1); err == nil && last[0] != '\n' {
+			line = append([]byte{'\n'}, line...)
+		}
 	}
 	_, err = file.Write(append(line, '\n'))
 	if err = errors.Join(err, file.Sync(), file.Close()); err != nil {
@@ -65,36 +72,33 @@ func WriteOffline(path string, request Request, actor, operator string, now time
 	return record, syncDir(filepath.Dir(path))
 }
 
-// ReadOffline reads the offline file at path; none is no records.
-func ReadOffline(path string) ([]OfflineRecord, error) {
+// ReadOffline reads the offline file at path; none is no records. Lines
+// that are no record (one cut short by a full disk, say) are damaged: they
+// are returned apart, as they are, never dropped.
+func ReadOffline(path string) (records []OfflineRecord, damaged [][]byte, err error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var records []OfflineRecord
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(nil, 1<<20)
-	for line := 1; scanner.Scan(); line++ {
-		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		var record OfflineRecord
-		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
-			return nil, fmt.Errorf("%s, line %d: %w", path, line, err)
-		}
-		if record.ID == "" {
-			return nil, fmt.Errorf("%s, line %d: a record without an ID", path, line)
+		if err := json.Unmarshal(line, &record); err != nil || record.ID == "" || record.Request.Check() != nil {
+			damaged = append(damaged, bytes.Clone(line))
+			continue
 		}
 		records = append(records, record)
 	}
-	return records, scanner.Err()
+	return records, damaged, nil
 }
 
-// KeepOffline replaces the offline file at path with records, those not
-// synced yet; none removes it. A record written meanwhile, past those
+// KeepOffline replaces the offline file at path with its records not
+// synced yet, and its damaged lines as they are; none removes it. A record written meanwhile, past those
 // read, is kept too: writers and this take the file's lock.
 func KeepOffline(path string, synced map[string]bool) error {
 	unlock, err := lock(path)
@@ -102,7 +106,7 @@ func KeepOffline(path string, synced map[string]bool) error {
 		return err
 	}
 	defer unlock()
-	records, err := ReadOffline(path)
+	records, damaged, err := ReadOffline(path)
 	if err != nil {
 		return err
 	}
@@ -115,6 +119,9 @@ func KeepOffline(path string, synced map[string]bool) error {
 		if err != nil {
 			return err
 		}
+		kept.Write(append(line, '\n'))
+	}
+	for _, line := range damaged {
 		kept.Write(append(line, '\n'))
 	}
 	if kept.Len() == 0 {

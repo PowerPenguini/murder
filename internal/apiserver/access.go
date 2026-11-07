@@ -84,7 +84,8 @@ func (s *Server) accesses(w http.ResponseWriter, r *http.Request) {
 
 // record writes request in the register, as the requester's.
 func (s *Server) record(r *http.Request, request access.Request) (access.Entry, error) {
-	event, err := s.store.Access(request.Tenant, request.Kind.Action(), request.Detail(), actor(r))
+	// An offline record is recorded once, however many syncs send it.
+	event, err := s.store.Access(request.Tenant, request.Kind.Action(), request.Detail(), actor(r), request.Offline != "")
 	if err != nil {
 		return access.Entry{}, fmt.Errorf("the access register could not record this access, so it is refused: %w", err)
 	}

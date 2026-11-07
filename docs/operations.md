@@ -343,7 +343,8 @@ to every tenant's data: `murder backup -reason TEXT -ticket REF <directory>`
 records it in the [access register](#record-access-to-tenants-data) first.
 The timer's copies are the system's own keeping, recorded nowhere; a unit of
 an earlier release, which runs `murder backup` without `-scheduled`, is
-taken as the timer's while systemd runs it with no terminal.
+taken as the timer's when its process runs in `murder-backup.service`'s
+control group (`/proc/self/cgroup`), and only then.
 
 To restore, stop the agent and put a backup in place:
 
@@ -566,7 +567,9 @@ names, as `jan via root`), and only then hands the data out: if the access
 cannot be recorded (no quorum, say), nothing is read. The panel asks for the
 purpose and the ticket before it shows a tenant's logs; its entry serves that
 person's reads of those logs for an hour, so a page that follows new lines
-records one entry. A read may name an entry recorded before (`-access ID`,
+records one entry. The socket's panel, where no one signs in, also asks who
+reads (`jan (panel socket)` in the register), and keeps each browser's
+entries apart. A read may name an entry recorded before (`-access ID`,
 the panel does so) only for the same thing, by the same person, within an
 hour (a day for the restore that recorded it). `backups verify`, `restore`,
 `state` and `forget` talk to the bucket themselves: they record the access
@@ -608,9 +611,12 @@ when it refuses the access itself), the access is written to
 `/var/lib/murder/access-offline.jsonl` on that host instead (readable by root
 only, on disk before the read goes ahead) and a warning says so. Once the
 agent records again, `sudo murder access sync` records each one (its time as
-when the access was, its person as the record says) and empties the file; a
-sync that stops halfway records none twice. `murder doctor` warns while
-records wait in the file. `restore` and `forget` need the agent anyway, and
+when the access was, its person as the record says) and empties the file;
+the agent records each record once, however many syncs send it, on whichever
+node. A line cut short (a full disk, say) is no record: the next one starts
+on a line of its own, and a sync leaves the damaged line in the file and
+says so, for a person to read and record with `murder access log`. `murder
+doctor` warns while records or damaged lines wait in the file. `restore` and `forget` need the agent anyway, and
 take no `-offline`. Restoring the state by hand (`murder restore`) is done
 with the agent stopped: record the copy you read with `backups state
 -offline`, and sync once the agent runs.

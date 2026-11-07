@@ -6,6 +6,7 @@
   <h2>Why read {{$n}}'s logs?</h2>
   <p class="lead">Its logs are its customer's data. Reading them is recorded in the access register first: who, when, why, and at whose request. The customer may ask for these records. One record covers your reads of these logs for an hour.</p>
   <form method="post" class="stack spaced">
+    {{if $d.AskName}}<label class="field"><span>Your name: no one signs in to this panel, so say who reads</span> <input type="text" name="reader" value="{{$d.Reader}}" required maxlength="40" class="short" placeholder="jan" autocomplete="username" autocapitalize="none" spellcheck="false"></label>{{end}}
     <label class="field">Purpose <input type="text" name="purpose" value="{{$d.Purpose}}" required maxlength="500" placeholder="the customer's export fails since Monday" autocomplete="off"></label>
     <label class="field"><span>Ticket: the customer's request, or <code>incident</code> or <code>legal</code> when no customer asked</span>
       <input type="text" name="ticket" value="{{$d.Ticket}}" required maxlength="200" class="short" placeholder="ZD-1234" autocomplete="off" autocapitalize="none" spellcheck="false"></label>

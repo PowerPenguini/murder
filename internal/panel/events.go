@@ -59,7 +59,7 @@ func who(actor string) string {
 	switch {
 	case name == "murder-panel socket":
 		return "the local panel"
-	case strings.HasSuffix(name, " (panel)"):
+	case strings.HasSuffix(name, " (panel)"), strings.HasSuffix(name, " (panel socket)"):
 		return name
 	case viaPanel:
 		return name + " (panel)"

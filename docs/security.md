@@ -12,8 +12,9 @@
   a node reaches tenants' data around Murder (`docker exec`, the datasets,
   backups decrypted by hand). Recording such access with `murder access log`
   is an organizational rule, not a technical control. The person named is
-  the one sudo names (`SUDO_USER`) or the panel's signed-in person; give
-  each operator an account of their own. The register is as trustworthy as
+  the one sudo names (`SUDO_USER`), the panel's signed-in person, or the
+  name given on the socket's panel; give each operator an account of their
+  own. The register is as trustworthy as
   those who can write the state: root on any node holds the master key and
   could, like any member, write events or remove them on every node; the
   copies of the state in the backup bucket (locked, in production) keep

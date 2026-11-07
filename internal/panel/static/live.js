@@ -208,7 +208,10 @@
     document.title = page.title;
     const fresh = page.getElementById("live");
     if (!fresh) return;
-    if (document.querySelector("[data-still]")) {
+    // A page that holds still updates only its live parts, while the
+    // fresh one holds still too: one that asks again why logs are read
+    // (its access ended) takes the page's place.
+    if (document.querySelector("[data-still]") && fresh.querySelector("[data-still]")) {
       // Lines followed stay at their end, unless scrolled back.
       const lines = document.querySelector("[data-follow]");
       const atEnd = !lines || lines.scrollTop + lines.clientHeight >= lines.scrollHeight - 24;

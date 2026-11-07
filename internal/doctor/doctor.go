@@ -327,12 +327,15 @@ func checkBackups(cfg config.Agent, h Host) []Result {
 // node's offline file while the agent could not record them: the register
 // misses them until they are synced.
 func checkOfflineAccesses(h Host) []Result {
-	records, err := access.ReadOffline(h.path(access.OfflineFile))
+	records, damaged, err := access.ReadOffline(h.path(access.OfflineFile))
 	switch {
 	case errors.Is(err, os.ErrPermission):
 		return []Result{{Skipped, "access register", "cannot read " + access.OfflineFile, "run as root"}}
 	case err != nil:
 		return []Result{{Warning, "access register", "the offline file of accesses cannot be read: " + err.Error(), "murder access sync"}}
+	case len(damaged) > 0:
+		return []Result{{Warning, "access register", fmt.Sprintf("%s holds %d damaged lines and %d records not in the register yet", access.OfflineFile, len(damaged), len(records)),
+			"murder access sync; record the damaged lines' accesses with murder access log, then remove them"}}
 	case len(records) > 0:
 		said := fmt.Sprintf("%d accesses to tenants' data wait", len(records))
 		if len(records) == 1 {

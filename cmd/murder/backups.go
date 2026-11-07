@@ -211,6 +211,16 @@ func runBackups(args []string) error {
 		if err != nil {
 			return err
 		}
+		// A download of many hours may outlast its entry: one more is
+		// recorded, rather than the download lost.
+		if time.Since(entry.At) > access.RestoreGrantFor-time.Hour {
+			if entry, err = record(access.BackupRestore, name); err != nil {
+				if discard := backups.DiscardCopy(context.WithoutCancel(ctx), copy); discard != nil {
+					return fmt.Errorf("%w; remove copy %s too: %w", err, copy, discard)
+				}
+				return err
+			}
+		}
 		replaced, err := client.ReplaceTenant(ctx, name, copy, entry.ID)
 		if err == nil && replaced.Error != "" {
 			err = errors.New(replaced.Error)

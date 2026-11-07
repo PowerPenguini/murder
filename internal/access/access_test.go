@@ -120,7 +120,7 @@ func TestAProofIsAPurposeAndTicketOrAGrant(t *testing.T) {
 // until a sync records them; one written during a sync is kept.
 func TestOfflineRecordsWaitForASync(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lib", "access-offline.jsonl")
-	if records, err := ReadOffline(path); err != nil || records != nil {
+	if records, _, err := ReadOffline(path); err != nil || records != nil {
 		t.Fatalf("no file: %v %v", records, err)
 	}
 	if _, err := WriteOffline(path, Request{Tenant: "acme", Kind: BackupVerify}, "root", "", time.Now()); err == nil {
@@ -139,7 +139,7 @@ func TestOfflineRecordsWaitForASync(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("the file: %v %v", info.Mode(), err)
 	}
-	records, err := ReadOffline(path)
+	records, _, err := ReadOffline(path)
 	if err != nil || len(records) != 2 || records[0].ID != first.ID || records[0].Operator != "jan" || records[1].Tenant != "acme" {
 		t.Fatalf("read: %+v %v", records, err)
 	}
@@ -154,7 +154,7 @@ func TestOfflineRecordsWaitForASync(t *testing.T) {
 	if err := KeepOffline(path, map[string]bool{first.ID: true}); err != nil {
 		t.Fatal(err)
 	}
-	if records, _ := ReadOffline(path); len(records) != 2 || records[0].ID != second.ID || records[1].ID != third.ID {
+	if records, _, _ := ReadOffline(path); len(records) != 2 || records[0].ID != second.ID || records[1].ID != third.ID {
 		t.Fatalf("kept: %+v", records)
 	}
 	if err := KeepOffline(path, map[string]bool{second.ID: true, third.ID: true}); err != nil {
@@ -163,10 +163,36 @@ func TestOfflineRecordsWaitForASync(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("the file stays when all are synced: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("{not json\n"), 0o600); err != nil {
+}
+
+// A write cut short (a full disk) leaves a line unended: the next record
+// starts on a line of its own and syncs, and the damaged one stays as it
+// is, never dropped.
+func TestADamagedOfflineLineStaysAndBlocksNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access-offline.jsonl")
+	torn := `{"id":"TORN","at":"2026-11-07T10:00:00Z","actor":"root","tenant":"acme","kind":"logs","purp`
+	if err := os.WriteFile(path, []byte(torn), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadOffline(path); err == nil || !strings.Contains(err.Error(), "line 1") {
-		t.Fatalf("a broken line: %v", err)
+	record, err := WriteOffline(path, Request{Tenant: "acme", Kind: BackupVerify, Purpose: "drill", Ticket: "incident"}, "root", "", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, damaged, err := ReadOffline(path)
+	if err != nil || len(records) != 1 || records[0].ID != record.ID || len(damaged) != 1 || string(damaged[0]) != torn {
+		t.Fatalf("read: %+v %q %v", records, damaged, err)
+	}
+	if err := KeepOffline(path, map[string]bool{record.ID: true}); err != nil {
+		t.Fatal(err)
+	}
+	if records, damaged, _ := ReadOffline(path); len(records) != 0 || len(damaged) != 1 || string(damaged[0]) != torn {
+		t.Fatalf("kept: %+v %q", records, damaged)
+	}
+	// A line that parses but is no access to record is damaged too.
+	if err := os.WriteFile(path, []byte(`{"id":"X","kind":"logs","tenant":"acme"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if records, damaged, _ := ReadOffline(path); len(records) != 0 || len(damaged) != 1 {
+		t.Fatalf("a record without a purpose: %+v %q", records, damaged)
 	}
 }

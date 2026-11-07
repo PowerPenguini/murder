@@ -253,11 +253,12 @@ type logsData struct {
 	Showing         bool
 	PreviousProblem string
 	// Ask says the page asks why the logs are read, for the access
-	// register, before it shows them; Purpose and Ticket are what was
-	// given, if anything. Grant is the entry the page reads under.
-	Ask             bool
-	Purpose, Ticket string
-	Grant           access.Entry
+	// register, before it shows them, and AskName who reads, on the
+	// socket's panel; Reader, Purpose and Ticket are what was given, if
+	// anything. Grant is the entry the page reads under.
+	Ask, AskName            bool
+	Reader, Purpose, Ticket string
+	Grant                   access.Entry
 }
 
 // Link is this page's address with some of its choices changed: pairs of
@@ -369,16 +370,16 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	var nodes api.Nodes
 	var previous api.PreviousLogs
 	var previousErr error
-	user := userOf(r)
 	// A tenant's logs are its customer's data: read under an entry of the
 	// access register, which the page asks for first.
-	grant, granted := s.grants.get(user, name, s.now())
-	if !granted {
-		s.askAccess(w, r, name, "", "", "", http.StatusOK)
+	reader := s.reader(r)
+	grant, granted := s.grants.get(reader, name, s.now())
+	if reader == "" || !granted {
+		s.askAccess(w, r, name, "", logsData{}, http.StatusOK)
 		return
 	}
 	proof := access.Proof{Grant: grant.ID}
-	agent := s.Actions(s.actor(user))
+	agent := s.Actions(grant.actor)
 	if err := all(
 		func() (err error) { data, err = agent.Logs(ctx, name, tail, proof); return },
 		func() error { previous, previousErr = agent.PreviousLogs(ctx, name, proof); return nil },
@@ -386,8 +387,8 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		func() (err error) { nodes, err = s.backend.Nodes(ctx); return },
 	); err != nil {
 		if refusedAccess(err) {
-			s.grants.drop(user, name)
-			s.askAccess(w, r, name, err.Error(), grant.Purpose, grant.Ticket, http.StatusOK)
+			s.grants.drop(reader, name)
+			s.askAccess(w, r, name, err.Error(), logsData{Reader: strings.TrimSuffix(grant.actor, " (panel socket)"), Purpose: grant.Purpose, Ticket: grant.Ticket}, http.StatusOK)
 			return
 		}
 		s.fail(w, r, err)
@@ -405,7 +406,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		head.State = writable(head.State, &u)
 	}
 	logs := logsData{Tenant: name, Tail: tail, Head: head, Level: q.Get("level"), Query: strings.TrimSpace(q.Get("q")),
-		Follow: q.Get("follow") != "", ReadAt: s.now(), Grant: grant}
+		Follow: q.Get("follow") != "", ReadAt: s.now(), Grant: grant.Entry}
 	if logs.Level != "warn" && logs.Level != "error" {
 		logs.Level = "all"
 	}

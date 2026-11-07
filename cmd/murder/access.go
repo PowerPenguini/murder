@@ -78,17 +78,21 @@ func asOperator(client *api.Client) *api.Client {
 	return client
 }
 
+// localUser is the user this runs as, as the agent names it.
+func localUser() string {
+	if found, err := user.Current(); err == nil {
+		return found.Username
+	}
+	return "uid " + strconv.Itoa(os.Getuid())
+}
+
 // localActor names the person at the terminal as the agent would: the
 // user, and who sudo says they are.
 func localActor() string {
-	who := "uid " + strconv.Itoa(os.Getuid())
-	if found, err := user.Current(); err == nil {
-		who = found.Username
-	}
 	if name := operator(); name != "" {
-		return name + " via " + who
+		return name + " via " + localUser()
 	}
-	return who
+	return localUser()
 }
 
 // recordAccess records an access through the agent before it is made.
@@ -255,13 +259,19 @@ func printAccesses(entries []access.Entry, format string) error {
 // each once: one recorded before, by a sync that stopped halfway, is
 // found by its record's ID.
 func syncAccesses(ctx context.Context, client *api.Client, path string) error {
-	records, err := access.ReadOffline(path)
+	records, damaged, err := access.ReadOffline(path)
 	if err != nil {
 		return err
 	}
+	// Damaged lines are no record to sync: they stay, for a person to read
+	// and record by hand.
+	var damagedErr error
+	if len(damaged) > 0 {
+		damagedErr = fmt.Errorf("%d lines of %s are no record (one cut short, say), kept there: read them, record each access with murder access log, then remove them", len(damaged), path)
+	}
 	if len(records) == 0 {
 		fmt.Fprintf(stdout, "no accesses wait in %s\n", path)
-		return nil
+		return damagedErr
 	}
 	known := map[string]bool{}
 	tenants := map[string]bool{}
@@ -283,10 +293,14 @@ func syncAccesses(ctx context.Context, client *api.Client, path string) error {
 	var failed error
 	for _, record := range records {
 		if !known[record.ID] {
-			// In the name of whom the record names, as the sync's user.
+			// In the name of whom the record names, as the sync's user:
+			// "jan via root", or "arch via root" for a record arch wrote
+			// as themselves and root syncs.
 			agent := client
 			if record.Operator != "" {
 				agent = client.WithActor(record.Operator)
+			} else if record.Actor != "" && record.Actor != localUser() {
+				agent = client.WithActor(record.Actor)
 			}
 			entry, err := agent.RecordAccess(ctx, record.Synced())
 			if err != nil {
@@ -301,8 +315,8 @@ func syncAccesses(ctx context.Context, client *api.Client, path string) error {
 		return errors.Join(failed, err)
 	}
 	if failed != nil {
-		return fmt.Errorf("%d of %d accesses recorded; the rest stay in %s: %w", len(synced), len(records), path, failed)
+		return errors.Join(fmt.Errorf("%d of %d accesses recorded; the rest stay in %s: %w", len(synced), len(records), path, failed), damagedErr)
 	}
 	fmt.Fprintf(stdout, "%d accesses recorded from %s\n", len(synced), path)
-	return nil
+	return damagedErr
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -20,10 +21,22 @@ import (
 // read, so the tests read them after.
 func openLogs(t *testing.T, client *http.Client, server *httptest.Server, tenant string) {
 	t.Helper()
-	response, body := submit(t, client, server, "/tenants/"+tenant+"/logs", url.Values{"purpose": {"a test"}, "ticket": {"incident"}}, server.URL)
+	response, body := submit(t, client, server, "/tenants/"+tenant+"/logs", url.Values{"reader": {"tester"}, "purpose": {"a test"}, "ticket": {"incident"}}, server.URL)
 	if response.StatusCode != http.StatusOK || response.Request.URL.Path != "/tenants/"+tenant+"/logs" || strings.Contains(body, `name="purpose"`) {
 		t.Fatalf("the logs of %s did not open: %d %s\n%s", tenant, response.StatusCode, response.Request.URL, body)
 	}
+}
+
+// getWith is get, by client: with its cookies.
+func getWith(t *testing.T, client *http.Client, url string) (*http.Response, string) {
+	t.Helper()
+	response, err := client.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	return response, string(body)
 }
 
 // accesses are the demo's access events of tenant.
@@ -59,24 +72,28 @@ func TestLogsAskWhyBeforeTheyOpen(t *testing.T) {
 	if got := accesses(t, cluster, "atlas"); len(got) != 0 {
 		t.Fatalf("an access recorded for a look at the form: %+v", got)
 	}
-	// Without a ticket, refused, what was given kept.
-	response, body := submit(t, client, server, "/tenants/atlas/logs?level=warn", url.Values{"purpose": {"export fails"}}, server.URL)
+	// Without a name, on the socket's panel, or a ticket: refused, what
+	// was given kept.
+	if response, body := submit(t, client, server, "/tenants/atlas/logs", url.Values{"purpose": {"export fails"}, "ticket": {"ZD-1"}}, server.URL); response.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body, "Say who you are") {
+		t.Fatalf("taken without a name: %d", response.StatusCode)
+	}
+	response, body := submit(t, client, server, "/tenants/atlas/logs?level=warn", url.Values{"reader": {"jan"}, "purpose": {"export fails"}}, server.URL)
 	if response.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body, "-ticket") || !strings.Contains(body, `value="export fails"`) || strings.Contains(body, `id="log-lines"`) {
 		t.Fatalf("taken without a ticket: %d\n%s", response.StatusCode, body)
 	}
 	// From elsewhere, nothing.
-	if response, _ := submit(t, client, server, "/tenants/atlas/logs", url.Values{"purpose": {"x"}, "ticket": {"incident"}}, "https://evil.example"); response.StatusCode != http.StatusForbidden {
+	if response, _ := submit(t, client, server, "/tenants/atlas/logs", url.Values{"reader": {"jan"}, "purpose": {"x"}, "ticket": {"incident"}}, "https://evil.example"); response.StatusCode != http.StatusForbidden {
 		t.Fatalf("an access recorded from elsewhere: %d", response.StatusCode)
 	}
 	if got := accesses(t, cluster, "atlas"); len(got) != 0 {
 		t.Fatalf("refused accesses recorded: %+v", got)
 	}
-	response, body = submit(t, client, server, "/tenants/atlas/logs?level=warn", url.Values{"purpose": {"export fails"}, "ticket": {"ZD-1234"}}, server.URL)
+	response, body = submit(t, client, server, "/tenants/atlas/logs?level=warn", url.Values{"reader": {"jan"}, "purpose": {"export fails"}, "ticket": {"ZD-1234"}}, server.URL)
 	if response.Request.URL.RequestURI() != "/tenants/atlas/logs?level=warn" || strings.Contains(body, `name="purpose"`) || !strings.Contains(body, "Read under access") || !strings.Contains(body, "ZD-1234") {
 		t.Fatalf("the logs, after saying why: %s\n%s", response.Request.URL, body)
 	}
 	got := accesses(t, cluster, "atlas")
-	if len(got) != 1 || got[0].Kind != access.Logs || got[0].Purpose != "export fails" || got[0].Ticket != "ZD-1234" || got[0].Actor != "murder-panel socket via murder-panel" {
+	if len(got) != 1 || got[0].Kind != access.Logs || got[0].Purpose != "export fails" || got[0].Ticket != "ZD-1234" || got[0].Actor != "jan (panel socket) via murder-panel" {
 		t.Fatalf("recorded: %+v", got)
 	}
 	// Read again, and followed: the same entry.
@@ -89,6 +106,16 @@ func TestLogsAskWhyBeforeTheyOpen(t *testing.T) {
 	}
 	if got := accesses(t, cluster, "atlas"); len(got) != 1 {
 		t.Fatalf("each read recorded again: %d", len(got))
+	}
+	// Another browser reads nothing under jan's access: it says who reads.
+	stranger, err := http.Get(server.URL + "/tenants/atlas/logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ = io.ReadAll(stranger.Body)
+	stranger.Body.Close()
+	if !strings.Contains(string(page), `name="reader"`) || strings.Contains(string(page), `id="log-lines"`) {
+		t.Fatal("another browser read under jan's access")
 	}
 	// Another tenant's logs ask again.
 	if response, err := client.Get(server.URL + "/tenants/acme-logistics/logs"); err != nil {
@@ -106,7 +133,7 @@ func TestLogsAskWhyBeforeTheyOpen(t *testing.T) {
 	} else {
 		page, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		if !strings.Contains(string(page), "had its logs read") || !strings.Contains(string(page), "“export fails” · ticket ZD-1234") {
+		if !strings.Contains(string(page), "had its logs read") || !strings.Contains(string(page), "“export fails” · ticket ZD-1234") || !strings.Contains(string(page), "jan (panel socket)") {
 			t.Fatalf("the events page:\n%s", page)
 		}
 	}
@@ -139,18 +166,19 @@ func TestAnEndedAccessAsksAgain(t *testing.T) {
 	}
 	server := httptest.NewServer(s.Handler())
 	t.Cleanup(server.Close)
-	client := server.Client()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
 	openLogs(t, client, server, "atlas")
 	now = now.Add(access.GrantFor - 30*time.Second)
-	if _, page := get(t, server.URL+"/tenants/atlas/logs"); !strings.Contains(page, `name="purpose"`) {
+	if _, page := getWith(t, client, server.URL+"/tenants/atlas/logs"); !strings.Contains(page, `name="purpose"`) {
 		t.Fatal("an access about to end still read under")
 	}
 	// The demo stamps entries by the system's clock.
 	now = time.Now()
 	openLogs(t, client, server, "atlas")
 	refuse = true
-	_, page := get(t, server.URL+"/tenants/atlas/logs")
-	if !strings.Contains(page, `name="purpose"`) || !strings.Contains(page, "say why again") || !strings.Contains(page, `value="a test"`) {
+	_, page := getWith(t, client, server.URL+"/tenants/atlas/logs")
+	if !strings.Contains(page, `name="purpose"`) || !strings.Contains(page, "say why again") || !strings.Contains(page, `value="a test"`) || !strings.Contains(page, `value="tester"`) {
 		t.Fatalf("a refused access:\n%s", page)
 	}
 	if got := accesses(t, cluster, "atlas"); len(got) != 2 {

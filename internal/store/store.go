@@ -500,10 +500,11 @@ type Store interface {
 	// Note records an event, frozen or not.
 	Note(action, detail, actor string) error
 	// Access records an access to a tenant's data, of an action that
-	// starts with "access.", frozen or not, and returns its event; Event
-	// is the event of an ID; Accesses are the access events of a tenant
-	// (all for ""), and those of every tenant, since a time.
-	Access(tenant, action, detail, actor string) (Event, error)
+	// starts with "access.", frozen or not, and returns its event (with
+	// once, the same access recorded before, if any); Event is the event
+	// of an ID; Accesses are the access events of a tenant (all for ""),
+	// and those of every tenant, since a time.
+	Access(tenant, action, detail, actor string, once bool) (Event, error)
 	Event(id int64) (Event, error)
 	Accesses(tenant string, since time.Time) ([]Event, error)
 

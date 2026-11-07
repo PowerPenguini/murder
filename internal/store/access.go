@@ -17,15 +17,33 @@ const accessPrefix = "access."
 // "access.", and returns the event. It is written as of the first schema
 // version of batches, as Note is: every release applies it, so an access
 // is recorded while the cluster upgrades, and while changes are frozen.
-func (s *SQLite) Access(tenant, action, detail, actor string) (Event, error) {
+// With once, an access of the same action, tenant and detail recorded
+// before is returned instead of a second: the write is computed against
+// the state it is applied to, so two such writes racing on any nodes
+// record one.
+func (s *SQLite) Access(tenant, action, detail, actor string, once bool) (Event, error) {
 	if !strings.HasPrefix(action, accessPrefix) || len(action) == len(accessPrefix) {
 		return Event{}, fmt.Errorf("%w: %q is not an access", ErrInvalid, action)
 	}
 	var at time.Time
-	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, _ *snapshot, now time.Time) error {
-		at = now
+	var before int64
+	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, current *snapshot, now time.Time) error {
+		at, before = now, 0
+		if once {
+			err := s.db.QueryRow(`SELECT id FROM events WHERE tenant = ? AND action = ? AND detail = ? AND id <= ? ORDER BY id LIMIT 1`,
+				tenant, action, detail, current.lastEvent).Scan(&before)
+			if err == nil {
+				return errRecordedBefore
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
 		return event(tx, now, actor, action, tenant, "", detail)
 	})
+	if errors.Is(err, errRecordedBefore) {
+		return s.Event(before)
+	}
 	if err != nil {
 		return Event{}, err
 	}
@@ -43,6 +61,9 @@ func (s *SQLite) Access(tenant, action, detail, actor string) (Event, error) {
 	e.At = parseTime(stamp)
 	return e, nil
 }
+
+// errRecordedBefore ends a write of an access recorded before.
+var errRecordedBefore = errors.New("recorded before")
 
 // Event is the event of ID id.
 func (s *SQLite) Event(id int64) (Event, error) {

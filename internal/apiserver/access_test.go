@@ -66,7 +66,7 @@ func TestASecretIsReadOnlyRecorded(t *testing.T) {
 // without a quorum.
 type unrecordingStore struct{ store.Store }
 
-func (unrecordingStore) Access(string, string, string, string) (store.Event, error) {
+func (unrecordingStore) Access(string, string, string, string, bool) (store.Event, error) {
 	return store.Event{}, errors.New("no leader")
 }
 

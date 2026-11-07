@@ -17,7 +17,6 @@ import (
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/store"
-	"golang.org/x/term"
 )
 
 // backupName matches the backups "murder backup" writes; their names sort
@@ -30,6 +29,29 @@ const (
 	partialPrefix = ".murder-backup-"
 	staleAfter    = time.Hour
 )
+
+// cgroupFile names the control group of this process, and with it the
+// systemd unit that runs it; tests replace it.
+var cgroupFile = "/proc/self/cgroup"
+
+// backupUnit is the unit murder-backup.timer starts.
+const backupUnit = "murder-backup.service"
+
+// runByBackupUnit says murder-backup.service runs this process: systemd
+// keeps a service's processes in its own control group
+// (0::/system.slice/murder-backup.service).
+func runByBackupUnit() bool {
+	data, err := os.ReadFile(cgroupFile)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasSuffix(strings.TrimSpace(line), "/"+backupUnit) {
+			return true
+		}
+	}
+	return false
+}
 
 // runBackup asks the agent for a copy of its database and keeps it in a
 // directory as murder-<UTC time>.db, removing all but the newest keep.
@@ -54,8 +76,8 @@ func runBackup(args []string) error {
 	}
 	dir := positional[0]
 	// murder-backup.service of releases before the register runs this
-	// without -scheduled: systemd says it runs it, with no terminal.
-	if !*scheduled && *reason.reason == "" && *reason.ticket == "" && os.Getenv("INVOCATION_ID") != "" && !term.IsTerminal(int(os.Stdin.Fd())) {
+	// without -scheduled: the unit's cgroup says it is that unit.
+	if !*scheduled && *reason.reason == "" && *reason.ticket == "" && runByBackupUnit() {
 		*scheduled = true
 		fmt.Fprintln(os.Stderr, "taken as -scheduled, run by systemd: install deploy/murder-backup.service of this release, which says so")
 	}
