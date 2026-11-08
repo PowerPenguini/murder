@@ -197,9 +197,16 @@ sudo systemctl restart murder-agent   # tenants keep running, the edge keeps ser
 `/usr/local/bin/murder` as root, compares the systemd units, the sysctl
 files and the Docker drop-in the node has with those of the release it
 runs, replaces any that differ, then runs `systemctl daemon-reload` and
-applies the sysctl files; it logs what it replaced. A file the node does
-not have stays out, and nothing restarts: services run under a changed
-unit from their next start. Change a unit with a drop-in (`systemctl edit
+applies the sysctl files; it logs what it replaced (a reload that failed is
+done at the next start). A file the node does not have stays out, as one
+left out on purpose cannot be told from one a later release added: `murder
+doctor` names settings missing, such as the kernel hardening on a node set
+up before it. Nothing restarts: services run under a changed unit from
+their next start. When the config moves `edge.tls.storage`, `edge.routes`
+or `edge.pidFile` out of `/var/lib/murder` and `/run/murder-edge`, the
+agent also makes those directories and writes
+`murder-edge.service.d/murder-paths.conf` with `ReadWritePaths=` for them,
+so the confined edge can still write there. Change a unit with a drop-in (`systemctl edit
 murder-edge`), which stays; an edit of the unit itself is replaced. When
 `murder-edge.service` changed, the agent says so: a reload hands over to a
 child of the old edge, which keeps the old unit's limits, so run `sudo

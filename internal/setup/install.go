@@ -196,6 +196,7 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 		if err != nil {
 			return err
 		}
+		var written []string
 		for _, file := range files {
 			name := file.Name()
 			target := Target(name)
@@ -212,17 +213,9 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 			if err := host.WriteFile(target, data, 0o644); err != nil {
 				return err
 			}
+			written = append(written, target)
 		}
-		if _, err := host.Run(ctx, "sysctl", "-q", "-p", SysctlFile); err != nil {
-			return fmt.Errorf("apply %s: %w", SysctlFile, err)
-		}
-		// A kernel may lack a key the hardening names (IPv6 turned off, no
-		// BPF): -e skips those, and doctor names what stays unhardened.
-		if _, err := host.Run(ctx, "sysctl", "-q", "-e", "-p", HardeningFile); err != nil {
-			return fmt.Errorf("apply %s: %w", HardeningFile, err)
-		}
-		_, err = host.Run(ctx, "systemctl", "daemon-reload")
-		return err
+		return activate(ctx, host, written, true)
 	})
 	if in.LiveRestore {
 		add("have Docker keep containers running while it restarts (live-restore)", func(ctx context.Context) error {
