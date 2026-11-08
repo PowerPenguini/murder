@@ -27,8 +27,9 @@ LimitNOFILE=65536
 # routes) and /run/murder-edge (PID file, a failed handover's reason),
 # which StateDirectory and RuntimeDirectory keep writable; it reads the
 # config, the master key and the DNS token, and talks to the agent on its
-# socket. Moving edge.tls.storage, edge.routes or edge.pidFile elsewhere
-# needs a ReadWritePaths= for it in a drop-in. It stays root (it owns the
+# socket. For edge.tls.storage, edge.routes or edge.pidFile moved
+# elsewhere, the agent writes a drop-in with ReadWritePaths= for them
+# (murder-edge.service.d/murder-paths.conf). It stays root (it owns the
 # key files and binds 80 and 443) but keeps no capability other than
 # binding low ports.
 # The agent and the panel keep none of this: an upgrade has them replace

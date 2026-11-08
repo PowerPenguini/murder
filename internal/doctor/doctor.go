@@ -289,7 +289,13 @@ func checkEdgeConfined(ctx context.Context, h Host) []Result {
 			if strings.TrimSpace(value) == "1" {
 				return []Result{{OK, "services", "the edge runs confined", ""}}
 			}
-			return []Result{{Warning, "services", "the edge runs unconfined: its unit predates deploy/murder-edge.service, or it has not restarted since", "install deploy/murder-edge.service, systemctl daemon-reload, systemctl restart murder-edge"}}
+			// The agent of a release with the limits brings the unit up to
+			// date at start, when it runs from /usr/local/bin/murder.
+			unit, _ := os.ReadFile(h.path("/etc/systemd/system/murder-edge.service"))
+			if !bytes.Contains(unit, []byte("NoNewPrivileges=yes")) {
+				return []Result{{Warning, "services", "the edge runs unconfined: its unit predates its limits", "systemctl restart murder-agent (from /usr/local/bin/murder, it brings the unit up to date), then systemctl restart murder-edge"}}
+			}
+			return []Result{{Warning, "services", "the edge runs unconfined: it has not restarted since its unit gained its limits", "systemctl restart murder-edge (open requests get edge.drain to finish)"}}
 		}
 	}
 	return nil

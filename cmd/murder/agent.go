@@ -24,6 +24,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/failover"
 	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/invite"
@@ -35,6 +36,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/rollout"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/secrets"
+	"github.com/PowerPenguini/murder/internal/setup"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 	measure "github.com/PowerPenguini/murder/internal/usage"
@@ -103,6 +105,8 @@ func runAgent(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Nothing below waits on it: systemctl may be slow while the host boots.
+	go refreshInstall(cfg, log)
 	key, err := secrets.LoadKey(cfg.MasterKeyFile)
 	if err != nil {
 		return err
@@ -790,4 +794,43 @@ func runFirewall(args []string) error {
 func privateHost(host string) bool {
 	address, err := netip.ParseAddr(host)
 	return err != nil || address.IsLoopback() || address.IsPrivate()
+}
+
+// refreshInstall brings the node's units and sysctl settings to this
+// release's: an upgrade replaces the binary only, and the agent is the
+// first of it to run. Only a node installed at the usual place, as root.
+func refreshInstall(cfg config.Agent, log *slog.Logger) {
+	host := setup.System{}
+	if executable, err := host.Executable(); err != nil || executable != setup.Binary || !host.Root() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// The confined edge writes only its own directories, unless told more.
+	written := []string{filepath.Dir(cfg.Edge.Routes), filepath.Dir(cfg.Edge.PIDFile)}
+	if cfg.Edge.TLS.Mode != edge.TLSOff {
+		written = append(written, cfg.Edge.TLS.Storage)
+	}
+	dirs := setup.EdgeWritable(written...)
+	for _, dir := range dirs {
+		// A missing directory cannot be made writable, nor made by the edge.
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			log.Warn("could not make a directory the edge writes", "dir", dir, "err", err)
+		}
+	}
+	replaced, err := setup.Refresh(ctx, host, dirs)
+	if len(replaced) > 0 {
+		log.Info("brought the install files up to this release", "files", replaced)
+	}
+	// Until systemd has read the new unit, a restart would not apply it.
+	if err == nil && slices.ContainsFunc(replaced, func(file string) bool {
+		return file == setup.Target("murder-edge.service") || file == setup.EdgePathsDropIn
+	}) {
+		// A reload hands over to a child of the old edge, which keeps the
+		// old unit's confinement; only a start under the new unit has it.
+		log.Warn("murder-edge.service changed: `systemctl restart murder-edge` runs the edge under it (open requests get edge.drain to finish)")
+	}
+	if err != nil {
+		log.Warn("could not bring the install files up to this release", "err", err)
+	}
 }

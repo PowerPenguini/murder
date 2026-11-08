@@ -409,8 +409,16 @@ func TestBackups(t *testing.T) {
 func TestEdgeConfined(t *testing.T) {
 	h := fakeHost(t, map[string]string{"systemctl show -p MainPID --value murder-edge.service": "4242\n"})
 	write(t, h, "/proc/4242/status", "Name:\tmurder\nNoNewPrivs:\t0\nSeccomp:\t0\n", 0o644)
-	if results := checkEdgeConfined(context.Background(), h); !has(results, Warning, "unconfined") {
-		t.Errorf("unconfined: %+v", results)
+	if results := checkEdgeConfined(context.Background(), h); !has(results, Warning, "predates its limits") {
+		t.Errorf("unconfined, old unit: %+v", results)
+	}
+	unit, err := deploy.Files.ReadFile("murder-edge.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, h, "/etc/systemd/system/murder-edge.service", string(unit), 0o644)
+	if results := checkEdgeConfined(context.Background(), h); !has(results, Warning, "not restarted since") {
+		t.Errorf("unconfined, new unit: %+v", results)
 	}
 	write(t, h, "/proc/4242/status", "Name:\tmurder\nNoNewPrivs:\t1\nSeccomp:\t2\n", 0o644)
 	if results := checkEdgeConfined(context.Background(), h); !has(results, OK, "confined") {

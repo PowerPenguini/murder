@@ -85,11 +85,11 @@ with its fix; it exits 1 when one failed.
 - **Updates.** On Debian and Ubuntu, that `unattended-upgrades` installs
   security updates, and whether one waits for a reboot.
 - **The edge's confinement.** Whether the running edge is confined (see
-  [security](security.md)). A node installed before reinstalls
-  `deploy/murder-edge.service`, then `systemctl daemon-reload` and
-  `systemctl restart murder-edge`: a reload hands over to a child of the
-  old, unconfined process, so only a restart confines it (open requests
-  get `edge.drain` to finish). `journalctl -u murder-edge` then shows any
+  [security](security.md)). On a node installed before, the agent of this
+  release brings `murder-edge.service` up to date at start (see
+  [Upgrade Murder](#upgrade-murder)); then `systemctl restart murder-edge`:
+  a reload hands over to a child of the old, unconfined process, so only a
+  restart confines it (open requests get `edge.drain` to finish). `journalctl -u murder-edge` then shows any
   call the filter refused, and one `systemctl reload murder-edge` proves
   the handover still works.
 - **Kernel and clock.** The settings `deploy/murder-hardening.conf` sets
@@ -192,6 +192,27 @@ sudo install -m 0755 murder /usr/local/bin/murder
 sudo systemctl reload murder-edge     # the new edge takes the listeners over; the old one finishes its requests
 sudo systemctl restart murder-agent   # tenants keep running, the edge keeps serving
 ```
+
+**Units and sysctl settings follow the binary.** The agent, started from
+`/usr/local/bin/murder` as root, compares the systemd units, the sysctl
+files and the Docker drop-in the node has with those of the release it
+runs, replaces any that differ, then runs `systemctl daemon-reload` and
+applies the sysctl files; it logs what it replaced (a reload that failed is
+done at the next start). A file the node does not have stays out, as one
+left out on purpose cannot be told from one a later release added: `murder
+doctor` names settings missing, such as the kernel hardening on a node set
+up before it. Nothing restarts: services run under a changed unit from
+their next start. When the config moves `edge.tls.storage`, `edge.routes`
+or `edge.pidFile` out of `/var/lib/murder` and `/run/murder-edge`, the
+agent also makes those directories and writes
+`murder-edge.service.d/murder-paths.conf` with `ReadWritePaths=` for them,
+so the confined edge can still write there. Change a unit with a drop-in (`systemctl edit
+murder-edge`), which stays; an edit of the unit itself is replaced. When
+`murder-edge.service` changed, the agent says so: a reload hands over to a
+child of the old edge, which keeps the old unit's limits, so run `sudo
+systemctl restart murder-edge` (open requests get `edge.drain` to finish)
+for the edge to run under the new one. `murder doctor` reports an edge
+still unconfined.
 
 **From a release before node identity keys,** finish the upgrade promptly.
 While any node shows no key in `murder cluster status`, someone with the
