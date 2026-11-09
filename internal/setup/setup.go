@@ -188,7 +188,7 @@ func (f Facts) Warnings() []string {
 	case s.Leave != "":
 		warnings = append(warnings, "SSH takes passwords, which bots guess around the clock; setup leaves it as it is, as "+s.Leave)
 	default:
-		warnings = append(warnings, "SSH takes passwords, which bots guess around the clock, and "+s.Account+" has no key to log in with instead: setup leaves SSH as it is (add a key to ~"+s.Account+"/.ssh/authorized_keys and run setup again, or set PasswordAuthentication no in "+SSHDropIn+")")
+		warnings = append(warnings, "SSH takes passwords, which bots guess around the clock, and "+s.Account+" has no key to log in with instead: setup leaves SSH as it is (add a key to ~"+s.Account+"/.ssh/authorized_keys then murder doctor -fix, or set PasswordAuthentication no in "+SSHDropIn+")")
 	}
 	if f.Docker != "" && !f.LiveRestore && f.Swarm {
 		warnings = append(warnings, "Docker is in swarm mode, which cannot keep containers running while Docker restarts: restarting Docker stops every tenant until the agent starts them again")

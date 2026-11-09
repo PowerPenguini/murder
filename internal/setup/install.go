@@ -58,13 +58,13 @@ volumes:
 hostFirewall:                      # drops what reaches the host besides SSH, Murder's ports and these
   ssh: {{ports .SSHPorts}}
 {{- if .Open}}
-  open:                            # listened to everyone when setup ran: take out what should not be public
+  open:                            # listened to everyone when this was written: take out what should not be public
 {{- range .Open}}
     - {{.Entry}}{{if .Process}}  # {{.Process}}{{end}}
 {{- end}}
 {{- end}}
 {{- if .Private}}
-  private:                         # listened on a private address when setup ran
+  private:                         # listened on a private address when this was written
 {{- range .Private}}
     - {{.Entry}}{{if .Process}}  # {{.Process}}{{end}}
 {{- end}}
