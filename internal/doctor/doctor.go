@@ -106,7 +106,7 @@ func Check(ctx context.Context, cfg config.Agent, configPath string, h Host) []R
 	results = append(results, sshResults...)
 	results = append(results, checkListeners(cfg, h, sshPorts, hostRules)...)
 	results = append(results, checkDocker(ctx, h)...)
-	results = append(results, checkUpdates(ctx, h)...)
+	results = append(results, checkUpdates(ctx, cfg, h)...)
 	results = append(results, checkKernel(h)...)
 	results = append(results, checkClock(ctx, h)...)
 	return results
@@ -448,7 +448,7 @@ func groupMembers(h Host, group string) []string {
 	return nil
 }
 
-func checkUpdates(ctx context.Context, h Host) []Result {
+func checkUpdates(ctx context.Context, cfg config.Agent, h Host) []Result {
 	var results []Result
 	output, err := h.Run(ctx, "apt-config", "dump")
 	switch {
@@ -470,9 +470,18 @@ func checkUpdates(ctx context.Context, h Host) []Result {
 		}
 	}
 	if _, err := os.Stat(h.path("/run/reboot-required")); err == nil {
-		results = append(results, Result{Warning, "updates", "an update waits for a reboot to take effect", "reboot when it suits (tenants restart with Docker)"})
+		results = append(results, Result{Warning, "updates", "an update waits for a reboot to take effect", rebootFix(cfg)})
 	}
 	return results
+}
+
+// rebootFix is how to reboot the node: through its cluster, its tenants
+// moved away and back; alone, with its tenants stopped until it is back.
+func rebootFix(cfg config.Agent) string {
+	if cfg.Cluster != nil {
+		return fmt.Sprintf("murder node reboot %s, run on another node of the cluster: it moves the tenants away, reboots this node and moves them back (here: murder node reboot -stay leaves them moved)", cfg.Node)
+	}
+	return "murder node reboot when it suits: alone, the node's tenants stop until it is back"
 }
 
 // kernelSetting is a sysctl and the values that pass.

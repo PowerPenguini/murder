@@ -12,6 +12,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/failover"
+	"github.com/PowerPenguini/murder/internal/reboot"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 )
@@ -21,6 +22,8 @@ type Cluster interface {
 	Status() (cluster.Status, error)
 	NodeInfo(ctx context.Context, node string) (upgrade.Info, error)
 	Install(ctx context.Context, node string, binary io.Reader, sha, freeze string) error
+	// RebootOn asks node to reboot its host.
+	RebootOn(ctx context.Context, node string, request reboot.Request) error
 	Bootstrap(ctx context.Context, actor string, restored bool) error
 	// ReplaceKey gives a node a new identity key, in place of one it lost.
 	ReplaceKey(ctx context.Context, name string, key ed25519.PublicKey, actor string) error

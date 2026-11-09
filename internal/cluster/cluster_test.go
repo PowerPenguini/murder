@@ -66,6 +66,10 @@ type node struct {
 	unregistered bool
 	// log takes the node's log; none if nil.
 	log io.Writer
+	// moves and reboot are the node's parts in moves and reboots; none if
+	// nil.
+	moves  Moves
+	reboot Rebooter
 }
 
 func newNode(t *testing.T, name string) *node {
@@ -109,6 +113,7 @@ func (n *node) start() {
 	c, err := Start(Config{
 		Node: n.name, Address: n.address, Dir: filepath.Join(n.dir, "raft"),
 		Seeds: n.key.DeriveAll("cluster ca"), Store: st, Replicas: n.replicas, Keys: nodeKeys{n}, Invites: n.invites, unregistered: n.unregistered,
+		Moves: n.moves, Reboot: n.reboot,
 		Log:    slog.New(slog.NewTextHandler(n.logTo(), nil)),
 		Fatal:  func(err error) { n.fatal <- err },
 		stable: n.stable,

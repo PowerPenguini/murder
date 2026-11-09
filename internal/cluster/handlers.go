@@ -17,6 +17,7 @@ import (
 
 	"github.com/hashicorp/raft"
 
+	"github.com/PowerPenguini/murder/internal/reboot"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -45,6 +46,7 @@ func (c *Cluster) handler() http.Handler {
 	members("GET /cluster/v1/tenants/{name}/status", c.handleTenantStatus)
 	members("POST /cluster/v1/tenants/{name}/move", c.handleMove)
 	members("PUT /cluster/v1/node/binary", c.handleInstall)
+	members("POST /cluster/v1/node/reboot", c.handleReboot)
 	members("GET /cluster/v1/ping", c.handlePing)
 	members("GET /cluster/v1/release", c.handleRelease)
 	members("POST /cluster/v1/node/key", c.handleRegisterKey)
@@ -921,6 +923,32 @@ func (c *Cluster) handleInstall(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, upgrade.ErrNotOwner):
 			status = http.StatusPreconditionFailed
 		case errors.Is(err, upgrade.ErrRestarting):
+			status = http.StatusConflict
+		}
+		writeError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+// handleReboot reboots this node's host, as another node asks: a node that
+// would not come back is a refusal (422), one rebooting already a conflict.
+func (c *Cluster) handleReboot(w http.ResponseWriter, r *http.Request) {
+	if c.config.Reboot == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this node takes no reboots"))
+		return
+	}
+	var request reboot.Request
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := c.config.Reboot.Reboot(r.Context(), request); err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.As(err, new(*reboot.NotReadyError)):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, reboot.ErrRebooting):
 			status = http.StatusConflict
 		}
 		writeError(w, status, err)

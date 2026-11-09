@@ -37,6 +37,7 @@ import (
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
+	"github.com/PowerPenguini/murder/internal/reboot"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/throttle"
 	"github.com/PowerPenguini/murder/internal/upgrade"
@@ -104,6 +105,9 @@ type Config struct {
 	Invites Invites
 	// Keys is this node's master key ring, for rotations; nil has none.
 	Keys Keys
+	// Reboot reboots this node's host when another node asks; nil takes
+	// no reboots.
+	Reboot Rebooter
 
 	// raft overrides Raft's timing in tests.
 	raft func(*raft.Config)
@@ -1300,6 +1304,17 @@ func (c *Cluster) request(ctx context.Context, node, method, path string, body i
 type Upgrader interface {
 	Info() upgrade.Info
 	Install(ctx context.Context, binary io.Reader, sha, freeze string) error
+}
+
+// Rebooter is the node's part in a reboot run from another node.
+type Rebooter interface {
+	Reboot(ctx context.Context, request reboot.Request) error
+}
+
+// RebootOn asks node to reboot its host, or with request.Check only
+// whether it could.
+func (c *Cluster) RebootOn(ctx context.Context, node string, request reboot.Request) error {
+	return c.request(ctx, node, http.MethodPost, "/cluster/v1/node/reboot", bytes.NewReader(marshal(request)), nil)
 }
 
 // NodeInfo asks a node of the cluster how it is, for an upgrade.

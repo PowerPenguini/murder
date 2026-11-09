@@ -165,7 +165,8 @@ sudo murder cluster replace old-node new-node   # moves every tenant, one after 
 Point the DNS records at the new server once it has joined (until then its
 edge answers 503, "starting"; the old one's serves every tenant it knows),
 and switch the old one off. `murder cluster drain NODE
--to TARGET` moves the tenants without taking the node out.
+-to TARGET` moves the tenants without taking the node out; to reboot a
+node, see [Reboot a node](#reboot-a-node).
 
 Tenants added one by one, a node that joined later or one drained for
 maintenance leave the nodes uneven. `murder cluster balance` moves tenants,
@@ -175,6 +176,54 @@ panel's Cluster page does the same, as a job). A tenant whose whole copy
 the target keeps goes first: its move sends only what changed. Suspended
 and archived tenants stay; nothing moves while a tenant moves already.
 `-dry-run` prints the moves only.
+
+## Reboot a node
+
+A kernel or C library update waits for a reboot (`murder doctor` says so).
+`murder node reboot NODE`, run on another node of the cluster, reboots it
+without stopping its tenants for longer than a move:
+
+```bash
+sudo murder node reboot n2              # tenants away, reboot, tenants back
+sudo murder node reboot n2 -to n3       # all of them to n3
+sudo murder node reboot n2 -stay        # leave them where they moved
+```
+
+It moves the node's tenants away one after the other, as `murder cluster
+drain` does: all to `-to`, or each to the node keeping its whole copy (only
+what changed since goes across), else to the node running the fewest. Then
+it marks the node away for as long as it waits (`-wait`, 15 minutes), so it
+is not failed over while it boots, and the node runs `systemctl reboot`. The
+command waits until the node's agent has started anew, caught up with the
+cluster and reconciled, then moves the tenants it moved back, those still
+where it put them. Moving them back is the default because the command
+knows which it moved and waits for the node anyway, and a reboot should
+leave the cluster as it found it; with `-stay`, or if the node does not
+come back in time, they stay where they moved, and the output says where.
+
+Run on the node it reboots, the command cannot wait for itself: it needs
+`-stay`, and returns once the node reboots (`murder cluster balance` evens
+the nodes out afterwards).
+
+It changes nothing, and says why, when:
+
+- changes are frozen (an upgrade, a key rotation): reboot once it is over;
+- the node does not answer, or no other node can take its tenants (each
+  must answer, and be neither failed over nor restarting);
+- the node would not come back as it runs: `murder-agent`, `murder-edge`,
+  `murder-firewall` (with the tenant firewall), `murder-panel` (if it runs)
+  and Docker (`docker.service` or `docker.socket`) must be enabled at boot;
+- fewer than a majority of the voters would answer while it reboots, as in
+  a cluster of two: the cluster then takes no change until it is back (no
+  tenant created, moved or failed over). `-force` reboots it all the same;
+- the node runs a release before this command: upgrade it first.
+
+When the node does not reboot after all (a move fails, or an upgrade that
+started meanwhile has it refuse), the tenants moved so far move back to
+it, as it still runs; if that fails too, the error says where each runs.
+Nothing holds other cluster changes off meanwhile, as for `murder cluster
+drain`: run one at a time.
+The panel does not offer reboots yet.
 
 ## A copy of every tenant on a second node
 

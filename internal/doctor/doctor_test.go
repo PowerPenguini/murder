@@ -314,16 +314,24 @@ func TestUpdates(t *testing.T) {
 	h := fakeHost(t, map[string]string{"apt-config dump": on})
 	write(t, h, "/usr/bin/unattended-upgrade", "", 0o755)
 	write(t, h, "/run/reboot-required", "", 0o644)
-	results := checkUpdates(context.Background(), h)
+	results := checkUpdates(context.Background(), config.Agent{Node: "n1"}, h)
 	if !has(results, OK, "install themselves") || !has(results, Warning, "reboot") {
 		t.Errorf("on: %+v", results)
 	}
+	// The fix names the command: alone, and in a cluster run elsewhere.
+	if fix := fixOf(results, "reboot"); !strings.Contains(fix, "murder node reboot when it suits") || !strings.Contains(fix, "stop until it is back") {
+		t.Errorf("alone, the fix is %q", fix)
+	}
+	clustered := checkUpdates(context.Background(), config.Agent{Node: "n1", Cluster: &config.Cluster{}}, h)
+	if fix := fixOf(clustered, "reboot"); !strings.Contains(fix, "murder node reboot n1, run on another node") {
+		t.Errorf("in a cluster, the fix is %q", fix)
+	}
 	h = fakeHost(t, map[string]string{"apt-config dump": strings.Replace(on, `Upgrade "1"`, `Upgrade "0"`, 1)})
 	write(t, h, "/usr/bin/unattended-upgrade", "", 0o755)
-	if results := checkUpdates(context.Background(), h); !has(results, Warning, "do not install themselves") {
+	if results := checkUpdates(context.Background(), config.Agent{}, h); !has(results, Warning, "do not install themselves") {
 		t.Errorf("off: %+v", results)
 	}
-	if results := checkUpdates(context.Background(), fakeHost(t, nil)); !has(results, Skipped, "not Debian") {
+	if results := checkUpdates(context.Background(), config.Agent{}, fakeHost(t, nil)); !has(results, Skipped, "not Debian") {
 		t.Errorf("not Debian: %+v", results)
 	}
 }
@@ -443,4 +451,14 @@ func TestOfflineAccessesWait(t *testing.T) {
 	if results := checkOfflineAccesses(h); !has(results, Warning, "an access to a tenant's data waits") || results[0].Fix != "murder access sync" {
 		t.Fatalf("one waiting: %+v", results)
 	}
+}
+
+// fixOf is the fix of the first result whose message holds text.
+func fixOf(results []Result, text string) string {
+	for _, result := range results {
+		if strings.Contains(result.Message, text) {
+			return result.Fix
+		}
+	}
+	return ""
 }

@@ -98,7 +98,8 @@ with its fix; it exits 1 when one failed.
 - **Docker.** `live-restore`, so a Docker upgrade does not stop tenants;
   seccomp; members of the `docker` group, who are root in all but name.
 - **Updates.** On Debian and Ubuntu, that `unattended-upgrades` installs
-  security updates, and whether one waits for a reboot.
+  security updates, and whether one waits for a reboot (see [Reboot a
+  node](#reboot-a-node)).
 - **The edge's confinement.** Whether the running edge is confined (see
   [security](security.md)). On a node installed before, the agent of this
   release brings `murder-edge.service` up to date at start (see
@@ -144,6 +145,34 @@ provider's console: remove `hostFirewall` from the config and run the same
 restart (`nft delete table inet murder` alone is undone by the agent as
 well). Other containers on the host (outside Murder's tenant networks)
 reach only the private ports.
+
+## Reboot a node
+
+An update of the kernel or the C library takes effect at the next reboot;
+`murder doctor` warns while one waits. Reboot with `murder node reboot`,
+which checks first that the node comes back as it runs: Murder's units and
+Docker start at boot (`systemctl enable` the one it names otherwise), and
+changes are not frozen.
+
+In a cluster, run it on another node, naming the node to reboot: its
+tenants move to other nodes, it reboots, and once it is back they move
+back, each away only for the seconds of a move (see
+[Reboot a node](cluster.md#reboot-a-node)).
+
+```bash
+sudo murder node reboot n2
+```
+
+On a node alone, nothing takes its tenants over: they stop, and its edge
+answers no request, until it is back; Docker and Murder's units start them
+again at boot. It says so and asks first; `-yes` does not ask.
+
+```bash
+sudo murder node reboot          # asks
+sudo murder node reboot -yes
+```
+
+The reboot is in the audit log (`node.rebooting`).
 
 ## Upgrade Murder
 
