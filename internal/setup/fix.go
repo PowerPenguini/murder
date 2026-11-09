@@ -3,7 +3,6 @@ package setup
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -73,13 +72,19 @@ func addHostFirewall(ctx context.Context, host Host, configPath, block string) e
 	if err != nil {
 		return err
 	}
-	data := append(bytes.TrimRight(bytes.Clone(old), "\n"), []byte("\n\n"+block)...)
-	agent, err := config.Parse(data)
-	if err != nil {
-		return Skipped{fmt.Sprintf("the agent would refuse %s with hostFirewall added (%v): setup left it as it was", configPath, err)}
+	// The block starts on a line of its own, though the file ends in a
+	// comment with no newline after it.
+	data := bytes.Clone(old)
+	if len(data) > 0 && !bytes.HasSuffix(data, []byte("\n")) {
+		data = append(data, '\n')
 	}
-	if agent.HostFirewall == nil {
-		return errors.New("hostFirewall did not take") // the block is fixed text
+	data = append(data, []byte("\n"+block)...)
+	agent, err := config.Parse(data)
+	switch {
+	case err != nil:
+		return Skipped{fmt.Sprintf("the agent would refuse %s with hostFirewall added (%v): doctor left it as it was; add it by hand:\n%s", configPath, err, block)}
+	case agent.HostFirewall == nil || len(agent.HostFirewall.SSH) == 0:
+		return Skipped{fmt.Sprintf("hostFirewall added to the end of %s does not take: doctor left it as it was; add it by hand:\n%s", configPath, block)}
 	}
 	if err := host.WriteFile(configPath+".before-host-firewall", old, 0o644); err != nil {
 		return err

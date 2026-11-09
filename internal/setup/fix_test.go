@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -76,3 +77,33 @@ func TestDoctorNamesTheFirewallForAClusterToAdd(t *testing.T) {
 		t.Fatalf("notes:\n%s", joined)
 	}
 }
+
+// However the config ends, the block lands as a key of its own, or the
+// config is left as it was.
+func TestDoctorAddsTheFirewallToAnyConfig(t *testing.T) {
+	block := "hostFirewall:\n  ssh: [22]\n"
+	for name, config := range map[string]string{
+		"a comment, no newline": aloneConfig + "# the end",
+		"no newline":            strings.TrimSuffix(aloneConfig, "\n"),
+		"blank lines":           aloneConfig + "\n\n",
+	} {
+		host := fixHost()
+		host.files["/etc/murder/agent.yaml"] = []byte(config)
+		if err := addHostFirewall(context.Background(), host, "/etc/murder/agent.yaml", block); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		agent, err := parseAgent(host.files["/etc/murder/agent.yaml"])
+		if err != nil || agent.HostFirewall == nil {
+			t.Fatalf("%s: %s gave %v", name, host.files["/etc/murder/agent.yaml"], err)
+		}
+	}
+	host := fixHost()
+	flow := "{node: n1, baseDomain: example.com, volumes: {driver: dir}}\n"
+	host.files["/etc/murder/agent.yaml"] = []byte(flow)
+	var skipped Skipped
+	if err := addHostFirewall(context.Background(), host, "/etc/murder/agent.yaml", block); !errors.As(err, &skipped) || string(host.files["/etc/murder/agent.yaml"]) != flow || slices.Contains(host.ran, "systemctl restart murder-agent.service murder-firewall.service") {
+		t.Fatalf("flow style: %v, %s, ran %v", err, host.files["/etc/murder/agent.yaml"], host.ran)
+	}
+}
+
+func parseAgent(data []byte) (config.Agent, error) { return config.Parse(data) }
