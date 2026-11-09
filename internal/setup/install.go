@@ -10,6 +10,7 @@ import (
 	"maps"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -28,6 +29,13 @@ func Config(s Settings) []byte {
 
 var configTemplate = template.Must(template.New("agent.yaml").Funcs(template.FuncMap{
 	"list": func(items []string) string { return "[" + strings.Join(items, ", ") + "]" },
+	"ports": func(ports []int) string {
+		var items []string
+		for _, port := range ports {
+			items = append(items, strconv.Itoa(port))
+		}
+		return "[" + strings.Join(items, ", ") + "]"
+	},
 }).Parse(`# /etc/murder/agent.yaml, written by "murder setup"; everything not here
 # has a default (see deploy/agent.example.yaml for every setting).
 node: {{.Node}}
@@ -44,6 +52,23 @@ volumes:
 
 volumes:
   driver: dir                      # plain directories: no disk limits, no copies on other nodes
+{{- end}}
+{{- if .HostFirewall}}
+
+hostFirewall:                      # drops what reaches the host besides SSH, Murder's ports and these
+  ssh: {{ports .SSHPorts}}
+{{- if .Open}}
+  open:                            # listened to everyone when setup ran: take out what should not be public
+{{- range .Open}}
+    - {{.Entry}}{{if .Process}}  # {{.Process}}{{end}}
+{{- end}}
+{{- end}}
+{{- if .Private}}
+  private:                         # listened on a private address when setup ran
+{{- range .Private}}
+    - {{.Entry}}{{if .Process}}  # {{.Process}}{{end}}
+{{- end}}
+{{- end}}
 {{- end}}
 
 edge:
