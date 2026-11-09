@@ -218,9 +218,11 @@ It changes nothing, and says why, when:
   tenant created, moved or failed over). `-force` reboots it all the same;
 - the node runs a release before this command: upgrade it first.
 
-A move that fails stops the reboot there; the node is not rebooted, and the
-tenants moved so far stay where they went. Nothing holds other cluster
-changes off meanwhile, as for `murder cluster drain`: run one at a time.
+When the node does not reboot after all (a move fails, or an upgrade that
+started meanwhile has it refuse), the tenants moved so far move back to
+it, as it still runs; if that fails too, the error says where each runs.
+Nothing holds other cluster changes off meanwhile, as for `murder cluster
+drain`: run one at a time.
 The panel does not offer reboots yet.
 
 ## A copy of every tenant on a second node

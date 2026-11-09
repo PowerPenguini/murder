@@ -143,10 +143,24 @@ func Reboot(ctx context.Context, client RebootClient, node string, opts RebootOp
 	plan := planDrain(theirs, tenants, targets, opts.To)
 	fmt.Fprintf(out, "rebooting node %s: %d tenants move away first\n", node, len(plan))
 	var done []moved
+	// undo moves back what moved, when the node does not reboot after
+	// all: it runs, so its tenants belong on it. Something that changed
+	// meanwhile (an upgrade that started, another drain) can stop that
+	// too; then the error says where they run.
+	undo := func(cause error) error {
+		if len(done) == 0 {
+			return fmt.Errorf("%w\nnode %s was not rebooted; no tenant was moved", cause, node)
+		}
+		fmt.Fprintf(out, "node %s does not reboot: moving its tenants back\n", node)
+		if err := moveBack(ctx, client, node, done, out, "node "+node+" was not rebooted and runs its tenants again"); err != nil {
+			return fmt.Errorf("%w\nnode %s was not rebooted, and moving its tenants back failed: %w", cause, node, err)
+		}
+		return fmt.Errorf("%w\nnode %s was not rebooted; its tenants were moved back", cause, node)
+	}
 	for _, move := range plan {
 		start := time.Now()
 		if _, err := client.Move(ctx, move.tenant, move.to); err != nil {
-			return fmt.Errorf("move %s to %s: %w\nnode %s was not rebooted; %s", move.tenant, move.to, err, node, whereMoved(done, node))
+			return undo(fmt.Errorf("move %s to %s: %w", move.tenant, move.to, err))
 		}
 		done = append(done, move)
 		fmt.Fprintf(out, "%s moved to %s in %v\n", move.tenant, move.to, time.Since(start).Round(time.Second))
@@ -154,7 +168,7 @@ func Reboot(ctx context.Context, client RebootClient, node string, opts RebootOp
 	// Caught up, once back, means as far as the cluster has applied now.
 	before, err := client.NodeInfo(ctx, nodeOrSelf(node))
 	if err != nil {
-		return fmt.Errorf("node %s: %w\nit was not rebooted; %s", node, err, whereMoved(done, node))
+		return undo(fmt.Errorf("node %s: %w", node, err))
 	}
 	target := before.Applied
 	if now, err := client.ClusterStatus(ctx); err == nil && now.Applied > target {
@@ -163,7 +177,7 @@ func Reboot(ctx context.Context, client RebootClient, node string, opts RebootOp
 	// The node is not failed over while it boots: it is marked away for
 	// as long as the wait.
 	if err := client.Reboot(ctx, nodeOrSelf(node), reboot.Request{Away: opts.Wait}); err != nil {
-		return fmt.Errorf("%w\n%s", rebootRefused(node, err), whereMoved(done, node))
+		return undo(rebootRefused(node, err))
 	}
 	if node == self {
 		fmt.Fprintf(out, "node %s reboots now; %s\n", node, whereMoved(done, node))
@@ -194,7 +208,7 @@ func Reboot(ctx context.Context, client RebootClient, node string, opts RebootOp
 		}
 		return nil
 	}
-	return moveBack(ctx, client, node, done, out)
+	return moveBack(ctx, client, node, done, out, "node "+node+" rebooted and runs its tenants again")
 }
 
 // rebootTargets are the nodes that can take node's tenants: they answer,
@@ -289,7 +303,7 @@ func rebootRefused(node string, err error) error {
 
 // moveBack moves the tenants a reboot moved back to node, those still where
 // they moved: one moved on since stays.
-func moveBack(ctx context.Context, client Client, node string, done []moved, out io.Writer) error {
+func moveBack(ctx context.Context, client Client, node string, done []moved, out io.Writer, finished string) error {
 	tenants, err := client.List(ctx)
 	if err != nil {
 		return fmt.Errorf("list the tenants to move back: %w\n%s", err, whereMoved(done, node))
@@ -312,6 +326,6 @@ func moveBack(ctx context.Context, client Client, node string, done []moved, out
 		back++
 		fmt.Fprintf(out, "%s moved back to %s in %v\n", move.tenant, node, time.Since(start).Round(time.Second))
 	}
-	fmt.Fprintf(out, "node %s rebooted and runs its tenants again (%d moved back)\n", node, back)
+	fmt.Fprintf(out, "%s (%d moved back)\n", finished, back)
 	return nil
 }

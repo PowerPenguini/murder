@@ -38,8 +38,10 @@ type rebootAgent struct {
 	started   map[string]time.Time
 	downFor   map[string]int
 	neverBack map[string]bool
-	// onWait runs as the reboot waits for a node, once.
+	// onWait runs as the reboot waits for a node, once; onMove after each
+	// move away from or back to a node.
 	onWait func()
+	onMove func(tenant string)
 	// events are what changed, in order: "move a n3", "reboot n2".
 	events   []string
 	checked  []string
@@ -130,7 +132,11 @@ func (a *rebootAgent) Move(ctx context.Context, tenant, to string) (api.Tenant, 
 	if err == nil {
 		a.mu.Lock()
 		a.events = append(a.events, "move "+tenant+" "+to)
+		onMove := a.onMove
 		a.mu.Unlock()
+		if onMove != nil {
+			onMove(tenant)
+		}
 	}
 	return moved, err
 }
@@ -296,11 +302,31 @@ func TestARebootStopsAtATenantThatDoesNotMove(t *testing.T) {
 	agent.tenants = []api.Tenant{runningOn("a", "n2"), runningOn("b", "n2")}
 	agent.failMove = map[string]bool{"b": true}
 	err := Reboot(context.Background(), agent, "n2", RebootOptions{To: "n3", Wait: time.Second}, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "move b to n3: the copy did not arrive") || !strings.Contains(err.Error(), "node n2 was not rebooted; the 1 tenants moved from n2 run a on n3") {
+	if err == nil || !strings.Contains(err.Error(), "move b to n3: the copy did not arrive") || !strings.Contains(err.Error(), "node n2 was not rebooted; its tenants were moved back") {
 		t.Fatalf("reboot: %v", err)
 	}
-	if slices.Contains(agent.events, "reboot n2") {
-		t.Fatalf("rebooted all the same: %v", agent.events)
+	if want := []string{"move a n3", "move a n2"}; !slices.Equal(agent.events, want) {
+		t.Fatalf("events %v, want %v", agent.events, want)
+	}
+}
+
+// A node that will not reboot once its tenants moved away, as an upgrade
+// that started meanwhile freezes it, gets them back.
+func TestANodeThatRefusesTheRebootGetsItsTenantsBack(t *testing.T) {
+	agent := newRebootAgent("n1", "n2", "n3")
+	agent.tenants = []api.Tenant{runningOn("a", "n2"), runningOn("b", "n2")}
+	var buf bytes.Buffer
+	agent.onMove = func(tenant string) {
+		if tenant == "b" {
+			agent.notReady = map[string]string{"n2": "an upgrade runs"}
+		}
+	}
+	err := Reboot(context.Background(), agent, "n2", RebootOptions{To: "n3", Wait: time.Second}, &buf)
+	if err == nil || !strings.Contains(err.Error(), "an upgrade runs") || !strings.Contains(err.Error(), "its tenants were moved back") {
+		t.Fatalf("reboot: %v\n%s", err, buf.String())
+	}
+	if want := []string{"move a n3", "move b n3", "move a n2", "move b n2"}; !slices.Equal(agent.events, want) {
+		t.Fatalf("events %v, want %v", agent.events, want)
 	}
 }
 
