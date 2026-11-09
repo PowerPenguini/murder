@@ -60,6 +60,7 @@ func runSetup(args []string) error {
 	var public listFlag
 	flags.Var(&public, "public", "a public IP address of this node (default: its own; repeatable)")
 	flags.BoolVar(&opts.ManageDNS, "manage-dns", false, "have the cluster keep *.<domain> on the nodes that serve")
+	flags.BoolVar(&opts.KeepSSH, "keep-ssh", false, "leave SSH's settings as they are (by default setup turns its passwords off when you log in with a key)")
 	flags.BoolVar(&opts.Force, "force", false, "write the config anew over an existing one (the master key and database are kept)")
 	yes := flags.Bool("yes", false, "ask nothing: take the options and what setup finds")
 	dryRun := flags.Bool("dry-run", false, "only show what setup would do, and the config it would write")
@@ -122,6 +123,9 @@ func runSetup(args []string) error {
 	describe(settings)
 	in := settings.Install()
 	in.LiveRestore = facts.WantsLiveRestore()
+	if facts.SSH.Harden() && !opts.KeepSSH {
+		in.SSH = facts.SSH.Keys
+	}
 	steps, err := setup.Steps(host, in, opts.Force, func() error { return runInit([]string{"-config", setup.ConfigFile}) })
 	if err != nil {
 		return err
@@ -251,6 +255,9 @@ func joinCluster(ctx context.Context, host setup.System, facts setup.Facts, opts
 		return err
 	}
 	in.LiveRestore = facts.WantsLiveRestore()
+	if facts.SSH.Harden() && !opts.KeepSSH {
+		in.SSH = facts.SSH.Keys
+	}
 	steps, err := setup.Steps(host, in, opts.Force, func() error { return runInit([]string{"-config", setup.ConfigFile}) })
 	if err != nil {
 		return err

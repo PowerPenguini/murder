@@ -24,6 +24,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/runtime"
+	"github.com/PowerPenguini/murder/internal/setup"
 )
 
 // Status is how a check came out, from best to worst.
@@ -381,15 +382,15 @@ func checkSSH(ctx context.Context, cfg config.Agent, h Host) ([]Result, []int) {
 	var results []Result
 	passwords := settings["passwordauthentication"] == "yes" || settings["kbdinteractiveauthentication"] == "yes" && settings["usepam"] == "yes"
 	if settings["passwordauthentication"] == "yes" {
-		results = append(results, Result{Failure, "ssh", "SSH takes passwords, which bots guess around the clock", "PasswordAuthentication no in /etc/ssh/sshd_config.d/murder.conf, then systemctl reload ssh"})
+		results = append(results, Result{Failure, "ssh", "SSH takes passwords, which bots guess around the clock", "PasswordAuthentication no in " + setup.SSHDropIn + " (sshd takes the first value it reads, and cloud-init's 50-cloud-init.conf often turns passwords on), then systemctl reload ssh"})
 	}
 	if settings["kbdinteractiveauthentication"] == "yes" && settings["usepam"] == "yes" {
-		results = append(results, Result{Warning, "ssh", "SSH takes keyboard-interactive logins, which PAM answers with a password", "KbdInteractiveAuthentication no in /etc/ssh/sshd_config.d/murder.conf"})
+		results = append(results, Result{Warning, "ssh", "SSH takes keyboard-interactive logins, which PAM answers with a password", "KbdInteractiveAuthentication no in " + setup.SSHDropIn})
 	}
 	// With no password login at all, "yes" lets root in by key only, as
 	// prohibit-password does.
 	if settings["permitrootlogin"] == "yes" && passwords {
-		results = append(results, Result{Failure, "ssh", "root may log in over SSH with a password", "PermitRootLogin prohibit-password in /etc/ssh/sshd_config.d/murder.conf"})
+		results = append(results, Result{Failure, "ssh", "root may log in over SSH with a password", "PermitRootLogin prohibit-password in " + setup.SSHDropIn})
 	}
 	if f := cfg.HostFirewall; f != nil {
 		var closed []string

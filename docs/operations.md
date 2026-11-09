@@ -17,6 +17,21 @@ the missing ones and the commands that install them. Then it:
   reload, no container restarts): a restart of Docker, as its upgrade
   does, then leaves tenants running. Swarm mode forbids it; setup says so.
   The agent warns at start while it is off;
+- turns SSH's password logins off, when sshd takes passwords and the
+  account running setup (the one `sudo` was run from, or root) has a key
+  in its `authorized_keys`: `PasswordAuthentication no` and
+  `KbdInteractiveAuthentication no` in `/etc/ssh/sshd_config.d/00-murder.conf`,
+  then a reload of sshd, which keeps open sessions. sshd takes the first
+  value it reads, so the file is named to come before cloud-init's
+  `50-cloud-init.conf`, which often turns passwords on. Setup checks the
+  result with `sshd -T` and takes the file away if sshd refuses it or a
+  setting read earlier still turns passwords on. It reads sshd's settings
+  for your own connection (`sshd -T -C` with the account and the address in
+  `SSH_CONNECTION`), so a `Match` block that gives you another key file or
+  asks for a password too counts; when it cannot tell the address and the
+  config has a `Match` block, it leaves SSH as it is. Without a key, or with an
+  `AuthenticationMethods` that asks for more than a key, it leaves SSH as
+  it is and says so; `-keep-ssh` leaves it alone anyway;
 - creates the dataset `<pool>/murder/tenants`;
 - writes `/etc/murder/agent.yaml` with only what differs from the defaults,
   and the tokens it was given as `0600` files beside it;

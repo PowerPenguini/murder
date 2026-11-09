@@ -43,6 +43,7 @@ type Host interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
 	ReadFile(path string) ([]byte, error)
 	WriteFile(path string, data []byte, perm fs.FileMode) error
+	Remove(path string) error
 	MkdirAll(path string, perm fs.FileMode) error
 	Exists(path string) bool
 	// Executable is the running binary's path.
@@ -51,6 +52,12 @@ type Host interface {
 	// Addresses are the host's unicast IP addresses.
 	Addresses() ([]netip.Addr, error)
 	Root() bool
+	// Invoker is the account that runs setup: the one sudo was run from,
+	// or root.
+	Invoker() string
+	// Connection is the invoker's SSH_CONNECTION ("client port server
+	// port"); empty when it did not log in over SSH.
+	Connection() string
 }
 
 // Facts are what the host has.
@@ -74,6 +81,8 @@ type Facts struct {
 	// LiveRestore reports whether Docker keeps containers running while
 	// it restarts; Swarm whether it is in swarm mode, which forbids that.
 	LiveRestore, Swarm bool
+	// SSH is what sshd lets in.
+	SSH SSH
 }
 
 // DaemonConfig is Docker's own config file.
@@ -116,6 +125,7 @@ func Inspect(ctx context.Context, host Host) Facts {
 			facts.Public = append(facts.Public, address)
 		}
 	}
+	facts.SSH = inspectSSH(ctx, host)
 	facts.Installed = host.Exists(ConfigFile)
 	facts.HasKey, facts.HasDatabase = host.Exists(KeyFile), host.Exists(DatabaseFile)
 	// The edge's ports, unless Murder's own edge holds them.
@@ -167,6 +177,13 @@ func (f Facts) Warnings() []string {
 	if !f.CgroupV2 {
 		warnings = append(warnings, "the host does not use cgroup v2: tenants run, but what they use is not measured")
 	}
+	switch s := f.SSH; {
+	case !s.Passwords || s.Harden():
+	case s.Leave != "":
+		warnings = append(warnings, "SSH takes passwords, which bots guess around the clock; setup leaves it as it is, as "+s.Leave)
+	default:
+		warnings = append(warnings, "SSH takes passwords, which bots guess around the clock, and "+s.Account+" has no key to log in with instead: setup leaves SSH as it is (add a key to ~"+s.Account+"/.ssh/authorized_keys and run setup again, or set PasswordAuthentication no in "+SSHDropIn+")")
+	}
 	if f.Docker != "" && !f.LiveRestore && f.Swarm {
 		warnings = append(warnings, "Docker is in swarm mode, which cannot keep containers running while Docker restarts: restarting Docker stops every tenant until the agent starts them again")
 	}
@@ -214,6 +231,8 @@ type Options struct {
 	ManageDNS bool
 	// Force writes a new config over an existing one.
 	Force bool
+	// KeepSSH leaves sshd's settings as they are.
+	KeepSSH bool
 }
 
 // Settings are what setup installs: every choice made.

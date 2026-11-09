@@ -105,6 +105,9 @@ type Install struct {
 	Panel bool
 	// LiveRestore turns on Docker's live-restore.
 	LiveRestore bool
+	// SSH turns SSH's passwords off: whoever runs setup logs in with the
+	// key in this file.
+	SSH string
 }
 
 // Install is what setup installs for the settings.
@@ -220,6 +223,11 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 	if in.LiveRestore {
 		add("have Docker keep containers running while it restarts (live-restore)", func(ctx context.Context) error {
 			return liveRestore(ctx, host)
+		})
+	}
+	if in.SSH != "" {
+		add("have SSH take keys only, no passwords ("+SSHDropIn+"; you log in with the key in "+in.SSH+")", func(ctx context.Context) error {
+			return hardenSSH(ctx, host)
 		})
 	}
 	if in.ZFSPool != "" {
