@@ -55,6 +55,9 @@ type Host interface {
 	// Invoker is the account that runs setup: the one sudo was run from,
 	// or root.
 	Invoker() string
+	// Connection is the invoker's SSH_CONNECTION ("client port server
+	// port"); empty when it did not log in over SSH.
+	Connection() string
 }
 
 // Facts are what the host has.

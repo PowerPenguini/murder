@@ -25,7 +25,11 @@ the missing ones and the commands that install them. Then it:
   value it reads, so the file is named to come before cloud-init's
   `50-cloud-init.conf`, which often turns passwords on. Setup checks the
   result with `sshd -T` and takes the file away if sshd refuses it or a
-  setting read earlier still turns passwords on. Without a key, or with an
+  setting read earlier still turns passwords on. It reads sshd's settings
+  for your own connection (`sshd -T -C` with the account and the address in
+  `SSH_CONNECTION`), so a `Match` block that gives you another key file or
+  asks for a password too counts; when it cannot tell the address and the
+  config has a `Match` block, it leaves SSH as it is. Without a key, or with an
   `AuthenticationMethods` that asks for more than a key, it leaves SSH as
   it is and says so; `-keep-ssh` leaves it alone anyway;
 - creates the dataset `<pool>/murder/tenants`;

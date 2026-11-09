@@ -16,11 +16,20 @@ type sshHost struct {
 	*fakeHost
 	earlier bool // a setting before the drop-in turns passwords on
 	refuse  bool // sshd refuses its configuration with the drop-in
+	// match is a Match block's AuthorizedKeysFile, for ubuntu connecting
+	// from 198.51.100.7; empty for none.
+	match string
 }
 
 func (h *sshHost) Run(ctx context.Context, name string, args ...string) (string, error) {
-	if name == "sshd" && slices.Equal(args, []string{"-T"}) {
-		h.ran = append(h.ran, "sshd -T")
+	if name == "sh" && h.match != "" {
+		return "Port 22\nMatch User ubuntu Address 198.51.100.7\n  AuthorizedKeysFile " + h.match + "\n", nil
+	}
+	if name == "sshd" && len(args) > 0 && args[0] == "-T" {
+		h.ran = append(h.ran, "sshd "+strings.Join(args, " "))
+		if len(args) == 3 && h.match != "" && strings.Contains(args[2], "user=ubuntu") && strings.Contains(args[2], "addr=198.51.100.7") {
+			return strings.Replace(sshdTakesPasswords, "authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2", "authorizedkeysfile "+h.match, 1), nil
+		}
 		if _, ok := h.files[SSHDropIn]; ok {
 			switch {
 			case h.refuse:
@@ -131,5 +140,30 @@ func TestSetupTakesItsSSHSettingAwayWhenItDoesNotTakeHold(t *testing.T) {
 		if slices.ContainsFunc(host.ran, func(line string) bool { return strings.Contains(line, "reload") }) {
 			t.Fatalf("%s: sshd was reloaded: %v", name, host.ran)
 		}
+	}
+}
+
+func TestSetupLooksForTheKeyWhereAMatchBlockSays(t *testing.T) {
+	// The default key file holds a key, but ubuntu's connection logs in
+	// with the one a Match block names, which has none.
+	host := newSSHHost()
+	host.match = "/etc/ssh/keys/%u"
+	host.files["/home/ubuntu/.ssh/authorized_keys"] = []byte("ssh-ed25519 AAAA\n")
+	host.connection = "198.51.100.7 50122 203.0.113.10 22"
+	if facts := Inspect(context.Background(), host); facts.SSH.Harden() {
+		t.Fatalf("a key outside the Match block's file: %+v", facts.SSH)
+	}
+	if !slices.Contains(host.ran, "sshd -T -C user=ubuntu,addr=198.51.100.7,host=198.51.100.7,laddr=203.0.113.10,lport=22") {
+		t.Fatalf("not asked for the connection's settings: %v", host.ran)
+	}
+	host.files["/etc/ssh/keys/ubuntu"] = []byte("ssh-ed25519 BBBB\n")
+	if facts := Inspect(context.Background(), host); !facts.SSH.Harden() || facts.SSH.Keys != "/etc/ssh/keys/ubuntu" {
+		t.Fatalf("the Match block's key: %+v", facts.SSH)
+	}
+
+	// Not knowing the address, setup cannot tell which block applies.
+	host.connection = ""
+	if facts := Inspect(context.Background(), host); facts.SSH.Harden() || !strings.Contains(facts.SSH.Leave, "Match") {
+		t.Fatalf("no address: %+v", facts.SSH)
 	}
 }

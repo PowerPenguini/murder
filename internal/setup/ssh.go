@@ -40,7 +40,11 @@ type SSH struct {
 func (s SSH) Harden() bool { return s.Passwords && s.Keys != "" && s.Leave == "" }
 
 // inspectSSH reads sshd's effective settings, and looks for a key the
-// account running setup logs in with.
+// account running setup logs in with. Match blocks can give that account,
+// or the address it connects from, settings of their own (another key
+// file, a password on top of the key), so the settings are sshd's for that
+// connection: the account, and the address from SSH_CONNECTION. Without
+// the address, a config with Match blocks is left as it is.
 func inspectSSH(ctx context.Context, host Host) SSH {
 	settings, err := sshdSettings(ctx, host)
 	if err != nil {
@@ -49,6 +53,17 @@ func inspectSSH(ctx context.Context, host Host) SSH {
 	s := SSH{Account: host.Invoker()}
 	s.Passwords = settings["passwordauthentication"] == "yes" || settings["kbdinteractiveauthentication"] == "yes" && settings["usepam"] == "yes"
 	if !s.Passwords {
+		return s
+	}
+	spec := "user=" + s.Account
+	if fields := strings.Fields(host.Connection()); len(fields) == 4 {
+		spec += ",addr=" + fields[0] + ",host=" + fields[0] + ",laddr=" + fields[2] + ",lport=" + fields[3]
+	} else if hasMatch(ctx, host) {
+		s.Leave = "sshd's config has Match blocks, and setup cannot tell the address you connect from (log in over SSH, then run it)"
+		return s
+	}
+	if settings, err = sshdSettings(ctx, host, "-C", spec); err != nil {
+		s.Leave = "sshd -T -C " + spec + " failed: " + err.Error()
 		return s
 	}
 	switch {
@@ -79,11 +94,25 @@ func inspectSSH(ctx context.Context, host Host) SSH {
 	return s
 }
 
-// sshdSettings are sshd's effective settings, by lowercase name.
-func sshdSettings(ctx context.Context, host Host) (map[string]string, error) {
-	output, err := host.Run(ctx, "sshd", "-T")
+// hasMatch reports whether sshd's config, or one of its drop-ins, has a
+// Match block.
+func hasMatch(ctx context.Context, host Host) bool {
+	output, _ := host.Run(ctx, "sh", "-c", "cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null; true")
+	for line := range strings.Lines(output) {
+		if fields := strings.Fields(line); len(fields) > 0 && strings.EqualFold(fields[0], "match") {
+			return true
+		}
+	}
+	return false
+}
+
+// sshdSettings are sshd's effective settings, by lowercase name; with
+// "-C spec", for that connection.
+func sshdSettings(ctx context.Context, host Host, args ...string) (map[string]string, error) {
+	args = append([]string{"-T"}, args...)
+	output, err := host.Run(ctx, "sshd", args...)
 	if err != nil {
-		if output, err = host.Run(ctx, "/usr/sbin/sshd", "-T"); err != nil {
+		if output, err = host.Run(ctx, "/usr/sbin/sshd", args...); err != nil {
 			return nil, err
 		}
 	}

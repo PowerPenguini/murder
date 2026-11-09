@@ -23,6 +23,8 @@ type fakeHost struct {
 	hostname string
 	addrs    []string
 	root     bool
+	// connection is SSH_CONNECTION.
+	connection string
 }
 
 func newFakeHost() *fakeHost {
@@ -92,6 +94,7 @@ func (f *fakeHost) Executable() (string, error)        { return f.exe, nil }
 func (f *fakeHost) Hostname() (string, error)          { return f.hostname, nil }
 func (f *fakeHost) Root() bool                         { return f.root }
 func (f *fakeHost) Invoker() string                    { return "ubuntu" }
+func (f *fakeHost) Connection() string                 { return f.connection }
 func (f *fakeHost) Addresses() ([]netip.Addr, error) {
 	var addrs []netip.Addr
 	for _, a := range f.addrs {
