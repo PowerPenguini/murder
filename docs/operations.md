@@ -83,6 +83,17 @@ it needs neither the agent nor Docker running, and runs best as root (what
 it cannot see as another user it skips and says so). Each finding comes
 with its fix; it exits 1 when one failed.
 
+`murder doctor -fix` first does, on a node set up already, what setup does
+on a new one where that is safe on a running node, after showing the list
+and asking (`-yes` asks nothing): SSH stops taking passwords when the
+account running it logs in with a key (see [Install](#install)); Docker's
+`live-restore` goes on (a reload, no container stops); and on a node alone
+the host firewall goes on in the config, with SSH and what listens now left
+open, the old config kept beside it as `agent.yaml.before-host-firewall`,
+then `murder-agent` and `murder-firewall` restart (tenants keep running).
+The nodes of a cluster share a config, so there it prints the
+`hostFirewall` to add to each instead. Then it checks as usual.
+
 - **Murder's files.** The master key and every token are root's and `0600`,
   the config is writable by root only (whoever writes it runs code as
   root) and the database's directory is `0700`.

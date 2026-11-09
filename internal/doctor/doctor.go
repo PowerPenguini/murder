@@ -238,7 +238,7 @@ func checkFirewall(ctx context.Context, cfg config.Agent, h Host) ([]Result, boo
 		results = append(results, Result{OK, "firewall", "the tenant firewall is loaded", ""})
 	}
 	if cfg.HostFirewall == nil {
-		results = append(results, Result{Warning, "firewall", "the host firewall is off: every port the host listens on is open to the internet", "set hostFirewall in the config (see docs/operations.md), or filter in the provider's firewall"})
+		results = append(results, Result{Warning, "firewall", "the host firewall is off: every port the host listens on is open to the internet", "murder doctor -fix (a node alone), or set hostFirewall in the config (see docs/operations.md), or filter in the provider's firewall"})
 	}
 	return results, hostRules
 }
@@ -403,7 +403,7 @@ func checkSSH(ctx context.Context, cfg config.Agent, h Host) ([]Result, []int) {
 	var results []Result
 	passwords := settings["passwordauthentication"] == "yes" || settings["kbdinteractiveauthentication"] == "yes" && settings["usepam"] == "yes"
 	if settings["passwordauthentication"] == "yes" {
-		results = append(results, Result{Failure, "ssh", "SSH takes passwords, which bots guess around the clock", "PasswordAuthentication no in " + setup.SSHDropIn + " (sshd takes the first value it reads, and cloud-init's 50-cloud-init.conf often turns passwords on), then systemctl reload ssh"})
+		results = append(results, Result{Failure, "ssh", "SSH takes passwords, which bots guess around the clock", "murder doctor -fix (with a key to log in with), or PasswordAuthentication no in " + setup.SSHDropIn + " (sshd takes the first value it reads, and cloud-init's 50-cloud-init.conf often turns passwords on), then systemctl reload ssh"})
 	}
 	if settings["kbdinteractiveauthentication"] == "yes" && settings["usepam"] == "yes" {
 		results = append(results, Result{Warning, "ssh", "SSH takes keyboard-interactive logins, which PAM answers with a password", "KbdInteractiveAuthentication no in " + setup.SSHDropIn})
@@ -437,7 +437,7 @@ func checkDocker(ctx context.Context, h Host) []Result {
 	}
 	var results []Result
 	if !info.LiveRestoreEnabled {
-		results = append(results, Result{Warning, "docker", "restarting Docker, as an upgrade of it does, stops every tenant until it is back", `"live-restore": true in /etc/docker/daemon.json, then systemctl reload docker`})
+		results = append(results, Result{Warning, "docker", "restarting Docker, as an upgrade of it does, stops every tenant until it is back", `murder doctor -fix, or "live-restore": true in /etc/docker/daemon.json, then systemctl reload docker`})
 	}
 	// Docker names an unconfined profile too: name=seccomp,profile=unconfined.
 	if !slices.ContainsFunc(info.SecurityOptions, func(option string) bool {
