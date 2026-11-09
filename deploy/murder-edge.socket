@@ -1,0 +1,24 @@
+[Unit]
+Description=Murder edge (public ports, held while the edge restarts)
+Documentation=https://github.com/PowerPenguini/murder
+
+# systemd holds the edge's ports and passes them to every edge it starts,
+# so they stay open while murder-edge.service stops and starts again: a
+# connection that arrives meanwhile waits in the kernel's queue for the
+# next edge instead of being refused. A reload hands them over between
+# edges, as without the socket. The edge serves only the addresses its
+# config names: for others (edge.http, edge.https and, in a cluster, the
+# relay), the agent writes a drop-in with them
+# (murder-edge.socket.d/murder-listen.conf). The socket applies a change
+# only when it starts again, and it cannot while the edge runs:
+# `systemctl stop murder-edge.socket murder-edge.service; systemctl start murder-edge`.
+# murder-edge.service pulls this socket in; stopping the edge for good
+# takes `systemctl stop murder-edge.socket murder-edge.service`, as a
+# connection to the socket starts the edge again.
+[Socket]
+ListenStream=80
+ListenStream=443
+FileDescriptorName=edge
+# The socket may start before the network is up, at an address of the
+# host's not yet assigned.
+FreeBind=yes

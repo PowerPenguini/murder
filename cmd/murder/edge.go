@@ -21,6 +21,7 @@ import (
 
 	"github.com/cloudflare/tableflip"
 
+	"github.com/PowerPenguini/murder/internal/activation"
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
@@ -48,7 +49,9 @@ func slowStartsAfterIdle(path string) bool {
 // last routes the agent gave it, kept on disk too, so it serves while the
 // agent restarts or is down. SIGHUP replaces it with the binary now at its
 // path, without closing a listener: the new process takes them over, and
-// the old one finishes its requests and exits.
+// the old one finishes its requests and exits. Started by systemd with
+// murder-edge.socket, it serves the sockets systemd holds, which stay open
+// while it restarts.
 func runEdge(args []string) error {
 	flags := flag.NewFlagSet("edge", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfig, "agent configuration file")
@@ -175,8 +178,29 @@ func runEdge(args []string) error {
 			}
 		}()
 	}
+	// An edge taking over gets the listeners from the old one; one started
+	// by systemd, from murder-edge.socket. An address the socket does not
+	// hold, it binds itself, as it does outside systemd.
+	passed, err := activation.Listeners()
+	if err != nil {
+		log.Warn("some of the sockets systemd passed cannot be served", "error", err)
+	}
+	activated := activation.NewSet(passed)
+	fromSystemd := activated.Active()
 	listen := func(name, address string) (net.Listener, error) {
-		listener, err := upgrader.Listen("tcp", address)
+		listener, err := upgrader.ListenWithCallback("tcp", address, func(network, address string) (net.Listener, error) {
+			if listener, exact := activated.Take(address); listener != nil {
+				if !exact {
+					log.Warn("murder-edge.socket holds this port at other addresses than the one configured, and the edge serves them; the agent rewrites the socket to match, and `systemctl stop murder-edge.socket murder-edge.service; systemctl start murder-edge` applies that", "listener", name, "address", address, "held", listener.Addr().String())
+				}
+				return listener, nil
+			}
+			// The socket holds no metrics: a scrape missed is no loss.
+			if fromSystemd && name != "edge metrics" {
+				log.Warn("murder-edge.socket does not hold this address, so it refuses connections while the edge restarts; the agent rewrites the socket to match, and `systemctl stop murder-edge.socket murder-edge.service; systemctl start murder-edge` applies that", "listener", name, "address", address)
+			}
+			return net.Listen(network, address)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
@@ -249,10 +273,16 @@ func runEdge(args []string) error {
 		observed.certificates.Store(certificates)
 		serve("edge metrics", &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}, metricsListener)
 	}
+	// What the socket holds beyond the config's addresses takes
+	// connections no edge answers: they wait until they time out.
+	for _, unused := range activated.Rest() {
+		log.Warn("murder-edge.socket holds an address the config does not name; connections to it are not answered until the socket is restarted", "address", unused.Addr().String())
+		_ = unused.Close()
+	}
 	if err := upgrader.Ready(); err != nil {
 		return err
 	}
-	log.Info("murder edge serving", "baseDomain", cfg.BaseDomain, "tls", cfg.Edge.TLS.Mode, "routes", len(table.Load().Routes))
+	log.Info("murder edge serving", "baseDomain", cfg.BaseDomain, "tls", cfg.Edge.TLS.Mode, "routes", len(table.Load().Routes), "socketActivated", fromSystemd)
 	var runErr error
 	select {
 	case <-upgrader.Exit():

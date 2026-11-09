@@ -430,6 +430,21 @@ func TestEdgeConfined(t *testing.T) {
 	}
 }
 
+// A running edge is told whether murder-edge.socket holds its ports.
+func TestEdgeSocket(t *testing.T) {
+	running := "systemctl is-active murder-edge.service"
+	socket := "systemctl is-active murder-edge.socket"
+	if results := checkEdgeSocket(context.Background(), fakeHost(t, map[string]string{running: "active\n", socket: "active\n"})); !has(results, OK, "holds the edge's ports") {
+		t.Errorf("held: %+v", results)
+	}
+	if results := checkEdgeSocket(context.Background(), fakeHost(t, map[string]string{running: "active\n", socket: "inactive\n"})); !has(results, Warning, "murder-edge.socket is inactive") {
+		t.Errorf("not held: %+v", results)
+	}
+	if results := checkEdgeSocket(context.Background(), fakeHost(t, map[string]string{running: "inactive\n", socket: "inactive\n"})); results != nil {
+		t.Errorf("edge stopped: %+v", results)
+	}
+}
+
 // Accesses written offline, not in the register yet, are a warning until
 // they are synced.
 func TestOfflineAccessesWait(t *testing.T) {

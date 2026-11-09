@@ -61,7 +61,9 @@
   from private networks. The netns test checks it from outside as well.
 - **The edge runs confined.** It faces the internet, so
   `murder-edge.service` keeps it to binding low ports
-  (`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`), a read-only system
+  (`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`; systemd binds its public
+  ports for it through `murder-edge.socket`, and it binds only what the
+  socket does not hold, such as `edge.metrics`), a read-only system
   (`ProtectSystem=strict`; it writes below `/var/lib/murder` and
   `/run/murder-edge` only), no new privileges, the system calls of an
   ordinary service and its own `/tmp` and devices

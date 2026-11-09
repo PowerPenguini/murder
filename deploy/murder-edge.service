@@ -1,10 +1,13 @@
 [Unit]
 Description=Murder edge (public listeners)
 Documentation=https://github.com/PowerPenguini/murder
-After=network-online.target
-Wants=network-online.target
+After=network-online.target murder-edge.socket
+Wants=network-online.target murder-edge.socket
 
 [Service]
+# murder-edge.socket holds the ports while the edge restarts. If the
+# socket fails to start, the edge binds them itself.
+Sockets=murder-edge.socket
 ExecStart=/usr/local/bin/murder edge -config /etc/murder/agent.yaml
 # Upgrade without a gap: install the new binary, then reload. The new
 # process takes the listeners over; the old one finishes its requests (at
@@ -30,8 +33,8 @@ LimitNOFILE=65536
 # socket. For edge.tls.storage, edge.routes or edge.pidFile moved
 # elsewhere, the agent writes a drop-in with ReadWritePaths= for them
 # (murder-edge.service.d/murder-paths.conf). It stays root (it owns the
-# key files and binds 80 and 443) but keeps no capability other than
-# binding low ports.
+# key files, and binds the ports murder-edge.socket does not hold) but
+# keeps no capability other than binding low ports.
 # The agent and the panel keep none of this: an upgrade has them replace
 # /usr/local/bin/murder, and the agent runs nft and drives Docker.
 NoNewPrivileges=yes

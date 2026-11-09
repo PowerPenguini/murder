@@ -789,6 +789,35 @@ func runFirewall(args []string) error {
 	return loadFirewall(context.Background(), cfg, subnets)
 }
 
+// edgeRestartAdvice says what restart, if any, runs the edge under the
+// files replaced. A reload hands over to a child of the old edge, which
+// keeps the old unit's confinement and the sockets it has; only a start
+// under the new unit has it. With murder-edge.socket holding the ports, a
+// restart of the edge refuses no connection: they wait for the new edge.
+// The socket itself takes new addresses only when it starts again, which
+// it cannot while the edge runs, so that restart closes the ports for a
+// moment.
+func edgeRestartAdvice(replaced []string, socketActive bool) string {
+	changed := func(files ...string) bool {
+		return slices.ContainsFunc(replaced, func(file string) bool { return slices.Contains(files, file) })
+	}
+	switch {
+	case socketActive && changed(setup.Target("murder-edge.socket"), setup.EdgeSocketDropIn):
+		return "murder-edge.socket changed: `systemctl stop murder-edge.socket murder-edge.service; systemctl start murder-edge` has it hold the edge's addresses; the ports close for that moment, and open requests get edge.drain to finish"
+	case !changed(setup.Target("murder-edge.service"), setup.EdgePathsDropIn):
+		return ""
+	case socketActive:
+		return "murder-edge.service changed: `systemctl restart murder-edge` runs the edge under it, and no longer drops connections: murder-edge.socket holds the ports, so new ones wait for the new edge while the old one finishes its requests (at most edge.drain)"
+	}
+	return "murder-edge.service changed: `systemctl restart murder-edge` runs the edge under it and has murder-edge.socket hold its ports from then on; that restart is the last to refuse connections for a moment (open requests get edge.drain to finish)"
+}
+
+// unitActive reports whether systemd runs unit.
+func unitActive(ctx context.Context, host setup.System, unit string) bool {
+	out, err := host.Run(ctx, "systemctl", "is-active", unit)
+	return err == nil && strings.TrimSpace(out) == "active"
+}
+
 // privateHost reports whether host is a loopback or private address, or a
 // name (which the operator chose deliberately).
 func privateHost(host string) bool {
@@ -818,17 +847,15 @@ func refreshInstall(cfg config.Agent, log *slog.Logger) {
 			log.Warn("could not make a directory the edge writes", "dir", dir, "err", err)
 		}
 	}
-	replaced, err := setup.Refresh(ctx, host, dirs)
+	replaced, err := setup.Refresh(ctx, host, setup.Edge{Writable: dirs, Listen: setup.EdgeListen(cfg)})
 	if len(replaced) > 0 {
 		log.Info("brought the install files up to this release", "files", replaced)
 	}
 	// Until systemd has read the new unit, a restart would not apply it.
-	if err == nil && slices.ContainsFunc(replaced, func(file string) bool {
-		return file == setup.Target("murder-edge.service") || file == setup.EdgePathsDropIn
-	}) {
-		// A reload hands over to a child of the old edge, which keeps the
-		// old unit's confinement; only a start under the new unit has it.
-		log.Warn("murder-edge.service changed: `systemctl restart murder-edge` runs the edge under it (open requests get edge.drain to finish)")
+	if err == nil {
+		if message := edgeRestartAdvice(replaced, unitActive(ctx, host, "murder-edge.socket")); message != "" {
+			log.Warn(message)
+		}
 	}
 	if err != nil {
 		log.Warn("could not bring the install files up to this release", "err", err)

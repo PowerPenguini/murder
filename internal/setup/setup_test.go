@@ -236,10 +236,15 @@ func TestStepsInstallEverything(t *testing.T) {
 	for path, mode := range map[string]fs.FileMode{
 		Binary: 0o755, ConfigFile: 0o644, HetznerTokenFile: 0o600, SysctlFile: 0o644, HardeningFile: 0o644, DockerDropIn: 0o644,
 		UnitDir + "/murder-agent.service": 0o644, UnitDir + "/murder-panel.service": 0o644, UnitDir + "/murder-backup.timer": 0o644,
+		UnitDir + "/murder-edge.socket": 0o644, EdgeSocketDropIn: 0o644,
 	} {
 		if _, ok := host.files[path]; !ok || host.modes[path] != mode {
 			t.Errorf("%s: written %v, mode %v, want %v", path, ok, host.modes[path], mode)
 		}
+	}
+	// The cluster's relay is held by the socket too, from its first start.
+	if dropIn := string(host.files[EdgeSocketDropIn]); !strings.HasSuffix(dropIn, "ListenStream=\nListenStream=80\nListenStream=443\nListenStream=10.0.0.2:7402\n") {
+		t.Errorf("socket drop-in %q", dropIn)
 	}
 	if string(host.files[HetznerTokenFile]) != "hcloud-s3cret\n" || strings.Contains(string(host.files[ConfigFile]), "s3cret") {
 		t.Fatal("the token is not kept in its own file")
@@ -301,6 +306,9 @@ func TestPlainDirectoriesNeedNoZFS(t *testing.T) {
 	}
 	if _, ok := host.files[DockerDropIn]; ok {
 		t.Fatal("the ZFS drop-in was installed without ZFS")
+	}
+	if _, ok := host.files[EdgeSocketDropIn]; ok {
+		t.Fatal("the socket got a drop-in for its own addresses")
 	}
 	if strings.Contains(strings.Join(host.ran, "\n"), "murder-panel") {
 		t.Fatal("the panel was started without a cluster")

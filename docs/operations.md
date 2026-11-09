@@ -21,8 +21,9 @@ the missing ones and the commands that install them. Then it:
 - writes `/etc/murder/agent.yaml` with only what differs from the defaults,
   and the tokens it was given as `0600` files beside it;
 - makes the master key and the database (`murder init`);
-- starts `murder-firewall`, `murder-agent`, `murder-edge`, the hourly
-  backup of the database and, in a cluster with TLS and a public address,
+- starts `murder-firewall`, `murder-agent`, `murder-edge` (with
+  `murder-edge.socket`, which holds its ports; see
+  [Restart the edge](#restart-the-edge)), the hourly backup of the database and, in a cluster with TLS and a public address,
   `murder-panel`;
 - starts a cluster of the node, when it has a private address.
 
@@ -52,7 +53,7 @@ sudo install -d -m 0755 /etc/murder
 sudo install -m 0644 deploy/agent.example.yaml /etc/murder/agent.yaml   # then edit it
 sudo murder init                       # creates the master key (store a copy offline) and an empty database
 sudo install -m 0644 deploy/murder-firewall.service deploy/murder-agent.service deploy/murder-edge.service \
-  deploy/murder-backup.service deploy/murder-backup.timer /etc/systemd/system/
+  deploy/murder-edge.socket deploy/murder-backup.service deploy/murder-backup.timer /etc/systemd/system/
 sudo systemctl enable --now murder-firewall murder-agent murder-edge murder-backup.timer
 sudo murder doctor                     # what is left to harden; changes nothing
 ```
@@ -89,9 +90,14 @@ with its fix; it exits 1 when one failed.
   release brings `murder-edge.service` up to date at start (see
   [Upgrade Murder](#upgrade-murder)); then `systemctl restart murder-edge`:
   a reload hands over to a child of the old, unconfined process, so only a
-  restart confines it (open requests get `edge.drain` to finish). `journalctl -u murder-edge` then shows any
+  restart confines it (open requests get `edge.drain` to finish; with
+  `murder-edge.socket` holding the ports, new connections wait for the
+  new edge rather than being refused). `journalctl -u murder-edge` then shows any
   call the filter refused, and one `systemctl reload murder-edge` proves
   the handover still works.
+- **The edge's ports across a restart.** Whether `murder-edge.socket`
+  holds them (see [Restart the edge](#restart-the-edge)); on a node
+  upgraded from before it, one `systemctl restart murder-edge` starts it.
 - **Kernel and clock.** The settings `deploy/murder-hardening.conf` sets
   (no ICMP redirects, loose reverse path filtering, SYN cookies, kernel
   addresses, log and BPF kept from users; `ip_forward` stays on for
@@ -201,18 +207,28 @@ applies the sysctl files; it logs what it replaced (a reload that failed is
 done at the next start). A file the node does not have stays out, as one
 left out on purpose cannot be told from one a later release added: `murder
 doctor` names settings missing, such as the kernel hardening on a node set
-up before it. Nothing restarts: services run under a changed unit from
+up before it. The one exception is a file a release adds beside one the
+node has: `murder-edge.socket` comes with `murder-edge.service`. Nothing restarts: services run under a changed unit from
 their next start. When the config moves `edge.tls.storage`, `edge.routes`
 or `edge.pidFile` out of `/var/lib/murder` and `/run/murder-edge`, the
 agent also makes those directories and writes
 `murder-edge.service.d/murder-paths.conf` with `ReadWritePaths=` for them,
-so the confined edge can still write there. Change a unit with a drop-in (`systemctl edit
+so the confined edge can still write there. When the config's edge
+addresses are not the socket's own (ports 80 and 443 on all addresses:
+TLS off, other ports or addresses, or a cluster, whose relay the socket
+holds too), it writes `murder-edge.socket.d/murder-listen.conf` with
+them. Change a unit with a drop-in (`systemctl edit
 murder-edge`), which stays; an edit of the unit itself is replaced. When
 `murder-edge.service` changed, the agent says so: a reload hands over to a
 child of the old edge, which keeps the old unit's limits, so run `sudo
 systemctl restart murder-edge` (open requests get `edge.drain` to finish)
-for the edge to run under the new one. `murder doctor` reports an edge
-still unconfined.
+for the edge to run under the new one. With `murder-edge.socket` holding
+the ports, that restart drops no connection; on the upgrade that brings
+the socket, that restart is the one that starts it, and the last to
+refuse connections for a moment. When the socket's addresses changed, the
+agent says to stop and start both (see [Restart the edge](#restart-the-edge)).
+`murder doctor` reports an edge still unconfined, and ports the socket
+does not hold.
 
 **From a release before node identity keys,** finish the upgrade promptly.
 While any node shows no key in `murder cluster status`, someone with the
@@ -239,6 +255,43 @@ listeners; only once it serves does the old one stop taking connections,
 finish the requests it has, WebSockets included (up to `edge.drain`, 30 s;
 what still runs then is closed, and reconnects) and exit. A new edge that does not start leaves the old
 one serving. Restarting the agent leaves containers alone and the edge routing.
+
+### Restart the edge
+
+A reload (`systemctl reload murder-edge`) is how to replace the edge: the
+old and the new one overlap. A restart cannot overlap them: systemd starts
+the new edge only once the old one has exited, after finishing its
+requests (at least 2 s, at most `edge.drain`). So that this gap refuses no
+connection, `murder-edge.socket` holds the edge's ports: systemd binds
+them, passes them to every edge it starts, and keeps them open while none
+runs. A connection that arrives during a restart, or in the second after a
+crash before systemd starts the edge again, waits in the kernel's queue
+and is served by the next edge. In a test under systemd, ten restarts 3 s
+apart, with a new connection every 20 ms to each of ports 80 and 443,
+refused 1121 of 2714 connections without the socket and none of 1751 with
+it; the slowest was answered after 3.9 s. A crash still loses the
+connections the dead edge had accepted (4 of 2333 in the same test, with
+`kill -9` for a restart), not those waiting.
+
+- `murder-edge.service` pulls the socket in (`Wants=`); it is not enabled
+  on its own. If the socket cannot start, the edge binds its ports itself,
+  as it does outside systemd.
+- Since a connection to the socket starts the edge, stopping the edge for
+  good takes `systemctl stop murder-edge.socket murder-edge.service`.
+- The socket holds the addresses of `edge.http`, `edge.https` (with TLS)
+  and, in a cluster, the relay; the agent writes them to
+  `murder-edge.socket.d/murder-listen.conf` when they are not the unit's
+  own. `edge.metrics` is not held: a scrape missed during a restart is no
+  loss. A host name in an address is left to the edge to bind.
+- systemd applies the socket's addresses only when the socket starts, and
+  it refuses to start the socket while the edge runs. After changing them,
+  `sudo systemctl stop murder-edge.socket murder-edge.service; sudo
+  systemctl start murder-edge` (`systemctl restart` of both at once fails
+  to order them). That closes the ports for as long as the old edge
+  drains. An edge started with a socket out of date with its config says
+  so in its log: it serves a socket on the same port at other addresses
+  rather than fail to bind beside it, and binds an address the socket
+  lacks itself.
 
 A new release replaces no container either: a container is replaced only
 when what it is made from changes (the tenant's spec, limits, secrets,
