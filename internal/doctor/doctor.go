@@ -269,7 +269,28 @@ func checkUnits(ctx context.Context, cfg config.Agent, h Host) []Result {
 	} else {
 		results = append(results, Result{OK, "services", "Murder's services start at boot", ""})
 	}
-	return append(results, checkEdgeConfined(ctx, h)...)
+	results = append(results, checkEdgeConfined(ctx, h)...)
+	return append(results, checkEdgeSocket(ctx, h)...)
+}
+
+// checkEdgeSocket says whether murder-edge.socket holds the edge's ports,
+// so that a restart of the edge refuses no connection. It is pulled in by
+// the edge's unit, not enabled, so it is asked whether it runs; it starts
+// with the edge, so only a running edge is asked about.
+func checkEdgeSocket(ctx context.Context, h Host) []Result {
+	if edge, err := h.Run(ctx, "systemctl", "is-active", "murder-edge.service"); err != nil || strings.TrimSpace(string(edge)) != "active" {
+		return nil
+	}
+	// is-active fails for a unit that does not run: its output says how.
+	output, _ := h.Run(ctx, "systemctl", "is-active", "murder-edge.socket")
+	switch state := strings.TrimSpace(string(output)); state {
+	case "active":
+		return []Result{{OK, "services", "murder-edge.socket holds the edge's ports while it restarts", ""}}
+	case "":
+		return nil
+	default:
+		return []Result{{Warning, "services", "the edge's ports refuse connections while it restarts: murder-edge.socket is " + state, "systemctl stop murder-edge.service && systemctl start murder-edge.socket murder-edge.service, once: the socket holds the ports from then on (an agent of this release installs both at its start; journalctl -u murder-edge.socket says why one failed)"}}
+	}
 }
 
 // checkEdgeConfined looks at the running edge, not its unit file: a unit

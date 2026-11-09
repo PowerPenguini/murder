@@ -9,5 +9,5 @@ import "embed"
 
 // Files are the install files, by their names in this directory.
 //
-//go:embed *.service *.timer murder-sysctl.conf murder-hardening.conf docker-after-zfs.conf
+//go:embed *.service *.socket *.timer murder-sysctl.conf murder-hardening.conf docker-after-zfs.conf
 var Files embed.FS

@@ -15,6 +15,7 @@ import (
 	"text/template"
 
 	"github.com/PowerPenguini/murder/deploy"
+	"github.com/PowerPenguini/murder/internal/config"
 )
 
 // Config is the agent's config for the settings: only what differs from
@@ -265,7 +266,7 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 			return err
 		})
 	}
-	add("write "+ConfigFile+" and the files it names", func(context.Context) error {
+	add("write "+ConfigFile+" and the files it names", func(ctx context.Context) error {
 		if host.Exists(ConfigFile) && !force {
 			return fmt.Errorf("%s exists: this node is set up already (edit it, or run setup again with -force to write it anew)", ConfigFile)
 		}
@@ -280,7 +281,27 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 				return err
 			}
 		}
-		return host.WriteFile(ConfigFile, in.Config, 0o644)
+		if err := host.WriteFile(ConfigFile, in.Config, 0o644); err != nil {
+			return err
+		}
+		// murder-edge.socket holds the edge's addresses from its first
+		// start, which is the edge's: the agent's drop-in would come only
+		// after it, and a socket takes a change only when it starts again.
+		cfg, err := config.Parse(in.Config)
+		if err != nil {
+			return err
+		}
+		listen := EdgeListen(cfg)
+		if slices.Equal(listen, edgeSocketListen()) && !host.Exists(EdgeSocketDropIn) {
+			return nil
+		}
+		if err := host.MkdirAll(path.Dir(EdgeSocketDropIn), 0o755); err != nil {
+			return err
+		}
+		if err := host.WriteFile(EdgeSocketDropIn, edgeSocket(listen), 0o644); err != nil {
+			return err
+		}
+		return activate(ctx, host, nil, true)
 	})
 	add("make the master key and the database", func(context.Context) error { return initialize() })
 	add("start "+strings.Join(in.Units(), ", "), func(ctx context.Context) error {

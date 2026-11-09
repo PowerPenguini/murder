@@ -391,3 +391,150 @@ func TestTheEdgeConfirmsItsSavedRoutesAtOnce(t *testing.T) {
 		t.Fatal("the agent did not confirm the saved routes at once")
 	}
 }
+
+// Restarted under socket activation, the edge refuses no connection: the
+// socket systemd holds (here, the test) takes them while no edge runs, and
+// the next edge serves those waiting. That edge still hands over on SIGHUP.
+func TestEdgeRestartUnderSocketActivationRefusesNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the binary")
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "murder")
+	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, output)
+	}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer backend.Close()
+	routes := filepath.Join(dir, "edge-routes.json")
+	if err := edge.SaveTable(routes, edge.NewTable(map[string]edge.Route{"acme": {Backend: strings.TrimPrefix(backend.URL, "http://")}})); err != nil {
+		t.Fatal(err)
+	}
+	// What murder-edge.socket does: hold the port across the edges.
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	socket, err := held.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	address := held.Addr().String()
+	pidFile := filepath.Join(dir, "edge.pid")
+	configPath := filepath.Join(dir, "agent.yaml")
+	config := fmt.Sprintf("baseDomain: example.test\nsocket: %s\nfirewall: \"off\"\nedge: {http: %q, routes: %s, routesHold: 0s, pidFile: %s, drain: 5s}\n",
+		filepath.Join(socketDir(t), "agent.sock"), address, routes, pidFile)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logFile, err := os.Create(filepath.Join(dir, "edge.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	output := logOutput(logFile.Name())
+	// systemd sets LISTEN_PID to the pid it starts: the shell's, which
+	// exec keeps.
+	start := func() *exec.Cmd {
+		edge := exec.Command("/bin/sh", "-c", `LISTEN_PID=$$ exec "$0" "$@"`, binary, "edge", "-config", configPath)
+		edge.Env = append(os.Environ(), "LISTEN_FDS=1", "LISTEN_FDNAMES=edge")
+		edge.ExtraFiles = []*os.File{socket}
+		edge.Stdout, edge.Stderr = logFile, logFile
+		if err := edge.Start(); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(30 * time.Second)
+		for readPID(pidFile) != edge.Process.Pid {
+			if time.Now().After(deadline) {
+				t.Fatalf("the edge did not get ready:\n%s", output())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return edge
+	}
+	stopEdge := func(pid int) {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		for range 300 {
+			if syscall.Kill(pid, 0) != nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatalf("edge %d did not stop:\n%s", pid, output())
+	}
+
+	first := start()
+	firstDone := make(chan struct{})
+	go func() { _ = first.Wait(); close(firstDone) }()
+	ctx, stop := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	var served atomic.Int64
+	failures := make(chan error, 100)
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 20 * time.Second}
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				request, _ := http.NewRequest("GET", "http://"+address+"/", nil)
+				request.Host = "acme.example.test"
+				response, err := client.Do(request)
+				if err != nil {
+					failures <- fmt.Errorf("at %s: %w", time.Now().Format("15:04:05.000"), err)
+					return
+				}
+				body, _ := io.ReadAll(response.Body)
+				response.Body.Close()
+				if response.StatusCode != 200 || string(body) != "ok" {
+					failures <- fmt.Errorf("%s: %q", response.Status, body)
+					return
+				}
+				served.Add(1)
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+	}
+	time.Sleep(300 * time.Millisecond)
+	// A restart: the edge stops, and only then does the next one start.
+	stopEdge(first.Process.Pid)
+	<-firstDone
+	before := served.Load()
+	second := start()
+	secondDone := make(chan struct{})
+	go func() { _ = second.Wait(); close(secondDone) }()
+	time.Sleep(300 * time.Millisecond)
+	afterRestart := served.Load()
+	// A reload hands over to a child, which gets the socket from the edge
+	// (the variables naming it are gone): it binds nothing anew, which
+	// would fail beside the held socket.
+	if err := second.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the edge did not hand over:\n%s", output())
+	}
+	child := readPID(pidFile)
+	time.Sleep(300 * time.Millisecond)
+	stop()
+	wg.Wait()
+	close(failures)
+	for err := range failures {
+		t.Errorf("a request failed: %v", err)
+	}
+	if before == 0 || afterRestart <= before || served.Load() <= afterRestart {
+		t.Errorf("served %d before the restart, %d after it, %d after the handover", before, afterRestart, served.Load())
+	}
+	if child != 0 && child != second.Process.Pid {
+		stopEdge(child)
+	}
+	if !strings.Contains(output(), `"socketActivated":true`) {
+		t.Errorf("the edge did not serve the socket it was passed:\n%s", output())
+	}
+	if t.Failed() {
+		t.Logf("edge output:\n%s", output())
+	}
+}

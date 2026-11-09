@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/setup"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -71,5 +72,30 @@ func TestAStoppingAgentMarksItsNodeAwayWithoutWaitingLong(t *testing.T) {
 	markAway(frozen, "n1", until, time.Second, log)
 	if strings.Contains(out.String(), "level=WARN") {
 		t.Fatalf("a freeze logged %q", out.String())
+	}
+}
+
+// The agent says which restart runs the edge under the units it replaced,
+// and that, with the socket holding the ports, it refuses no connection.
+func TestEdgeRestartAdvice(t *testing.T) {
+	service, socket := setup.Target("murder-edge.service"), setup.Target("murder-edge.socket")
+	for _, c := range []struct {
+		replaced []string
+		active   bool
+		want     string
+	}{
+		{nil, true, ""},
+		{[]string{setup.Target("murder-agent.service")}, true, ""},
+		{[]string{service}, true, "no longer drops connections"},
+		{[]string{setup.EdgePathsDropIn}, true, "no longer drops connections"},
+		// The release that brings the socket: one restart starts it.
+		{[]string{service, socket}, false, "systemctl stop murder-edge.service && systemctl start murder-edge.socket"},
+		{[]string{setup.EdgeSocketDropIn}, true, "systemctl stop murder-edge.socket murder-edge.service; systemctl start murder-edge"},
+		{[]string{service, setup.EdgeSocketDropIn}, true, "the ports close for that moment"},
+	} {
+		got := edgeRestartAdvice(c.replaced, c.active)
+		if c.want == "" && got != "" || !strings.Contains(got, c.want) {
+			t.Errorf("replaced %v, socket active %v: %q, want %q", c.replaced, c.active, got, c.want)
+		}
 	}
 }
