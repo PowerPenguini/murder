@@ -29,6 +29,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/invite"
 	"github.com/PowerPenguini/murder/internal/move"
+	"github.com/PowerPenguini/murder/internal/reboot"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/records"
 	"github.com/PowerPenguini/murder/internal/releases"
@@ -171,6 +172,19 @@ func runAgent(args []string) error {
 			time.AfterFunc(500*time.Millisecond, func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) })
 		},
 	}}
+	// The agent's part in a reboot of the host, as "murder node reboot"
+	// asks: it reboots once the node would come back as it runs.
+	rebooter := &reboot.Node{
+		System: reboot.Exec{}, Firewall: cfg.Firewall == config.FirewallNftables,
+		Frozen: upgrader.frozen, Delay: 500 * time.Millisecond, Log: log.With("component", "reboot"),
+		Away: func(until time.Time) error {
+			// Outside a cluster, nothing fails the node over.
+			if _, member := st.NodeKey(node); !member {
+				return nil
+			}
+			return st.Away(node, until)
+		},
+	}
 	// A node that cannot apply what the cluster applied stops; its restart
 	// applies the entry again.
 	fatal := make(chan error, 1)
@@ -200,7 +214,7 @@ func runAgent(args []string) error {
 		member, err = cluster.Start(cluster.Config{
 			Node: node, Address: cfg.Cluster.Address, Dir: cfg.Cluster.Dir,
 			Seeds: key.DeriveAll(clusterSeed), Store: st, Log: log, Upgrade: upgrader, Moves: moves, Replicas: receiver,
-			Usage: peerUsage{recorder}, Invites: invites, Keys: ring,
+			Usage: peerUsage{recorder}, Invites: invites, Keys: ring, Reboot: rebooter,
 			Fatal: func(err error) {
 				select {
 				case fatal <- err:
@@ -268,7 +282,7 @@ func runAgent(args []string) error {
 		}
 	}
 
-	apiHandler := apiserver.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves).WithUsage(recorder)
+	apiHandler := apiserver.NewServer(st, reconciler, docker, key, log).WithUpgrader(upgrader).WithMoves(moves).WithUsage(recorder).WithRebooter(rebooter)
 	apiHandler.WithKeys(&keyRotator{ring: ring, store: st, member: started.Load, node: node, log: log.With("component", "keys")})
 	go func() {
 		ticker := time.NewTicker(keyCheckEvery)
@@ -421,8 +435,9 @@ func runAgent(args []string) error {
 	}
 	// A clean stop, as for a reboot, marks the node away for a while: the
 	// leader does not power it off for not answering meanwhile.
+	// A reboot asked for may have marked it away for longer: that stays.
 	if member != nil && runErr == nil {
-		markAway(st, node, time.Now().Add(awayFor), awayTimeout, log)
+		markAway(st, node, later(time.Now().Add(awayFor), rebooter.AwayUntil()), awayTimeout, log)
 	}
 	// Tenant containers keep running while the agent is down or restarting;
 	// only the agent's own listeners stop. A pass, also one an API call
@@ -571,6 +586,14 @@ func keepPublic(ctx context.Context, st *store.SQLite, node string, values []str
 // awayFor is how long a node whose agent stopped cleanly is not failed over
 // for not answering: long enough for a reboot.
 const awayFor = 10 * time.Minute
+
+// later is the later of a and b.
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
 
 // awayTimeout bounds marking the node away as the agent stops: a node that
 // cannot reach the cluster's leader does not hold its stop for long.

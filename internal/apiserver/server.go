@@ -52,6 +52,8 @@ type Server struct {
 	caughtUpOnce sync.Once
 	// upgrader installs new binaries on this node; nil if it takes none.
 	upgrader Upgrader
+	// rebooter reboots this node's host; nil if it takes no reboots.
+	rebooter Rebooter
 	// relayPort is where the edges of a cluster pass requests on.
 	relayPort int
 	// moves moves tenants between nodes; nil if this node moves none.
@@ -108,6 +110,7 @@ func (s *Server) Handler() http.Handler {
 	s.clusterRoutes(mux)
 	s.keyRoutes(mux)
 	s.upgradeRoutes(mux)
+	s.rebootRoutes(mux)
 	s.usageRoutes(mux)
 	s.domainRoutes(mux)
 	s.accessRoutes(mux)
