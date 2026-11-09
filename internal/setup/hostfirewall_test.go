@@ -79,3 +79,32 @@ func TestSetupTurnsTheHostFirewallOn(t *testing.T) {
 		t.Fatalf("-no-host-firewall gave %+v, %v", agent.HostFirewall, err)
 	}
 }
+
+// sshd on 22 by its settings, but on 2222 by a ListenAddress and by a
+// socket systemd holds: both stay open.
+func TestTheHostFirewallKeepsEverySSHPortOpen(t *testing.T) {
+	host := newFakeHost()
+	host.commands["sshd -T"] = "port 22\nlistenaddress 192.0.2.10:2200\nlistenaddress [2001:db8::1]:2201\npasswordauthentication no\n"
+	host.commands["systemctl show -p Listen --value ssh.socket"] = "[::]:2202 (Stream)\n0.0.0.0:2203 (Stream)\n"
+	host.commands["ss -H -ltunp"] = "tcp LISTEN 0 4096 0.0.0.0:2222 0.0.0.0:* users:((\"systemd\",pid=1,fd=50))\n"
+	facts := Inspect(context.Background(), host)
+	if !slices.Equal(facts.SSHPorts, []int{22, 2200, 2201, 2202, 2203}) {
+		t.Fatalf("ssh ports %v", facts.SSHPorts)
+	}
+	s, _ := Settle(Options{Domain: "example.com", ClusterAddress: "none", ZFSPool: "none"}, facts)
+	agent, err := config.Parse(Config(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A socket of systemd's the settings do not name is opened all the
+	// same, as something that served.
+	rules, err := agent.HostRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range []int{22, 2200, 2201, 2202, 2203, 2222} {
+		if !slices.Contains(rules.PublicTCP, port) {
+			t.Fatalf("port %d closed: %v\n%s", port, rules.PublicTCP, Config(s))
+		}
+	}
+}

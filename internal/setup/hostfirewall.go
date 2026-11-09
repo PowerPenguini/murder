@@ -23,15 +23,41 @@ type Listener struct {
 // Entry is the listener as hostFirewall lists it, such as "9100/tcp".
 func (l Listener) Entry() string { return fmt.Sprintf("%d/%s", l.Port, l.Protocol) }
 
-// sshPorts are the ports sshd listens on: its Port settings, and the
-// sockets it (or systemd, for a socket-activated ssh) holds that its
-// settings name; 22 when neither says.
+// sshPorts are the ports sshd listens on: its Port and ListenAddress
+// settings, the sockets sshd holds, and those of systemd's ssh.socket for
+// a socket-activated ssh; 22 when none says. A port is taken whatever the
+// address: one the firewall opens needlessly costs less than SSH locked
+// out.
 func sshPorts(ctx context.Context, host Host) []int {
 	var ports []int
+	addPort := func(text string) {
+		if port, err := strconv.Atoi(text); err == nil && port > 0 && port < 65536 {
+			ports = append(ports, port)
+		}
+	}
 	if settings, err := sshdSettingsAll(ctx, host); err == nil {
 		for _, value := range settings["port"] {
-			if port, err := strconv.Atoi(value); err == nil {
-				ports = append(ports, port)
+			addPort(value)
+		}
+		for _, value := range settings["listenaddress"] {
+			// "192.0.2.10:22", "[::]:22", with a "rdomain" after it.
+			address, _, _ := strings.Cut(value, " ")
+			if i := strings.LastIndex(address, ":"); i >= 0 && !strings.HasSuffix(address, "]") {
+				addPort(address[i+1:])
+			}
+		}
+	}
+	for _, unit := range []string{"ssh.socket", "sshd.socket"} {
+		// "Listen=[::]:22 (Stream)", one line for each.
+		output, err := host.Run(ctx, "systemctl", "show", "-p", "Listen", "--value", unit)
+		if err != nil {
+			continue
+		}
+		for _, field := range strings.Fields(output) {
+			if i := strings.LastIndex(field, ":"); i >= 0 {
+				addPort(field[i+1:])
+			} else {
+				addPort(field)
 			}
 		}
 	}
