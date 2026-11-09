@@ -57,6 +57,8 @@ func (System) WriteFile(path string, data []byte, perm fs.FileMode) error {
 	return os.Rename(temp.Name(), path)
 }
 
+func (System) Remove(path string) error { return os.Remove(path) }
+
 func (System) MkdirAll(path string, perm fs.FileMode) error { return os.MkdirAll(path, perm) }
 
 func (System) Exists(path string) bool {
@@ -110,3 +112,10 @@ func virtual(name string) bool {
 }
 
 func (System) Root() bool { return os.Geteuid() == 0 }
+
+func (System) Invoker() string {
+	if account := os.Getenv("SUDO_USER"); account != "" {
+		return account
+	}
+	return "root"
+}

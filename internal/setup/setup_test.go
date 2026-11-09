@@ -78,11 +78,20 @@ func (f *fakeHost) WriteFile(path string, data []byte, perm fs.FileMode) error {
 	return nil
 }
 
+func (f *fakeHost) Remove(path string) error {
+	if _, ok := f.files[path]; !ok {
+		return fs.ErrNotExist
+	}
+	delete(f.files, path)
+	return nil
+}
+
 func (f *fakeHost) MkdirAll(string, fs.FileMode) error { return nil }
 func (f *fakeHost) Exists(path string) bool            { _, ok := f.files[path]; return ok }
 func (f *fakeHost) Executable() (string, error)        { return f.exe, nil }
 func (f *fakeHost) Hostname() (string, error)          { return f.hostname, nil }
 func (f *fakeHost) Root() bool                         { return f.root }
+func (f *fakeHost) Invoker() string                    { return "ubuntu" }
 func (f *fakeHost) Addresses() ([]netip.Addr, error) {
 	var addrs []netip.Addr
 	for _, a := range f.addrs {
