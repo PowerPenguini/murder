@@ -81,8 +81,12 @@ type Facts struct {
 	// LiveRestore reports whether Docker keeps containers running while
 	// it restarts; Swarm whether it is in swarm mode, which forbids that.
 	LiveRestore, Swarm bool
-	// SSH is what sshd lets in.
-	SSH SSH
+	// SSH is what sshd lets in, and SSHPorts the ports it listens on.
+	SSH      SSH
+	SSHPorts []int
+	// Listeners are the ports the host firewall would close: what
+	// listens beyond loopback, other than Murder and sshd.
+	Listeners []Listener
 }
 
 // DaemonConfig is Docker's own config file.
@@ -126,6 +130,8 @@ func Inspect(ctx context.Context, host Host) Facts {
 		}
 	}
 	facts.SSH = inspectSSH(ctx, host)
+	facts.SSHPorts = sshPorts(ctx, host)
+	facts.Listeners = listeners(ctx, host, facts.SSHPorts)
 	facts.Installed = host.Exists(ConfigFile)
 	facts.HasKey, facts.HasDatabase = host.Exists(KeyFile), host.Exists(DatabaseFile)
 	// The edge's ports, unless Murder's own edge holds them.
@@ -233,6 +239,8 @@ type Options struct {
 	Force bool
 	// KeepSSH leaves sshd's settings as they are.
 	KeepSSH bool
+	// NoHostFirewall leaves the host's own ports unfiltered.
+	NoHostFirewall bool
 }
 
 // Settings are what setup installs: every choice made.
@@ -249,6 +257,12 @@ type Settings struct {
 	ManageDNS      bool
 	Panel          bool
 	TunnelAddress  string
+	// HostFirewall drops what reaches the host besides SSH on SSHPorts,
+	// Murder's ports and Open (to everyone) and Private (to private
+	// networks), which list what listened when setup ran.
+	HostFirewall  bool
+	SSHPorts      []int
+	Open, Private []Listener
 }
 
 var (
@@ -348,6 +362,20 @@ func Settle(opts Options, facts Facts) (Settings, []string) {
 	// The panel serves HTTPS inside its tunnel, whose devices are kept in
 	// the cluster's state, and whose endpoint is a public address.
 	s.Panel = cluster && s.TLS != "off" && len(s.Public) > 0
+	if !opts.NoHostFirewall {
+		s.HostFirewall = true
+		s.SSHPorts = facts.SSHPorts
+		if len(s.SSHPorts) == 0 {
+			s.SSHPorts = []int{22}
+		}
+		for _, l := range facts.Listeners {
+			if l.Private {
+				s.Private = append(s.Private, l)
+			} else {
+				s.Open = append(s.Open, l)
+			}
+		}
+	}
 	if s.Panel {
 		s.TunnelAddress = "10.77.0.1"
 	}

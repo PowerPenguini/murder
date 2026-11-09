@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +62,7 @@ func runSetup(args []string) error {
 	flags.Var(&public, "public", "a public IP address of this node (default: its own; repeatable)")
 	flags.BoolVar(&opts.ManageDNS, "manage-dns", false, "have the cluster keep *.<domain> on the nodes that serve")
 	flags.BoolVar(&opts.KeepSSH, "keep-ssh", false, "leave SSH's settings as they are (by default setup turns its passwords off when you log in with a key)")
+	flags.BoolVar(&opts.NoHostFirewall, "no-host-firewall", false, "leave the host's own ports unfiltered (by default only SSH, Murder's ports and what listened when setup ran stay open)")
 	flags.BoolVar(&opts.Force, "force", false, "write the config anew over an existing one (the master key and database are kept)")
 	yes := flags.Bool("yes", false, "ask nothing: take the options and what setup finds")
 	dryRun := flags.Bool("dry-run", false, "only show what setup would do, and the config it would write")
@@ -336,6 +338,38 @@ func describe(s setup.Settings) {
 	if s.Panel {
 		fmt.Fprintf(stdout, "  panel:     https://panel.%s inside a WireGuard tunnel\n", s.Domain)
 	}
+	if s.HostFirewall {
+		open := []string{"SSH (" + ports(s.SSHPorts) + ")", "Murder's ports"}
+		for _, l := range s.Open {
+			open = append(open, l.Entry()+processOf(l))
+		}
+		line := "  firewall:  the host takes " + strings.Join(open, ", ")
+		if len(s.Private) > 0 {
+			var private []string
+			for _, l := range s.Private {
+				private = append(private, l.Entry()+processOf(l))
+			}
+			line += "; from private networks also " + strings.Join(private, ", ")
+		}
+		fmt.Fprintln(stdout, line)
+	} else {
+		fmt.Fprintln(stdout, "  firewall:  the host's own ports unfiltered (-no-host-firewall)")
+	}
+}
+
+func ports(numbers []int) string {
+	var texts []string
+	for _, n := range numbers {
+		texts = append(texts, strconv.Itoa(n))
+	}
+	return strings.Join(texts, ", ")
+}
+
+func processOf(l setup.Listener) string {
+	if l.Process == "" {
+		return ""
+	}
+	return " (" + l.Process + ")"
 }
 
 // nextSteps says what is left to do by hand.

@@ -66,8 +66,8 @@ type Agent struct {
 	// host from anywhere other than a tenant network, unless it goes to
 	// SSH, the edge, the panel's tunnel or a port listed here; the cluster
 	// and relay ports, and metrics not on loopback, stay open to private
-	// networks only. Off by default: it would close ports the host serves
-	// besides Murder.
+	// networks only. Off without the key, as it would close ports the host
+	// serves besides Murder; murder setup writes it, with what listened.
 	HostFirewall *HostFirewall `yaml:"hostFirewall"`
 	Volumes      Volumes       `yaml:"volumes"`
 	Edge         Edge          `yaml:"edge"`

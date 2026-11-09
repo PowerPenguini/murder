@@ -32,6 +32,9 @@ the missing ones and the commands that install them. Then it:
   config has a `Match` block, it leaves SSH as it is. Without a key, or with an
   `AuthenticationMethods` that asks for more than a key, it leaves SSH as
   it is and says so; `-keep-ssh` leaves it alone anyway;
+- turns the host firewall on (`hostFirewall`, see
+  [Harden the node](#harden-the-node)), with SSH's ports and what listened
+  when setup ran left open;
 - creates the dataset `<pool>/murder/tenants`;
 - writes `/etc/murder/agent.yaml` with only what differs from the defaults,
   and the tokens it was given as `0600` files beside it;
@@ -120,8 +123,16 @@ sudo install -m 0644 deploy/murder-hardening.conf /etc/sysctl.d/91-murder-harden
 sudo sysctl --system
 ```
 
-The host firewall is off by default, as it closes every port the host
-serves besides SSH and Murder's. With `hostFirewall` set, the same table
+The host firewall is off in a config without `hostFirewall`, as it closes
+every port the host serves besides SSH and Murder's. `murder setup` turns
+it on (`-no-host-firewall` leaves it off): `hostFirewall.ssh` gets the
+ports sshd listens on (`sshd -T`, and its sockets, a socket-activated
+ssh's too), and what else listened beyond loopback when setup ran goes in
+`open`, or in `private` when it listened on a private address only, each
+with a comment naming the process, so setup closes nothing that served.
+Take out what should not be public. Docker's published ports, the DHCP
+client, mDNS and LLMNR are left out: the first pass the host's input rules
+anyway, and the others need no opening. With `hostFirewall` set, the same table
 drops what reaches the host from outside unless it goes to SSH (port 22,
 or `hostFirewall.ssh`), the edge ports, the panel's tunnel or a port in
 `hostFirewall.open`; the cluster port, the relay port and metrics not on
