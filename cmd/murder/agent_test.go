@@ -89,7 +89,7 @@ func TestEdgeRestartAdvice(t *testing.T) {
 		{[]string{service}, true, "no longer drops connections"},
 		{[]string{setup.EdgePathsDropIn}, true, "no longer drops connections"},
 		// The release that brings the socket: one restart starts it.
-		{[]string{service, socket}, false, "the last to refuse connections"},
+		{[]string{service, socket}, false, "systemctl stop murder-edge.service && systemctl start murder-edge.socket"},
 		{[]string{setup.EdgeSocketDropIn}, true, "systemctl stop murder-edge.socket murder-edge.service; systemctl start murder-edge"},
 		{[]string{service, setup.EdgeSocketDropIn}, true, "the ports close for that moment"},
 	} {

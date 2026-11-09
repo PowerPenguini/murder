@@ -809,7 +809,10 @@ func edgeRestartAdvice(replaced []string, socketActive bool) string {
 	case socketActive:
 		return "murder-edge.service changed: `systemctl restart murder-edge` runs the edge under it, and no longer drops connections: murder-edge.socket holds the ports, so new ones wait for the new edge while the old one finishes its requests (at most edge.drain)"
 	}
-	return "murder-edge.service changed: `systemctl restart murder-edge` runs the edge under it and has murder-edge.socket hold its ports from then on; that restart is the last to refuse connections for a moment (open requests get edge.drain to finish)"
+	// Stopped first, explicitly: the socket binds the ports the running
+	// edge holds, so it must not start before that edge let them go, or
+	// the new edge falls back to binding them itself.
+	return "murder-edge.service changed: `systemctl stop murder-edge.service && systemctl start murder-edge.socket murder-edge.service` runs the edge under it, with murder-edge.socket holding its ports from then on; that is the last time they refuse connections for a moment (open requests get edge.drain to finish). `systemctl is-active murder-edge.socket` then says active"
 }
 
 // unitActive reports whether systemd runs unit.

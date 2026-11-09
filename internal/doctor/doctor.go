@@ -288,7 +288,7 @@ func checkEdgeSocket(ctx context.Context, h Host) []Result {
 	case "":
 		return nil
 	default:
-		return []Result{{Warning, "services", "the edge's ports refuse connections while it restarts: murder-edge.socket is " + state, "systemctl restart murder-edge, once: the edge's unit starts the socket, which holds the ports from then on (an agent of this release installs both at its start; journalctl -u murder-edge.socket says why one failed)"}}
+		return []Result{{Warning, "services", "the edge's ports refuse connections while it restarts: murder-edge.socket is " + state, "systemctl stop murder-edge.service && systemctl start murder-edge.socket murder-edge.service, once: the socket holds the ports from then on (an agent of this release installs both at its start; journalctl -u murder-edge.socket says why one failed)"}}
 	}
 }
 

@@ -97,7 +97,9 @@ with its fix; it exits 1 when one failed.
   the handover still works.
 - **The edge's ports across a restart.** Whether `murder-edge.socket`
   holds them (see [Restart the edge](#restart-the-edge)); on a node
-  upgraded from before it, one `systemctl restart murder-edge` starts it.
+  upgraded from before it, `systemctl stop murder-edge.service && systemctl
+  start murder-edge.socket murder-edge.service`, once, starts it: the edge
+  lets the ports go before the socket takes them.
 - **Kernel and clock.** The settings `deploy/murder-hardening.conf` sets
   (no ICMP redirects, loose reverse path filtering, SYN cookies, kernel
   addresses, log and BPF kept from users; `ip_forward` stays on for
