@@ -368,18 +368,25 @@ func Settle(opts Options, facts Facts) (Settings, []string) {
 		if len(s.SSHPorts) == 0 {
 			s.SSHPorts = []int{22}
 		}
-		for _, l := range facts.Listeners {
-			if l.Private {
-				s.Private = append(s.Private, l)
-			} else {
-				s.Open = append(s.Open, l)
-			}
-		}
+		s.Open, s.Private = splitListeners(facts.Listeners)
 	}
 	if s.Panel {
 		s.TunnelAddress = "10.77.0.1"
 	}
 	return s, problems
+}
+
+// splitListeners parts listeners into those to open to everyone and
+// those to open to private networks only.
+func splitListeners(listeners []Listener) (open, private []Listener) {
+	for _, l := range listeners {
+		if l.Private {
+			private = append(private, l)
+		} else {
+			open = append(open, l)
+		}
+	}
+	return open, private
 }
 
 func splitAddress(text string) (netip.Addr, uint16, error) {

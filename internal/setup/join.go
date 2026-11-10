@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/netip"
 	"path"
+	"slices"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -24,6 +26,12 @@ type Own struct {
 	// Identity is the host's identity key as a node, made before it
 	// redeems the invitation, which admits its public half.
 	Identity ed25519.PrivateKey
+	// SSHPorts are the ports this host's sshd listens on, and Open and
+	// Private what else listened on it: a host firewall the cluster has
+	// opens them here too, so joining locks SSH out on no port and shuts
+	// off nothing that served.
+	SSHPorts      []int
+	Open, Private []Listener
 }
 
 // SettleOwn makes a joining host's own choices: from the options, then
@@ -65,6 +73,8 @@ func SettleOwn(opts Options, facts Facts, peer netip.AddrPort) (Own, []string) {
 			own.Public = append(own.Public, address.String())
 		}
 	}
+	own.SSHPorts = facts.SSHPorts
+	own.Open, own.Private = splitListeners(facts.Listeners)
 	return own, problems
 }
 
@@ -166,6 +176,7 @@ func Adopt(bundle cluster.Bundle, own Own) (Install, config.Agent, error) {
 		set(root, scalar("dir"), "volumes", "driver")
 		remove(root, "volumes", "parent")
 	}
+	keepOwnPorts(root, own)
 	if bundle.TunnelAddress != "" {
 		set(root, scalar(bundle.TunnelAddress), "panel", "tunnel", "address")
 	}
@@ -205,6 +216,73 @@ func Adopt(bundle cluster.Bundle, own Own) (Install, config.Agent, error) {
 	}
 	in.Secrets[path.Join(agent.Cluster.Dir, cluster.IdentityFile)] = identity
 	return in, agent, nil
+}
+
+// keepOwnPorts opens, in the cluster's host firewall, this host's SSH
+// ports and what else listened on it, beside the cluster's own entries:
+// the inviting node's sshd may listen elsewhere, and what the cluster's
+// config opens was found on that node, not on this host. A cluster
+// without a host firewall gets none.
+func keepOwnPorts(root *yaml.Node, own Own) {
+	firewall := get(root, "hostFirewall")
+	switch {
+	case firewall == nil:
+		return
+	case firewall.Kind == yaml.ScalarNode && firewall.ShortTag() == "!!null":
+		// A bare "hostFirewall:" turns it on with every default.
+		firewall = &yaml.Node{Kind: yaml.MappingNode}
+		set(root, firewall, "hostFirewall")
+	case firewall.Kind != yaml.MappingNode:
+		return // config.Parse says what is wrong with it
+	}
+	ssh := []int{22} // the default, when the cluster names none
+	if list := get(firewall, "ssh"); list != nil && list.Kind == yaml.SequenceNode {
+		ssh = nil
+		for _, item := range list.Content {
+			if port, err := strconv.Atoi(item.Value); err == nil {
+				ssh = append(ssh, port)
+			}
+		}
+	}
+	if added := slices.DeleteFunc(slices.Clone(own.SSHPorts), func(port int) bool { return slices.Contains(ssh, port) }); len(added) > 0 || get(firewall, "ssh") == nil {
+		ssh = append(ssh, added...)
+		slices.Sort(ssh)
+		var ports []string
+		for _, port := range slices.Compact(ssh) {
+			ports = append(ports, strconv.Itoa(port))
+		}
+		set(firewall, sequence(ports), "ssh")
+	}
+	entries := func(key string) []string {
+		var out []string
+		if list := get(firewall, key); list != nil && list.Kind == yaml.SequenceNode {
+			for _, item := range list.Content {
+				out = append(out, item.Value)
+			}
+		}
+		return out
+	}
+	add := func(key string, listeners []Listener, covered []string) {
+		list := get(firewall, key)
+		for _, l := range listeners {
+			if slices.Contains(covered, l.Entry()) {
+				continue
+			}
+			if list == nil || list.Kind != yaml.SequenceNode {
+				list = &yaml.Node{Kind: yaml.SequenceNode}
+				set(firewall, list, key)
+			}
+			item := scalar(l.Entry())
+			if l.Process != "" {
+				item.LineComment = "# " + l.Process + " on " + own.Node
+			}
+			list.Content = append(list.Content, item)
+			covered = append(covered, l.Entry())
+		}
+	}
+	add("open", own.Open, entries("open"))
+	// What is open to everyone needs no opening to private networks.
+	add("private", own.Private, append(entries("open"), entries("private")...))
 }
 
 func scalar(value string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Value: value} }
