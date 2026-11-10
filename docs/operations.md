@@ -149,6 +149,8 @@ ports sshd listens on (`sshd -T`, and its sockets, a socket-activated
 ssh's too), and what else listened beyond loopback when setup ran goes in
 `open`, or in `private` when it listened on a private address only, each
 with a comment naming the process, so setup closes nothing that served.
+A host joining a cluster (`setup -join`) adds its own SSH ports and
+listeners to the cluster's `hostFirewall` the same way.
 Take out what should not be public. Docker's published ports, the DHCP
 client, mDNS and LLMNR are left out: the first pass the host's input rules
 anyway, and the others need no opening. With `hostFirewall` set, the same table

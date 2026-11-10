@@ -3,10 +3,12 @@ package setup
 import (
 	"context"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/PowerPenguini/murder/internal/cluster"
+	"github.com/PowerPenguini/murder/internal/config"
 )
 
 const clusterConfig = `# written by murder setup
@@ -90,7 +92,7 @@ func TestAJoiningHostPicksItsAddressOnThePeersNetwork(t *testing.T) {
 	host.addrs = []string{"203.0.113.11", "10.0.0.3", "192.168.1.5"}
 	facts := Inspect(context.Background(), host)
 	own, problems := SettleOwn(Options{}, facts, netip.MustParseAddrPort("10.0.0.2:7400"))
-	if len(problems) > 0 || own.Node != "fsn-1" || own.ClusterAddress != "10.0.0.3:7400" || own.ZFSPool != "tank" || own.Public[0] != "203.0.113.11" {
+	if len(problems) > 0 || own.Node != "fsn-1" || own.ClusterAddress != "10.0.0.3:7400" || own.ZFSPool != "tank" || own.Public[0] != "203.0.113.11" || len(own.SSHPorts) == 0 || !slices.Equal(own.SSHPorts, facts.SSHPorts) {
 		t.Fatalf("own %+v, problems %v", own, problems)
 	}
 	_, problems = SettleOwn(Options{}, facts, netip.MustParseAddrPort("172.20.0.2:7400"))
@@ -100,5 +102,57 @@ func TestAJoiningHostPicksItsAddressOnThePeersNetwork(t *testing.T) {
 	own, problems = SettleOwn(Options{ClusterAddress: "192.168.1.5", Node: "n9"}, facts, netip.MustParseAddrPort("172.20.0.2:7400"))
 	if len(problems) > 0 || own.ClusterAddress != "192.168.1.5:7400" || own.Node != "n9" {
 		t.Fatalf("own %+v, problems %v", own, problems)
+	}
+}
+
+// A joining host keeps its own SSH ports and what listened on it open in
+// the cluster's host firewall: the inviting node's sshd may listen on
+// other ports, and the entries the cluster's config opens were found on
+// that node, not on this host.
+func TestAJoiningHostKeepsItsOwnPortsOpen(t *testing.T) {
+	identity, err := cluster.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := Own{Node: "n2", ZFSPool: "data", ClusterAddress: "10.0.0.3:7400", Identity: identity, SSHPorts: []int{22, 2222},
+		Open:    []Listener{{Protocol: "tcp", Port: 9300, Process: "python3"}, {Protocol: "tcp", Port: 9100, Process: "node_exporter"}},
+		Private: []Listener{{Protocol: "tcp", Port: 9200, Process: "app"}, {Protocol: "udp", Port: 9400, Process: "dns"}, {Protocol: "tcp", Port: 9100}}}
+	adopt := func(firewall string) (config.Agent, string) {
+		t.Helper()
+		bundle := cluster.Bundle{Cluster: "acme", Key: []byte("a2V5\n"), Config: []byte(clusterConfig + firewall), TunnelAddress: "10.77.0.2",
+			Files: map[string][]byte{"/etc/murder/hetzner.token": []byte("hcloud\n"), "/etc/murder/ghcr.token": []byte("ghp\n")}}
+		in, agent, err := Adopt(bundle, own)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return agent, string(in.Config)
+	}
+
+	agent, text := adopt("hostFirewall:  # drops the rest\n  ssh: [22]\n  open:\n    - 9100/tcp  # python3\n  private:\n    - 9200/tcp\n")
+	h := agent.HostFirewall
+	if h == nil || !slices.Equal(h.SSH, []int{22, 2222}) || !slices.Equal(h.Open, []string{"9100/tcp", "9300/tcp"}) || !slices.Equal(h.Private, []string{"9200/tcp", "9400/udp"}) {
+		t.Fatalf("host firewall %+v in\n%s", h, text)
+	}
+	if !strings.Contains(text, "9300/tcp # python3 on n2") || !strings.Contains(text, "# drops the rest") {
+		t.Fatalf("comments lost:\n%s", text)
+	}
+	// "hostFirewall:" alone opens 22 by default, which stays.
+	if agent, text := adopt("hostFirewall:\n"); agent.HostFirewall == nil || !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) {
+		t.Fatalf("bare host firewall %+v in\n%s", agent.HostFirewall, text)
+	}
+	// The cluster's SSH ports keep their layout and comments, in any form
+	// YAML writes an int.
+	agent, text = adopt("hostFirewall:\n  ssh:\n    - 0x16  # main\n    - 2_000  # alt\n")
+	if !slices.Equal(agent.HostFirewall.SSH, []int{22, 2000, 2222}) || !strings.Contains(text, "- 2_000 # alt") {
+		t.Fatalf("ssh %v in\n%s", agent.HostFirewall.SSH, text)
+	}
+	// A cluster without a host firewall gets none.
+	if agent, text := adopt(""); agent.HostFirewall != nil || strings.Contains(text, "hostFirewall") {
+		t.Fatalf("host firewall %+v in\n%s", agent.HostFirewall, text)
+	}
+	// Nothing to add leaves the cluster's entries as they are.
+	own.SSHPorts, own.Open, own.Private = []int{22}, nil, nil
+	if agent, _ := adopt("hostFirewall:\n  ssh: [22]\n  open: [\"9100/tcp\"]\n"); !slices.Equal(agent.HostFirewall.SSH, []int{22}) || !slices.Equal(agent.HostFirewall.Open, []string{"9100/tcp"}) || agent.HostFirewall.Private != nil {
+		t.Fatalf("host firewall %+v", agent.HostFirewall)
 	}
 }
