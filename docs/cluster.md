@@ -29,10 +29,11 @@ private network (the one on the node's network, or `-cluster-address`),
 its public addresses, its ZFS pool and its address in the panel's tunnel.
 When the cluster's config has a host firewall (`hostFirewall`), the
 server keeps the cluster's entries and adds its own: the ports its sshd
-listens on, and what else listened on it beyond loopback, each with the
+listens on, and what else listened on it beyond loopback, with the
 process and the server's name in a comment, so joining locks SSH out on
 no port and shuts off nothing that served. Take out what should not be
-open. Then it installs and starts everything as `murder setup` does, and joins.
+open. Then it installs and starts everything as `murder setup` does, and
+joins.
 An invitation is used once, and only when the server is ready for it:
 setup checks the server first. It hands the master key to whoever brings
 it, so only root makes one, and each one made and used is in the audit

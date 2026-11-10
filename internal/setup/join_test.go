@@ -140,6 +140,12 @@ func TestAJoiningHostKeepsItsOwnPortsOpen(t *testing.T) {
 	if agent, text := adopt("hostFirewall:\n"); agent.HostFirewall == nil || !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) {
 		t.Fatalf("bare host firewall %+v in\n%s", agent.HostFirewall, text)
 	}
+	// The cluster's SSH ports keep their layout and comments, in any form
+	// YAML writes an int.
+	agent, text = adopt("hostFirewall:\n  ssh:\n    - 0x16  # main\n    - 2_000  # alt\n")
+	if !slices.Equal(agent.HostFirewall.SSH, []int{22, 2000, 2222}) || !strings.Contains(text, "- 2_000 # alt") {
+		t.Fatalf("ssh %v in\n%s", agent.HostFirewall.SSH, text)
+	}
 	// A cluster without a host firewall gets none.
 	if agent, text := adopt(""); agent.HostFirewall != nil || strings.Contains(text, "hostFirewall") {
 		t.Fatalf("host firewall %+v in\n%s", agent.HostFirewall, text)

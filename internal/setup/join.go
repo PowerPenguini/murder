@@ -235,23 +235,25 @@ func keepOwnPorts(root *yaml.Node, own Own) {
 	case firewall.Kind != yaml.MappingNode:
 		return // config.Parse says what is wrong with it
 	}
-	ssh := []int{22} // the default, when the cluster names none
-	if list := get(firewall, "ssh"); list != nil && list.Kind == yaml.SequenceNode {
-		ssh = nil
-		for _, item := range list.Content {
-			if port, err := strconv.Atoi(item.Value); err == nil {
-				ssh = append(ssh, port)
-			}
+	// SSH: the host's ports beside the cluster's, which keep their
+	// layout and comments; 22 when the cluster relied on the default.
+	list := get(firewall, "ssh")
+	if list == nil || list.Kind != yaml.SequenceNode {
+		list = &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle, Content: []*yaml.Node{scalar("22")}}
+		set(firewall, list, "ssh")
+	}
+	var ssh []int
+	for _, item := range list.Content {
+		var port int
+		if item.Decode(&port) == nil { // 22, but also 0x16 or 2_2, as config.Parse reads them
+			ssh = append(ssh, port)
 		}
 	}
-	if added := slices.DeleteFunc(slices.Clone(own.SSHPorts), func(port int) bool { return slices.Contains(ssh, port) }); len(added) > 0 || get(firewall, "ssh") == nil {
-		ssh = append(ssh, added...)
-		slices.Sort(ssh)
-		var ports []string
-		for _, port := range slices.Compact(ssh) {
-			ports = append(ports, strconv.Itoa(port))
+	for _, port := range own.SSHPorts {
+		if !slices.Contains(ssh, port) {
+			list.Content = append(list.Content, scalar(strconv.Itoa(port)))
+			ssh = append(ssh, port)
 		}
-		set(firewall, sequence(ports), "ssh")
 	}
 	entries := func(key string) []string {
 		var out []string
