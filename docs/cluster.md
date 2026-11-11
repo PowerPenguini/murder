@@ -181,7 +181,9 @@ to the one running the fewest, until none runs two more than another (the
 panel's Cluster page does the same, as a job). A tenant whose whole copy
 the target keeps goes first: its move sends only what changed. Suspended
 and archived tenants stay; nothing moves while a tenant moves already.
-`-dry-run` prints the moves only.
+`-dry-run` prints the moves only. A drain, a replace and a balance each hold
+the cluster while they run (see
+[One operation at a time](#one-operation-at-a-time)).
 
 ## Reboot a node
 
@@ -213,7 +215,9 @@ the nodes out afterwards).
 
 It changes nothing, and says why, when:
 
-- changes are frozen (an upgrade, a key rotation): reboot once it is over;
+- changes are frozen (an upgrade, a key rotation), or another operation
+  holds the cluster (see [One operation at a time](#one-operation-at-a-time)):
+  reboot once it is over;
 - the node does not answer, or no other node can take its tenants (each
   must answer, and be neither failed over nor restarting);
 - the node would not come back as it runs: `murder-agent`, `murder-edge`,
@@ -227,18 +231,64 @@ It changes nothing, and says why, when:
 When the node does not reboot after all (a move fails, or an upgrade that
 started meanwhile has it refuse), the tenants moved so far move back to
 it, as it still runs; if that fails too, the error says where each runs.
-Nothing holds other cluster changes off meanwhile, as for `murder cluster
-drain`: run one at a time.
-
 The panel's Cluster page and each node's page offer the same reboot (its
 name typed), as a job whose page shows each step and where each tenant
 runs. A reboot that would leave no majority answering asks for a box ticked,
 as `-force` does. The panel runs on one node, and its job stops as that
 node goes down, before it could move the tenants back: there it reboots
 only with them left where they move (`-stay`), and says which other node's
-panel (or command line) moves them back instead. A panel job is one change
-of the cluster: no upgrade, drain or balance runs beside it from that
-panel.
+panel (or command line) moves them back instead. A reboot holds the
+cluster's operation lease, from the panel or the command line alike (see
+[One operation at a time](#one-operation-at-a-time)).
+
+## One operation at a time
+
+A drain, a replace, a balance and a node reboot each change the cluster
+over many steps, planned from where the tenants run as they begin; two at
+once would move tenants under each other's plans (a drain moving tenants
+onto the node a reboot is emptying, say). So each holds the cluster's
+**operation lease** while it runs, from the panel or the command line
+alike: a row of the replicated state, written through Raft, that names the
+operation, who began it, on which node and when. Another one is refused
+before it changes anything, and the refusal names the holder:
+
+```
+conflicting change: another operation changes the cluster: drain node n2 to n3,
+begun by alice on node n1 at 2026-11-11 12:00:00 (lease 3KXQ…, held until 12:04:30 unless renewed)
+```
+
+An upgrade and a master key rotation freeze changes instead; the freeze
+and the lease exclude each other. No freeze is taken while an operation
+holds the lease (the upgrade or the rotation says which, and changes
+nothing), and no lease while changes are frozen.
+
+The agent also refuses, while an operation holds the lease, a single
+`murder tenant move`, a node's removal and a node's reboot that do not act
+under it: only that operation's own go on. A lone move is not an operation
+of its own, though, and takes no lease: moves of different tenants by hand
+do not get in each other's way (a tenant moves once at a time anyway), and
+an operator moving two tenants side by side should not have to wait for
+the first. What they must not do is shift placement under a plan that
+spans the cluster.
+
+The lease lasts two minutes, and its holder renews it every 30 seconds
+while it runs, so a holder that died (its command line killed, its node
+down) lets go within two minutes, and the next operation takes its place;
+the audit log says whose expired (`operation.expired`). A renewal that
+fails because the cluster has no leader for a moment is tried again. A
+holder whose lease was taken from it stops at its next request and says
+so. Taking and releasing the lease are in the audit log
+(`operation.started`, `operation.ended`).
+
+`murder cluster status` shows the operation that holds the cluster, as does
+the panel's Cluster page. `murder cluster unlock` says which holds it and
+how to break its lease; `murder cluster unlock LEASE`, as root, breaks that
+lease and only that one (one taken since stays), for an operation whose
+command is gone or that must stop where it is. Breaking is in the audit log
+(`operation.unlocked`); check where its tenants are afterwards.
+
+A cluster takes the lease once every node runs a release that keeps it
+(schema version 20): during a rolling upgrade, changes are frozen anyway.
 
 ## A copy of every tenant on a second node
 

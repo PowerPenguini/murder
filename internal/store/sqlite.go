@@ -68,7 +68,9 @@ type snapshot struct {
 	cluster string
 	// frozen, while an upgrade runs, says why changes are refused.
 	frozen string
-	apps   map[string]App
+	// lease is the cluster's operation lease, expired or not.
+	lease Lease
+	apps  map[string]App
 	// revisions are each app's recent revisions, oldest first.
 	revisions map[string][]Revision
 	// rollouts are each app's newest rollout.
@@ -365,7 +367,7 @@ type querier interface {
 // load reads the whole state. It is small: one row per app and tenant.
 func load(q querier) (*snapshot, error) {
 	state := &snapshot{}
-	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadRevisions, loadRollouts, loadAllTenants, loadNodes, loadDevices, loadDomains, loadACME, loadPanel, loadImages} {
+	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadRevisions, loadRollouts, loadAllTenants, loadNodes, loadDevices, loadDomains, loadACME, loadPanel, loadLease, loadImages} {
 		if err := part(q, state); err != nil {
 			return nil, err
 		}

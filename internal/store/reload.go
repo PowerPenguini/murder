@@ -104,6 +104,7 @@ var partOf = map[string]string{
 	"panel_enrollments": "panel",
 	"panel_sessions":    "panel",
 	"panel_secrets":     "panel",
+	"operation_lease":   "lease",
 }
 
 var loaders = map[string]func(querier, *snapshot) error{
@@ -116,6 +117,7 @@ var loaders = map[string]func(querier, *snapshot) error{
 	"acme":      loadACME,
 	"images":    loadImages,
 	"panel":     loadPanel,
+	"lease":     loadLease,
 }
 
 func (c *changes) note(data sqlite.SQLitePreUpdateData) {

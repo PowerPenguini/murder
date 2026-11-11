@@ -202,8 +202,14 @@ Each stage is one PR, reviewed and tested before the next.
    only while changes are taken: it never resumes or takes over one that
    stopped; `murder upgrade` on a node does. Upgrades, drains, reboots and
    backups are jobs: their page follows what they say. One change of the
-   cluster (an upgrade, a drain, a balance or a reboot) runs at a time, from either of a node's panels; a
-   thaw waits for it too. The binary is uploaded beside the database, not
+   cluster (an upgrade, a drain, a balance or a reboot) runs at a time, from
+   any node's panel or command line: a drain, a balance and a reboot hold
+   the cluster's operation lease, an upgrade freezes changes, and either
+   refuses the others (see
+   [One operation at a time](cluster.md#one-operation-at-a-time)); the
+   page shows the operation that holds the cluster, and the panel refuses
+   to begin a job while it does. A thaw waits for this panel's upgrade.
+   The binary is uploaded beside the database, not
    to /tmp. Jobs live in the panel process that began them, so a panel
    replaced by an upgrade restarts only once its jobs ended, taking none
    meanwhile; a panel asked to stop serves on until its upgrade or drain

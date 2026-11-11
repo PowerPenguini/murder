@@ -51,11 +51,19 @@
   </table>
   <form method="post" class="row spaced"><input type="hidden" name="do" value="balance">
     <span class="hint">One after the other, each with its data; a tenant moved onto its copy sends only what changed.</span>
-    <button type="submit"{{if $d.Busy}} disabled{{end}}>Balance</button>
+    <button type="submit"{{if or $d.Busy $d.Lease}} disabled{{end}}>Balance</button>
   </form>
   {{else}}
   <p class="lead">Tenant counts are balanced: no node runs two more than another.</p>
   {{end}}
+</section>
+{{end}}
+
+{{with $d.Lease}}
+<section>
+  <div class="head"><h2>An operation holds the cluster</h2></div>
+  <p class="lead">{{.Kind}}{{with .Detail}} {{.}}{{end}}, begun by {{who .Actor}} on node {{.Node}} at {{.Started.Format "2006-01-02 15:04"}}{{with $d.Busy}}: <a href="/jobs/{{.ID}}">{{.Title}}</a>{{end}}.</p>
+  <p>No other drain, balance, reboot, upgrade or tenant move begins until it ends. It renews its hold while it runs; one whose command died lets go within two minutes. To take the cluster from it now, run <code>sudo murder cluster unlock {{.ID}}</code> on a node.</p>
 </section>
 {{end}}
 

@@ -33,6 +33,13 @@ func (s *Server) rebootNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node := r.PathValue("node")
+	// Only a reboot that happens: a check changes nothing.
+	if !request.Check {
+		if err := s.leased(r); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
 	var err error
 	switch {
 	case s.local(node) && s.rebooter != nil:

@@ -64,6 +64,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if c.Actor != "" {
 		request.Header.Set(ActorHeader, c.Actor)
 	}
+	if lease := LeaseOf(ctx); lease != "" {
+		request.Header.Set(LeaseHeader, lease)
+	}
 	response, err := c.http.Do(request)
 	if err != nil {
 		return fmt.Errorf("reach the murder agent: %w", err)

@@ -35,6 +35,10 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusError{http.StatusConflict, errors.New("this node moves no tenants")})
 		return
 	}
+	if err := s.leased(r); err != nil {
+		writeError(w, err)
+		return
+	}
 	name := r.PathValue("name")
 	if err := s.moves.Move(r.Context(), name, request.To, actor(r)); err != nil {
 		writeError(w, err)

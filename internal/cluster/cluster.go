@@ -1382,6 +1382,8 @@ type Status struct {
 	// LastContact is when a follower last heard from the leader.
 	LastContact time.Time `json:"lastContact,omitzero"`
 	Members     []Member  `json:"members"`
+	// Lease is the operation that holds the cluster now, if one does.
+	Lease *store.Lease `json:"lease,omitempty"`
 }
 
 // Member is one voter of the cluster.

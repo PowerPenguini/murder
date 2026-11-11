@@ -44,6 +44,12 @@ const clusterUsage = `Usage: murder cluster <command> [arguments]
   replace <old> <new> move every tenant of old to new, then take old out of
                       the cluster: a server swapped for a bigger or smaller
                       one, which joined first; switch it off afterwards
+  unlock [<lease>]    say which operation holds the cluster (a drain, a
+                      balance, a reboot, a replace); with its lease, as
+                      that prints it, take the cluster from it: for one
+                      whose command died, which would otherwise hold it
+                      until its lease expires (2 minutes after its last
+                      renewal), or one that must stop
   failover <node> -powered-off
                       run the tenants of node, which you made sure is
                       powered off, from their replicas; refused while it
@@ -55,6 +61,12 @@ A node joins with an invitation, which admits its name and identity key:
 node set up by hand, copy /etc/murder/master.key from a node of the
 cluster before "murder init", then "murder cluster join". Every node runs
 tenants.
+
+One operation changes the cluster at a time: a drain, balance, replace or
+node reboot holds the cluster's operation lease while it runs, and an
+upgrade or a master key rotation freezes changes; each refuses to begin
+while another runs, and says which. A single tenant move or a node's
+removal goes on beside nothing of these either.
 `
 
 func runCluster(args []string) error {
@@ -120,16 +132,18 @@ func runCluster(args []string) error {
 	case command == "drain" && len(rest) == 1 && *to != "":
 		return drain(client, rest[0], *to)
 	case command == "replace" && len(rest) == 2:
-		if err := drain(client, rest[0], rest[1]); err != nil {
-			return err
+		remove := func(ctx context.Context, node string) error {
+			removal, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			return client.RemoveNode(removal, node)
 		}
-		removal, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		if err := client.RemoveNode(removal, rest[0]); err != nil {
+		if err := clusterops.Replace(context.Background(), client, remove, rest[0], rest[1], stdout); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "node %s runs no tenant and left the cluster: point its DNS records at %s and switch it off (its edge serves the tenants it knew until then, not ones created or moved since)\n", rest[0], rest[1])
 		return nil
+	case command == "unlock" && len(rest) <= 1:
+		return unlock(ctx, client, rest)
 	case command == "failover" && len(rest) == 1:
 		if !*poweredOff {
 			return fmt.Errorf("failover runs node %s's tenants elsewhere: make sure it is powered off (its tenants must not run twice), then add -powered-off", rest[0])
@@ -168,6 +182,9 @@ func printCluster(status cluster.Status) error {
 		leader = "none"
 	}
 	fmt.Fprintf(stdout, "node %s at %s: %s, leader %s, applied log entry %d\n", status.Node, status.Address, status.State, leader, status.Applied)
+	if status.Lease != nil {
+		fmt.Fprintf(stdout, "an operation holds the cluster: %s\n", status.Lease)
+	}
 	if !status.LastContact.IsZero() {
 		fmt.Fprintf(stdout, "last heard from the leader %s ago\n", time.Since(status.LastContact).Round(time.Millisecond))
 	}
@@ -194,4 +211,31 @@ func printCluster(status cluster.Status) error {
 // drain moves every tenant of node to target, telling each move.
 func drain(client *api.Client, node, target string) error {
 	return clusterops.Drain(context.Background(), client, node, target, stdout)
+}
+
+// unlock says which operation holds the cluster's lease; with the lease
+// named, it breaks that one, and only that one: a lease taken since, by
+// another operation, stays.
+func unlock(ctx context.Context, client *api.Client, args []string) error {
+	if len(args) == 0 {
+		lease, err := client.Lease(ctx)
+		if err != nil {
+			return err
+		}
+		switch {
+		case lease.ID == "":
+			fmt.Fprintln(stdout, "no operation holds the cluster")
+		case !lease.Held:
+			fmt.Fprintf(stdout, "no operation holds the cluster: the last lease expired unreleased (%s)\n", lease.Lease)
+		default:
+			fmt.Fprintf(stdout, "%s\n\nIt renews its lease while it runs. If its command is gone (killed, its node down), the lease\nexpires by itself; to take the cluster from it now, or to stop it where it is, run:\n\n  murder cluster unlock %s\n", lease.Lease, lease.ID)
+		}
+		return nil
+	}
+	lease, err := client.BreakLease(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "broke the lease of %s\nif it still runs, it stops at its next renewal or request; check where its tenants are with \"murder tenant list\"\n", lease)
+	return nil
 }

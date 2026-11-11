@@ -53,7 +53,8 @@ type moved struct{ tenant, to string }
 // changing nothing, when changes are frozen, when no other node can take
 // the tenants, when node would not come back as it runs (its units do not
 // start at boot), or when the cluster would lose its majority meanwhile
-// (unless opts.Force). Node "" or "-" is this node.
+// (unless opts.Force), or while another operation holds the cluster's
+// lease, which it holds itself meanwhile. Node "" or "-" is this node.
 func Reboot(ctx context.Context, client RebootClient, node string, opts RebootOptions, out io.Writer) error {
 	if opts.Wait <= 0 {
 		opts.Wait = 15 * time.Minute
@@ -81,12 +82,23 @@ func Reboot(ctx context.Context, client RebootClient, node string, opts RebootOp
 	if node == self && !opts.Stay {
 		return fmt.Errorf("this command runs on node %s, which it would reboot, so it could not move the tenants back once it is up: run \"murder node reboot %s\" on another node of the cluster, which waits for it and moves them back, or add -stay to leave them where they move", node, node)
 	}
+	// Frozen changes refuse the lease too; said here as for a reboot.
+	if view, err := client.Nodes(ctx); err == nil && view.Frozen != "" {
+		return frozenRefusal(view.Frozen)
+	}
+	return Leased(ctx, client, "reboot", "node "+node, out, func(ctx context.Context) error {
+		return rebootNode(ctx, client, node, self, members, opts, out)
+	})
+}
+
+// rebootNode is Reboot, under the cluster's operation lease.
+func rebootNode(ctx context.Context, client RebootClient, node, self string, members cluster.Status, opts RebootOptions, out io.Writer) error {
 	view, err := client.Nodes(ctx)
 	if err != nil {
 		return err
 	}
 	if view.Frozen != "" {
-		return fmt.Errorf("changes are frozen (%s): a reboot moves tenants, so nothing was changed; reboot once that is over", view.Frozen)
+		return frozenRefusal(view.Frozen)
 	}
 	states := map[string]api.NodeState{}
 	for _, state := range view.Nodes {
@@ -328,4 +340,9 @@ func moveBack(ctx context.Context, client Client, node string, done []moved, out
 	}
 	fmt.Fprintf(out, "%s (%d moved back)\n", finished, back)
 	return nil
+}
+
+// frozenRefusal refuses a reboot while changes are frozen.
+func frozenRefusal(frozen string) error {
+	return fmt.Errorf("changes are frozen (%s): a reboot moves tenants, so nothing was changed; reboot once that is over", frozen)
 }

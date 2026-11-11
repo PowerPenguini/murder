@@ -62,6 +62,16 @@ type fakeAgent struct {
 	tenants  []api.Tenant
 	failMove map[string]bool
 	moved    []string
+
+	// lease is the operation lease held now, "" for none; leases counts
+	// those taken, released those let go. renewals counts renewals;
+	// lostAfter, if set, has the lease broken at that renewal.
+	lease     string
+	leaseKind string
+	leases    int
+	released  int
+	renewals  int
+	lostAfter int
 }
 
 func newFakeAgent(running map[string]string) *fakeAgent {
@@ -173,6 +183,9 @@ func (a *fakeAgent) Freeze(_ context.Context, reason string) error {
 	if a.frozen != "" && a.frozen != reason {
 		return &api.Error{Status: http.StatusConflict, Message: "changes are frozen: " + a.frozen}
 	}
+	if a.lease != "" {
+		return &api.Error{Status: http.StatusConflict, Message: "conflicting change: another operation changes the cluster: " + a.leaseKind}
+	}
 	a.frozen = reason
 	a.freezes++
 	return nil
@@ -209,9 +222,15 @@ func (a *fakeAgent) List(context.Context) ([]api.Tenant, error) {
 	return slices.Clone(a.tenants), nil
 }
 
-func (a *fakeAgent) Move(_ context.Context, tenant, to string) (api.Tenant, error) {
+func (a *fakeAgent) Move(ctx context.Context, tenant, to string) (api.Tenant, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return api.Tenant{}, err
+	}
+	if a.lease != "" && api.LeaseOf(ctx) != a.lease {
+		return api.Tenant{}, &api.Error{Status: http.StatusConflict, Message: "conflicting change: another operation changes the cluster: " + a.leaseKind}
+	}
 	if a.failMove[tenant] {
 		return api.Tenant{}, &api.Error{Status: http.StatusConflict, Message: "the copy did not arrive"}
 	}

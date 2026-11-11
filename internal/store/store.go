@@ -503,6 +503,16 @@ type Store interface {
 	ThawIf(reason, actor string) error
 	ThawOwn(reason, actor string) error
 	TakeOverFreeze(from, reason, actor string) error
+	// Lease is the cluster's operation lease, expired or not (see Lease).
+	// TakeLease has an operation hold it, refused while changes are
+	// frozen or another holds it; RenewLease keeps it; ReleaseLease lets
+	// go of it once the operation ended; BreakLease takes it away from a
+	// holder a person knows is gone.
+	Lease() Lease
+	TakeLease(kind, detail, actor string) (Lease, error)
+	RenewLease(id string) (Lease, error)
+	ReleaseLease(id, actor string) error
+	BreakLease(id, actor string) (Lease, error)
 	// Note records an event, frozen or not.
 	Note(action, detail, actor string) error
 	// Access records an access to a tenant's data, of an action that

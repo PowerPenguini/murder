@@ -28,6 +28,8 @@ type demoNodes struct {
 	// a node that reboots answers again.
 	rebooted map[string]time.Time
 	down     map[string]time.Time
+	// lease is the operation that holds the demo's cluster, if one does.
+	lease *store.Lease
 }
 
 const demoBinary = "9f2c4be1a07d3355e0c1d7a8b6f4e2d1c0b9a8f7e6d5c4b3a2918070605040302"
@@ -42,6 +44,10 @@ func (d *DemoCluster) Nodes(ctx context.Context) (api.Nodes, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	nodes.Frozen = d.nodes.frozen
+	if d.nodes.lease != nil {
+		lease := *d.nodes.lease
+		nodes.Lease = &lease
+	}
 	nodes.Nodes = slices.DeleteFunc(nodes.Nodes, func(n api.NodeState) bool { return d.nodes.removed[n.Name] })
 	for i, n := range nodes.Nodes {
 		if at, ok := d.nodes.failed[n.Name]; ok {
@@ -130,6 +136,9 @@ func (a *demoActor) Freeze(_ context.Context, reason string) error {
 	if a.nodes.frozen != "" && a.nodes.frozen != reason {
 		return &api.Error{Status: http.StatusConflict, Message: "changes are frozen: " + a.nodes.frozen}
 	}
+	if a.nodes.lease != nil {
+		return &api.Error{Status: http.StatusConflict, Message: fmt.Sprintf("%v: %s", store.ErrLeased, a.nodes.lease)}
+	}
 	a.nodes.frozen = reason
 	return nil
 }
@@ -149,6 +158,42 @@ func (a *demoActor) TakeOverFreeze(_ context.Context, from, reason string) error
 	defer a.mu.Unlock()
 	if a.nodes.frozen == from {
 		a.nodes.frozen = reason
+	}
+	return nil
+}
+
+// TakeLease, RenewLease and ReleaseLease hold the demo's cluster as the
+// agent does: one operation at a time, none while changes are frozen.
+func (a *demoActor) TakeLease(_ context.Context, kind, detail string) (store.Lease, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case a.nodes.frozen != "":
+		return store.Lease{}, &api.Error{Status: http.StatusConflict, Message: "changes are frozen: " + a.nodes.frozen}
+	case a.nodes.lease != nil:
+		return store.Lease{}, &api.Error{Status: http.StatusConflict, Message: fmt.Sprintf("%v: %s", store.ErrLeased, a.nodes.lease)}
+	}
+	now := time.Now()
+	lease := store.Lease{ID: fmt.Sprintf("demo%d", now.UnixNano()), Kind: kind, Detail: detail, Actor: a.actor, Node: "n1", Started: now, Renewed: now, Expires: now.Add(store.LeaseTTL)}
+	a.nodes.lease = &lease
+	return lease, nil
+}
+
+func (a *demoActor) RenewLease(_ context.Context, id string) (store.Lease, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.nodes.lease == nil || a.nodes.lease.ID != id {
+		return store.Lease{}, &api.Error{Status: http.StatusGone, Message: store.ErrLeaseLost.Error()}
+	}
+	a.nodes.lease.Renewed, a.nodes.lease.Expires = time.Now(), time.Now().Add(store.LeaseTTL)
+	return *a.nodes.lease, nil
+}
+
+func (a *demoActor) ReleaseLease(_ context.Context, id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.nodes.lease != nil && a.nodes.lease.ID == id {
+		a.nodes.lease = nil
 	}
 	return nil
 }

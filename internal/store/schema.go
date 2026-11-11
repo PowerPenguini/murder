@@ -11,8 +11,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 18 in place.
-const schemaVersion = 19
+// versions 4 to 19 in place.
+const schemaVersion = 20
 
 // IdentitySchema is the schema version that pins each node's identity
 // key in the state: a node registers its key only once every node runs a
@@ -290,6 +290,8 @@ CREATE TABLE secrets (
 
 ` + revocationsTable + `
 
+` + leaseTable + `;
+
 -- The audit log. It outlives the tenants and apps it names.
 CREATE TABLE events (
 	id     INTEGER PRIMARY KEY,
@@ -554,6 +556,13 @@ func upgrade(db *sql.DB) error {
 			if _, err := tx.Exec(statement); err != nil {
 				return err
 			}
+		}
+		version = 19
+	}
+	// Version 20 keeps the cluster's operation lease.
+	if version == 19 {
+		if _, err := tx.Exec(leaseTable); err != nil {
+			return err
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
