@@ -142,7 +142,7 @@
       <p class="nhead"><strong>Add <span class="mono">{{.Name}}</span> to {{$t.Spec.Name}}?</strong>{{with .Display}} <span class="dim">{{.}}</span>{{end}}</p>
       <p class="hint">At the domain's DNS provider, create:</p>
       <table class="kv"><tbody>{{range .Records}}<tr><td class="mono">{{.Name}} {{.Type}}</td><td class="mono">{{.Value}}</td></tr>{{end}}</tbody></table>
-      <p class="hint spaced">Once the cluster sees it point here, every node serves it as {{$t.Spec.Name}}, and the leader asks the CA for its certificate (over HTTP, port 80), which it renews 30 days before it expires. Nothing is stored until you add it.</p>
+      <p class="hint spaced">Once the cluster sees it point here, every node serves it as {{$t.Spec.Name}}, and the leader asks the CA for its certificate (checked on port 80, or 443 where 80 is closed), which it renews 30 days before it expires. Nothing is stored until you add it.</p>
       <form method="post" action="/tenants/{{$t.Spec.Name}}" class="row spaced"><input type="hidden" name="do" value="domain-add"><input type="hidden" name="domain" value="{{.Name}}"><input type="hidden" name="reviewed" value="{{.Token}}">
         <button type="submit" class="primary">Add {{.Name}}</button> <a href="/tenants/{{$t.Spec.Name}}#domains">Cancel</a>
       </form>

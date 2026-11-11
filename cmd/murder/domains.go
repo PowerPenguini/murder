@@ -89,8 +89,9 @@ const domainUsage = `Usage: murder tenant domain <command> TENANT [DOMAIN]
 A domain is routed once its DNS points at the cluster: a CNAME to the
 tenant's own name, or A and AAAA records with the nodes' public addresses.
 The cluster's leader checks it, then orders its certificate over ACME
-(HTTP-01, so port 80 must reach every node) and renews it 30 days before it
-expires. -json prints JSON.
+(HTTP-01 on port 80, or TLS-ALPN-01 on 443 where 80 is closed: one of them
+must reach every node) and renews it 30 days before it expires. -json prints
+JSON.
 `
 
 // runDomain serves "murder tenant domain".

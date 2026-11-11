@@ -71,9 +71,10 @@ func (d Domain) Verified() bool { return !d.VerifiedAt.IsZero() }
 // MaxDomains is how many domains a tenant may have.
 const MaxDomains = 20
 
-// Challenge is an HTTP-01 challenge of an order the leader waits on: every
-// edge answers http://Domain/.well-known/acme-challenge/Token with KeyAuth
-// until ExpiresAt.
+// Challenge is a challenge of an order the leader waits on: until
+// ExpiresAt, every edge answers http://Domain/.well-known/acme-challenge/Token
+// with KeyAuth (HTTP-01), and a handshake for Domain over acme-tls/1 with
+// a certificate that holds KeyAuth's digest (TLS-ALPN-01).
 type Challenge struct {
 	Token     string    `json:"token"`
 	Domain    string    `json:"domain"`
@@ -414,8 +415,9 @@ func (s *SQLite) Challenges() []Challenge {
 	return challenges
 }
 
-// PutChallenge has every edge answer an HTTP-01 challenge for one of the
-// domains, and forgets the challenges that expired.
+// PutChallenge has every edge answer a challenge for one of the domains,
+// over HTTP-01 and TLS-ALPN-01, in place of any other for that domain, and
+// forgets the challenges that expired.
 func (s *SQLite) PutChallenge(challenge Challenge) error {
 	if !challengeToken.MatchString(challenge.Token) {
 		return fmt.Errorf("%w: challenge token %q", ErrInvalid, challenge.Token)
@@ -424,8 +426,11 @@ func (s *SQLite) PutChallenge(challenge Challenge) error {
 		if _, ok := current.domains[challenge.Domain]; !ok {
 			return fmt.Errorf("domain %s: %w", challenge.Domain, ErrNotFound)
 		}
+		// One challenge per domain: TLS-ALPN-01 looks it up by name. An
+		// order asks for one at a time, and one before it is over.
 		for _, token := range slices.Sorted(maps.Keys(current.challenges)) {
-			if token != challenge.Token && !current.challenges[token].ExpiresAt.After(now) {
+			other := current.challenges[token]
+			if token != challenge.Token && (!other.ExpiresAt.After(now) || other.Domain == challenge.Domain) {
 				if err := tx.Exec(`DELETE FROM acme_challenges WHERE token = ?`, token); err != nil {
 					return err
 				}

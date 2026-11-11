@@ -21,7 +21,7 @@ type Table struct {
 	Version string           `json:"version"`
 	Routes  map[string]Route `json:"routes"`
 	// Domains are tenants' own host names, by name; Challenges the ACME
-	// HTTP-01 challenges every edge answers, by token.
+	// challenges every edge answers, HTTP-01 and TLS-ALPN-01, by token.
 	Domains    map[string]DomainRoute    `json:"domains,omitempty"`
 	Challenges map[string]ChallengeRoute `json:"challenges,omitempty"`
 }
@@ -35,8 +35,10 @@ type DomainRoute struct {
 	Key         string `json:"key,omitempty"`
 }
 
-// ChallengeRoute is an ACME HTTP-01 challenge: the edge answers
-// http://Domain/.well-known/acme-challenge/<token> with KeyAuth.
+// ChallengeRoute is an ACME challenge: the edge answers
+// http://Domain/.well-known/acme-challenge/<token> with KeyAuth (HTTP-01),
+// and a TLS handshake for Domain that asks for acme-tls/1 with a
+// certificate that holds KeyAuth's digest (TLS-ALPN-01).
 type ChallengeRoute struct {
 	Domain  string `json:"domain"`
 	KeyAuth string `json:"keyAuth"`
@@ -145,6 +147,21 @@ func (l *LiveTable) Challenge(token string) (ChallengeRoute, bool) {
 	}
 	challenge, ok := table.Challenges[token]
 	return challenge, ok
+}
+
+// DomainChallenge implements DomainChallenges: the challenge under way
+// for domain, if any. The leader keeps one per domain at a time.
+func (l *LiveTable) DomainChallenge(domain string) (ChallengeRoute, bool) {
+	table := l.table.Load()
+	if table == nil {
+		return ChallengeRoute{}, false
+	}
+	for _, challenge := range table.Challenges {
+		if challenge.Domain == domain {
+			return challenge, true
+		}
+	}
+	return ChallengeRoute{}, false
 }
 
 // Load returns the table served now; zero before the first.

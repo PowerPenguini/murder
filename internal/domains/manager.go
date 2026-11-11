@@ -587,7 +587,11 @@ func (m *Manager) accountFor(ctx context.Context) (*acmez.Client, acme.Account, 
 				PollInterval: time.Second,
 				Logger:       m.log().With("component", "acme"),
 			},
-			ChallengeSolvers: map[string]acmez.Solver{acme.ChallengeTypeHTTP01: &solver{m: m}},
+			// Both answered by every edge, from the challenges in the
+			// state: HTTP-01 on port 80, TLS-ALPN-01 on 443 for a node
+			// whose port 80 the internet does not reach. acmez picks one
+			// and, if the CA cannot reach it, the other.
+			ChallengeSolvers: map[string]acmez.Solver{acme.ChallengeTypeHTTP01: &solver{m: m}, acme.ChallengeTypeTLSALPN01: &solver{m: m}},
 		}
 	}
 	stored, ok := m.Store.ACMEAccount(m.CA)
@@ -670,8 +674,9 @@ func parseKey(text string) (crypto.Signer, error) {
 	return signer, nil
 }
 
-// solver answers HTTP-01 challenges from every edge: it puts them in the
-// replicated state, which every edge serves from.
+// solver answers HTTP-01 and TLS-ALPN-01 challenges from every edge: it
+// puts them in the replicated state, which every edge serves from. Both
+// answer with the same key authorization.
 type solver struct{ m *Manager }
 
 func (s *solver) Present(_ context.Context, challenge acme.Challenge) error {

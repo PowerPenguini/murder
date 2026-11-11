@@ -444,3 +444,31 @@ func TestACanonicalHostIsOneOfTheTenantsHosts(t *testing.T) {
 		t.Fatalf("an archived tenant: %v", err)
 	}
 }
+
+// A domain has one challenge at a time: a new one takes the place of the
+// one before.
+func TestANewChallengeReplacesTheDomainsOld(t *testing.T) {
+	st := withTenant(t, "acme")
+	for _, name := range []string{"app.customer.com", "www.customer.com"} {
+		if _, _, err := st.AddDomain("acme", name, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expires := time.Now().Add(time.Minute)
+	for _, challenge := range []Challenge{
+		{Token: "first", Domain: "app.customer.com", KeyAuth: "first.x", ExpiresAt: expires},
+		{Token: "other", Domain: "www.customer.com", KeyAuth: "other.x", ExpiresAt: expires},
+		{Token: "second", Domain: "app.customer.com", KeyAuth: "second.x", ExpiresAt: expires},
+	} {
+		if err := st.PutChallenge(challenge); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var tokens []string
+	for _, challenge := range st.Challenges() {
+		tokens = append(tokens, challenge.Token)
+	}
+	if !reflect.DeepEqual(tokens, []string{"other", "second"}) {
+		t.Fatalf("challenges %v", tokens)
+	}
+}

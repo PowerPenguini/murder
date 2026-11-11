@@ -69,6 +69,12 @@ type Challenges interface {
 	Challenge(token string) (ChallengeRoute, bool)
 }
 
+// DomainChallenges looks the ACME challenge under way for a domain up, for
+// TLS-ALPN-01, which names the domain and no token.
+type DomainChallenges interface {
+	DomainChallenge(domain string) (ChallengeRoute, bool)
+}
+
 // Proxy routes "<tenant>.<BaseDomain>" to the tenant's backend, or to the
 // edge of the node that runs it. Its reverse proxies are made once and
 // shared by every request, with copy buffers from a pool: a request costs

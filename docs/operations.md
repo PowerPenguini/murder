@@ -435,8 +435,9 @@ for a name that does not point here: its rate limits count failures. Once
 it does, every edge routes the name to the tenant, exactly as its own
 name (moves, holds, 503s for a suspended tenant), and the leader orders
 its certificate from `edge.tls.ca` (Let's Encrypt by default) with the
-HTTP-01 challenge: every node's edge answers it on port 80, so the
-customer's DNS provider needs no API. The certificate is renewed 30 days
+HTTP-01 challenge on port 80 or the TLS-ALPN-01 challenge on port 443:
+every node's edge answers both, so the customer's DNS provider needs no
+API. The certificate is renewed 30 days
 before it expires; the old one is served until the new one is there. A
 failed order is tried again after 5 minutes, then less and less often,
 6 hours apart at most. Plain HTTP for a domain with its certificate goes
@@ -498,12 +499,14 @@ What it needs:
   routed, without certificates (plain HTTP when TLS is off). `internal`
   with `ca` set (`email` optional), as for a test cluster, still orders
   domains' certificates from that CA (say Let's Encrypt's staging one).
-- Port 80 open to the internet on every node the name leads to: the CA
-  asks any of them, from several places. Keep it open in the provider's
-  firewall (`test/hetzner` opens 80 and 443). The edge listens on
-  `edge.http` (`:80`) already; the leader checks that every node's edge
-  answers a challenge, at its private address and that port, before the
-  CA is asked.
+- Port 80 or port 443 open to the internet on every node the name leads
+  to: the CA asks any of them, from several places. Keep both open in the
+  provider's firewall where you can (`test/hetzner` opens 80 and 443). The
+  edge listens on `edge.http` (`:80`) and `edge.https` (`:443`) already;
+  the leader checks that every node's edge answers a challenge, at its
+  private address and `edge.http`'s port, before the CA is asked, so the
+  edges keep listening on port 80 even where the internet does not reach
+  it.
 - Every node on a release with schema 18: the leader orders nothing until
   every node runs one, so a rolling upgrade finishes first. Canonical
   hosts and revocation need schema 19 on every node: the leader orders,
@@ -511,7 +514,21 @@ What it needs:
 
 The cluster has one ACME account per CA, made with the first order, its
 key sealed with the master key in the state: every leader uses it.
-TLS-ALPN-01 is not used.
+**Port 80 closed or filtered.** The leader offers the CA both challenges
+it answers, HTTP-01 and TLS-ALPN-01 (RFC 8737), and the client library
+(acmez) picks one; when the CA cannot reach port 80 (a connection or
+timeout failure), the order is made again with TLS-ALPN-01, which the CA
+checks with a TLS handshake on port 443 that asks for the `acme-tls/1`
+protocol. Every edge answers that handshake itself, with a certificate
+made for the challenge, from the challenges in its routes, as it answers
+HTTP-01: a node that does not run the tenant answers as well as the one
+that does, and the handshake is never relayed. Only a client that asks
+for `acme-tls/1` alone gets it; browsers never do. What does not work:
+a proxy or CDN in front of the nodes that ends TLS itself (TLS-ALPN-01
+needs the handshake to reach the edge, and HTTP-01 then needs port 80);
+and a failed attempt still counts against the CA's limits on failed
+validations, so open port 80 where you can. Ports 80 and 443 both
+filtered leave a domain `failed`, said why.
 
 ## Back up and restore
 
