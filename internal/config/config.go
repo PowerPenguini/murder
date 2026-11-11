@@ -164,7 +164,11 @@ type HostFirewall struct {
 }
 
 // HostRules is what the host firewall lets in; nil when hostFirewall is
-// unset.
+// unset. The rules name ports, and for the private ones the private
+// source networks, never the node's own addresses: what is open is open
+// on every address the host has. So public addresses found on the host,
+// which may differ from one start to the next (an interface up late at
+// boot, a new DHCP lease), change nothing here; only the ports do.
 func (a Agent) HostRules() (*firewall.Host, error) {
 	h := a.HostFirewall
 	if h == nil {

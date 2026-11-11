@@ -134,6 +134,11 @@ func checkOwnSettings(cfg config.Agent, configPath string, h Host) []Result {
 				value = "taken"
 			}
 		}
+		if d.Problem != "" {
+			results = append(results, Result{Warning, "config", fmt.Sprintf("%s: %s, from %s: %s", d.Key, value, d.From, d.Problem),
+				"see that sshd -T and ss run (as root), or name the ports in " + config.NodeFileName + ": hostFirewall: {ssh: [22, …]}"})
+			continue
+		}
 		results = append(results, Result{OK, "config", fmt.Sprintf("%s: %s, from %s", d.Key, value, d.From), ""})
 	}
 	nodeFile := config.NodeFile(configPath)

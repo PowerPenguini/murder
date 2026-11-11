@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -17,6 +18,15 @@ type fakeHost struct {
 	pools     []string
 	noZFS     bool
 	ssh       []int
+	sshErr    error
+	// record is the record of SSH ports, shared by copies; nil keeps none.
+	record *sshRecord
+}
+
+type sshRecord struct {
+	ports  []int
+	writes int
+	fail   error
 }
 
 func (h fakeHost) Hostname() (string, error) {
@@ -41,7 +51,25 @@ func (h fakeHost) Pools() ([]string, error) {
 	return h.pools, nil
 }
 
-func (h fakeHost) SSHPorts() []int { return h.ssh }
+func (h fakeHost) SSHPorts() ([]int, error) { return h.ssh, h.sshErr }
+
+func (h fakeHost) RecordedSSHPorts() []int {
+	if h.record == nil {
+		return nil
+	}
+	return h.record.ports
+}
+
+func (h fakeHost) RecordSSHPorts(ports []int) error {
+	if h.record == nil {
+		return nil
+	}
+	if h.record.fail != nil {
+		return h.record.fail
+	}
+	h.record.ports, h.record.writes = slices.Clone(ports), h.record.writes+1
+	return nil
+}
 
 // shared names nothing of a node's own: every node of a cluster can have
 // it.
@@ -181,5 +209,88 @@ cluster: {address: 10.0.0.2:7500, publicAddresses: [203.0.113.10]}
 	}
 	if got, want := agent.Derivable(host), []string{"node", "cluster.publicAddresses", "volumes.parent"}; !slices.Equal(got, want) {
 		t.Fatalf("derivable %v, want %v", got, want)
+	}
+}
+
+// The SSH ports the host firewall opens never shrink on a detection that
+// failed: a port closed by mistake locks the operator out.
+func TestSSHPortsNeverShrinkOnAFailedDetection(t *testing.T) {
+	config := []byte("baseDomain: example.com\nhostFirewall:\n")
+	record := &sshRecord{}
+	host := fakeHost{name: "n1", addresses: []string{"203.0.113.10"}, ssh: []int{22, 2222}, record: record}
+	agent, err := ParseOn(config, nil, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A complete detection is recorded, and is no problem.
+	if !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) || !slices.Equal(record.ports, []int{22, 2222}) || agent.Detected[len(agent.Detected)-1].Problem != "" {
+		t.Fatalf("ssh %v, record %v, detected %+v", agent.HostFirewall.SSH, record.ports, agent.Detected)
+	}
+	// At the next start ss is missing and sshd -T fails: nothing found,
+	// the recorded ports stay open, and the record stays as it was.
+	host.ssh, host.sshErr = nil, errors.New("sshd -T: exit status 255; ss: not found")
+	agent, err = ParseOn(config, nil, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := agent.Detected[len(agent.Detected)-1]
+	if !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) || d.Problem == "" || !strings.Contains(d.Problem, "ss: not found") || record.writes != 1 {
+		t.Fatalf("ssh %v, detected %+v, writes %d", agent.HostFirewall.SSH, d, record.writes)
+	}
+	if rules, err := agent.HostRules(); err != nil || !slices.Contains(rules.PublicTCP, 2222) {
+		t.Fatalf("rules %+v, %v", rules, err)
+	}
+	// Partial: sshd -T answers 22 but the sockets cannot be read; 2222
+	// stays open.
+	host.ssh, host.sshErr = []int{22}, errors.New("ss: not found")
+	if agent, err = ParseOn(config, nil, host); err != nil || !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) || record.writes != 1 {
+		t.Fatalf("partial: ssh %v, %v, writes %d", agent.HostFirewall.SSH, err, record.writes)
+	}
+	// A failed detection with no record opens 22, as before.
+	host.record, host.ssh = &sshRecord{}, nil
+	if agent, err = ParseOn(config, nil, host); err != nil || !slices.Equal(agent.HostFirewall.SSH, []int{22}) || !strings.Contains(agent.Detected[len(agent.Detected)-1].From, "22") {
+		t.Fatalf("no record: ssh %v, %v", agent.HostFirewall.SSH, err)
+	}
+	// A complete detection that finds sshd moved off a port is believed:
+	// the record follows it.
+	host.record, host.ssh, host.sshErr = record, []int{2222}, nil
+	if agent, err = ParseOn(config, nil, host); err != nil || !slices.Equal(agent.HostFirewall.SSH, []int{2222}) || !slices.Equal(record.ports, []int{2222}) {
+		t.Fatalf("moved: ssh %v, record %v, %v", agent.HostFirewall.SSH, record.ports, err)
+	}
+	// A record that cannot be written is said, when it holds other ports.
+	record.fail = errors.New("read-only file system")
+	host.ssh = []int{22}
+	if agent, err = ParseOn(config, nil, host); err != nil || !strings.Contains(agent.Detected[len(agent.Detected)-1].Problem, "read-only") {
+		t.Fatalf("unwritable record: %+v, %v", agent.Detected, err)
+	}
+	// Derivable tries detection without recording anything.
+	record.fail, record.writes = nil, 0
+	explicit, err := ParseOn([]byte("baseDomain: example.com\nhostFirewall: {ssh: [22]}\n"), nil, host)
+	if err != nil || !slices.Contains(explicit.Derivable(host), "hostFirewall.ssh") || record.writes != 0 {
+		t.Fatalf("derivable %v, writes %d, %v", explicit.Derivable(host), record.writes, err)
+	}
+}
+
+// The host firewall's rules do not follow the public addresses found on
+// the host: it opens ports on every address, so an interface up late at
+// boot or a new DHCP lease changes no rule.
+func TestHostRulesDoNotFollowPublicAddresses(t *testing.T) {
+	config := []byte(shared)
+	rules := func(addresses ...string) string {
+		t.Helper()
+		host := fakeHost{name: "n1", addresses: append([]string{"10.0.0.2"}, addresses...), pools: []string{"tank"}, ssh: []int{22}}
+		agent, err := ParseOn(config, nil, host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := agent.HostRules()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("%+v", *r)
+	}
+	none, one, two := rules(), rules("203.0.113.10"), rules("203.0.113.10", "198.51.100.7")
+	if none != one || one != two {
+		t.Fatalf("rules changed with the public addresses:\n%s\n%s\n%s", none, one, two)
 	}
 }

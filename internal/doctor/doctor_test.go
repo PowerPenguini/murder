@@ -485,8 +485,10 @@ func (probe) Hostname() (string, error) { return "fsn-1.example.com", nil }
 func (probe) Addresses() ([]netip.Addr, error) {
 	return []netip.Addr{netip.MustParseAddr("10.0.0.2")}, nil
 }
-func (probe) Pools() ([]string, error) { return []string{"tank"}, nil }
-func (probe) SSHPorts() []int          { return []int{22} }
+func (probe) Pools() ([]string, error)   { return []string{"tank"}, nil }
+func (probe) SSHPorts() ([]int, error)   { return []int{22}, nil }
+func (probe) RecordedSSHPorts() []int    { return nil }
+func (probe) RecordSSHPorts([]int) error { return nil }
 
 // The doctor says what the config left out and where it was found, what
 // node.yaml sets, and what the config sets that the host gives the same.
@@ -507,5 +509,11 @@ func TestOwnSettings(t *testing.T) {
 		if !has(results, OK, want) {
 			t.Errorf("no %q in %+v", want, results)
 		}
+	}
+	// SSH ports found incomplete are a warning, with what was kept.
+	cfg.Detected = append(cfg.Detected, config.Detected{Key: "hostFirewall.ssh", Value: "22, 2222", From: "the ports sshd listens on, and those found before", Problem: "sshd's ports could not all be found (ss: not found)"})
+	results = checkOwnSettings(cfg, "/etc/murder/agent.yaml", Host{Root: root})
+	if !has(results, Warning, "hostFirewall.ssh: 22, 2222") || has(results, OK, "hostFirewall.ssh") {
+		t.Errorf("incomplete ssh: %+v", results)
 	}
 }

@@ -198,6 +198,9 @@ func Adopt(bundle cluster.Bundle, own Own) (Install, config.Agent, error) {
 		return Install{}, config.Agent{}, fmt.Errorf("the cluster's config has no cluster section")
 	}
 	in := Install{Config: bundle.Config, NodeConfig: nodeData, Secrets: map[string][]byte{}, ZFSPool: own.ZFSPool, Panel: agent.Panel.Tunnel != nil}
+	if agent.HostFirewall != nil {
+		in.SSHPorts = own.SSHPorts
+	}
 	// Files land where the cluster keeps them, beside the config only.
 	for file, data := range bundle.Files {
 		if path.Dir(file) != ConfigDir {

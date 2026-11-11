@@ -56,8 +56,10 @@ func (h detectHost) Addresses() ([]netip.Addr, error) {
 	}
 	return out, nil
 }
-func (h detectHost) Pools() ([]string, error) { return h.pools, nil }
-func (h detectHost) SSHPorts() []int          { return h.ssh }
+func (h detectHost) Pools() ([]string, error)   { return h.pools, nil }
+func (h detectHost) SSHPorts() ([]int, error)   { return h.ssh, nil }
+func (h detectHost) RecordedSSHPorts() []int    { return nil }
+func (h detectHost) RecordSSHPorts([]int) error { return nil }
 
 // A cluster whose config names the inviting node's own settings: the
 // host keeps that config as it is, and names its own in node.yaml.

@@ -156,7 +156,15 @@ every port the host serves besides SSH and Murder's. `murder setup` turns
 it on (`-no-host-firewall` leaves it off): it leaves `hostFirewall.ssh`
 out, so the agent opens the ports sshd listens on (`sshd -T`, and its
 sockets, a socket-activated ssh's too) as it finds them at every start,
-and a port sshd moves to is open once the agent restarts. What else
+and a port sshd moves to is open once the agent restarts. The ports
+never shrink by accident: each complete detection (`sshd -T` and `ss`
+both answered) is kept in `/var/lib/murder/ssh-ports`, which setup seeds,
+and a start whose detection fails or is partial, as with `ss` not there
+yet early at boot, opens what it found beside the ports kept there (22
+if there are none), logs a warning and has `murder doctor` warn under
+`config`. A port opened needlessly costs less than SSH locked out. Only
+a complete detection that no longer finds a port, as after sshd was moved
+off it, closes it. What else
 listened beyond loopback when setup ran goes in
 `open`, or in `private` when it listened on a private address only, each
 with a comment naming the process, so setup closes nothing that served.

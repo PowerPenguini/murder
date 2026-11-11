@@ -142,7 +142,12 @@ func (h factsHost) Pools() ([]string, error) {
 	return h.facts.Pools, nil
 }
 
-func (h factsHost) SSHPorts() []int { return h.facts.SSHPorts }
+func (h factsHost) SSHPorts() ([]int, error) { return h.facts.SSHPorts, h.facts.SSHPortsErr }
+
+// Setup keeps no record: the agent makes it, and setup seeds it with what
+// it found (Install.SSHPorts).
+func (factsHost) RecordedSSHPorts() []int    { return nil }
+func (factsHost) RecordSSHPorts([]int) error { return nil }
 
 // Probe answers detection from host, as the agent will on it.
 func Probe(ctx context.Context, host Host) config.Host { return probe{ctx, host} }
@@ -155,7 +160,9 @@ type probe struct {
 func (p probe) Hostname() (string, error)        { return p.host.Hostname() }
 func (p probe) Addresses() ([]netip.Addr, error) { return p.host.Addresses() }
 func (p probe) Pools() ([]string, error)         { return hostprobe.Pools(p.ctx, p.host) }
-func (p probe) SSHPorts() []int                  { return hostprobe.SSHPorts(p.ctx, p.host) }
+func (p probe) SSHPorts() ([]int, error)         { return hostprobe.SSHPorts(p.ctx, p.host) }
+func (p probe) RecordedSSHPorts() []int          { return nil }
+func (p probe) RecordSSHPorts([]int) error       { return nil }
 
 // nowhere finds nothing: every own setting goes in node.yaml.
 type nowhere struct{}
@@ -163,4 +170,6 @@ type nowhere struct{}
 func (nowhere) Hostname() (string, error)        { return "", errors.New("unknown") }
 func (nowhere) Addresses() ([]netip.Addr, error) { return nil, errors.New("unknown") }
 func (nowhere) Pools() ([]string, error)         { return nil, hostprobe.ErrNoZFS }
-func (nowhere) SSHPorts() []int                  { return []int{22} }
+func (nowhere) SSHPorts() ([]int, error)         { return []int{22}, nil }
+func (nowhere) RecordedSSHPorts() []int          { return nil }
+func (nowhere) RecordSSHPorts([]int) error       { return nil }

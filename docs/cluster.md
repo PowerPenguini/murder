@@ -63,7 +63,7 @@ them on the host at every start:
 | `cluster.address` | the host's only private IPv4 address, port 7400; several is refused, naming them |
 | `cluster.publicAddresses` (`publicAddresses` alone) | the public IPv4 addresses of the host's interfaces; `[]` says none |
 | `volumes.parent` | `<pool>/murder/tenants` of the host's only ZFS pool, with `driver: zfs` |
-| `hostFirewall.ssh` | the ports sshd listens on (`sshd -T`, its sockets, `ssh.socket`), at every start |
+| `hostFirewall.ssh` | the ports sshd listens on (`sshd -T`, its sockets, `ssh.socket`), at every start; never fewer than the last complete detection found (see [Harden the node](operations.md#harden-the-node)) |
 | `panel.tunnel.address` | the cluster's state: the address it has for this node, or else the lowest one no node has, which the panel records there |
 
 What a host cannot tell, such as which of two private addresses the
@@ -81,7 +81,10 @@ cluster: {address: 10.0.0.2:7400}
 volumes: {parent: fast/murder/tenants}
 ```
 
-A setting given in either file wins over what the host has.
+A setting given in either file wins over what the host has. Public
+addresses found on the host feed the state's records (DNS, the panel's
+endpoint), not the host firewall, which opens ports on every address the
+host has: an interface up late at boot opens and closes nothing.
 `murder doctor` reports, under `config`, what the agent found and from
 where, what `node.yaml` sets, and which settings the config names that
 the host would give the same: take those out to share the file. Why a

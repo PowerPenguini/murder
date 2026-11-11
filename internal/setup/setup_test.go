@@ -269,6 +269,10 @@ func TestStepsInstallEverything(t *testing.T) {
 	if dropIn := string(host.files[EdgeSocketDropIn]); !strings.HasSuffix(dropIn, "ListenStream=\nListenStream=80\nListenStream=443\nListenStream=10.0.0.2:7402\n") {
 		t.Errorf("socket drop-in %q", dropIn)
 	}
+	// The SSH ports setup found seed the record the agent keeps them in.
+	if string(host.files["/var/lib/murder/ssh-ports"]) != "22\n" {
+		t.Errorf("ssh ports record %q", host.files["/var/lib/murder/ssh-ports"])
+	}
 	if string(host.files[HetznerTokenFile]) != "hcloud-s3cret\n" || strings.Contains(string(host.files[ConfigFile]), "s3cret") {
 		t.Fatal("the token is not kept in its own file")
 	}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/PowerPenguini/murder/deploy"
 	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/hostprobe"
 )
 
 // Config is the agent's config for the settings: only what differs from
@@ -136,11 +137,17 @@ type Install struct {
 	// SSH turns SSH's passwords off: whoever runs setup logs in with the
 	// key in this file.
 	SSH string
+	// SSHPorts seed the record of SSH ports (hostprobe.SSHPortsRecord), so
+	// even the first start whose detection of them fails keeps them open.
+	SSHPorts []int
 }
 
 // Install is what setup installs for the settings.
 func (s Settings) Install() Install {
 	in := Install{Config: Config(s), NodeConfig: s.NodeConfig, Secrets: map[string][]byte{}, ZFSPool: s.ZFSPool, Panel: s.Panel}
+	if s.HostFirewall {
+		in.SSHPorts = s.SSHPorts
+	}
 	if s.HetznerToken != "" {
 		in.Secrets[HetznerTokenFile] = []byte(s.HetznerToken + "\n")
 	}
@@ -188,6 +195,18 @@ func liveRestore(ctx context.Context, host Host) error {
 		return fmt.Errorf("have Docker read %s again: %w", DaemonConfig, err)
 	}
 	return nil
+}
+
+// recordSSHPorts adds ports to the record of SSH ports: with -force, the
+// ports a node kept stay.
+func recordSSHPorts(host Host, ports []int) error {
+	if data, err := host.ReadFile(hostprobe.SSHPortsRecord); err == nil {
+		ports = append(slices.Clone(ports), hostprobe.ParsePorts(string(data))...)
+	}
+	if err := host.MkdirAll(path.Dir(hostprobe.SSHPortsRecord), 0o755); err != nil {
+		return err
+	}
+	return host.WriteFile(hostprobe.SSHPortsRecord, []byte(hostprobe.FormatPorts(hostprobe.ParsePorts(hostprobe.FormatPorts(ports)))), 0o644)
 }
 
 // Units are the services setup enables and starts, in order.
@@ -306,6 +325,11 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 		cfg, err := config.ParseOn(in.Config, in.NodeConfig, Probe(ctx, host))
 		if err != nil {
 			return err
+		}
+		if cfg.HostFirewall != nil && cfg.IsDetected("hostFirewall.ssh") && len(in.SSHPorts) > 0 {
+			if err := recordSSHPorts(host, in.SSHPorts); err != nil {
+				return err
+			}
 		}
 		listen := EdgeListen(cfg)
 		if slices.Equal(listen, edgeSocketListen()) && !host.Exists(EdgeSocketDropIn) {

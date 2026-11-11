@@ -45,8 +45,13 @@ type Host interface {
 	Addresses() ([]netip.Addr, error)
 	// Pools are the host's ZFS pools; an error without ZFS.
 	Pools() ([]string, error)
-	// SSHPorts are the ports sshd listens on.
-	SSHPorts() []int
+	// SSHPorts are the ports sshd listens on; with an error, only those
+	// it could find, perhaps none.
+	SSHPorts() ([]int, error)
+	// RecordedSSHPorts are the ports the last complete detection found,
+	// which RecordSSHPorts keeps; none if it never ran.
+	RecordedSSHPorts() []int
+	RecordSSHPorts(ports []int) error
 }
 
 // Detected is a setting the config left out, found on the host.
@@ -58,6 +63,9 @@ type Detected struct {
 	Value string
 	// From says where.
 	From string
+	// Problem, if set, says the finding is incomplete and what was done
+	// about it; the agent logs it and the doctor warns of it.
+	Problem string
 }
 
 // Load reads the config at path, and node.yaml beside it over it, and
@@ -165,7 +173,9 @@ func mergeMappings(base, over *yaml.Node) {
 // set it instead; it fills in the rest all the same.
 func (a *Agent) Detect(host Host) error {
 	var problems []string
-	note := func(key, value, from string) { a.Detected = append(a.Detected, Detected{key, value, from}) }
+	note := func(key, value, from string) {
+		a.Detected = append(a.Detected, Detected{Key: key, Value: value, From: from})
+	}
 	if a.Node == "" {
 		name, err := host.Hostname()
 		short, _, _ := strings.Cut(name, ".")
@@ -234,8 +244,7 @@ func (a *Agent) Detect(host Host) error {
 		}
 	}
 	if h := a.HostFirewall; h != nil && h.SSH == nil {
-		h.SSH = host.SSHPorts()
-		note("hostFirewall.ssh", joinPorts(h.SSH), "the ports sshd listens on")
+		h.SSH = a.detectSSH(host)
 	}
 	if t := a.Panel.Tunnel; t != nil && t.Address == "" {
 		note("panel.tunnel.address", "", "the cluster's state, as the panel starts: the address it has there, or the lowest one free")
@@ -244,6 +253,44 @@ func (a *Agent) Detect(host Host) error {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// detectSSH finds the ports the host firewall opens for SSH. A port the
+// firewall closes by mistake locks the operator out, and one it opens
+// needlessly costs little, so the set never shrinks on a detection that
+// failed: then the ports found are opened beside those the last complete
+// detection found, and 22 if there are none. Only a complete detection,
+// sshd and its sockets both asked, replaces the record, as when sshd was
+// moved off a port.
+func (a *Agent) detectSSH(host Host) []int {
+	found, err := host.SSHPorts()
+	if err == nil && len(found) == 0 {
+		err = errors.New("sshd named no port")
+	}
+	if err == nil {
+		recorded := host.RecordedSSHPorts()
+		d := Detected{Key: "hostFirewall.ssh", Value: joinPorts(found), From: "the ports sshd listens on"}
+		if !slices.Equal(recorded, found) {
+			if recordErr := host.RecordSSHPorts(found); recordErr != nil && recorded != nil {
+				// The record keeps ports this detection did not find: a
+				// later failed one would open them again, the safe way.
+				d.Problem = fmt.Sprintf("the ports could not be recorded (%v): a start whose detection fails opens those recorded before, %s", recordErr, joinPorts(recorded))
+			}
+		}
+		a.Detected = append(a.Detected, d)
+		return found
+	}
+	recorded := host.RecordedSSHPorts()
+	ports := append(slices.Clone(found), recorded...)
+	from := "those found before"
+	if len(ports) == 0 {
+		ports, from = []int{22}, "22, as nothing was found before"
+	}
+	slices.Sort(ports)
+	ports = slices.Compact(ports)
+	a.Detected = append(a.Detected, Detected{Key: "hostFirewall.ssh", Value: joinPorts(ports), From: "the ports sshd listens on, and " + from,
+		Problem: fmt.Sprintf("sshd's ports could not all be found (%v): kept %s open beside what was found (%s); set hostFirewall.ssh to name them", err, from, joinPorts(found))})
+	return ports
 }
 
 // IsDetected reports whether the setting key was left out and found.
@@ -263,7 +310,7 @@ func (a Agent) Derivable(host Host) []string {
 		probe := a.clone()
 		probe.Detected = nil
 		clear(&probe)
-		if probe.Detect(host) == nil && probe.IsDetected(key) && same(probe) {
+		if probe.Detect(noRecord{host}) == nil && probe.IsDetected(key) && same(probe) {
 			keys = append(keys, key)
 		}
 	}
@@ -282,12 +329,25 @@ func (a Agent) Derivable(host Host) []string {
 		try("volumes.parent", func(p *Agent) { p.Volumes.Parent = "" }, func(p Agent) bool { return p.Volumes.Parent == a.Volumes.Parent })
 	}
 	if h := a.HostFirewall; h != nil {
+		// Only a complete detection counts: one that kept the record's
+		// ports would say nothing of sshd. Derivable never records.
 		try("hostFirewall.ssh", func(p *Agent) { p.HostFirewall.SSH = nil }, func(p Agent) bool {
+			for _, d := range p.Detected {
+				if d.Key == "hostFirewall.ssh" && d.Problem != "" {
+					return false
+				}
+			}
 			return slices.Equal(p.HostFirewall.SSH, h.SSH)
 		})
 	}
 	return keys
 }
+
+// noRecord is host, keeping no record: what is only tried changes
+// nothing.
+type noRecord struct{ Host }
+
+func (noRecord) RecordSSHPorts([]int) error { return nil }
 
 // clone copies a, with its own copies of what Detect changes.
 func (a Agent) clone() Agent {

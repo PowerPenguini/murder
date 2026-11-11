@@ -102,6 +102,7 @@ func runAgent(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	warnDetected(cfg, log)
 	// Nothing below waits on it: systemctl may be slow while the host boots.
 	go refreshInstall(cfg, log)
 	key, err := secrets.LoadKey(cfg.MasterKeyFile)
@@ -787,6 +788,16 @@ func storeSubnets(st store.Store) []netip.Prefix {
 	return subnets
 }
 
+// warnDetected logs the node's own settings found incomplete on the host,
+// such as SSH ports kept open from before because sshd could not be asked.
+func warnDetected(cfg config.Agent, log *slog.Logger) {
+	for _, d := range cfg.Detected {
+		if d.Problem != "" {
+			log.Warn("a setting of this node's own was found incomplete", "setting", d.Key, "value", d.Value, "problem", d.Problem)
+		}
+	}
+}
+
 // runFirewall loads the tenant firewall once, for murder-firewall.service,
 // which runs before Docker starts the tenants at boot.
 func runFirewall(args []string) error {
@@ -799,6 +810,8 @@ func runFirewall(args []string) error {
 	if err != nil {
 		return err
 	}
+	// It runs early at boot, where ss or sshd may not answer yet.
+	warnDetected(cfg, slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	if cfg.Firewall != config.FirewallNftables {
 		fmt.Println("the tenant firewall is off in", *configPath)
 		return nil

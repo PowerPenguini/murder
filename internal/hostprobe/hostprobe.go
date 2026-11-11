@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -54,10 +55,59 @@ func (System) Pools() ([]string, error) {
 	return Pools(ctx, Exec{})
 }
 
-func (System) SSHPorts() []int {
+func (System) SSHPorts() ([]int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return SSHPorts(ctx, Exec{})
+}
+
+// SSHPortsRecord keeps the SSH ports the last complete detection found,
+// so one that fails, as with ss not there yet early at boot, closes none
+// of them.
+const SSHPortsRecord = "/var/lib/murder/ssh-ports"
+
+// RecordedSSHPorts are the ports SSHPortsRecord keeps; none without it.
+func (System) RecordedSSHPorts() []int {
+	data, err := os.ReadFile(SSHPortsRecord)
+	if err != nil {
+		return nil
+	}
+	return ParsePorts(string(data))
+}
+
+// RecordSSHPorts keeps ports in SSHPortsRecord. It fails without root,
+// as for the CLI run by a member of the socket's group: the agent and the
+// firewall, which run as root, keep it.
+func (System) RecordSSHPorts(ports []int) error {
+	if err := os.MkdirAll(filepath.Dir(SSHPortsRecord), 0o755); err != nil {
+		return err
+	}
+	temp := SSHPortsRecord + ".new"
+	if err := os.WriteFile(temp, []byte(FormatPorts(ports)), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(temp, SSHPortsRecord)
+}
+
+// FormatPorts is ports as SSHPortsRecord keeps them: "22 2222\n".
+func FormatPorts(ports []int) string {
+	var texts []string
+	for _, port := range ports {
+		texts = append(texts, strconv.Itoa(port))
+	}
+	return strings.Join(texts, " ") + "\n"
+}
+
+// ParsePorts reads FormatPorts' text, leaving out what is not a port.
+func ParsePorts(text string) []int {
+	var ports []int
+	for _, field := range strings.Fields(text) {
+		if port, err := strconv.Atoi(field); err == nil && port > 0 && port < 65536 {
+			ports = append(ports, port)
+		}
+	}
+	slices.Sort(ports)
+	return slices.Compact(ports)
 }
 
 // Addresses are those of the host's own interfaces that are up: not
@@ -129,17 +179,22 @@ func Pools(ctx context.Context, runner Runner) ([]string, error) {
 
 // SSHPorts are the ports sshd listens on: its Port and ListenAddress
 // settings, the sockets sshd holds, and those of systemd's ssh.socket for
-// a socket-activated ssh; 22 when none says. A port is taken whatever the
-// address: one the firewall opens needlessly costs less than SSH locked
-// out.
-func SSHPorts(ctx context.Context, runner Runner) []int {
+// a socket-activated ssh. A port is taken whatever the address: one the
+// firewall opens needlessly costs less than SSH locked out. The error says
+// what could not be asked (sshd -T, or ss for the sockets): the ports are
+// then only some of them, perhaps none, and the caller keeps open those it
+// knew before.
+func SSHPorts(ctx context.Context, runner Runner) ([]int, error) {
+	var failed []error
 	var ports []int
 	addPort := func(text string) {
 		if port, err := strconv.Atoi(text); err == nil && port > 0 && port < 65536 {
 			ports = append(ports, port)
 		}
 	}
-	if settings, err := SSHDSettings(ctx, runner); err == nil {
+	if settings, err := SSHDSettings(ctx, runner); err != nil {
+		failed = append(failed, err)
+	} else {
 		for _, value := range settings["port"] {
 			addPort(value)
 		}
@@ -165,16 +220,19 @@ func SSHPorts(ctx context.Context, runner Runner) []int {
 			}
 		}
 	}
-	for _, s := range Sockets(ctx, runner) {
+	// A unit that does not exist shows an empty value: only sshd -T and ss
+	// failing leave ports unknown.
+	sockets, err := ListSockets(ctx, runner)
+	if err != nil {
+		failed = append(failed, err)
+	}
+	for _, s := range sockets {
 		if s.Protocol == "tcp" && (s.Process == "sshd" || s.Process == "sshd-session") {
 			ports = append(ports, s.Port)
 		}
 	}
-	if len(ports) == 0 {
-		ports = []int{22}
-	}
 	slices.Sort(ports)
-	return slices.Compact(ports)
+	return slices.Compact(ports), errors.Join(failed...)
 }
 
 // SSHDSettings is sshd -T, by lowercase name, with every value of a
@@ -202,11 +260,18 @@ type Socket struct {
 	Process  string
 }
 
-// Sockets are the host's listening TCP and bound UDP sockets, from ss.
+// Sockets are the host's listening TCP and bound UDP sockets, from ss;
+// none if ss fails.
 func Sockets(ctx context.Context, runner Runner) []Socket {
+	sockets, _ := ListSockets(ctx, runner)
+	return sockets
+}
+
+// ListSockets is Sockets, saying why ss failed.
+func ListSockets(ctx context.Context, runner Runner) ([]Socket, error) {
 	output, err := runner.Run(ctx, "ss", "-H", "-ltunp")
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var out []Socket
 	for line := range strings.Lines(output) {
@@ -237,5 +302,5 @@ func Sockets(ctx context.Context, runner Runner) []Socket {
 		}
 		out = append(out, s)
 	}
-	return out
+	return out, nil
 }

@@ -89,6 +89,9 @@ type Facts struct {
 	// SSH is what sshd lets in, and SSHPorts the ports it listens on.
 	SSH      SSH
 	SSHPorts []int
+	// SSHPortsErr says what of sshd could not be asked: SSHPorts are then
+	// only those found, and 22 if none.
+	SSHPortsErr error
 	// Listeners are the ports the host firewall would close: what
 	// listens beyond loopback, other than Murder and sshd.
 	Listeners []Listener
@@ -127,7 +130,10 @@ func Inspect(ctx context.Context, host Host) Facts {
 	addresses, _ := host.Addresses()
 	facts.Private, facts.Public = hostprobe.Classify(addresses)
 	facts.SSH = inspectSSH(ctx, host)
-	facts.SSHPorts = hostprobe.SSHPorts(ctx, host)
+	facts.SSHPorts, facts.SSHPortsErr = hostprobe.SSHPorts(ctx, host)
+	if len(facts.SSHPorts) == 0 {
+		facts.SSHPorts = []int{22}
+	}
 	facts.Listeners = listeners(ctx, host, facts.SSHPorts)
 	facts.Installed = host.Exists(ConfigFile)
 	facts.HasKey, facts.HasDatabase = host.Exists(KeyFile), host.Exists(DatabaseFile)
