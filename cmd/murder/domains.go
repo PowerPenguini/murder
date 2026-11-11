@@ -65,7 +65,7 @@ func newDomainManager(cfg config.Agent, st *store.SQLite, key *secrets.Key, memb
 		manager.Ready = func(ctx context.Context) error {
 			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
-			return member.EveryNodeRuns(ctx, store.DomainsSchema)
+			return member.EveryNodeRuns(ctx, store.RevocationsSchema)
 		}
 	}
 	return manager
@@ -78,7 +78,8 @@ const domainUsage = `Usage: murder tenant domain <command> TENANT [DOMAIN]
   list TENANT                the tenant's domains, their state and certificates
   check TENANT DOMAIN        check its DNS now, as after changing its records
   remove TENANT DOMAIN -yes  take a domain from a tenant, with its certificate:
-                             requests for it are answered 404 at once
+                             requests for it are answered 404 at once, and
+                             the leader revokes its certificate with the CA
   primary TENANT HOST        make HOST, one of the tenant's domains or its own
                              name below the base domain, its canonical host:
                              requests for its other hosts are redirected there

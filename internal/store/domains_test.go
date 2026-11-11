@@ -300,7 +300,7 @@ func TestOpenUpgradesSchemaVersion17(t *testing.T) {
 	}
 	for _, statement := range []string{
 		schema,
-		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`,
+		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`,
 		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '3'), ('applied', '0')`,
 		`INSERT INTO apps (name, spec, created_at, updated_at, revision) VALUES ('web', '` + marshal(normalizeApp(appSpec())) + `', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 1)`,
 		`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, node)
@@ -358,7 +358,7 @@ func TestASnapshotFromBeforeDomainsInstalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `UPDATE meta SET value = '10' WHERE key = 'applied'`, `PRAGMA user_version = 17`} {
+	for _, statement := range []string{`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `UPDATE meta SET value = '10' WHERE key = 'applied'`, `PRAGMA user_version = 17`} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}

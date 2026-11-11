@@ -442,6 +442,21 @@ failed order is tried again after 5 minutes, then less and less often,
 6 hours apart at most. Plain HTTP for a domain with its certificate goes
 to HTTPS; before it has one, port 80 answers 503.
 
+**Removing a domain.** `domain remove`, and purging the tenant, stop
+every edge routing the name at once and delete its certificate and key
+from the state, so nothing renews it. The certificate is kept, without
+its key, for the leader to revoke with the CA (reason: cessation of
+operation), signed with the cluster's account that ordered it: the CA
+then no longer vouches that the name is the tenant's. This is best
+effort. A failure is tried again after 5 minutes, then less and less
+often, five times in all; then the leader gives up and the certificate
+simply runs out. A certificate that expired meanwhile is only
+forgotten, and one the CA has revoked already counts as revoked. Each
+outcome is logged and in the audit log (`domain.revoked`,
+`domain.revoke-failed`, with the serial). A certificate from another CA
+than `edge.tls.ca` is set to now, or ordered while no CA was set,
+cannot be revoked this way.
+
 **One canonical host.** A tenant reachable at several names, such as
 `customer.com` and `www.customer.com`, or a domain and its own
 `acme.<baseDomain>`, can name one of them canonical with `domain primary`
@@ -469,8 +484,9 @@ The states, in `domain list` and the panel: `verifying` (not checked yet),
 until it expires) and `failed` (ordering it failed, say the CA could not
 reach the name; said why, with the next attempt). Each change is in the audit log (`domain.added`,
 `domain.verified`, `domain.pending`, `domain.issued`, `domain.renewed`,
-`domain.failed`, `domain.removed`, and `tenant.canonical` for a change of
-canonical host). On the leader, `/metrics` has
+`domain.failed`, `domain.removed`, `domain.revoked`,
+`domain.revoke-failed`, and `tenant.canonical` for a change of canonical
+host). On the leader, `/metrics` has
 `murder_domain_state`, `murder_domain_certificate_expiry_timestamp_seconds`
 and `murder_domain_failing` for each domain: alert on an expiry less than
 20 days away, or on a domain failing for a day.
@@ -490,7 +506,8 @@ What it needs:
   CA is asked.
 - Every node on a release with schema 18: the leader orders nothing until
   every node runs one, so a rolling upgrade finishes first. Canonical
-  hosts need schema 19 on every node.
+  hosts and revocation need schema 19 on every node: the leader orders,
+  renews and revokes nothing until every node runs it.
 
 The cluster has one ACME account per CA, made with the first order, its
 key sealed with the master key in the state: every leader uses it.

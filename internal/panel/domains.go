@@ -229,7 +229,7 @@ func (s *Server) domainAction(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err = agent.RemoveDomain(ctx, name, domain); err == nil {
-			done = domain + " is removed from " + name + ": it is served no more, its certificate dropped"
+			done = domain + " is removed from " + name + ": it is served no more, and its certificate is revoked"
 		}
 	case "domain-primary":
 		if err = agent.SetCanonical(ctx, name, domain); err == nil {

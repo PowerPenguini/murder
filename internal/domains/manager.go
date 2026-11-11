@@ -38,6 +38,9 @@ type Store interface {
 	UpdateDomain(update store.Domain, said store.DomainEvent, actor string) error
 	PutChallenge(challenge store.Challenge) error
 	DeleteChallenge(token string) error
+	Revocations() []store.Revocation
+	RetryRevocation(update store.Revocation) error
+	EndRevocation(fingerprint string, said store.DomainEvent, actor string) error
 	ACMEAccount(ca string) (store.ACMEAccount, bool)
 	PutACMEAccount(account store.ACMEAccount, actor string) (store.ACMEAccount, error)
 	Watch() <-chan struct{}
@@ -88,6 +91,8 @@ type Manager struct {
 
 	// obtain, if set, orders certificates in place of the CA: for tests.
 	obtain func(ctx context.Context, name string) (chain, key string, leaf *x509.Certificate, err error)
+	// revoke, if set, revokes certificates in place of the CA: for tests.
+	revoke func(ctx context.Context, leaf *x509.Certificate) error
 
 	mu      sync.Mutex
 	client  *acmez.Client
@@ -119,6 +124,11 @@ const (
 	// readyFor is how long every node is taken to run a release that
 	// applies domain writes, once seen to.
 	readyFor = 10 * time.Minute
+	// revokeAttempts is how often revoking a removed domain's certificate
+	// is tried, spaced as orders are, before the leader gives up: the CA
+	// may never take it, say when it came from another CA than the one
+	// set now.
+	revokeAttempts = 5
 )
 
 // backoff is the wait before the next attempt after attempts failures in
@@ -187,8 +197,8 @@ func (m *Manager) Step(ctx context.Context) {
 	if frozen := m.Store.Frozen(); frozen != "" {
 		return
 	}
-	due := m.due()
-	if len(due) == 0 {
+	due, revocations := m.due(), m.revocationsDue()
+	if len(due) == 0 && len(revocations) == 0 {
 		return
 	}
 	if !m.everyNodeReady(ctx) {
@@ -203,6 +213,103 @@ func (m *Manager) Step(ctx context.Context) {
 		}
 		m.handle(ctx, domain)
 	}
+	for _, revocation := range revocations {
+		if ctx.Err() != nil {
+			return
+		}
+		if m.Leader != nil && !m.Leader() {
+			return
+		}
+		m.revokeOne(ctx, revocation)
+	}
+}
+
+// revocationsDue lists the certificates of removed domains whose next
+// attempt at revoking is due.
+func (m *Manager) revocationsDue() []store.Revocation {
+	now := m.now()
+	var due []store.Revocation
+	for _, revocation := range m.Store.Revocations() {
+		if !revocation.NextAt.After(now) {
+			due = append(due, revocation)
+		}
+	}
+	return due
+}
+
+// revokeOne revokes the certificate of a removed domain with the CA, best
+// effort: one that expired meanwhile is only forgotten, a failure is tried
+// again later, revokeAttempts times in all, and each outcome is logged
+// and in the audit log.
+func (m *Manager) revokeOne(ctx context.Context, r store.Revocation) {
+	now := m.now()
+	end := func(action, detail string) {
+		if err := m.Store.EndRevocation(r.Fingerprint, store.DomainEvent{Action: action, Detail: detail}, Actor); err != nil && !errors.Is(err, store.ErrFrozen) {
+			m.log().Warn("forget a removed domain's certificate", "domain", r.Domain, "error", err)
+		}
+	}
+	if !now.Before(r.NotAfter) {
+		end("", "")
+		return
+	}
+	leaf, err := leafOf(r.Certificate)
+	if err != nil {
+		m.log().Warn("a removed domain's certificate cannot be read, and is not revoked", "domain", r.Domain, "tenant", r.Tenant, "error", err)
+		end("domain.revoke-failed", r.Domain+": its certificate cannot be read: "+oneLine(err.Error()))
+		return
+	}
+	if m.CA == "" {
+		m.log().Warn("a removed domain's certificate is not revoked: no CA is set on the leader", "domain", r.Domain, "tenant", r.Tenant, "serial", leaf.SerialNumber.Text(16))
+		end("domain.revoke-failed", fmt.Sprintf("%s: certificate %s not revoked: no CA is set on the leader; it expires %s", r.Domain, leaf.SerialNumber.Text(16), r.NotAfter.UTC().Format(time.DateOnly)))
+		return
+	}
+	revoke := m.revokeWithCA
+	if m.revoke != nil {
+		revoke = m.revoke
+	}
+	ctx, cancel := context.WithTimeout(ctx, orderTimeout)
+	defer cancel()
+	err = revoke(ctx, leaf)
+	var problem acme.Problem
+	if err == nil || errors.As(err, &problem) && problem.Type == acme.ProblemTypeAlreadyRevoked {
+		m.log().Info("a removed domain's certificate is revoked", "domain", r.Domain, "tenant", r.Tenant, "serial", leaf.SerialNumber.Text(16))
+		end("domain.revoked", fmt.Sprintf("%s: certificate %s revoked with %s", r.Domain, leaf.SerialNumber.Text(16), m.CA))
+		return
+	}
+	if ctx.Err() != nil && m.Leader != nil && !m.Leader() {
+		return
+	}
+	attempts := r.Attempts + 1
+	if attempts >= revokeAttempts {
+		m.log().Warn("gave up revoking a removed domain's certificate", "domain", r.Domain, "tenant", r.Tenant, "serial", leaf.SerialNumber.Text(16), "attempts", attempts, "error", err)
+		end("domain.revoke-failed", fmt.Sprintf("%s: certificate %s not revoked after %d attempts: %s; it expires %s", r.Domain, leaf.SerialNumber.Text(16), attempts, oneLine(err.Error()), r.NotAfter.UTC().Format(time.DateOnly)))
+		return
+	}
+	next := r
+	next.Attempts, next.NextAt = attempts, now.Add(backoff(attempts, orderFirst, orderMost))
+	m.log().Warn("revoke a removed domain's certificate", "domain", r.Domain, "tenant", r.Tenant, "attempts", attempts, "next", next.NextAt, "error", err)
+	if err := m.Store.RetryRevocation(next); err != nil && !errors.Is(err, store.ErrFrozen) && !errors.Is(err, store.ErrNotFound) {
+		m.log().Warn("store a revocation's next attempt", "domain", r.Domain, "error", err)
+	}
+}
+
+// revokeWithCA revokes leaf with the CA, signed with the cluster's
+// account, which ordered it: no longer in use is the reason.
+func (m *Manager) revokeWithCA(ctx context.Context, leaf *x509.Certificate) error {
+	client, account, err := m.accountFor(ctx)
+	if err != nil {
+		return err
+	}
+	return client.RevokeCertificate(ctx, account, leaf, nil, acme.ReasonCessationOfOperation)
+}
+
+// leafOf is the first certificate of a chain, PEM.
+func leafOf(chain string) (*x509.Certificate, error) {
+	block, _ := pem.Decode([]byte(chain))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, errors.New("no certificate in PEM")
+	}
+	return x509.ParseCertificate(block.Bytes)
 }
 
 // due lists the domains of live tenants whose next look is due.

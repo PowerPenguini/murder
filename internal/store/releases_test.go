@@ -297,7 +297,7 @@ func TestAnAppFromBeforeRevisionsKeepsItsSpecAsTheFirst(t *testing.T) {
 		`ALTER TABLE tenants DROP COLUMN canary`,
 		`ALTER TABLE tenants DROP COLUMN hold`,
 		`ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN moved_on`,
-		`DROP TABLE admissions`, `DROP TABLE departed_keys`, `DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE rollouts`,
+		`DROP TABLE admissions`, `DROP TABLE departed_keys`, `DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `DROP TABLE rollouts`,
 		`DROP TABLE app_revisions`,
 		`ALTER TABLE apps DROP COLUMN tag`,
 		`ALTER TABLE apps DROP COLUMN revision`,

@@ -1,7 +1,9 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -139,7 +141,8 @@ func loadDomains(q querier, state *snapshot) error {
 	return closeRows(rows)
 }
 
-// loadACME reads the cluster's ACME accounts and the challenges under way.
+// loadACME reads the cluster's ACME accounts, the certificates to revoke
+// and the challenges under way.
 func loadACME(q querier, state *snapshot) error {
 	state.accounts = map[string]ACMEAccount{}
 	rows, err := q.Query(`SELECT ca, email, location, key, created_at FROM acme_accounts`)
@@ -155,6 +158,24 @@ func loadACME(q querier, state *snapshot) error {
 		}
 		a.CreatedAt = parseTime(created)
 		state.accounts[a.CA] = a
+	}
+	if err := closeRows(rows); err != nil {
+		return err
+	}
+	state.revocations = map[string]Revocation{}
+	rows, err = q.Query(`SELECT fingerprint, domain, tenant, certificate, not_after, created_at, attempts, next_at FROM acme_revocations`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var r Revocation
+		var notAfter, created, next string
+		if err := rows.Scan(&r.Fingerprint, &r.Domain, &r.Tenant, &r.Certificate, &notAfter, &created, &r.Attempts, &next); err != nil {
+			rows.Close()
+			return err
+		}
+		r.NotAfter, r.CreatedAt, r.NextAt = parseTime(notAfter), parseTime(created), parseTime(next)
+		state.revocations[r.Fingerprint] = r
 	}
 	if err := closeRows(rows); err != nil {
 		return err
@@ -271,13 +292,17 @@ func (s *SQLite) AddDomain(tenant, name, actor string) (Domain, bool, error) {
 }
 
 // RemoveDomain takes a domain from its tenant, live or archived, with its
-// certificate: the edges stop routing it at once. A tenant whose canonical
+// certificate: the edges stop routing it at once, and the leader revokes
+// the certificate (see Revocation). A tenant whose canonical
 // host it was has none any more.
 func (s *SQLite) RemoveDomain(tenant, name, actor string) error {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		domain, ok := current.domains[name]
 		if !ok || domain.Tenant != tenant {
 			return fmt.Errorf("tenant %s has no domain %s: %w", tenant, name, ErrNotFound)
+		}
+		if err := revokeLater(tx, domain, now); err != nil {
+			return err
 		}
 		if err := tx.Exec(`DELETE FROM domains WHERE name = ?`, name); err != nil {
 			return err
@@ -463,4 +488,83 @@ func (s *SQLite) PutACMEAccount(account ACMEAccount, actor string) (ACMEAccount,
 		return ACMEAccount{}, err
 	}
 	return next.accounts[account.CA], nil
+}
+
+// Revocation is the certificate of a domain taken from its tenant, or
+// purged with it, which the leader revokes with the CA: a certificate
+// says the name is the tenant's, and it no longer is. Fingerprint is the
+// SHA-256 of Certificate, hex; Attempts counts the failures in a row and
+// NextAt is when the leader tries again.
+type Revocation struct {
+	Fingerprint string    `json:"fingerprint"`
+	Domain      string    `json:"domain"`
+	Tenant      string    `json:"tenant"`
+	Certificate string    `json:"-"`
+	NotAfter    time.Time `json:"notAfter"`
+	CreatedAt   time.Time `json:"createdAt"`
+	Attempts    int       `json:"attempts,omitempty"`
+	NextAt      time.Time `json:"nextAt"`
+}
+
+// revokeLater keeps the certificate of a domain about to be deleted for
+// the leader to revoke, if it has one that has not expired. Its private
+// key is not kept: the cluster's account, which ordered it, revokes it.
+func revokeLater(tx *recorder, domain Domain, now time.Time) error {
+	if domain.Certificate == "" || !now.Before(domain.NotAfter) {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(domain.Certificate))
+	stamp := formatTime(now)
+	return tx.Exec(`INSERT INTO acme_revocations (fingerprint, domain, tenant, certificate, not_after, created_at, next_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (fingerprint) DO NOTHING`,
+		hex.EncodeToString(sum[:]), domain.Name, domain.Tenant, domain.Certificate, formatTime(domain.NotAfter), stamp, stamp)
+}
+
+// Revocations lists the certificates the leader is to revoke, by
+// fingerprint.
+func (s *SQLite) Revocations() []Revocation {
+	state := s.state.Load()
+	revocations := make([]Revocation, 0, len(state.revocations))
+	for _, fingerprint := range slices.Sorted(maps.Keys(state.revocations)) {
+		revocations = append(revocations, state.revocations[fingerprint])
+	}
+	return revocations
+}
+
+// RetryRevocation notes that revoking a certificate failed: the leader
+// tries again at update.NextAt, after update.Attempts failures.
+func (s *SQLite) RetryRevocation(update Revocation) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, _ time.Time) error {
+		if _, ok := current.revocations[update.Fingerprint]; !ok {
+			return fmt.Errorf("revocation %s: %w", update.Fingerprint, ErrNotFound)
+		}
+		return tx.Exec(`UPDATE acme_revocations SET attempts = ?, next_at = ? WHERE fingerprint = ?`, update.Attempts, formatTime(update.NextAt), update.Fingerprint)
+	})
+	return err
+}
+
+// EndRevocation forgets a certificate the leader revoked, or gave up on,
+// and records what happened, unless said.Action is empty.
+func (s *SQLite) EndRevocation(fingerprint string, said DomainEvent, actor string) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		revocation, ok := current.revocations[fingerprint]
+		if !ok {
+			return errUnchanged
+		}
+		if err := tx.Exec(`DELETE FROM acme_revocations WHERE fingerprint = ?`, fingerprint); err != nil {
+			return err
+		}
+		if said.Action == "" {
+			return nil
+		}
+		app := ""
+		if record, ok := current.tenants[revocation.Tenant]; ok {
+			app = record.App
+		}
+		return event(tx, now, actor, said.Action, revocation.Tenant, app, said.Detail)
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
 }

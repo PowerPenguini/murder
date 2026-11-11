@@ -87,8 +87,11 @@ type snapshot struct {
 	domains    map[string]Domain
 	challenges map[string]Challenge
 	accounts   map[string]ACMEAccount
-	panel      panelState
-	images     map[string]bool
+	// revocations are the certificates of removed domains the leader
+	// revokes, by fingerprint.
+	revocations map[string]Revocation
+	panel       panelState
+	images      map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
 	lastEvent int64
@@ -1707,6 +1710,14 @@ func (s *SQLite) Forget(name, actor string) error {
 		app, detail := "", "leftover data"
 		if ok {
 			app, detail = record.App, ""
+			// Its domains go with it; their certificates are revoked.
+			for _, domainName := range slices.Sorted(maps.Keys(current.domains)) {
+				if domain := current.domains[domainName]; domain.Tenant == name {
+					if err := revokeLater(tx, domain, now); err != nil {
+						return err
+					}
+				}
+			}
 			if err := tx.Exec(`DELETE FROM tenants WHERE name = ?`, name); err != nil {
 				return err
 			}

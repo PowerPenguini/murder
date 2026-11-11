@@ -462,6 +462,7 @@ type Store interface {
 	RemoveDomain(tenant, name, actor string) error
 	CheckDomainNow(tenant, name, actor string) error
 	SetCanonical(tenant, host, own, actor string) error
+	Revocations() []Revocation
 	Challenges() []Challenge
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.

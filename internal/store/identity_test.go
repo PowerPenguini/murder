@@ -167,7 +167,7 @@ func TestAStateOfSchema15GetsTheKeysTriggers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{`DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `DROP TABLE admissions`, `DROP TABLE departed_keys`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`, `UPDATE meta SET value = '10' WHERE key = 'applied'`} {
+	for _, statement := range []string{`DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `DROP TABLE admissions`, `DROP TABLE departed_keys`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`, `UPDATE meta SET value = '10' WHERE key = 'applied'`} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -297,7 +297,7 @@ func TestATriggerFiredByTheStoresCountIsHeldToTheBatchsChecks(t *testing.T) {
 // included, whose text differs between a new database and a migrated one.
 func TestABatchReadsNoSchema(t *testing.T) {
 	a, b := openNamed(t, "a"), openNamed(t, "b")
-	for _, statement := range []string{`DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `DROP TABLE admissions`, `DROP TABLE departed_keys`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`} {
+	for _, statement := range []string{`DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `DROP TABLE admissions`, `DROP TABLE departed_keys`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`} {
 		if _, err := b.db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -342,7 +342,7 @@ func TestTheUpgradeDropsWhatIsNotTheSchemas(t *testing.T) {
 		`CREATE TRIGGER legacy AFTER UPDATE ON meta BEGIN DELETE FROM nodes; END`,
 		`CREATE VIEW leftover AS SELECT * FROM nodes`,
 		`CREATE INDEX leftover_index ON nodes (address)`,
-		`DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `DROP TABLE admissions`, `DROP TABLE departed_keys`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`,
+		`DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `DROP TABLE admissions`, `DROP TABLE departed_keys`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`,
 	} {
 		if _, err := st.db.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -507,7 +507,7 @@ func TestAnUpgradeBringsEventIDsBelowTheBound(t *testing.T) {
 			`DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`,
 			`DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`,
 			`DROP TABLE admissions`, `DROP TABLE departed_keys`, `ALTER TABLE nodes DROP COLUMN key`,
-			`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`,
+			`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`,
 			`INSERT INTO events (id, at, actor, action, tenant, app, detail) VALUES (9223372036854775807, '', '', '', '', '', 'legacy')`,
 			`INSERT INTO events (id, at, actor, action, tenant, app, detail) VALUES (5000000000000000000, '', '', '', '', '', 'older')`,
 		} {
@@ -563,7 +563,7 @@ func legacy(t *testing.T, st *SQLite) {
 		`DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`,
 		`DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`,
 		`DROP TABLE admissions`, `DROP TABLE departed_keys`, `ALTER TABLE nodes DROP COLUMN key`,
-		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`,
+		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`,
 	} {
 		if _, err := st.db.Exec(statement); err != nil {
 			t.Fatal(err)

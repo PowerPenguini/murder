@@ -132,7 +132,7 @@
     </div>{{else if .Remove}}
     <div class="nrow" role="status">
       <p class="nhead"><strong>Remove <span class="mono">{{.Name}}</span> from {{$t.Spec.Name}}?</strong></p>
-      <p class="hint">Requests for it are answered 404 at once, on every node, and its certificate is dropped: adding it back orders a new one. {{$t.Spec.Name}} stays at <span class="mono">{{$t.Host}}</span>. Type the domain to confirm.</p>
+      <p class="hint">Requests for it are answered 404 at once, on every node, and the leader revokes its certificate with the CA: adding it back orders a new one. {{$t.Spec.Name}} stays at <span class="mono">{{$t.Host}}</span>. Type the domain to confirm.</p>
       <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="domain-remove"><input type="hidden" name="domain" value="{{.Name}}">
         <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
         <div class="row"><button type="submit" class="danger">Remove {{.Name}}</button> <a href="/tenants/{{$t.Spec.Name}}#domains">Keep it</a></div>

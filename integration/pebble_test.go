@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -363,6 +364,29 @@ func TestPebbleIssuesACertificateForATenantsDomain(t *testing.T) {
 		}
 		return nil
 	})
+
+	// The leader revokes its certificate with the CA, which says so.
+	second.Step(ctx)
+	if left := n.store.Revocations(); len(left) != 0 {
+		t.Fatalf("not revoked: %+v", left)
+	}
+	if events, _ := n.client.Events(ctx, store.EventQuery{Tenant: tenant, Limit: 1}); events[0].Action != "domain.revoked" {
+		t.Fatalf("events %+v", events)
+	}
+	block, _ := pem.Decode([]byte(renewed.Certificate))
+	revokedLeaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = insecure.Get(fmt.Sprintf("https://127.0.0.1:%d/cert-status-by-serial/%x", pebbleAdmin, revokedLeaf.SerialNumber))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(status), "Revoked") {
+		t.Fatalf("Pebble has the certificate as %s", status)
+	}
 }
 
 func statusOf(t *testing.T, client *http.Client, url, host string) int {

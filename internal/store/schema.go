@@ -25,6 +25,11 @@ const IdentitySchema = 16
 // version or later, which applies those writes.
 const DomainsSchema = 18
 
+// RevocationsSchema is the schema version that keeps the certificates of
+// removed domains, which the leader revokes: it revokes only once every
+// node runs a release of this version or later, which applies its writes.
+const RevocationsSchema = 19
+
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
 
@@ -283,6 +288,8 @@ CREATE TABLE secrets (
 
 ` + domainTables + `
 
+` + revocationsTable + `
+
 -- The audit log. It outlives the tenants and apps it names.
 CREATE TABLE events (
 	id     INTEGER PRIMARY KEY,
@@ -537,10 +544,12 @@ func upgrade(db *sql.DB) error {
 		}
 		version = 18
 	}
-	// Version 19 keeps each tenant's canonical host.
+	// Version 19 keeps each tenant's canonical host, and the certificates
+	// of removed domains the leader revokes.
 	if version == 18 {
 		for _, statement := range []string{
 			`ALTER TABLE tenants ADD COLUMN canonical TEXT NOT NULL DEFAULT ''`,
+			revocationsTable,
 		} {
 			if _, err := tx.Exec(statement); err != nil {
 				return err
@@ -897,4 +906,22 @@ CREATE TABLE panel_sessions (
 CREATE TABLE panel_secrets (
 	name  TEXT PRIMARY KEY,
 	value TEXT NOT NULL
+) STRICT;`
+
+// revocationsTable keeps the certificates of domains taken from their
+// tenant, or purged with it, until the leader has revoked them with the
+// CA, or gave up.
+const revocationsTable = `-- Certificates of removed domains the leader revokes with the CA:
+-- fingerprint is the SHA-256 of the chain, hex; attempts counts failures
+-- in a row, next_at is when the leader tries again. A certificate that
+-- expired meanwhile is only dropped.
+CREATE TABLE acme_revocations (
+	fingerprint TEXT PRIMARY KEY,
+	domain      TEXT NOT NULL,
+	tenant      TEXT NOT NULL,
+	certificate TEXT NOT NULL,
+	not_after   TEXT NOT NULL,
+	created_at  TEXT NOT NULL,
+	attempts    INTEGER NOT NULL DEFAULT 0,
+	next_at     TEXT NOT NULL
 ) STRICT;`
