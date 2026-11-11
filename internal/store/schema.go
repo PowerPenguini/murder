@@ -11,8 +11,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 17 in place.
-const schemaVersion = 18
+// versions 4 to 18 in place.
+const schemaVersion = 19
 
 // IdentitySchema is the schema version that pins each node's identity
 // key in the state: a node registers its key only once every node runs a
@@ -139,7 +139,11 @@ CREATE TABLE tenants (
 	restore TEXT NOT NULL DEFAULT '',
 	-- moved_on is the node it ran on as its rollout moved it, which keeps
 	-- the snapshot its data can go back to.
-	moved_on TEXT NOT NULL DEFAULT ''
+	moved_on TEXT NOT NULL DEFAULT '',
+	-- The host the edges send the tenant's requests to, with a redirect,
+	-- when they come for its other hosts: one of its domains, or its own
+	-- name below the base domain; empty for none.
+	canonical TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -530,6 +534,17 @@ func upgrade(db *sql.DB) error {
 	if version == 17 {
 		if _, err := tx.Exec(domainTables); err != nil {
 			return err
+		}
+		version = 18
+	}
+	// Version 19 keeps each tenant's canonical host.
+	if version == 18 {
+		for _, statement := range []string{
+			`ALTER TABLE tenants ADD COLUMN canonical TEXT NOT NULL DEFAULT ''`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

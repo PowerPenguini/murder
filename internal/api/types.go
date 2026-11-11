@@ -62,6 +62,9 @@ type Tenant struct {
 	Status     *reconcile.Status `json:"status,omitempty"`
 	// Domains are the tenant's own host names, outside the base domain.
 	Domains []Domain `json:"domains,omitempty"`
+	// Canonical is the host the edges redirect the tenant's other hosts
+	// to: one of its domains, or Host; empty for none.
+	Canonical string `json:"canonical,omitempty"`
 }
 
 // Domain is what the API shows of a tenant's own domain: never its
@@ -85,6 +88,9 @@ type Domain struct {
 	// IssuedAt and NotAfter are its certificate's, once it has one.
 	IssuedAt time.Time `json:"issuedAt,omitzero"`
 	NotAfter time.Time `json:"notAfter,omitzero"`
+	// Canonical is set on the tenant's canonical host: its other hosts
+	// redirect to it.
+	Canonical bool `json:"canonical,omitempty"`
 	// Records are the DNS records that point it at the cluster.
 	Records   []domains.Record `json:"records"`
 	CreatedAt time.Time        `json:"createdAt"`
@@ -93,6 +99,12 @@ type Domain struct {
 
 // Routed reports whether the edges route the domain to its tenant.
 func (d Domain) Routed() bool { return !d.VerifiedAt.IsZero() }
+
+// CanonicalRequest names the host the edges redirect a tenant's other
+// hosts to; an empty Host redirects nothing.
+type CanonicalRequest struct {
+	Host string `json:"host"`
+}
 
 // DomainRequest gives a tenant a domain of its own.
 type DomainRequest struct {

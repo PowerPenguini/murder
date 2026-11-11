@@ -108,6 +108,39 @@ func TestDomainsAreRemovedWithTheirNameTyped(t *testing.T) {
 	}
 }
 
+// A host is made the tenant's canonical one after a review that says what
+// a permanent redirect means; the box then marks it, and offers to stop.
+func TestACanonicalHostIsReviewedAndShown(t *testing.T) {
+	cluster, server, client := newActingPanel(t)
+	_, page := get(t, server.URL+"/tenants/acme-logistics")
+	if section := between(page, `<section id="domains">`, `</section>`); !strings.Contains(section, "Make it canonical…") || !strings.Contains(section, "Each host serves it.") {
+		t.Fatalf("the box offers no canonical host:\n%s", section)
+	}
+	_, page = get(t, server.URL+"/tenants/acme-logistics?do=domain-primary&domain=portal.acme-logistics.com")
+	if review := between(page, `id="domain-review"`, `</form>`); !strings.Contains(review, "canonical host?") || !strings.Contains(review, "308, permanent") {
+		t.Fatalf("the review:\n%s", review)
+	}
+	_, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"domain-primary"}, "domain": {"portal.acme-logistics.com"}}, server.URL)
+	if !strings.Contains(body, "redirects to portal.acme-logistics.com") {
+		t.Fatalf("after making it canonical:\n%s", between(body, `<main`, `</main>`))
+	}
+	tenant, _ := cluster.Get(t.Context(), "acme-logistics")
+	if tenant.Canonical != "portal.acme-logistics.com" {
+		t.Fatalf("canonical %q", tenant.Canonical)
+	}
+	_, page = get(t, server.URL+"/tenants/acme-logistics")
+	section := between(page, `<section id="domains">`, `</section>`)
+	if !strings.Contains(section, `<span class="st ok">canonical</span>`) || !strings.Contains(section, "Stop redirecting…") {
+		t.Fatalf("the box after:\n%s", section)
+	}
+	if _, body := submit(t, client, server, "/tenants/acme-logistics", url.Values{"do": {"domain-primary"}, "domain": {""}}, server.URL); !strings.Contains(body, "none redirects") {
+		t.Fatal("stopping the redirect did not say so")
+	}
+	if tenant, _ := cluster.Get(t.Context(), "acme-logistics"); tenant.Canonical != "" {
+		t.Fatalf("canonical %q", tenant.Canonical)
+	}
+}
+
 func TestDomainStates(t *testing.T) {
 	now := time.Now()
 	for _, c := range []struct {

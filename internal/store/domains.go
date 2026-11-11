@@ -271,7 +271,8 @@ func (s *SQLite) AddDomain(tenant, name, actor string) (Domain, bool, error) {
 }
 
 // RemoveDomain takes a domain from its tenant, live or archived, with its
-// certificate: the edges stop routing it at once.
+// certificate: the edges stop routing it at once. A tenant whose canonical
+// host it was has none any more.
 func (s *SQLite) RemoveDomain(tenant, name, actor string) error {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		domain, ok := current.domains[name]
@@ -281,12 +282,50 @@ func (s *SQLite) RemoveDomain(tenant, name, actor string) error {
 		if err := tx.Exec(`DELETE FROM domains WHERE name = ?`, name); err != nil {
 			return err
 		}
+		if record, ok := current.tenants[tenant]; ok && record.Canonical == name {
+			if err := tx.Exec(`UPDATE tenants SET canonical = '' WHERE name = ?`, tenant); err != nil {
+				return err
+			}
+		}
 		app := ""
 		if record, ok := current.tenants[tenant]; ok {
 			app = record.App
 		}
 		return event(tx, now, actor, "domain.removed", tenant, app, name)
 	})
+	return err
+}
+
+// SetCanonical names the host the edges redirect a live tenant's other
+// hosts to: one of its domains, or own, its name below the base domain, as
+// the caller has it. An empty host redirects nothing. Naming the one it
+// has already changes nothing.
+func (s *SQLite) SetCanonical(tenant, host, own, actor string) error {
+	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
+		record, err := liveTenant(current, tenant)
+		if err != nil {
+			return err
+		}
+		if host != "" && host != own {
+			if domain, ok := current.domains[host]; !ok || domain.Tenant != tenant {
+				return fmt.Errorf("%w: %s is not a domain of tenant %s, nor its own name %s; add it first", ErrInvalid, host, tenant, own)
+			}
+		}
+		if record.Canonical == host {
+			return errUnchanged
+		}
+		if err := tx.Exec(`UPDATE tenants SET canonical = ? WHERE name = ?`, host, tenant); err != nil {
+			return err
+		}
+		detail := "every host of the tenant redirects to " + host
+		if host == "" {
+			detail = "no canonical host: each host serves the tenant"
+		}
+		return event(tx, now, actor, "tenant.canonical", tenant, record.App, detail)
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
 	return err
 }
 

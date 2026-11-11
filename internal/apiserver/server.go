@@ -161,6 +161,7 @@ func (s *Server) view(record store.Record) api.Tenant {
 		Host: s.reconciler.Host(record.Spec.Name), URL: s.reconciler.URL(record.Spec.Name),
 		Generation: record.Generation, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ArchivedAt: record.ArchivedAt,
 		AppRevision: record.AppRevision, BeforeRevision: record.BeforeRevision, Canary: record.Canary, Hold: record.Hold, Restoring: record.Restore != "",
+		Canonical: record.Canonical,
 	}
 	view.KeptSecrets = slices.Sorted(maps.Keys(record.Sealed))
 	if domains := s.store.TenantDomains(record.Spec.Name); len(domains) > 0 {
@@ -1019,6 +1020,16 @@ func (r Routes) Route(tenant string) (edge.Route, bool) {
 	if err != nil {
 		return edge.Route{}, false
 	}
+	route, ok := r.route(record)
+	// The edge redirects to it only once it can serve it (see
+	// edge.Proxy.canonicalHost).
+	route.Canonical = record.Canonical
+	return route, ok
+}
+
+// route is where a live tenant's requests go.
+func (r Routes) route(record store.Record) (edge.Route, bool) {
+	tenant := record.Spec.Name
 	// Moving, it runs nowhere for a moment: requests wait for it.
 	if record.MoveHeld {
 		return edge.Route{Moving: true, Suspended: record.Spec.Suspended}, true

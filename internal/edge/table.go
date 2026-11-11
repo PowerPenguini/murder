@@ -56,6 +56,11 @@ func NewTableWith(routes map[string]Route, domains map[string]DomainRoute, chall
 	for _, tenant := range slices.Sorted(maps.Keys(routes)) {
 		route := routes[tenant]
 		fmt.Fprintf(sum, "%s\x00%s\x00%s\x00%t\x00%t\x00", tenant, route.Backend, route.Relay, route.Suspended, route.Moving)
+		// A route without a canonical host keeps the version it had
+		// before them.
+		if route.Canonical != "" {
+			fmt.Fprintf(sum, "canonical\x00%s\x00", route.Canonical)
+		}
 	}
 	// A table without domains keeps the version it had before them.
 	for _, name := range slices.Sorted(maps.Keys(domains)) {

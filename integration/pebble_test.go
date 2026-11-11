@@ -303,6 +303,32 @@ func TestPebbleIssuesACertificateForATenantsDomain(t *testing.T) {
 	}
 	response.Body.Close()
 
+	// Made canonical, the tenant's own name redirects to it, over plain
+	// HTTP and HTTPS alike, and the domain itself is served.
+	if err := n.client.SetCanonical(ctx, tenant, name); err != nil {
+		t.Fatal(err)
+	}
+	insecureNoRedirect := &http.Client{Timeout: 10 * time.Second, CheckRedirect: noRedirect.CheckRedirect, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	waitFor(t, "the tenant's own name redirects to its canonical host", func() error {
+		for _, url := range []string{"http://127.0.0.1:" + strconv.Itoa(httpPort), "https://127.0.0.1:" + strconv.Itoa(httpsPort)} {
+			request, _ := http.NewRequest(http.MethodGet, url+"/info?x=1", nil)
+			request.Host = tenant + "." + baseDomain
+			response, err := insecureNoRedirect.Do(request)
+			if err != nil {
+				return err
+			}
+			response.Body.Close()
+			if response.StatusCode != http.StatusPermanentRedirect || response.Header.Get("Location") != "https://"+name+"/info?x=1" {
+				return fmt.Errorf("%s: %s to %q", url, response.Status, response.Header.Get("Location"))
+			}
+		}
+		return nil
+	})
+	if response, err = secure.Get("https://" + name + "/info"); err != nil || response.StatusCode != 200 {
+		t.Fatalf("the canonical host: %v %v", response, err)
+	}
+	response.Body.Close()
+
 	// A new leader renews it 30 days before it expires, with the
 	// cluster's account, which it reads from the state: the one before
 	// stopped leading.

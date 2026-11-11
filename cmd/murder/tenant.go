@@ -50,7 +50,7 @@ const tenantUsage = `Usage: murder tenant <command> [options]
   logs NAME -previous -reason TEXT -ticket REF
                          print the last lines its node kept of the container
                          before (one that exited, or was replaced or stopped)
-  domain add|list|check|remove NAME [DOMAIN]
+  domain add|list|check|remove|primary NAME [DOMAIN]
                          host names of the tenant's own, such as
                          app.customer.com, with certificates the cluster
                          orders and renews ("murder tenant domain" says more)

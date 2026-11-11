@@ -15,6 +15,7 @@ func (s *Server) domainRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tenants/{name}/domains", s.addDomain)
 	mux.HandleFunc("DELETE /v1/tenants/{name}/domains/{domain}", s.removeDomain)
 	mux.HandleFunc("POST /v1/tenants/{name}/domains/{domain}/check", s.checkDomain)
+	mux.HandleFunc("PUT /v1/tenants/{name}/canonical", s.setCanonical)
 }
 
 // domainView is what the API shows of a domain: its state, and the DNS
@@ -28,6 +29,9 @@ func (s *Server) domainView(domain store.Domain) api.Domain {
 	}
 	if display := domains.Display(domain.Name); display != domain.Name {
 		view.Display = display
+	}
+	if record, err := s.store.Get(domain.Tenant); err == nil && record.Canonical == domain.Name {
+		view.Canonical = true
 	}
 	return view
 }
@@ -82,6 +86,25 @@ func domainNamed(given string) string {
 
 func (s *Server) removeDomain(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.RemoveDomain(r.PathValue("name"), domainNamed(r.PathValue("domain")), actor(r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// setCanonical names the host the edges redirect a tenant's other hosts
+// to: one of its domains, as given or normalised, or its own name.
+func (s *Server) setCanonical(w http.ResponseWriter, r *http.Request) {
+	var request api.CanonicalRequest
+	if !readJSON(w, r, &request) {
+		return
+	}
+	tenant := r.PathValue("name")
+	host := ""
+	if strings.TrimSpace(request.Host) != "" {
+		host = domainNamed(request.Host)
+	}
+	if err := s.store.SetCanonical(tenant, host, strings.ToLower(s.reconciler.Host(tenant)), actor(r)); err != nil {
 		writeError(w, err)
 		return
 	}

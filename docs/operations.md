@@ -398,6 +398,8 @@ sudo murder tenant domain add acme app.customer.com   # prints the DNS record to
 sudo murder tenant domain list acme                   # state, DNS record, certificate, why
 sudo murder tenant domain check acme app.customer.com # check its DNS now, after changing it
 sudo murder tenant domain remove acme app.customer.com -yes
+sudo murder tenant domain primary acme app.customer.com # redirect its other hosts there
+sudo murder tenant domain primary acme -none            # stop redirecting
 ```
 
 The panel's tenant page does the same (Domains). A name is kept in lower
@@ -440,6 +442,26 @@ failed order is tried again after 5 minutes, then less and less often,
 6 hours apart at most. Plain HTTP for a domain with its certificate goes
 to HTTPS; before it has one, port 80 answers 503.
 
+**One canonical host.** A tenant reachable at several names, such as
+`customer.com` and `www.customer.com`, or a domain and its own
+`acme.<baseDomain>`, can name one of them canonical with `domain primary`
+(or the panel's Domains box, after a review): one of its domains, or its
+own name below the base domain. Every edge then answers a request for
+any other host of the tenant with a 308 redirect to the canonical one,
+over HTTPS, with the same path and query; a 308 keeps the method and
+body, so a form posted to the old name is posted again. Plain HTTP goes
+straight to `https://<canonical>` in one redirect, so a name that only
+redirects needs no certificate of its own for plain HTTP; HTTPS to it
+does. Requests for `/.well-known/acme-challenge/` are answered before any
+redirect, so names that redirect still get and renew their certificates.
+A domain becomes canonical in effect only once the edges can serve it:
+once its DNS was checked and, with TLS, it has its certificate; until
+then every host serves the tenant as before, and nothing is sent where it
+would fail. `tenant show` has the host as `canonical`, `domain list`
+marks it. Removing the canonical domain removes the redirect. Browsers
+remember a permanent redirect: pick the canonical host before announcing
+the others.
+
 The states, in `domain list` and the panel: `verifying` (not checked yet),
 `pending` (its DNS does not point at the cluster, said why; with
 `edge.tls` not `acme`, no certificate is ordered), `issuing`, `active`,
@@ -447,7 +469,8 @@ The states, in `domain list` and the panel: `verifying` (not checked yet),
 until it expires) and `failed` (ordering it failed, say the CA could not
 reach the name; said why, with the next attempt). Each change is in the audit log (`domain.added`,
 `domain.verified`, `domain.pending`, `domain.issued`, `domain.renewed`,
-`domain.failed`, `domain.removed`). On the leader, `/metrics` has
+`domain.failed`, `domain.removed`, and `tenant.canonical` for a change of
+canonical host). On the leader, `/metrics` has
 `murder_domain_state`, `murder_domain_certificate_expiry_timestamp_seconds`
 and `murder_domain_failing` for each domain: alert on an expiry less than
 20 days away, or on a domain failing for a day.
@@ -466,7 +489,8 @@ What it needs:
   answers a challenge, at its private address and that port, before the
   CA is asked.
 - Every node on a release with schema 18: the leader orders nothing until
-  every node runs one, so a rolling upgrade finishes first.
+  every node runs one, so a rolling upgrade finishes first. Canonical
+  hosts need schema 19 on every node.
 
 The cluster has one ACME account per CA, made with the first order, its
 key sealed with the master key in the state: every leader uses it.

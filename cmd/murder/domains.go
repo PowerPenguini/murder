@@ -79,6 +79,11 @@ const domainUsage = `Usage: murder tenant domain <command> TENANT [DOMAIN]
   check TENANT DOMAIN        check its DNS now, as after changing its records
   remove TENANT DOMAIN -yes  take a domain from a tenant, with its certificate:
                              requests for it are answered 404 at once
+  primary TENANT HOST        make HOST, one of the tenant's domains or its own
+                             name below the base domain, its canonical host:
+                             requests for its other hosts are redirected there
+                             (308), path and query kept
+  primary TENANT -none       redirect nothing: every host serves the tenant
 
 A domain is routed once its DNS points at the cluster: a CNAME to the
 tenant's own name, or A and AAAA records with the nodes' public addresses.
@@ -97,6 +102,7 @@ func runDomain(args []string) error {
 	flags := flag.NewFlagSet("tenant domain "+command, flag.ContinueOnError)
 	socket := socketPath(flags)
 	yes := flags.Bool("yes", false, "with remove: confirm")
+	none := flags.Bool("none", false, "with primary: no canonical host")
 	asJSON := flags.Bool("json", false, "print JSON")
 	positional, err := parseInterspersed(flags, args)
 	if err != nil {
@@ -164,6 +170,27 @@ func runDomain(args []string) error {
 		}
 		fmt.Fprintf(stdout, "%s removed from %s\n", positional[1], positional[0])
 		return nil
+	case "primary":
+		host := ""
+		if *none {
+			if err := need(1); err != nil {
+				return err
+			}
+		} else {
+			if err := need(2); err != nil {
+				return err
+			}
+			host = positional[1]
+		}
+		if err := client.SetCanonical(ctx, positional[0], host); err != nil {
+			return err
+		}
+		if host == "" {
+			fmt.Fprintf(stdout, "%s has no canonical host: each of its hosts serves it\n", positional[0])
+			return nil
+		}
+		fmt.Fprintf(stdout, "%s's other hosts redirect to %s once the edges serve it: a domain once it has its certificate\n", positional[0], host)
+		return nil
 	default:
 		fmt.Fprint(os.Stderr, domainUsage)
 		return fmt.Errorf("unknown tenant domain command %q", command)
@@ -204,6 +231,9 @@ func printDomains(list []api.Domain) error {
 		name := domain.Name
 		if domain.Display != "" {
 			name += " (" + domain.Display + ")"
+		}
+		if domain.Canonical {
+			name += " (canonical)"
 		}
 		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", name, domain.State, routed, certificate, strings.Join(records, ", "), detail)
 	}

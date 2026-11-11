@@ -58,6 +58,23 @@ func TestTenantsDomainsThroughTheAPI(t *testing.T) {
 	if err := f.client.CheckDomain(ctx, "acme", "app.customer.com"); err != nil {
 		t.Fatal(err)
 	}
+	// A canonical host: one of its domains, as given, or its own name;
+	// the tenant, its domain and its route show it.
+	checkStatus(t, "another tenant's host", f.client.SetCanonical(ctx, "acme", "beta.example.test"), 400)
+	checkStatus(t, "a host it does not have", f.client.SetCanonical(ctx, "acme", "else.customer.com"), 400)
+	checkStatus(t, "no such tenant", f.client.SetCanonical(ctx, "nobody", ""), 404)
+	if err := f.client.SetCanonical(ctx, "acme", "acme.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.SetCanonical(ctx, "acme", " App.Customer.com. "); err != nil {
+		t.Fatal(err)
+	}
+	if tenant, err := f.client.Get(ctx, "acme"); err != nil || tenant.Canonical != "app.customer.com" || !tenant.Domains[0].Canonical || tenant.Domains[1].Canonical {
+		t.Fatalf("the tenant's canonical host: %+v %v", tenant, err)
+	}
+	if route, ok := (Routes{Store: f.store}).Route("acme"); !ok || route.Canonical != "app.customer.com" {
+		t.Fatalf("the route: %+v %v", route, ok)
+	}
 	checkStatus(t, "remove another tenant's", f.client.RemoveDomain(ctx, "beta", "app.customer.com"), 404)
 	if err := f.client.RemoveDomain(ctx, "acme", "APP.customer.com"); err != nil {
 		t.Fatal(err)
@@ -65,9 +82,15 @@ func TestTenantsDomainsThroughTheAPI(t *testing.T) {
 	if list, _ := f.client.Domains(ctx, "acme"); len(list) != 1 {
 		t.Fatalf("after the remove: %+v", list)
 	}
+	if tenant, _ := f.client.Get(ctx, "acme"); tenant.Canonical != "" {
+		t.Fatalf("the removed domain stays canonical: %q", tenant.Canonical)
+	}
 	events, _ := f.client.Events(ctx, store.EventQuery{Tenant: "acme", Limit: 1})
 	if events[0].Action != "domain.removed" || events[0].Detail != "app.customer.com" {
 		t.Fatalf("events %+v", events)
+	}
+	if err := f.client.SetCanonical(ctx, "acme", ""); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -48,6 +48,9 @@ type Route struct {
 	// Moving holds requests: the tenant is moving to another node, and
 	// for a few seconds runs nowhere.
 	Moving bool `json:"moving,omitempty"`
+	// Canonical is the host the tenant's other hosts redirect to: one of
+	// its domains, or its own name below the base domain; empty for none.
+	Canonical string `json:"canonical,omitempty"`
 }
 
 // Routes looks tenants up by name.
@@ -524,8 +527,65 @@ func acmeToken(token string) bool {
 	return true
 }
 
+// canonicalHost returns the host a request for host goes to instead: its
+// tenant's canonical host, when the tenant has one and host is another of
+// its hosts, and the canonical host can take the request over scheme. The
+// tenant's own name below the base domain always can; one of its domains
+// once the edges route it and, over HTTPS, once it has its certificate.
+// Until then every host serves the tenant as it would without one, rather
+// than send clients where they would find nothing.
+func (p *Proxy) canonicalHost(host, scheme string) (string, bool) {
+	host = hostName(host)
+	tenant, ok := p.Tenant(host)
+	// A proxy that only redirects to HTTPS may have no routes at all.
+	if !ok || p.routes == nil {
+		return "", false
+	}
+	route, ok := p.routes.Route(tenant)
+	if !ok || route.Canonical == "" || route.Canonical == host {
+		return "", false
+	}
+	if route.Canonical == tenant+"."+p.baseDomain {
+		return route.Canonical, true
+	}
+	domain, ok := p.domain(route.Canonical)
+	if !ok || domain.Tenant != tenant || scheme == "https" && domain.Certificate == "" {
+		return "", false
+	}
+	return route.Canonical, true
+}
+
+// redirectCanonical answers a request for one of a tenant's hosts that is
+// not its canonical one with a permanent redirect there, over scheme, with
+// the same path and query, and reports whether it did. 308 keeps the
+// method and body, so a form posted to the old host is posted again.
+func (p *Proxy) redirectCanonical(w http.ResponseWriter, r *http.Request, scheme string) bool {
+	if r.Method == http.MethodConnect {
+		return false
+	}
+	canonical, ok := p.canonicalHost(r.Host, scheme)
+	if !ok {
+		return false
+	}
+	if scheme == "https" {
+		w.Header().Set("Strict-Transport-Security", hsts)
+	}
+	http.Redirect(w, r, scheme+"://"+canonical+r.URL.RequestURI(), http.StatusPermanentRedirect)
+	return true
+}
+
+// ServeHTTP serves a client: an ACME challenge first, which a CA asks of
+// whichever host it checks, then a redirect to the tenant's canonical
+// host, then the tenant.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.answerChallenge(w, r) {
+		return
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if p.redirectCanonical(w, r, scheme) {
 		return
 	}
 	p.serve(w, r, false)
@@ -773,6 +833,12 @@ func (p *Proxy) RedirectToHTTPS(ready func() bool) http.Handler {
 		}
 		if _, ok := p.Tenant(r.Host); !ok {
 			http.Error(w, "unknown host", http.StatusNotFound)
+			return
+		}
+		// A host that is not its tenant's canonical one goes there over
+		// HTTPS at once, in one redirect: it needs no certificate of its
+		// own for that.
+		if ready() && p.redirectCanonical(w, r, "https") {
 			return
 		}
 		// A tenant's own domain goes to HTTPS once it has its certificate;

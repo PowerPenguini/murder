@@ -28,6 +28,7 @@ type DomainAgent interface {
 	AddDomain(ctx context.Context, tenant, name string) (api.DomainAdded, error)
 	RemoveDomain(ctx context.Context, tenant, name string) error
 	CheckDomain(ctx context.Context, tenant, name string) error
+	SetCanonical(ctx context.Context, tenant, host string) error
 }
 
 // The agent's client adds and removes domains.
@@ -58,10 +59,12 @@ type domainRow struct {
 	Next string
 }
 
-// domainReview is a domain to add, or remove, as the person is asked to
-// confirm it.
+// domainReview is a domain to add, or remove, or a host to make the
+// tenant's canonical one (Primary; an empty Name for none), as the person
+// is asked to confirm it.
 type domainReview struct {
 	Remove  bool
+	Primary bool
 	Name    string
 	Display string
 	Records []domains.Record
@@ -159,6 +162,15 @@ func (s *Server) domainsOf(r *http.Request, t api.Tenant, nodes api.Nodes) *doma
 				view.Review = &domainReview{Remove: true, Name: d.Name, Display: d.Display}
 			}
 		}
+	case "domain-primary":
+		if given == "" || given == t.Host {
+			view.Review = &domainReview{Primary: true, Name: given}
+		}
+		for _, d := range t.Domains {
+			if d.Name == given {
+				view.Review = &domainReview{Primary: true, Name: d.Name, Display: d.Display}
+			}
+		}
 	}
 	return view
 }
@@ -218,6 +230,13 @@ func (s *Server) domainAction(w http.ResponseWriter, r *http.Request) {
 		}
 		if err = agent.RemoveDomain(ctx, name, domain); err == nil {
 			done = domain + " is removed from " + name + ": it is served no more, its certificate dropped"
+		}
+	case "domain-primary":
+		if err = agent.SetCanonical(ctx, name, domain); err == nil {
+			done = "every host of " + name + " redirects to " + domain + " once the edges serve it there"
+			if domain == "" {
+				done = "each host of " + name + " serves it: none redirects"
+			}
 		}
 	case "domain-check":
 		if err = agent.CheckDomain(ctx, name, domain); err == nil {
