@@ -1019,8 +1019,8 @@ func (s *Server) funcs() template.FuncMap {
 		"action":   actionText,
 		"loglines": logLines,
 		"failure":  failureEvent,
-		"nodeActs": func(n api.NodeState, self bool, targets []string, all []api.Tenant, from string) nodeActs {
-			return drainOf(nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, From: from}, all)
+		"nodeActs": func(n api.NodeState, self bool, targets []string, all []api.Tenant, voters int, from string) nodeActs {
+			return drainOf(nodeActs{Name: n.Name, Answers: n.Answers, Failed: n.Failed(), Self: self, Targets: targets, Voters: voters, From: from}, all)
 		},
 		"every":      every,
 		"imageRepo":  func(ref string) string { r, _ := ImageParts(ref); return r },
@@ -1259,7 +1259,13 @@ type nodeActs struct {
 	// leaves without a ready copy on another node.
 	Keeps, Archived int
 	Unprotected     map[string][]string
+	// Voters counts the cluster's nodes, each a voter.
+	Voters int
 }
+
+// LosesMajority says the cluster would take no change while the node is
+// down: the other nodes that answer are no majority of the voters.
+func (a nodeActs) LosesMajority() bool { return a.Voters > 0 && len(a.Targets)*2 <= a.Voters }
 
 // drainOf says what draining a node would do: the tenants it moves, and,
 // for each node it could go to, those left without a copy elsewhere: they

@@ -12,10 +12,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -406,5 +408,77 @@ func TestARotationsFreezeIsNotThawedFromThePanel(t *testing.T) {
 	response := uploadBinary(t, client, server, os.Args[0], "upgrade")
 	if page, _ := io.ReadAll(response.Body); !strings.Contains(string(page), "the panel begins no upgrade until they are taken again") {
 		t.Fatalf("an upgrade began during a rotation:\n%s", page)
+	}
+}
+
+func TestRebootingFromThePanel(t *testing.T) {
+	cluster, s, server, client := newClusterPanel(t)
+	ctx := context.Background()
+	// With hel-1 failed, rebooting nbg-1 leaves 1 of 3 voters: the menu
+	// says so, and asks for the reboot all the same.
+	_, page := get(t, server.URL+"/nodes/nbg-1")
+	for _, want := range []string{`name="do" value="reboot"><input type="hidden" name="node" value="nbg-1"`, "1 of the cluster's 3 voters answer", `name="force" value="on" required`, "they move back"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("nbg-1's page lacks %q:\n%s", want, page)
+		}
+	}
+	// The panel's own node reboots only with its tenants left moved.
+	_, page = get(t, server.URL+"/nodes/fsn-1")
+	if !strings.Contains(page, `name="stay" value="on" required`) || !strings.Contains(page, "reboot it from nbg-1's panel") {
+		t.Fatalf("fsn-1's page does not say the panel runs on it:\n%s", page)
+	}
+
+	if _, body := submit(t, client, server, "/cluster", url.Values{"do": {"reboot"}, "node": {"nbg-1"}}, server.URL); !strings.Contains(body, "type the node&#39;s name to reboot it") {
+		t.Fatalf("rebooted without the name:\n%s", body)
+	}
+	_, body := submit(t, client, server, "/cluster", url.Values{"do": {"reboot"}, "node": {"fsn-1"}, "confirm": {"fsn-1"}, "force": {"on"}}, server.URL)
+	if !strings.Contains(body, "this panel runs on fsn-1") || !strings.Contains(body, "reboot it from nbg-1&#39;s panel") || s.Jobs.Busy() != nil {
+		t.Fatalf("the panel's own node was rebooted with its tenants to move back:\n%s", body)
+	}
+
+	// Without -force, the job refuses, changing nothing.
+	response, _ := submit(t, client, server, "/cluster", url.Values{"do": {"reboot"}, "node": {"nbg-1"}, "confirm": {"nbg-1"}}, server.URL)
+	if body = waitForJob(t, s, client, response); !strings.Contains(body, "not a majority") || !strings.Contains(body, "stopped here") {
+		t.Fatalf("the reboot that would lose the majority:\n%s", body)
+	}
+	before, _ := cluster.List(ctx)
+	on := func(tenants []api.Tenant, node string) []string {
+		var names []string
+		for _, tenant := range tenants {
+			if tenant.Node == node {
+				names = append(names, tenant.Spec.Name)
+			}
+		}
+		slices.Sort(names)
+		return names
+	}
+	if len(on(before, "nbg-1")) == 0 {
+		t.Fatal("the demo's nbg-1 runs no tenant")
+	}
+
+	// With it, nbg-1's tenants move away, it reboots, and they move back.
+	response, _ = submit(t, client, server, "/cluster", url.Values{"do": {"reboot"}, "node": {"nbg-1"}, "confirm": {"nbg-1"}, "force": {"on"}}, server.URL)
+	body = waitForJob(t, s, client, response)
+	for _, want := range []string{"Reboot nbg-1", ">done<", "moved back", "Move its tenants back", "node nbg-1 is back"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("the reboot's page lacks %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "not yet") || strings.Contains(body, "stopped here") {
+		t.Fatalf("the reboot's page has a step left:\n%s", body)
+	}
+	after, _ := cluster.List(ctx)
+	if got, want := on(after, "nbg-1"), on(before, "nbg-1"); !slices.Equal(got, want) {
+		t.Fatalf("nbg-1 runs %v after its reboot, not %v", got, want)
+	}
+
+	// The panel's own node, its tenants left where they move.
+	response, _ = submit(t, client, server, "/cluster", url.Values{"do": {"reboot"}, "node": {"fsn-1"}, "confirm": {"fsn-1"}, "force": {"on"}, "stay": {"on"}}, server.URL)
+	body = waitForJob(t, s, client, response)
+	if !strings.Contains(body, "node fsn-1 reboots now") || !strings.Contains(body, ">done<") || strings.Contains(body, "Move its tenants back") {
+		t.Fatalf("the reboot of the panel's node:\n%s", body)
+	}
+	if now, _ := cluster.List(ctx); len(on(now, "fsn-1")) != 0 {
+		t.Fatalf("fsn-1 still runs %v", on(now, "fsn-1"))
 	}
 }

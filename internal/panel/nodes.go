@@ -24,6 +24,8 @@ type nodeData struct {
 	Clustered bool
 	Targets   []string
 	Acts      bool
+	// Voters counts the cluster's nodes.
+	Voters int
 	// Runs are the tenants it runs, Keeps those it keeps a copy of.
 	Runs, Keeps []tenantRow
 	// RunNames are the live tenants it runs, by name; All every tenant.
@@ -77,7 +79,7 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 	node := nodes.Nodes[i]
 	now := s.now()
 	data := nodeData{Node: node, State: nodeState(node, now), Leader: node.Name == nodes.Leader, Self: node.Name == nodes.Self,
-		Clustered: len(nodes.Nodes) > 1, Acts: s.Cluster != nil, All: tenants}
+		Clustered: len(nodes.Nodes) > 1, Acts: s.Cluster != nil, All: tenants, Voters: len(nodes.Nodes)}
 	for _, other := range nodes.Nodes {
 		if other.Name != name && other.Answers && !other.Failed() {
 			data.Targets = append(data.Targets, other.Name)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/cluster"
+	"github.com/PowerPenguini/murder/internal/reboot"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 )
@@ -23,6 +24,10 @@ type demoNodes struct {
 	failed   map[string]time.Time
 	frozen   string
 	started  time.Time
+	// rebooted are when nodes came back from a reboot; down until when
+	// a node that reboots answers again.
+	rebooted map[string]time.Time
+	down     map[string]time.Time
 }
 
 const demoBinary = "9f2c4be1a07d3355e0c1d7a8b6f4e2d1c0b9a8f7e6d5c4b3a2918070605040302"
@@ -41,6 +46,10 @@ func (d *DemoCluster) Nodes(ctx context.Context) (api.Nodes, error) {
 	for i, n := range nodes.Nodes {
 		if at, ok := d.nodes.failed[n.Name]; ok {
 			nodes.Nodes[i].FailedAt = at
+		}
+		if until, ok := d.nodes.down[n.Name]; ok && time.Now().Before(until) {
+			nodes.Nodes[i].Answers = false
+			nodes.Nodes[i].AwayUntil = until.Add(10 * time.Minute)
 		}
 	}
 	return nodes, err
@@ -71,7 +80,7 @@ func (a *demoActor) ClusterStatus(ctx context.Context) (cluster.Status, error) {
 	nodes, _ := a.Nodes(ctx)
 	status := cluster.Status{Node: nodes.Self, State: "Leader", Leader: nodes.Leader, Applied: 4812}
 	for _, n := range nodes.Nodes {
-		status.Members = append(status.Members, cluster.Member{Name: n.Name, Address: n.Address})
+		status.Members = append(status.Members, cluster.Member{Name: n.Name, Address: n.Address, Suffrage: "Voter"})
 	}
 	return status, nil
 }
@@ -87,9 +96,13 @@ func (a *demoActor) NodeInfo(ctx context.Context, node string) (upgrade.Info, er
 	if !ok {
 		binary = demoBinary
 	}
+	started := a.nodes.started
+	if at, ok := a.nodes.rebooted[node]; ok {
+		started = at
+	}
 	for _, n := range nodes.Nodes {
 		if n.Name == node && n.Answers {
-			return upgrade.Info{Node: node, Version: upgrade.Version{Binary: binary, Schema: 13}, Started: a.nodes.started, Applied: 4812, LastPass: time.Now()}, nil
+			return upgrade.Info{Node: node, Version: upgrade.Version{Binary: binary, Schema: 13}, Started: started, Applied: 4812, LastPass: time.Now()}, nil
 		}
 	}
 	return upgrade.Info{}, &api.Error{Status: 502, Message: "node " + node + " does not answer"}
@@ -186,6 +199,29 @@ func (a *demoActor) FailOver(_ context.Context, node string) (store.FailedOver, 
 	a.nodes.failed[node] = time.Now()
 	a.record("node.failed-over", "", node)
 	return outcome, nil
+}
+
+// Reboot has a node go down for a few paces and come back started anew;
+// the demo's own node, which serves the panel, only says it would.
+func (a *demoActor) Reboot(ctx context.Context, node string, request reboot.Request) error {
+	nodes, _ := a.Nodes(ctx)
+	if node == "-" {
+		node = nodes.Self
+	}
+	if request.Check {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if node == nodes.Self {
+		a.record("node.rebooting", "", node)
+		return nil
+	}
+	back := time.Now().Add(5 * a.Pace)
+	a.nodes.down[node] = back
+	a.nodes.rebooted[node] = back
+	a.record("node.rebooting", "", node)
+	return nil
 }
 
 func (a *demoActor) RunBackups(ctx context.Context) ([]api.BackupResult, error) {

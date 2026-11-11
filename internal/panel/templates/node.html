@@ -6,7 +6,7 @@
   <div class="actions">
     <details class="drop end">
       <summary class="button">Act on {{$n.Name}}</summary>
-      <div class="pop acts">{{template "node-actions" (nodeActs $n $d.Self $d.Targets $d.All "node")}}</div>
+      <div class="pop acts">{{template "node-actions" (nodeActs $n $d.Self $d.Targets $d.All $d.Voters "node")}}</div>
     </details>
   </div>
   {{end}}
@@ -24,7 +24,7 @@
   </ol>
   {{else}}
   <p class="flat spaced"><span class="lead-in">It runs nothing and keeps no copy: remove it, or join a replacement first.</span> To replace it, make an invitation on a live node (<code>sudo murder invite</code>) and join a new server with it; the cluster then has a node to spare again.</p>
-  {{if $d.Acts}}<div class="spaced inline-form">{{template "remove-form" (nodeActs $n $d.Self $d.Targets $d.All "node")}}</div>{{end}}
+  {{if $d.Acts}}<div class="spaced inline-form">{{template "remove-form" (nodeActs $n $d.Self $d.Targets $d.All $d.Voters "node")}}</div>{{end}}
   {{end}}
 </div>
 {{else if not $n.Answers}}

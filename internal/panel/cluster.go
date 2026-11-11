@@ -24,6 +24,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/clusterops"
+	"github.com/PowerPenguini/murder/internal/reboot"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
 )
@@ -38,6 +39,8 @@ type ClusterAgent interface {
 	RunBackups(ctx context.Context) ([]api.BackupResult, error)
 	// ThawIf takes changes again only if they are still frozen for reason.
 	ThawIf(ctx context.Context, reason string) error
+	// Reboot asks node ("-" for this one) to reboot, or whether it could.
+	Reboot(ctx context.Context, node string, request reboot.Request) error
 }
 
 // Job is work that outlasts a request, such as an upgrade: what it says,
@@ -93,10 +96,13 @@ const (
 	JobDrain   JobKind = "drain"
 	JobBackups JobKind = "backups"
 	JobBalance JobKind = "balance"
+	JobReboot  JobKind = "reboot"
 )
 
 // exclusive kinds change the cluster: one runs at a time.
-func (k JobKind) exclusive() bool { return k == JobUpgrade || k == JobDrain || k == JobBalance }
+func (k JobKind) exclusive() bool {
+	return k == JobUpgrade || k == JobDrain || k == JobBalance || k == JobReboot
+}
 
 // Jobs are a panel's recent jobs, newest first. The socket's panel and
 // the tunnel's share them, so that one change of the cluster runs at a time
@@ -672,6 +678,27 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 		toJob(s.Jobs.Start(JobDrain, "Drain "+node+" to "+to, user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			return clusterops.Drain(ctx, agent, node, to, out)
 		}))
+	case "reboot":
+		if !typed(confirmed, node) {
+			back("problem", "type the node's name to reboot it")
+			return
+		}
+		opts := clusterops.RebootOptions{To: r.FormValue("to"), Stay: r.FormValue("stay") == "on", Force: r.FormValue("force") == "on"}
+		nodes, err := agent.Nodes(ctx)
+		if err != nil {
+			back("problem", err.Error())
+			return
+		}
+		// The panel's job runs on its own node: rebooting that node ends
+		// the job as the host goes down, before it could move the tenants
+		// back. With them left where they move, the job is done by then.
+		if node == nodes.Self && !opts.Stay {
+			back("problem", selfReboot(nodes, node))
+			return
+		}
+		toJob(s.Jobs.Start(JobReboot, "Reboot "+node, user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
+			return clusterops.Reboot(ctx, agent, node, opts, out)
+		}))
 	case "remove":
 		if !typed(confirmed, node) {
 			back("problem", "type the node's name to remove it")
@@ -739,6 +766,22 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		back("problem", "unknown action")
 	}
+}
+
+// selfReboot says why the panel does not reboot its own node and move the
+// tenants back, and where to do it from instead.
+func selfReboot(nodes api.Nodes, node string) string {
+	from := ""
+	for _, n := range nodes.Nodes {
+		if from == "" && n.Name != node && n.Answers && !n.Failed() {
+			from = n.Name
+		}
+	}
+	say := "this panel runs on " + node + ", so its job stops as " + node + " goes down and could not move the tenants back once it is up"
+	if from == "" {
+		return say + ": no other node answers to do it from, so tick \"Leave them where they move\" to reboot it from here"
+	}
+	return say + ": reboot it from " + from + "'s panel (or run sudo murder node reboot " + node + " on " + from + "), which waits for it and moves them back, or tick \"Leave them where they move\""
 }
 
 func (s *Server) nodeName(ctx context.Context, agent ClusterAgent) string {
@@ -891,6 +934,8 @@ type jobData struct {
 	Source, Target string
 	Again          *nodeActs
 	Since, Until   time.Time
+	// Reboot is a reboot's progress.
+	Reboot *rebootView
 	// Results are a backup job's, tenant by tenant; Succeeded and Failed
 	// count them.
 	Results           []jobResult
@@ -909,6 +954,97 @@ var drainTitle = regexp.MustCompile(`^Drain (\S+) to (\S+)$`)
 // drainMoved reads a drain's moves from its output, as clusterops.Drain
 // writes them: "atlas moved to fsn-1 in 41s".
 var drainMoved = regexp.MustCompile(`(?m)^(\S+) moved to (\S+)`)
+
+// rebootView is how far a reboot got: its steps, and the tenants it moved.
+type rebootView struct {
+	Node    string
+	Steps   []rebootStep
+	Tenants []rebootRow
+}
+
+// rebootStep is one step of a reboot; State is "done", "now" (under way),
+// "failed" (where it stopped) or "" (not yet, or not at all).
+type rebootStep struct{ Text, State string }
+
+// rebootRow is a tenant a reboot moved: where to, whether back, and where
+// it runs now.
+type rebootRow struct {
+	Name, To, Now string
+	// Back says it moved back; Stays that it was left where it moved,
+	// having moved on since.
+	Back, Stays, Exists bool
+}
+
+// A reboot's output, as clusterops.Reboot writes it.
+var (
+	rebootTitle    = regexp.MustCompile(`^Reboot (\S+)$`)
+	rebootPlan     = regexp.MustCompile(`(?m)^rebooting node \S+: (\d+) tenants move away first$`)
+	rebootMovedOut = regexp.MustCompile(`(?m)^(\S+) moved to (\S+) in `)
+	rebootMovedIn  = regexp.MustCompile(`(?m)^(\S+) moved back to \S+ in `)
+	rebootStays    = regexp.MustCompile(`(?m)^(\S+) stays: it is no longer on `)
+)
+
+// rebootOf reads a reboot's progress from its output; where holds where
+// each tenant runs now.
+func rebootOf(job *Job, node string, where map[string]string) *rebootView {
+	out := job.Output()
+	has := func(text string) bool { return strings.Contains(out, text) }
+	view := &rebootView{Node: node}
+	index := map[string]int{}
+	for _, m := range rebootMovedOut.FindAllStringSubmatch(out, -1) {
+		if _, ok := index[m[1]]; !ok {
+			now, ok := where[m[1]]
+			index[m[1]] = len(view.Tenants)
+			view.Tenants = append(view.Tenants, rebootRow{Name: m[1], To: m[2], Now: now, Exists: ok})
+		}
+	}
+	for _, m := range rebootMovedIn.FindAllStringSubmatch(out, -1) {
+		if i, ok := index[m[1]]; ok {
+			view.Tenants[i].Back = true
+		}
+	}
+	for _, m := range rebootStays.FindAllStringSubmatch(out, -1) {
+		if i, ok := index[m[1]]; ok {
+			view.Tenants[i].Stays = true
+		}
+	}
+	away := "Move its tenants away"
+	if m := rebootPlan.FindStringSubmatch(out); m != nil {
+		away = fmt.Sprintf("Move its tenants away: %d of %s", len(view.Tenants), m[1])
+	}
+	itself := has("node " + node + " reboots now")
+	rebooted := has("node "+node+" reboots; waiting") || itself
+	back := has("node " + node + " is back")
+	// Each step: done once the next began, or the job said so.
+	view.Steps = []rebootStep{
+		{Text: "Check that it can reboot, and would come back as it runs"},
+		{Text: away},
+		{Text: "Reboot it"},
+	}
+	started := []bool{true, rebootPlan.MatchString(out), rebooted}
+	if !itself {
+		view.Steps = append(view.Steps, rebootStep{Text: "Wait for it to come back and catch up"}, rebootStep{Text: "Move its tenants back"})
+		started = append(started, rebooted, back)
+	}
+	// Left where they moved (-stay): it ended once back, moving none.
+	stayed := back && job.Done() && job.Failed == "" && !has("runs its tenants again")
+	for i := range view.Steps {
+		next := i+1 < len(started) && started[i+1]
+		switch {
+		case !started[i]:
+		case next || (i == len(started)-1 && job.Done() && job.Failed == "" && !job.Interrupted):
+			view.Steps[i].State = "done"
+		case job.Done():
+			view.Steps[i].State = "failed"
+		default:
+			view.Steps[i].State = "now"
+		}
+	}
+	if stayed && len(view.Steps) == 5 {
+		view.Steps[4] = rebootStep{Text: "Leave its tenants where they moved", State: "done"}
+	}
+	return view
+}
 
 // jobResult is one tenant's line of a backup job.
 type jobResult struct {
@@ -993,6 +1129,16 @@ func (s *Server) jobPage(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+	if m := rebootTitle.FindStringSubmatch(job.Title); job.Kind == JobReboot && m != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		tenants, _ := s.backend.List(ctx)
+		where := map[string]string{}
+		for _, t := range tenants {
+			where[t.Spec.Name] = t.Node
+		}
+		data.Reboot = rebootOf(job, m[1], where)
 	}
 	if job.Kind == JobBackups {
 		data.Results = backupResults(job.Output())
