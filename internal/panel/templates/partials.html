@@ -174,10 +174,11 @@ its pages beside it, what can be done to it, and where it runs. */}}
 </header>
 {{end}}
 
-{{/* What can be done to a node: drain it while it answers; fail it over
-once it is off; remove it once it runs and keeps nothing. */}}
+{{/* What can be done to a node: drain or reboot it while it answers; fail
+it over once it is off; remove it once it runs and keeps nothing. */}}
 {{define "node-actions"}}
-  {{if and .Answers .Targets}}<details class="act" name="node-{{.Name}}"><summary><span class="act-name">Drain…</span><span class="act-say">Move its tenants to another node</span></summary>{{template "drain-form" .}}</details>{{end}}
+  {{if and .Answers .Targets}}<details class="act" name="node-{{.Name}}"><summary><span class="act-name">Drain…</span><span class="act-say">Move its tenants to another node</span></summary>{{template "drain-form" .}}</details>
+  <details class="act" name="node-{{.Name}}"><summary><span class="act-name">Reboot…</span><span class="act-say">For a new kernel: its tenants move away{{if not .Self}} and back{{end}}</span></summary>{{template "reboot-form" .}}</details>{{end}}
   {{if and (not .Answers) (not .Failed)}}
   <details class="act" name="node-{{.Name}}"><summary><span class="act-name">Fail it over…</span><span class="act-say">Its copies take over; only once it is off</span></summary>
   <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="failover"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
@@ -218,6 +219,29 @@ once it is off; remove it once it runs and keeps nothing. */}}
     <div><button type="submit" class="danger">Drain {{.Name}}</button></div>
   </form>
   {{end}}
+{{end}}
+
+{{/* A reboot of a node, as murder node reboot does it. The panel's own
+node cannot have its tenants moved back by the panel's job, which stops as
+the node goes down: it reboots only with them left where they move. */}}
+{{define "reboot-form"}}
+  <form method="post" action="/cluster" class="stack"><input type="hidden" name="do" value="reboot"><input type="hidden" name="node" value="{{.Name}}">{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
+    <p class="hint">{{if .Tenants}}Its {{plural (len .Tenants) "tenant" "tenants"}} ({{range $i, $t := .Tenants}}{{if $i}}, {{end}}{{$t}}{{end}}) move to other nodes, one after the other, each answering no request for the seconds it moves. Then it reboots{{if not .Self}}, and once it is back and has caught up, they move back{{end}}.{{else}}It runs no tenant: nothing moves, and it reboots.{{end}} Nothing changes if it would not come back as it runs, or changes are frozen.</p>
+    <label class="field">Move them to <select name="to"><option value="" selected>where each fits best</option>{{range .Targets}}<option>{{.}}</option>{{end}}</select><span class="hint">Where each fits best: the node keeping its copy, else the one running the fewest.</span></label>
+    {{if .Self}}
+    <p class="hint">This panel runs on {{.Name}}: its job stops as {{.Name}} goes down, so it cannot move the tenants back. To have them moved back, reboot it from {{index .Targets 0}}'s panel.</p>
+    <label class="check"><input type="checkbox" name="stay" value="on" required> Leave them where they move</label>
+    {{else}}
+    <label class="check"><input type="checkbox" name="stay" value="on"> Leave them where they move, once it is back</label>
+    {{end}}
+    {{if .LosesMajority}}
+    <p class="hint red">While it reboots, {{len .Targets}} of the cluster's {{.Voters}} voters answer, not a majority: the cluster takes no change until it is back. No tenant is created, moved or failed over meanwhile.</p>
+    <label class="check"><input type="checkbox" name="force" value="on" required> Reboot it all the same</label>
+    {{end}}
+    <p class="hint">Type {{.Name}} to confirm.</p>
+    <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+    <div><button type="submit" class="danger">Reboot {{.Name}}</button></div>
+  </form>
 {{end}}
 
 {{/* An image: its repository and short digest, the whole reference behind

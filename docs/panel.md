@@ -70,7 +70,7 @@ should every passkey be lost, at the same page (`/enroll`, "an invitation,
 or a lost passkey?"). Signed in, the Access page invites others, removes
 people and passkeys, makes new recovery codes, and adds or removes devices
 (a QR code, shown once). The Cluster page shows each node's release,
-drains, removes and fails over nodes, backs up this node's tenants, takes
+drains, reboots, removes and fails over nodes, backs up this node's tenants, takes
 changes again after a stopped upgrade, and upgrades the cluster with an
 uploaded `murder` binary; the slow ones run as jobs, with a page that
 follows them. The Apps page creates apps and edits their specs as YAML,
@@ -187,7 +187,10 @@ Each stage is one PR, reviewed and tested before the next.
    agent's API for the person signed in and sends back to the page with
    what it did, once (a cookie, so a reload repeats nothing).
 5. **Cluster actions:** the Cluster page shows each node's release and
-   schema, drains a node to another, removes one (its name typed), fails
+   schema, drains a node to another, reboots one as `murder node reboot`
+   does (its name typed; the panel's own node only with its tenants left
+   where they move, as the job stops when the node goes down), removes one
+   (its name typed), fails
    over one that does not answer (its name typed: only once it is off),
    takes changes again after a stopped upgrade ("thaw" typed; it ends only
    the freeze the page showed, and is never for an upgrade that runs from
@@ -197,9 +200,9 @@ Each stage is one PR, reviewed and tested before the next.
    then installs it node by node, this one last, as `murder upgrade` does:
    the same code, in `internal/clusterops`). The panel begins an upgrade
    only while changes are taken: it never resumes or takes over one that
-   stopped; `murder upgrade` on a node does. Upgrades, drains and backups are
-   jobs: their page follows what they say. One change of the cluster (an
-   upgrade or a drain) runs at a time, from either of a node's panels; a
+   stopped; `murder upgrade` on a node does. Upgrades, drains, reboots and
+   backups are jobs: their page follows what they say. One change of the
+   cluster (an upgrade, a drain, a balance or a reboot) runs at a time, from either of a node's panels; a
    thaw waits for it too. The binary is uploaded beside the database, not
    to /tmp. Jobs live in the panel process that began them, so a panel
    replaced by an upgrade restarts only once its jobs ended, taking none

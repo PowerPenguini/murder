@@ -23,7 +23,7 @@ var actions = map[string]string{
 	"acme.account-created": "ACME account made",
 	"node.joined":          "node joined", "node.removed": "node removed", "node.changed": "node changed",
 	"node.failed": "node failed", "node.failed-over": "node's tenants failed over", "node.back": "node back",
-	"node.away": "node restarting", "node.upgrading": "node upgrading", "node.upgraded": "node upgraded",
+	"node.away": "node restarting", "node.rebooting": "node rebooting", "node.upgrading": "node upgrading", "node.upgraded": "node upgraded",
 	"node.public": "node's public addresses", "node.tunnel": "node in the tunnel",
 	"panel.invited": "person invited", "panel.user-added": "person added", "panel.user-removed": "person removed",
 	"panel.passkey-added": "passkey added", "panel.passkey-removed": "passkey removed", "panel.recovery-codes": "recovery codes made",
@@ -179,7 +179,7 @@ func (r eventRow) PredicatePlural() string {
 
 // nodePredicates say a node's event after its name.
 var nodePredicates = map[string]string{
-	"node.failed-over": "'s tenants failed over to their copies", "node.failed": " failed", "node.back": " is back", "node.away": " is restarting",
+	"node.failed-over": "'s tenants failed over to their copies", "node.failed": " failed", "node.back": " is back", "node.away": " is restarting", "node.rebooting": " reboots",
 	"node.upgraded": " was upgraded", "node.upgrading": " is upgrading", "node.joined": " joined the cluster", "node.removed": " was removed from the cluster",
 }
 

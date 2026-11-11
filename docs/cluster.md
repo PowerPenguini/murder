@@ -229,7 +229,16 @@ started meanwhile has it refuse), the tenants moved so far move back to
 it, as it still runs; if that fails too, the error says where each runs.
 Nothing holds other cluster changes off meanwhile, as for `murder cluster
 drain`: run one at a time.
-The panel does not offer reboots yet.
+
+The panel's Cluster page and each node's page offer the same reboot (its
+name typed), as a job whose page shows each step and where each tenant
+runs. A reboot that would leave no majority answering asks for a box ticked,
+as `-force` does. The panel runs on one node, and its job stops as that
+node goes down, before it could move the tenants back: there it reboots
+only with them left where they move (`-stay`), and says which other node's
+panel (or command line) moves them back instead. A panel job is one change
+of the cluster: no upgrade, drain or balance runs beside it from that
+panel.
 
 ## A copy of every tenant on a second node
 

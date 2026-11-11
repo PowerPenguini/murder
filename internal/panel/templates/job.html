@@ -5,7 +5,7 @@
   {{if not $j.Done}}<span class="st busy">running</span>{{else if $j.Interrupted}}<span class="st warn">interrupted</span>{{else if $j.Failed}}<span class="st bad">failed</span>{{else}}<span class="st ok">done</span>{{end}}
 </div>
 <p class="lead">Begun by {{who $j.By}} {{ago $j.Started}} ago ({{utc $j.Started}}){{if $j.Done}}, {{if $j.Interrupted}}interrupted when the panel stopped{{else}}ended {{ago $j.Ended}} ago{{end}}{{end}}. {{if $d.Kept}}Its record is kept by this node's panel, across restarts.{{else}}Its record lives in this node's panel until it restarts.{{end}} <a href="/events?show=all&amp;since={{iso $d.Since}}&amp;until={{iso $d.Until}}">What it changed: the audit log while it ran</a></p>
-{{if $j.Interrupted}}<div class="notice">It did not finish, and did not fail as such.{{if $d.Drained}} Below is what moved and what did not; drain {{$d.Source}} again to move the rest.{{else}} What it changed is in the audit log; run it again to finish it.{{end}}</div>{{end}}
+{{if $j.Interrupted}}<div class="notice">It did not finish, and did not fail as such.{{if $d.Drained}} Below is what moved and what did not; drain {{$d.Source}} again to move the rest.{{else if $d.Reboot}} Below is how far it got: a tenant it moved and did not move back runs where it says; move it back from its page.{{else}} What it changed is in the audit log; run it again to finish it.{{end}}</div>{{end}}
 {{if $d.Drained}}
 <section class="near">
   <div class="head"><h2>Its tenants</h2></div>
@@ -24,7 +24,45 @@
   {{with $d.Again}}<details class="drop spaced" id="again"><summary class="button">Drain {{$d.Source}} again</summary><div class="pop">{{template "drain-form" .}}</div></details>{{end}}
 </section>
 {{end}}
-{{if $d.Results}}
+{{if $d.Reboot}}{{with $d.Reboot}}
+{{if and $j.Failed (not $j.Interrupted)}}<div class="problem bad" role="alert"><p class="flat">{{$j.Failed}}</p></div>{{end}}
+<section class="near">
+  <div class="head"><h2>Its steps</h2></div>
+  <table class="list">
+    <thead><tr><th>Step</th><th>State</th></tr></thead>
+    <tbody>
+    {{range .Steps}}
+      <tr>
+        <td class="l-main">{{.Text}}</td>
+        <td class="l-side">{{if eq .State "done"}}<span class="st ok">done</span>{{else if eq .State "now"}}<span class="st busy">under way</span>{{else if eq .State "failed"}}<span class="st bad">stopped here</span>{{else}}<span class="dim">not yet</span>{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{if .Tenants}}
+<section>
+  <div class="head"><h2>Its tenants</h2></div>
+  <table class="list">
+    <thead><tr><th>Tenant</th><th>Moved to</th><th>Back</th><th>Runs on now</th></tr></thead>
+    <tbody>
+    {{range .Tenants}}
+      <tr>
+        <td class="l-main">{{if .Exists}}<a href="/tenants/{{.Name}}">{{.Name}}</a>{{else}}{{.Name}}{{end}}</td>
+        <td class="l-sub" data-label="Moved to">{{.To}}</td>
+        <td class="l-side">{{if .Back}}<span class="st ok">moved back</span>{{else if .Stays}}<span class="dim">moved on since</span>{{else}}<span class="dim">not yet</span>{{end}}</td>
+        <td class="l-sub" data-label="Now">{{if not .Exists}}<span class="dim">gone since</span>{{else}}{{.Now}}{{end}} · <a href="/events?tenant={{.Name}}&amp;show=all&amp;since={{iso $d.Since}}&amp;until={{iso $d.Until}}">its events then</a></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+<section>
+  <div class="head"><h2>What it said</h2></div>
+  <pre class="logs">{{with $j.Output}}{{.}}{{else}}Under way…{{end}}</pre>
+</section>
+{{end}}{{else if $d.Results}}
 <section class="near">
   <div class="head"><h2>{{if $d.Failed}}{{$d.Failed}} failed, {{end}}{{$d.Succeeded}} backed up</h2></div>
   <table class="list">

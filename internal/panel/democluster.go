@@ -76,7 +76,7 @@ func (d *DemoCluster) FillDisk(name string) error {
 }
 
 func NewDemoCluster() *DemoCluster {
-	d := &DemoCluster{tenants: map[string]api.Tenant{}, nodes: demoNodes{binaries: map[string]string{}, removed: map[string]bool{}, failed: map[string]time.Time{}, started: time.Now().Add(-3 * 24 * time.Hour)}, Pace: time.Second}
+	d := &DemoCluster{tenants: map[string]api.Tenant{}, nodes: demoNodes{binaries: map[string]string{}, removed: map[string]bool{}, failed: map[string]time.Time{}, rebooted: map[string]time.Time{}, down: map[string]time.Time{}, started: time.Now().Add(-3 * 24 * time.Hour)}, Pace: time.Second}
 	tenants, _ := d.Demo.List(context.Background())
 	for _, t := range tenants {
 		d.tenants[t.Spec.Name] = t
