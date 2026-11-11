@@ -19,7 +19,9 @@ import (
 )
 
 // Config is the agent's config for the settings: only what differs from
-// the defaults, with a word on each.
+// the defaults, with a word on each. It leaves the node's own settings
+// out, for the agent to find at every start, so every node of a cluster
+// can have the same; NodeConfig names those it would not find.
 func Config(s Settings) []byte {
 	var out bytes.Buffer
 	if err := configTemplate.Execute(&out, s); err != nil {
@@ -38,17 +40,15 @@ var configTemplate = template.Must(template.New("agent.yaml").Funcs(template.Fun
 		return "[" + strings.Join(items, ", ") + "]"
 	},
 }).Parse(`# /etc/murder/agent.yaml, written by "murder setup"; everything not here
-# has a default (see deploy/agent.example.yaml for every setting).
-node: {{.Node}}
+# has a default (see deploy/agent.example.yaml for every setting). It names
+# nothing of this node's own: the agent finds its name, addresses, ZFS pool
+# and SSH ports at every start, and node.yaml beside it, if there is one,
+# names what it would not find. Every node of a cluster can have this file.
 baseDomain: {{.Domain}}  # tenants live at <tenant>.{{.Domain}}
-{{- if and .Public (not .ClusterAddress)}}
-publicAddresses: {{list .Public}}  # tenants' own domains point here
-{{- end}}
 {{- if .ZFSPool}}
 
 volumes:
-  driver: zfs                      # a dataset per tenant, with a disk limit
-  parent: {{.ZFSPool}}/murder/tenants
+  driver: zfs                      # a dataset per tenant, with a disk limit, in <the only pool>/murder/tenants
 {{- else}}
 
 volumes:
@@ -56,8 +56,7 @@ volumes:
 {{- end}}
 {{- if .HostFirewall}}
 
-hostFirewall:                      # drops what reaches the host besides SSH, Murder's ports and these
-  ssh: {{ports .SSHPorts}}
+hostFirewall:                      # drops what reaches the host besides SSH (the ports sshd listens on), Murder's ports and these
 {{- if .Open}}
   open:                            # listened to everyone when this was written: take out what should not be public
 {{- range .Open}}
@@ -81,11 +80,12 @@ edge:
     dnsTokenFile: {{if eq .DNSProvider "hetzner"}}` + HetznerTokenFile + `{{else}}` + DNSTokenFile + `{{end}}
 {{- end}}
 {{- if .ClusterAddress}}
+{{- if or .Failover .ManageDNS}}
 
-cluster:
-  address: {{.ClusterAddress}}  # this node on the private network
-{{- if .Public}}
-  publicAddresses: {{list .Public}}
+cluster:                           # each node at its only private address, port 7400, unless node.yaml says
+{{- else}}
+
+cluster: {}                        # each node at its only private address, port 7400, unless node.yaml says
 {{- end}}
 {{- if .Failover}}
   failover:                        # power a dead node off, run its tenants from their copies
@@ -101,8 +101,7 @@ cluster:
 {{- if .Panel}}
 
 panel:
-  tunnel:
-    address: {{.TunnelAddress}}  # this node in the panel's WireGuard tunnel
+  tunnel: {}                       # each node's address in the panel's WireGuard tunnel comes from the cluster's state
 {{- end}}
 `))
 
@@ -120,8 +119,11 @@ func (s Skipped) Error() string { return s.Reason }
 
 // Install is what setup puts on a host.
 type Install struct {
-	// Config is the agent's config.
+	// Config is the agent's config, which the nodes of a cluster share.
 	Config []byte
+	// NodeConfig is node.yaml, the node's own settings the agent would not
+	// find; nil when it finds them all.
+	NodeConfig []byte
 	// Secrets are files only root reads, such as tokens and the master
 	// key, by path.
 	Secrets map[string][]byte
@@ -138,7 +140,7 @@ type Install struct {
 
 // Install is what setup installs for the settings.
 func (s Settings) Install() Install {
-	in := Install{Config: Config(s), Secrets: map[string][]byte{}, ZFSPool: s.ZFSPool, Panel: s.Panel}
+	in := Install{Config: Config(s), NodeConfig: s.NodeConfig, Secrets: map[string][]byte{}, ZFSPool: s.ZFSPool, Panel: s.Panel}
 	if s.HetznerToken != "" {
 		in.Secrets[HetznerTokenFile] = []byte(s.HetznerToken + "\n")
 	}
@@ -266,7 +268,11 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 			return err
 		})
 	}
-	add("write "+ConfigFile+" and the files it names", func(ctx context.Context) error {
+	written := ConfigFile
+	if in.NodeConfig != nil {
+		written += ", " + NodeFile
+	}
+	add("write "+written+" and the files it names", func(ctx context.Context) error {
 		if host.Exists(ConfigFile) && !force {
 			return fmt.Errorf("%s exists: this node is set up already (edit it, or run setup again with -force to write it anew)", ConfigFile)
 		}
@@ -284,10 +290,20 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 		if err := host.WriteFile(ConfigFile, in.Config, 0o644); err != nil {
 			return err
 		}
+		// A node.yaml of an earlier setup would be read over the new config.
+		if in.NodeConfig != nil {
+			if err := host.WriteFile(NodeFile, in.NodeConfig, 0o644); err != nil {
+				return err
+			}
+		} else if host.Exists(NodeFile) {
+			if err := host.Remove(NodeFile); err != nil {
+				return err
+			}
+		}
 		// murder-edge.socket holds the edge's addresses from its first
 		// start, which is the edge's: the agent's drop-in would come only
 		// after it, and a socket takes a change only when it starts again.
-		cfg, err := config.Parse(in.Config)
+		cfg, err := config.ParseOn(in.Config, in.NodeConfig, Probe(ctx, host))
 		if err != nil {
 			return err
 		}

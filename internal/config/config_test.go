@@ -64,7 +64,7 @@ func TestParseRejectsBadConfig(t *testing.T) {
 		"firewall":       "baseDomain: example.com\nfirewall: iptables\n",
 		"edge port":      "baseDomain: example.com\nedge: {http: \"localhost\"}\n",
 		"bad driver":     "baseDomain: example.com\nvolumes: {driver: nfs}\n",
-		"zfs no parent":  "baseDomain: example.com\nvolumes: {driver: zfs, mountRoot: /srv}\n",
+		"zfs mountRoot":  "baseDomain: example.com\nvolumes: {driver: zfs, mountRoot: srv}\n",
 		"acme partial":   "baseDomain: example.com\nedge: {tls: {mode: acme}}\n",
 		"interval":       "baseDomain: example.com\nreconcileInterval: 10ms\n",
 		"duration":       "baseDomain: example.com\nreconcileInterval: soon\n",
@@ -92,7 +92,7 @@ func TestParseRejectsBadConfig(t *testing.T) {
 }
 
 func TestExampleConfigParses(t *testing.T) {
-	agent, err := Load("../../deploy/agent.example.yaml")
+	agent, err := LoadOn("../../deploy/agent.example.yaml", fakeHost{name: "fsn-1", addresses: []string{"10.0.0.2", "203.0.113.10"}, pools: []string{"tank"}, ssh: []int{22}})
 	if err != nil {
 		t.Fatalf("deploy/agent.example.yaml: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestDNSRecords(t *testing.T) {
 		t.Fatalf("a zone above the base domain: %v", err)
 	}
 	for name, extra := range map[string]string{
-		"no addresses":     "  dns: {provider: hetzner, tokenFile: /t}\n",
+		"no addresses":     "  publicAddresses: []\n  dns: {provider: hetzner, tokenFile: /t}\n",
 		"a private one":    "  publicAddresses: [10.0.0.2]\n",
 		"not an address":   "  publicAddresses: [example.com]\n",
 		"no provider":      "  publicAddresses: [203.0.113.7]\n  dns: {tokenFile: /t}\n",
@@ -295,14 +295,15 @@ func TestANodeAloneNamesItsPublicAddresses(t *testing.T) {
 // the listed ports to everyone, and the cluster, relay and non-loopback
 // metrics ports to private networks only.
 func TestHostFirewall(t *testing.T) {
-	agent, err := Parse([]byte(`
+	sshd := fakeHost{name: "n1", addresses: []string{"10.0.0.2"}, ssh: []int{22}}
+	agent, err := ParseOn([]byte(`
 baseDomain: example.com
 edge: {tls: {mode: internal}, metrics: 10.0.0.2:9465}
 metrics: 127.0.0.1:9464
 cluster: {address: 10.0.0.2:7400}
 panel: {tunnel: {address: 10.77.0.1}}
 hostFirewall: {open: [9100/tcp, 3478/udp], private: [8125/udp]}
-`))
+`), nil, sshd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +326,7 @@ hostFirewall: {open: [9100/tcp, 3478/udp], private: [8125/udp]}
 		}
 	}
 	// A bare key, as the example's line uncommented alone, takes the defaults.
-	if bare, err := Parse([]byte("baseDomain: example.com\nhostFirewall:\n")); err != nil {
+	if bare, err := ParseOn([]byte("baseDomain: example.com\nhostFirewall:\n"), nil, sshd); err != nil {
 		t.Fatal(err)
 	} else if bare.HostFirewall == nil || !slices.Equal(bare.HostFirewall.SSH, []int{22}) {
 		t.Errorf("bare hostFirewall: %+v", bare.HostFirewall)

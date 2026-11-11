@@ -39,9 +39,10 @@ func TestDoctorFixesANodeAlone(t *testing.T) {
 	if !strings.Contains(string(host.files[SSHDropIn]), "PasswordAuthentication no") || !strings.Contains(string(host.files[DaemonConfig]), `"live-restore": true`) {
 		t.Fatal("SSH or live-restore not fixed")
 	}
+	// The SSH ports are left out: the agent finds them at every start.
 	written := host.files["/etc/murder/agent.yaml"]
 	agent, err := config.Parse(written)
-	if err != nil || agent.HostFirewall == nil || !slices.Equal(agent.HostFirewall.SSH, []int{22}) || !slices.Equal(agent.HostFirewall.Open, []string{"9100/tcp"}) {
+	if err != nil || agent.HostFirewall == nil || agent.HostFirewall.SSH != nil || !slices.Equal(agent.HostFirewall.Open, []string{"9100/tcp"}) {
 		t.Fatalf("config %s: %+v, %v", written, agent.HostFirewall, err)
 	}
 	if !strings.HasPrefix(string(written), aloneConfig) || string(host.files["/etc/murder/agent.yaml.before-host-firewall"]) != aloneConfig {
@@ -73,7 +74,7 @@ func TestDoctorNamesTheFirewallForAClusterToAdd(t *testing.T) {
 		}
 	}
 	joined := strings.Join(notes, "\n")
-	if !strings.Contains(joined, "has no key") || !strings.Contains(joined, "  ssh: [22]") || !strings.Contains(joined, "9100/tcp") {
+	if !strings.Contains(joined, "has no key") || strings.Contains(joined, "ssh: [") || !strings.Contains(joined, "9100/tcp") {
 		t.Fatalf("notes:\n%s", joined)
 	}
 }

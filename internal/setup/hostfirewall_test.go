@@ -59,7 +59,8 @@ func TestSetupTurnsTheHostFirewallOn(t *testing.T) {
 		t.Fatal(problems)
 	}
 	text := string(Config(s))
-	agent, err := config.Parse([]byte(text))
+	// The SSH ports are left out, for the agent to find at every start.
+	agent, err := config.ParseOn([]byte(text), s.NodeConfig, factsHost{facts})
 	if err != nil {
 		t.Fatalf("%v\n%s", err, text)
 	}
@@ -67,7 +68,7 @@ func TestSetupTurnsTheHostFirewallOn(t *testing.T) {
 	if h == nil || !slices.Equal(h.SSH, []int{22, 2222}) || !slices.Equal(h.Open, []string{"9100/tcp"}) || !slices.Equal(h.Private, []string{"5432/tcp"}) {
 		t.Fatalf("hostFirewall %+v in\n%s", h, text)
 	}
-	if !strings.Contains(text, "9100/tcp  # node_exporter") {
+	if !strings.Contains(text, "9100/tcp  # node_exporter") || strings.Contains(text, "ssh:") {
 		t.Fatalf("the config does not say what listens:\n%s", text)
 	}
 	if _, err := agent.HostRules(); err != nil {
@@ -92,7 +93,7 @@ func TestTheHostFirewallKeepsEverySSHPortOpen(t *testing.T) {
 		t.Fatalf("ssh ports %v", facts.SSHPorts)
 	}
 	s, _ := Settle(Options{Domain: "example.com", ClusterAddress: "none", ZFSPool: "none"}, facts)
-	agent, err := config.Parse(Config(s))
+	agent, err := config.ParseOn(Config(s), s.NodeConfig, factsHost{facts})
 	if err != nil {
 		t.Fatal(err)
 	}

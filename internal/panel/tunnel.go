@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/tunnel"
 )
@@ -139,6 +141,79 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 		case <-time.After(every):
 		}
 	}
+}
+
+// TunnelClaimer is what taking an address in the tunnel asks of the
+// agent.
+type TunnelClaimer interface {
+	Nodes(ctx context.Context) (api.Nodes, error)
+	SetTunnel(ctx context.Context, end store.Tunnel) error
+}
+
+// ClaimTunnelAddress is this node's address in the panel's tunnel, for a
+// config that names none: the one the cluster's state has for this node,
+// or else the lowest one below devices' that no node has, which it records
+// there with end's key and port. The state refuses an address another
+// node took meanwhile, and it then tries the next. It waits, every every,
+// for the agent and for this node to be in the cluster.
+func ClaimTunnelAddress(ctx context.Context, agent TunnelClaimer, network netip.Prefix, end store.Tunnel, every time.Duration, log *slog.Logger) (netip.Addr, error) {
+	for attempt := 1; ; attempt++ {
+		call, cancel := context.WithTimeout(ctx, every+5*time.Second)
+		view, err := agent.Nodes(call)
+		cancel()
+		if err == nil {
+			address, recorded, ok := tunnelAddressIn(view, network)
+			switch {
+			case recorded:
+				return address, nil
+			case !ok:
+				err = fmt.Errorf("no address is left for a node in the panel's tunnel %s", network)
+			default:
+				end.Address = address
+				call, cancel := context.WithTimeout(ctx, every+5*time.Second)
+				err = agent.SetTunnel(call, end)
+				cancel()
+				if err == nil {
+					log.Info("this node took an address in the panel's tunnel", "address", address.String())
+					return address, nil
+				}
+			}
+		}
+		if attempt%5 == 3 {
+			log.Warn("the panel waits for an address in its tunnel", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return netip.Addr{}, ctx.Err()
+		case <-time.After(every):
+		}
+	}
+}
+
+// tunnelAddressIn is the address the cluster's state has for this node in
+// network (recorded), or else the lowest one no node has; ok is false when
+// none is left.
+func tunnelAddressIn(view api.Nodes, network netip.Prefix) (address netip.Addr, recorded, ok bool) {
+	network = network.Masked()
+	used := map[netip.Addr]bool{}
+	for _, node := range view.Nodes {
+		if node.Tunnel == nil {
+			continue
+		}
+		if node.Name == view.Self && network.Contains(node.Tunnel.Address) {
+			return node.Tunnel.Address, true, true
+		}
+		used[node.Tunnel.Address] = true
+	}
+	// Devices begin at the 100th address.
+	address = network.Addr().Next()
+	for i := 1; i < 100 && network.Contains(address); i++ {
+		if !used[address] {
+			return address, false, true
+		}
+		address = address.Next()
+	}
+	return netip.Addr{}, false, false
 }
 
 // staleDevices is how many polling intervals the devices may go unread

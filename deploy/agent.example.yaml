@@ -1,7 +1,19 @@
 # /etc/murder/agent.yaml
-node: node-fsn-1                   # stored by "murder init" (host name if unset); must match afterwards
+#
+# Every node of a cluster can have this same file. A node's own settings
+# (node, cluster.address, publicAddresses, volumes.parent, hostFirewall.ssh,
+# panel.tunnel.address) are left out: the agent finds them on the host at
+# every start, and "murder doctor" says what it found. What it cannot find,
+# such as which of two private addresses the other nodes reach, goes in
+# /etc/murder/node.yaml beside this file, which is read over it:
+#
+#   # /etc/murder/node.yaml, this node's alone
+#   cluster: {address: 10.0.0.2:7400}
+#   volumes: {parent: fast/murder/tenants}
+#
+# node: node-fsn-1                 # default: the host name's first label; stored by "murder init", must match afterwards
 baseDomain: example.com            # tenants live at <tenant>.example.com
-# publicAddresses: [203.0.113.10]  # a node alone: where tenants' own domains point (in a cluster, cluster.publicAddresses)
+# publicAddresses: [203.0.113.10]  # a node alone: where tenants' own domains point (in a cluster, cluster.publicAddresses); default: the host's public addresses
 database: /var/lib/murder/murder.db  # apps, tenants, sealed secrets, audit log (SQLite)
 masterKeyFile: /etc/murder/master.key
 socket: /run/murder/agent.sock
@@ -15,14 +27,14 @@ registries:                        # private registries: images are pulled with 
 networkPool: 10.240.0.0/16         # one /28 per tenant network (the tenant at .2); must not overlap host or Docker networks
 firewall: nftables                 # keeps tenants from the host and private networks; off only for development
 # hostFirewall:                    # also drop what reaches the host but SSH, the edge, the panel's tunnel and these
-#   ssh: [22]                      # every port sshd listens on, or SSH is locked out
+#   ssh: [22]                      # default: the ports sshd listens on, found at every start; set, every one, or SSH is locked out
 #   open: ["9100/tcp"]             # more ports open to everyone
 #   private: ["9100/tcp"]          # more ports open to private networks only (the cluster's are already)
 metrics: 127.0.0.1:9464            # /metrics for Prometheus or VictoriaMetrics (tenant names: keep it private); unset = off
 
 volumes:
   driver: zfs                      # or: driver: dir, root: /srv/murder/tenants
-  parent: tank/murder/tenants      # datasets mount below /srv/murder/tenants (mountRoot)
+  # parent: tank/murder/tenants    # default: <the only pool>/murder/tenants; datasets mount below /srv/murder/tenants (mountRoot)
 
 edge:                              # served by "murder edge"
   http: ":80"                      # open to the internet: tenants' own domains get their certificates over HTTP-01 here
@@ -48,7 +60,7 @@ edge:                              # served by "murder edge"
 #   recipient: age1...             # public key; keep the private key offline
 
 # cluster:                         # replicate the state to other nodes (see README)
-#   address: 10.0.0.2:7400         # this node on the private network
+#   # address: 10.0.0.2:7400       # default: the host's only private address, port 7400
 #   dir: /var/lib/murder/cluster
 #   failover:                      # run a dead node's tenants from their replicas (docs/failover.md)
 #     after: 30s                   # unanswered this long counts as dead

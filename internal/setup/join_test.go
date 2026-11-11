@@ -40,6 +40,27 @@ panel:
     address: 10.77.0.1
 `
 
+// detectHost is what the agent finds on a host.
+type detectHost struct {
+	name      string
+	addresses []string
+	pools     []string
+	ssh       []int
+}
+
+func (h detectHost) Hostname() (string, error) { return h.name, nil }
+func (h detectHost) Addresses() ([]netip.Addr, error) {
+	var out []netip.Addr
+	for _, a := range h.addresses {
+		out = append(out, netip.MustParseAddr(a))
+	}
+	return out, nil
+}
+func (h detectHost) Pools() ([]string, error) { return h.pools, nil }
+func (h detectHost) SSHPorts() []int          { return h.ssh }
+
+// A cluster whose config names the inviting node's own settings: the
+// host keeps that config as it is, and names its own in node.yaml.
 func TestAHostMakesTheClustersConfigItsOwn(t *testing.T) {
 	bundle := cluster.Bundle{Cluster: "acme", Key: []byte("a2V5\n"), Config: []byte(clusterConfig), TunnelAddress: "10.77.0.2",
 		Files: map[string][]byte{"/etc/murder/hetzner.token": []byte("hcloud\n"), "/etc/murder/ghcr.token": []byte("ghp\n")}}
@@ -50,6 +71,9 @@ func TestAHostMakesTheClustersConfigItsOwn(t *testing.T) {
 	in, agent, err := Adopt(bundle, Own{Node: "n2", ZFSPool: "data", ClusterAddress: "10.0.0.3:7400", Public: []string{"203.0.113.11"}, Identity: identity})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if string(in.Config) != clusterConfig {
+		t.Fatalf("the cluster's config changed:\n%s", in.Config)
 	}
 	if agent.Node != "n2" || agent.Cluster.Address != "10.0.0.3:7400" || agent.Cluster.PublicAddresses[0] != "203.0.113.11" || agent.Volumes.Parent != "data/murder/tenants" || agent.Panel.Tunnel.Address != "10.77.0.2" {
 		t.Fatalf("agent %+v", agent)
@@ -62,8 +86,13 @@ func TestAHostMakesTheClustersConfigItsOwn(t *testing.T) {
 	if agent.Metrics != "10.0.0.3:9464" || agent.Edge.HTTPS != "203.0.113.11:443" || agent.Edge.HTTP != ":80" || agent.Volumes.MountRoot != "/srv/tenants" {
 		t.Fatalf("metrics %s, https %s, http %s, mountRoot %s", agent.Metrics, agent.Edge.HTTPS, agent.Edge.HTTP, agent.Volumes.MountRoot)
 	}
-	if !strings.Contains(string(in.Config), "this node on the private network") {
-		t.Fatalf("comments lost:\n%s", in.Config)
+	for _, want := range []string{"node: n2", "address: 10.0.0.3:7400", "publicAddresses: [203.0.113.11]", "parent: data/murder/tenants", "address: 10.77.0.2", "metrics: 10.0.0.3:9464", "https: 203.0.113.11:443"} {
+		if !strings.Contains(string(in.NodeConfig), want) {
+			t.Fatalf("node.yaml lacks %q:\n%s", want, in.NodeConfig)
+		}
+	}
+	if strings.Contains(string(in.NodeConfig), "http: \":80\"") || strings.Contains(string(in.NodeConfig), "baseDomain") {
+		t.Fatalf("node.yaml names the cluster's settings:\n%s", in.NodeConfig)
 	}
 	if string(in.Secrets["/etc/murder/master.key"]) != "a2V5\n" || string(in.Secrets["/etc/murder/ghcr.token"]) != "ghp\n" || len(in.Secrets) != 4 || !in.Panel || in.ZFSPool != "data" {
 		t.Fatalf("install %+v", in)
@@ -84,6 +113,63 @@ func TestAHostMakesTheClustersConfigItsOwn(t *testing.T) {
 	bundle.Files["/root/.ssh/authorized_keys"] = []byte("x")
 	if _, _, err := Adopt(bundle, Own{Node: "n2", ZFSPool: "data", ClusterAddress: "10.0.0.3:7400", Identity: identity}); err == nil || !strings.Contains(err.Error(), "not in /etc/murder") {
 		t.Fatalf("a file elsewhere: %v", err)
+	}
+}
+
+// sharedConfig names nothing of a node's own.
+const sharedConfig = `baseDomain: example.com
+volumes:
+  driver: zfs
+edge:
+  tls: {mode: internal}
+hostFirewall:
+cluster: {}
+panel:
+  tunnel: {}
+`
+
+// A cluster whose config names nothing of a node's own: a plain host
+// needs no node.yaml, and one that is not names only what sets it apart.
+func TestAHostJoinsWithTheSharedConfigAsItIs(t *testing.T) {
+	identity, err := cluster.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := cluster.Bundle{Cluster: "acme", Key: []byte("a2V5\n"), Config: []byte(sharedConfig), TunnelAddress: "10.77.0.2"}
+	plain := detectHost{name: "n2.example.com", addresses: []string{"10.0.0.3", "203.0.113.11"}, pools: []string{"tank"}, ssh: []int{22}}
+	own := Own{Node: "n2", ZFSPool: "tank", ClusterAddress: "10.0.0.3:7400", Public: []string{"203.0.113.11"}, Identity: identity, SSHPorts: []int{22}, Host: plain}
+	in, agent, err := Adopt(bundle, own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(in.Config) != sharedConfig || in.NodeConfig != nil {
+		t.Fatalf("config\n%s\nnode.yaml\n%s", in.Config, in.NodeConfig)
+	}
+	// The panel takes its address from the cluster's state.
+	if agent.Node != "n2" || agent.Cluster.Address != "10.0.0.3:7400" || agent.Volumes.Parent != "tank/murder/tenants" || agent.Panel.Tunnel.Address != "" || !slices.Equal(agent.HostFirewall.SSH, []int{22}) {
+		t.Fatalf("agent %+v", agent)
+	}
+
+	// Another name, two private addresses and two pools: those the agent
+	// cannot tell go in node.yaml; its public address it finds.
+	busy := detectHost{name: "host-7", addresses: []string{"10.0.0.3", "192.168.1.3", "203.0.113.11"}, pools: []string{"tank", "fast"}, ssh: []int{22}}
+	own.Host, own.ZFSPool = busy, "fast"
+	in, agent, err = Adopt(bundle, own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "node: n2\ncluster:\n  address: 10.0.0.3:7400\nvolumes:\n  parent: fast/murder/tenants\n"
+	if !strings.HasSuffix(string(in.NodeConfig), want) || !strings.HasPrefix(string(in.NodeConfig), "# /etc/murder/node.yaml") {
+		t.Fatalf("node.yaml\n%s\nwant it to end in\n%s", in.NodeConfig, want)
+	}
+	if agent.Node != "n2" || agent.Cluster.Address != "10.0.0.3:7400" || agent.Volumes.Parent != "fast/murder/tenants" || agent.Cluster.PublicAddresses[0] != "203.0.113.11" {
+		t.Fatalf("agent %+v", agent)
+	}
+
+	// Plain directories in a cluster of ZFS nodes.
+	own.Host, own.ZFSPool = plain, ""
+	if in, agent, err = Adopt(bundle, own); err != nil || !strings.HasSuffix(string(in.NodeConfig), "volumes:\n  driver: dir\n") || agent.Volumes.Driver != "dir" {
+		t.Fatalf("node.yaml\n%s, %v", in.NodeConfig, err)
 	}
 }
 
@@ -117,6 +203,8 @@ func TestAJoiningHostKeepsItsOwnPortsOpen(t *testing.T) {
 	own := Own{Node: "n2", ZFSPool: "data", ClusterAddress: "10.0.0.3:7400", Identity: identity, SSHPorts: []int{22, 2222},
 		Open:    []Listener{{Protocol: "tcp", Port: 9300, Process: "python3"}, {Protocol: "tcp", Port: 9100, Process: "node_exporter"}},
 		Private: []Listener{{Protocol: "tcp", Port: 9200, Process: "app"}, {Protocol: "udp", Port: 9400, Process: "dns"}, {Protocol: "tcp", Port: 9100}}}
+	host := detectHost{name: "n2", addresses: []string{"10.0.0.3"}, pools: []string{"data"}, ssh: []int{22, 2222}}
+	own.Host = host
 	adopt := func(firewall string) (config.Agent, string) {
 		t.Helper()
 		bundle := cluster.Bundle{Cluster: "acme", Key: []byte("a2V5\n"), Config: []byte(clusterConfig + firewall), TunnelAddress: "10.77.0.2",
@@ -125,7 +213,10 @@ func TestAJoiningHostKeepsItsOwnPortsOpen(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return agent, string(in.Config)
+		if string(in.Config) != string(bundle.Config) {
+			t.Fatalf("the cluster's config changed:\n%s", in.Config)
+		}
+		return agent, string(in.NodeConfig)
 	}
 
 	agent, text := adopt("hostFirewall:  # drops the rest\n  ssh: [22]\n  open:\n    - 9100/tcp  # python3\n  private:\n    - 9200/tcp\n")
@@ -133,11 +224,12 @@ func TestAJoiningHostKeepsItsOwnPortsOpen(t *testing.T) {
 	if h == nil || !slices.Equal(h.SSH, []int{22, 2222}) || !slices.Equal(h.Open, []string{"9100/tcp", "9300/tcp"}) || !slices.Equal(h.Private, []string{"9200/tcp", "9400/udp"}) {
 		t.Fatalf("host firewall %+v in\n%s", h, text)
 	}
-	if !strings.Contains(text, "9300/tcp # python3 on n2") || !strings.Contains(text, "# drops the rest") {
+	if !strings.Contains(text, "9300/tcp # python3 on n2") || !strings.Contains(text, "9100/tcp # python3") {
 		t.Fatalf("comments lost:\n%s", text)
 	}
-	// "hostFirewall:" alone opens 22 by default, which stays.
-	if agent, text := adopt("hostFirewall:\n"); agent.HostFirewall == nil || !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) {
+	// "hostFirewall:" alone finds the SSH ports on each node, and opens
+	// what listened on this host, in node.yaml.
+	if agent, text := adopt("hostFirewall:\n"); agent.HostFirewall == nil || !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) || strings.Contains(text, "ssh") || !strings.Contains(text, "9300/tcp") {
 		t.Fatalf("bare host firewall %+v in\n%s", agent.HostFirewall, text)
 	}
 	// The cluster's SSH ports keep their layout and comments, in any form
@@ -152,7 +244,7 @@ func TestAJoiningHostKeepsItsOwnPortsOpen(t *testing.T) {
 	}
 	// Nothing to add leaves the cluster's entries as they are.
 	own.SSHPorts, own.Open, own.Private = []int{22}, nil, nil
-	if agent, _ := adopt("hostFirewall:\n  ssh: [22]\n  open: [\"9100/tcp\"]\n"); !slices.Equal(agent.HostFirewall.SSH, []int{22}) || !slices.Equal(agent.HostFirewall.Open, []string{"9100/tcp"}) || agent.HostFirewall.Private != nil {
-		t.Fatalf("host firewall %+v", agent.HostFirewall)
+	if agent, text := adopt("hostFirewall:\n  ssh: [22]\n  open: [\"9100/tcp\"]\n"); !slices.Equal(agent.HostFirewall.SSH, []int{22}) || !slices.Equal(agent.HostFirewall.Open, []string{"9100/tcp"}) || agent.HostFirewall.Private != nil || strings.Contains(text, "hostFirewall") {
+		t.Fatalf("host firewall %+v in\n%s", agent.HostFirewall, text)
 	}
 }

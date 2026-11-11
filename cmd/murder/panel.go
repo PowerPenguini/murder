@@ -19,6 +19,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/panel"
+	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/tunnel"
 )
 
@@ -188,9 +189,29 @@ func serveTunnel(ctx context.Context, cfg config.Agent, client *api.Client, hand
 		}
 	}
 	defer certificates.Close()
-	address, err := netip.ParseAddr(t.Address)
-	if err != nil {
-		return err
+	var address netip.Addr
+	if t.Address != "" {
+		if address, err = netip.ParseAddr(t.Address); err != nil {
+			return err
+		}
+	} else {
+		// Left out of the config, so every node's can be the same: the
+		// state keeps each node's address.
+		network, err := netip.ParsePrefix(t.Network)
+		if err != nil {
+			return err
+		}
+		public, err := tunnel.PublicKey(private)
+		if err != nil {
+			return err
+		}
+		address, err = panel.ClaimTunnelAddress(ctx, client, network, store.Tunnel{Key: public, Port: t.Port}, 5*time.Second, log)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
 	}
 	return panel.ServeTunnel(ctx, client, panel.TunnelConfig{
 		PrivateKey: private, Address: address, Port: t.Port, Name: cfg.Panel.Name, TLS: certificates.Config,

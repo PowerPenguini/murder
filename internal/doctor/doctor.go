@@ -20,9 +20,12 @@ import (
 	"syscall"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/hostprobe"
 	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/setup"
 )
@@ -66,6 +69,9 @@ type Host struct {
 	// Engine asks Docker about itself.
 	Engine func(ctx context.Context) (runtime.EngineInfo, error)
 	Now    func() time.Time
+	// Probe finds the node's own settings, as the config does when they
+	// are left out.
+	Probe config.Host
 }
 
 // System is the machine the doctor runs on, with Docker at the socket cfg
@@ -84,6 +90,7 @@ func System(cfg config.Agent) Host {
 		},
 		Engine: docker.Info,
 		Now:    time.Now,
+		Probe:  hostprobe.System{},
 	}
 }
 
@@ -96,6 +103,7 @@ const BackupDir = "/var/backups/murder"
 // configPath.
 func Check(ctx context.Context, cfg config.Agent, configPath string, h Host) []Result {
 	var results []Result
+	results = append(results, checkOwnSettings(cfg, configPath, h)...)
 	results = append(results, checkFiles(cfg, configPath, h)...)
 	firewallResults, hostRules := checkFirewall(ctx, cfg, h)
 	results = append(results, firewallResults...)
@@ -109,6 +117,48 @@ func Check(ctx context.Context, cfg config.Agent, configPath string, h Host) []R
 	results = append(results, checkUpdates(ctx, cfg, h)...)
 	results = append(results, checkKernel(h)...)
 	results = append(results, checkClock(ctx, h)...)
+	return results
+}
+
+// checkOwnSettings reports the node's own settings: those the config left
+// out, as found on the host; those node.yaml sets; and those the config
+// sets that the host would give the same, which a config every node of a
+// cluster shares can do without.
+func checkOwnSettings(cfg config.Agent, configPath string, h Host) []Result {
+	var results []Result
+	for _, d := range cfg.Detected {
+		value := d.Value
+		if value == "" {
+			value = "none"
+			if d.Key == "panel.tunnel.address" {
+				value = "taken"
+			}
+		}
+		results = append(results, Result{OK, "config", fmt.Sprintf("%s: %s, from %s", d.Key, value, d.From), ""})
+	}
+	nodeFile := config.NodeFile(configPath)
+	if data, err := os.ReadFile(h.path(nodeFile)); err == nil {
+		var top map[string]yaml.Node
+		if yaml.Unmarshal(data, &top) == nil && len(top) > 0 {
+			var keys []string
+			for key, value := range top {
+				if value.Kind == yaml.MappingNode {
+					for i := 0; i+1 < len(value.Content); i += 2 {
+						keys = append(keys, key+"."+value.Content[i].Value)
+					}
+				} else {
+					keys = append(keys, key)
+				}
+			}
+			slices.Sort(keys)
+			results = append(results, Result{OK, "config", nodeFile + " sets " + strings.Join(keys, ", ") + " for this node alone", ""})
+		}
+	}
+	if h.Probe != nil {
+		if keys := cfg.Derivable(h.Probe); len(keys) > 0 {
+			results = append(results, Result{OK, "config", fmt.Sprintf("the config sets %s, which the host gives the same: left out, the nodes of a cluster can share one config", strings.Join(keys, ", ")), ""})
+		}
+	}
 	return results
 }
 
@@ -198,8 +248,10 @@ func checkFiles(cfg config.Agent, configPath string, h Host) []Result {
 			results = append(results, Result{Failure, "files", fmt.Sprintf("%s is %04o and user %d's: whoever may write it replaces the config or a secret in it", dir, info.Mode().Perm(), owner(info)), "chown root:root " + dir + " && chmod go-w " + dir})
 		}
 	}
-	if info, err := os.Stat(h.path(configPath)); err == nil && (info.Mode().Perm()&0o022 != 0 || owner(info) != h.Owner) {
-		results = append(results, Result{Failure, "files", fmt.Sprintf("%s is %04o and user %d's: whoever may write it runs code as root", configPath, info.Mode().Perm(), owner(info)), "chown root:root " + configPath + " && chmod 644 " + configPath})
+	for _, file := range []string{configPath, config.NodeFile(configPath)} {
+		if info, err := os.Stat(h.path(file)); err == nil && (info.Mode().Perm()&0o022 != 0 || owner(info) != h.Owner) {
+			results = append(results, Result{Failure, "files", fmt.Sprintf("%s is %04o and user %d's: whoever may write it runs code as root", file, info.Mode().Perm(), owner(info)), "chown root:root " + file + " && chmod 644 " + file})
+		}
 	}
 	for _, dir := range []string{filepath.Dir(cfg.Database), BackupDir} {
 		if info, err := os.Stat(h.path(dir)); err == nil && info.Mode().Perm()&0o077 != 0 {

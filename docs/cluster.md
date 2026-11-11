@@ -23,17 +23,23 @@ key for the server's name for an hour. In return the server takes, over
 the same connection, the master key, the node's config, the tokens the
 config names (files in `/etc/murder` only) and the members' identity
 keys. Invitations of a release before node identity keys
-(`address/secret.key`, which name no node) are refused: make a new one. It makes the
-config its own: its name (the host name, or `-node`), its address on the
-private network (the one on the node's network, or `-cluster-address`),
-its public addresses, its ZFS pool and its address in the panel's tunnel.
+(`address/secret.key`, which name no node) are refused: make a new one.
+The server keeps the node's `agent.yaml` as it is, byte for byte (see
+[One config for every node](#one-config-for-every-node)), and writes its
+own settings in `/etc/murder/node.yaml`, only where the agent would not
+find them on the host by itself: its name (the host name, or `-node`),
+its address on the private network (the one on the node's network, or
+`-cluster-address`), its public addresses, its ZFS pool and, where the
+cluster's config names the inviting node's, its address in the panel's
+tunnel. A server with one private address, one ZFS pool and the host name
+as its name gets no `node.yaml` at all.
 When the cluster's config has a host firewall (`hostFirewall`), the
-server keeps the cluster's entries and adds its own: the ports its sshd
-listens on, and what else listened on it beyond loopback, with the
-process and the server's name in a comment, so joining locks SSH out on
-no port and shuts off nothing that served. Take out what should not be
-open. Then it installs and starts everything as `murder setup` does, and
-joins.
+server keeps the cluster's entries and adds, in `node.yaml`, what else
+listened on it beyond loopback, with the process and the server's name in
+a comment, and its SSH ports where the cluster's config lists some (left
+out, each node finds its own), so joining locks SSH out on no port and
+shuts off nothing that served. Take out what should not be open. Then it
+installs and starts everything as `murder setup` does, and joins.
 An invitation is used once, and only when the server is ready for it:
 setup checks the server first. It hands the master key to whoever brings
 it, so only root makes one, and each one made and used is in the audit
@@ -43,6 +49,47 @@ standard input, so it never shows in the process list. A host that has a
 master key or a database already, its own or a cluster's it left, is
 refused: move them aside first. The node takes at most 8 hosts with
 invitations at once, each for 30 seconds.
+
+### One config for every node
+
+Every node of a cluster can have the same `/etc/murder/agent.yaml`, byte
+for byte: copy it to every node, compare it with a checksum, keep it in
+one place. A node's own settings are left out of it, and the agent finds
+them on the host at every start:
+
+| Setting | Found from |
+| --- | --- |
+| `node` | the host name's first label (the database keeps the name it was made with; a renamed host keeps it) |
+| `cluster.address` | the host's only private IPv4 address, port 7400; several is refused, naming them |
+| `cluster.publicAddresses` (`publicAddresses` alone) | the public IPv4 addresses of the host's interfaces; `[]` says none |
+| `volumes.parent` | `<pool>/murder/tenants` of the host's only ZFS pool, with `driver: zfs` |
+| `hostFirewall.ssh` | the ports sshd listens on (`sshd -T`, its sockets, `ssh.socket`), at every start |
+| `panel.tunnel.address` | the cluster's state: the address it has for this node, or else the lowest one no node has, which the panel records there |
+
+What a host cannot tell, such as which of two private addresses the
+other nodes reach or which of two pools holds tenants, goes in
+`/etc/murder/node.yaml` beside the config, which is this node's alone and
+is read over it: a mapping in both is merged key by key, anything else in
+`node.yaml`, a list too, replaces the shared value. So do listeners bound
+to the node's own addresses (`edge.http: 10.0.0.2:80`, `metrics:
+10.0.0.2:9464`), which no host can guess; bind them to every address
+(`:80`, the default) or keep them there.
+
+```yaml
+# /etc/murder/node.yaml
+cluster: {address: 10.0.0.2:7400}
+volumes: {parent: fast/murder/tenants}
+```
+
+A setting given in either file wins over what the host has.
+`murder doctor` reports, under `config`, what the agent found and from
+where, what `node.yaml` sets, and which settings the config names that
+the host would give the same: take those out to share the file. Why a
+second file rather than placeholders in one: the node's own values are
+few, differ for reasons only the operator knows, and are read the same
+way as the rest; a separate file keeps the shared one free of them
+without a template language, and leaves nothing to guess on a host
+whose addresses are not plain.
 
 To join by hand instead, as below: copy the master key, give the node a
 `cluster:` section, then join with an invitation.
@@ -407,10 +454,11 @@ master key on every node without stopping one
 top-level `publicAddresses` into it, as `cluster.publicAddresses`):
 
 ```yaml
-cluster:
-  address: 10.0.0.2:7400   # this node on the private network; the others reach it there
-  dir: /var/lib/murder/cluster
+cluster: {}   # each node at its only private address, port 7400
 ```
+
+A node with several private addresses names the one the others reach it
+at in its `node.yaml`: `cluster: {address: 10.0.0.2:7400}`.
 
 On the first node (with its state, if it already runs tenants):
 

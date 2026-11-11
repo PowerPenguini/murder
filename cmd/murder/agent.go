@@ -77,12 +77,8 @@ func runInit(args []string) error {
 		fmt.Printf("master key %s already exists\n", cfg.MasterKeyFile)
 	}
 	if _, err := os.Stat(cfg.Database); errors.Is(err, os.ErrNotExist) {
+		// The config's, or else the host name's first label.
 		node := cfg.Node
-		if node == "" {
-			if node, err = os.Hostname(); err != nil {
-				return fmt.Errorf("set node in %s: the host name is unknown: %w", *configPath, err)
-			}
-		}
 		if err := store.Init(cfg.Database, node); err != nil {
 			return err
 		}
@@ -122,7 +118,9 @@ func runAgent(args []string) error {
 	}
 	defer st.Close()
 	node := st.Node()
-	if cfg.Node != "" && cfg.Node != node {
+	// A name found from the host name gives way to the database's: the
+	// host may have been renamed since. One the config sets must match.
+	if cfg.Node != node && !cfg.IsDetected("node") {
 		return fmt.Errorf("config names node %q but the database belongs to node %q", cfg.Node, node)
 	}
 	// Run alone, a node of a cluster would change its state apart from the
