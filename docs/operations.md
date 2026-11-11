@@ -363,6 +363,21 @@ connections the dead edge had accepted (4 of 2333 in the same test, with
   rather than fail to bind beside it, and binds an address the socket
   lacks itself.
 
+The panel's WireGuard tunnel (`panel.tunnel.port`, UDP 51820 by default)
+is the panel's, not the edge's: wireguard-go runs in `murder-panel`, and the
+port closes while the panel restarts (on an upgrade, or after a crash).
+No socket holds it, as `murder-edge.socket` holds the edge's ports,
+because holding it would gain nothing. The tunnel's session keys and the
+TCP connections inside it live in the panel process: a new panel knows
+neither, so it drops the packets a device sent the old one, whether they
+waited in a held socket or were refused. A device gets through again once
+it makes a new handshake. It does so on its own, about 15 s after its
+packets go unanswered (WireGuard's keepalive and rekey timeouts). In a
+test of the tunnel's two ends, a page was reached again 15.3 s after the
+panel's end restarted with no gap, and 12.2 s after it restarted 3 s
+later: 15 s after it stopped either way. A browser that was open on the
+panel reloads once it is through.
+
 A new release replaces no container either: a container is replaced only
 when what it is made from changes (the tenant's spec, limits, secrets,
 address or data path), not when Murder makes containers differently. To
