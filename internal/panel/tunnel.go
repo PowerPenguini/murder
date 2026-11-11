@@ -45,6 +45,11 @@ func ServeTunnel(ctx context.Context, agent TunnelAgent, config TunnelConfig, ha
 	if err != nil {
 		return err
 	}
+	// The UDP port is bound here, and closes while the panel restarts: no
+	// socket unit holds it, as murder-edge.socket holds the edge's ports.
+	// A new panel has none of the old one's session keys, so it would drop
+	// the packets held for it anyway; a device gets through once it makes
+	// a new handshake, which it does on its own (docs/operations.md).
 	end, err := tunnel.Start(config.PrivateKey, config.Address, config.Port, log)
 	if err != nil {
 		return err
