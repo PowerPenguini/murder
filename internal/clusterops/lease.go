@@ -93,8 +93,28 @@ func renew(ctx context.Context, client LeaseClient, id string, stop <-chan struc
 		_, err := client.RenewLease(ask, id)
 		cancel()
 		if err != nil && status(err) == http.StatusGone {
-			lose(fmt.Errorf("this operation lost the cluster's operation lease, so it stopped where it was: %w", err))
+			lose(&LostError{fmt.Errorf("this operation lost the cluster's operation lease, so it stopped where it was: %w", err)})
 			return
 		}
 	}
+}
+
+// LostError is the cause of an operation's context once its lease was
+// lost: broken by a person, or expired and taken by another.
+type LostError struct{ err error }
+
+func (e *LostError) Error() string { return e.err.Error() }
+func (e *LostError) Unwrap() error { return e.err }
+
+// leaseLost reports whether ctx ended because its operation lost the
+// lease.
+func leaseLost(ctx context.Context) bool {
+	var lost *LostError
+	return errors.As(context.Cause(ctx), &lost)
+}
+
+// withoutLease is ctx, never cancelled, acting under no lease: for what an
+// operation does once its own lease is gone, under a lease of its own.
+func withoutLease(ctx context.Context) context.Context {
+	return api.WithLease(context.WithoutCancel(ctx), "")
 }

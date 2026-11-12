@@ -388,6 +388,11 @@ type Store interface {
 	StartMove(name, target, actor string) (Record, error)
 	HoldMove(name string) error
 	FinishMove(name, actor string) (Record, error)
+	// StartMoveFenced, FinishMoveFenced and RemoveNodeFenced are those
+	// writes for an operation that holds the cluster's lease (see Fence).
+	StartMoveFenced(name, target, actor string, fence Fence) (Record, error)
+	FinishMoveFenced(name, actor string, fence Fence) (Record, error)
+	RemoveNodeFenced(name, actor string, fence Fence) error
 	ReleaseHold(name string) error
 	CancelMove(name, actor string) (bool, error)
 	// PlaceReplicas gives every tenant whose replica is missing, on its own

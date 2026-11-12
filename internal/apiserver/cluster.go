@@ -206,7 +206,8 @@ func (s *Server) removeNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := s.cluster.Remove(r.Context(), r.PathValue("name"), actor(r)); err != nil {
+	ctx := store.WithFence(r.Context(), store.Fence{Lease: r.Header.Get(api.LeaseHeader)})
+	if err := s.cluster.Remove(ctx, r.PathValue("name"), actor(r)); err != nil {
 		writeError(w, err)
 		return
 	}

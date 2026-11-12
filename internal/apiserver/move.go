@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
+	"github.com/PowerPenguini/murder/internal/store"
 )
 
 // Moves moves tenants between the nodes of a cluster.
@@ -40,7 +41,10 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	if err := s.moves.Move(r.Context(), name, request.To, actor(r)); err != nil {
+	// The move's start and handover check the operation's lease and plan
+	// as they are written, on whichever node makes them.
+	fence := store.Fence{Lease: r.Header.Get(api.LeaseHeader), From: request.From}
+	if err := s.moves.Move(store.WithFence(r.Context(), fence), name, request.To, actor(r)); err != nil {
 		writeError(w, err)
 		return
 	}

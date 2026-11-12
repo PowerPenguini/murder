@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"errors"
@@ -77,6 +78,8 @@ CREATE TABLE operation_lease (
 	node       TEXT NOT NULL,
 	started_at TEXT NOT NULL,
 	renewed_at TEXT NOT NULL,
+	-- Written with every digit of its nanoseconds (formatFixed), so that
+	-- it compares as text as it does as a time.
 	expires_at TEXT NOT NULL
 ) STRICT`
 
@@ -116,7 +119,7 @@ func (s *SQLite) TakeLease(kind, detail, actor string) (Lease, error) {
 		if err := tx.Exec(`INSERT INTO operation_lease (slot, id, kind, detail, actor, node, started_at, renewed_at, expires_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (slot) DO UPDATE SET id = excluded.id, kind = excluded.kind, detail = excluded.detail, actor = excluded.actor, node = excluded.node,
 			started_at = excluded.started_at, renewed_at = excluded.renewed_at, expires_at = excluded.expires_at`,
-			taken.ID, taken.Kind, taken.Detail, taken.Actor, taken.Node, formatTime(now), formatTime(now), formatTime(taken.Expires)); err != nil {
+			taken.ID, taken.Kind, taken.Detail, taken.Actor, taken.Node, formatTime(now), formatTime(now), formatFixed(taken.Expires)); err != nil {
 			return err
 		}
 		if current.lease.ID != "" {
@@ -145,7 +148,7 @@ func (s *SQLite) RenewLease(id string) (Lease, error) {
 		if current.frozen != "" {
 			return fmt.Errorf("%w: lease %s expired, and changes were frozen since (%s)", ErrLeaseLost, id, current.frozen)
 		}
-		return tx.Exec(`UPDATE operation_lease SET renewed_at = ?, expires_at = ? WHERE slot = 1 AND id = ?`, formatTime(now), formatTime(now.Add(LeaseTTL)), id)
+		return tx.Exec(`UPDATE operation_lease SET renewed_at = ?, expires_at = ? WHERE slot = 1 AND id = ?`, formatTime(now), formatFixed(now.Add(LeaseTTL)), id)
 	})
 	if err != nil {
 		return Lease{}, err
@@ -206,3 +209,60 @@ func leaseRefuses(current *snapshot, now time.Time) error {
 	}
 	return nil
 }
+
+// Fence is what a write made for an operation that holds the cluster's
+// lease checks as it is applied, so that an operation that lost its lease
+// (broken, or expired and taken by another) changes nothing more, however
+// far along a slow step of it was. A move takes its tenant from the node
+// the operation planned it on, From, and only from there: one failed over
+// meanwhile, or moved by another operation, is no longer the plan's. The
+// zero Fence checks nothing, for writes made outside any operation.
+type Fence struct {
+	Lease string `json:"lease,omitempty"`
+	From  string `json:"from,omitempty"`
+}
+
+// fenceKey is the context key of the fence a move or removal is made
+// under.
+type fenceKey struct{}
+
+// WithFence has the move or removal made with ctx checked against fence,
+// on this node or on the node it is passed on to.
+func WithFence(ctx context.Context, fence Fence) context.Context {
+	return context.WithValue(ctx, fenceKey{}, fence)
+}
+
+// FenceOf is the fence ctx carries; the zero Fence for none.
+func FenceOf(ctx context.Context) Fence {
+	fence, _ := ctx.Value(fenceKey{}).(Fence)
+	return fence
+}
+
+// fenceGuard is a batch's own check that the lease it was made under is
+// still the cluster's, unexpired at the time the batch was made: if not,
+// it inserts a row the table's CHECK refuses, and every node refuses the
+// whole batch alike. The write that adds it checks the same against the
+// state it was computed from, and a batch applies only to that version of
+// the state, so the guard never fires on a node that agrees; it states the
+// condition in the log entry itself, where the apply sees it.
+const fenceGuard = `INSERT INTO operation_lease (slot, id, kind, detail, actor, node, started_at, renewed_at, expires_at)
+	SELECT 0, '', '', '', '', '', '', '', '' WHERE NOT EXISTS (SELECT 1 FROM operation_lease WHERE slot = 1 AND id = ? AND expires_at > ?)`
+
+// fenced checks a write made under fence against current at now, and adds
+// fenceGuard to it.
+func fenced(tx *recorder, current *snapshot, now time.Time, fence Fence) error {
+	if fence.Lease == "" {
+		return nil
+	}
+	if current.lease.ID != fence.Lease || !current.lease.Held(now) {
+		return fmt.Errorf("%w: lease %s was broken, or expired and another took its place, so this step was not made", ErrLeaseLost, fence.Lease)
+	}
+	return tx.Exec(fenceGuard, fence.Lease, formatFixed(now))
+}
+
+// fixedTime is RFC 3339 with every digit of the nanoseconds, so that the
+// times it writes compare as text the way they compare as times, as
+// fenceGuard compares expires_at.
+const fixedTime = "2006-01-02T15:04:05.000000000Z07:00"
+
+func formatFixed(t time.Time) string { return t.UTC().Format(fixedTime) }

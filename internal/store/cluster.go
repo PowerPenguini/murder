@@ -826,8 +826,17 @@ func removable(current *snapshot, name string) error {
 // too, which comes next. Only the leader does, and every check of the
 // removal is part of this write, before anything changes in Raft.
 func (s *SQLite) RemoveNode(name, actor string) error {
+	return s.RemoveNodeFenced(name, actor, Fence{})
+}
+
+// RemoveNodeFenced is RemoveNode for an operation under the cluster's
+// lease (see Fence): refused once the lease is no longer fence's.
+func (s *SQLite) RemoveNodeFenced(name, actor string, fence Fence) error {
 	_, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
 		tx.leaderOnly = true
+		if err := fenced(tx, current, now, fence); err != nil {
+			return err
+		}
 		node, found := current.nodes[name]
 		if !found {
 			return fmt.Errorf("node %s: %w", name, ErrNotFound)
@@ -995,11 +1004,24 @@ func (s *SQLite) Note(action, detail, actor string) error {
 }
 
 func (s *SQLite) StartMove(name, target, actor string) (Record, error) {
+	return s.StartMoveFenced(name, target, actor, Fence{})
+}
+
+// StartMoveFenced is StartMove for an operation under the cluster's lease
+// (see Fence): refused once the lease is no longer fence's, and for a
+// tenant that no longer runs on fence.From, where the operation planned
+// it: failed over meanwhile, say, which wins over the plan.
+func (s *SQLite) StartMoveFenced(name, target, actor string, fence Fence) (Record, error) {
 	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
+		if err := fenced(tx, current, now, fence); err != nil {
+			return err
+		}
 		switch {
 		case !ok:
 			return fmt.Errorf("tenant %s: %w", name, ErrNotFound)
+		case fence.From != "" && record.Node != fence.From:
+			return fmt.Errorf("%w: tenant %s runs on node %s now, not on node %s where the operation planned it: the cluster changed under the plan (a failover, say), so the operation stops here", ErrConflict, name, record.Node, fence.From)
 		case record.Node != current.node:
 			return fmt.Errorf("%w: tenant %s runs on node %s: move it from there", ErrConflict, name, record.Node)
 		case record.MoveTo != "":
@@ -1041,10 +1063,27 @@ func (s *SQLite) HoldMove(name string) error {
 }
 
 func (s *SQLite) FinishMove(name, actor string) (Record, error) {
+	return s.FinishMoveFenced(name, actor, Fence{})
+}
+
+// FinishMoveFenced is FinishMove for an operation under the cluster's
+// lease (see Fence): refused once the lease is no longer fence's, so a
+// slow move whose operation lost the lease does not hand its tenant over;
+// the move is then undone, as any that fails before the handover, and the
+// tenant runs on its node again. A move a failover cancelled (its target
+// failed) or overtook (its tenant runs from its copy now) is refused too,
+// lease or not.
+func (s *SQLite) FinishMoveFenced(name, actor string, fence Fence) (Record, error) {
 	next, err := s.write(true, func(tx *recorder, current *snapshot, now time.Time) error {
 		record, ok := current.tenants[name]
+		if err := fenced(tx, current, now, fence); err != nil {
+			return err
+		}
 		if !ok || record.MoveTo == "" {
-			return fmt.Errorf("tenant %s is not moving: %w", name, ErrConflict)
+			return fmt.Errorf("tenant %s is not moving (a failover of its node or its target cancels a move): %w", name, ErrConflict)
+		}
+		if fence.From != "" && record.Node != fence.From {
+			return fmt.Errorf("%w: tenant %s runs on node %s now, not on node %s, which was moving it", ErrConflict, name, record.Node, fence.From)
 		}
 		if err := targetMember(current, record); err != nil {
 			return err

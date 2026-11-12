@@ -224,8 +224,8 @@ func TestAnArchivedTenantMovesWithoutStopping(t *testing.T) {
 // leader that lost its leadership in flight may.
 type finishFails struct{ *store.SQLite }
 
-func (s finishFails) FinishMove(name, actor string) (store.Record, error) {
-	record, _ := s.SQLite.FinishMove(name, actor)
+func (s finishFails) FinishMoveFenced(name, actor string, fence store.Fence) (store.Record, error) {
+	record, _ := s.SQLite.FinishMoveFenced(name, actor, fence)
 	return record, errors.New("leadership lost while committing log")
 }
 

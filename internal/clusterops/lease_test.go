@@ -188,8 +188,8 @@ type slowAgent struct {
 	delay time.Duration
 }
 
-func (a slowAgent) Move(ctx context.Context, tenant, to string) (api.Tenant, error) {
-	moved, err := a.fakeAgent.Move(ctx, tenant, to)
+func (a slowAgent) MoveFrom(ctx context.Context, tenant, from, to string) (api.Tenant, error) {
+	moved, err := a.fakeAgent.MoveFrom(ctx, tenant, from, to)
 	if err != nil {
 		return moved, err
 	}

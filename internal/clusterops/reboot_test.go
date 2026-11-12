@@ -127,8 +127,8 @@ func (a *rebootAgent) Reboot(_ context.Context, name string, request reboot.Requ
 	return nil
 }
 
-func (a *rebootAgent) Move(ctx context.Context, tenant, to string) (api.Tenant, error) {
-	moved, err := a.fakeAgent.Move(ctx, tenant, to)
+func (a *rebootAgent) MoveFrom(ctx context.Context, tenant, from, to string) (api.Tenant, error) {
+	moved, err := a.fakeAgent.MoveFrom(ctx, tenant, from, to)
 	if err == nil {
 		a.mu.Lock()
 		a.events = append(a.events, "move "+tenant+" "+to)
@@ -453,5 +453,60 @@ func TestADrainPlanSpreadsTheTenants(t *testing.T) {
 	}
 	if plan := planDrain(theirs[:2], all, []string{"n2", "n3"}, "n2"); plan[0].to != "n2" || plan[1].to != "n2" {
 		t.Fatalf("to n2: %v", plan)
+	}
+}
+
+// A reboot whose lease is lost before the node reboots moves its tenants
+// back under a lease of its own, taken once; if another operation holds
+// the cluster by then, it leaves them be, and says where they run and how
+// to move them back.
+func TestARebootThatLostItsLeaseMovesBackUnderANewOneOrSaysHow(t *testing.T) {
+	defer func(every time.Duration) { renewEvery = every }(renewEvery)
+	renewEvery = 5 * time.Millisecond
+	for _, c := range []struct {
+		name string
+		// taker, if set, holds the cluster once the reboot's lease is gone.
+		taker string
+		want  []string
+	}{
+		{"broken", "", []string{"move a n3", "move a n2"}},
+		{"taken", "drain node n1 to n3", []string{"move a n3"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			agent := newRebootAgent("n1", "n2", "n3")
+			agent.tenants = []api.Tenant{runningOn("a", "n2"), runningOn("b", "n2")}
+			agent.onMove = func(tenant string) {
+				if tenant != "a" || len(agent.events) != 1 {
+					return
+				}
+				agent.mu.Lock()
+				agent.lease, agent.leaseKind = c.taker, c.taker
+				agent.mu.Unlock()
+				// The reboot's next renewal finds its lease gone.
+				time.Sleep(100 * time.Millisecond)
+			}
+			var out bytes.Buffer
+			err := Reboot(context.Background(), agent, "n2", RebootOptions{To: "n3", Wait: time.Second}, &out)
+			if err == nil || !strings.Contains(err.Error(), "lost the cluster's operation lease") {
+				t.Fatalf("reboot: %v\n%s", err, out.String())
+			}
+			if !slices.Equal(agent.events, c.want) || agent.rebooted {
+				t.Fatalf("events %v, want %v; rebooted %v", agent.events, c.want, agent.rebooted)
+			}
+			if c.taker == "" {
+				if !strings.Contains(err.Error(), "its tenants were moved back") || agent.leases != 2 || agent.lease != "" {
+					t.Fatalf("reboot: %v; leases %d, held %q", err, agent.leases, agent.lease)
+				}
+				return
+			}
+			for _, want := range []string{"its tenants were not moved back", "another operation changes the cluster: drain node n1 to n3", "a on n3", "murder tenant move a -to n2"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("reboot: %v, want %q", err, want)
+				}
+			}
+			if agent.lease != c.taker || agent.leases != 1 {
+				t.Fatalf("the other operation's lease: %q, leases %d", agent.lease, agent.leases)
+			}
+		})
 	}
 }

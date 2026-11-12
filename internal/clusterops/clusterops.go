@@ -31,7 +31,8 @@ type Client interface {
 	TakeOverFreeze(ctx context.Context, from, reason string) error
 	ThawOwn(ctx context.Context, reason string) error
 	List(ctx context.Context) ([]api.Tenant, error)
-	Move(ctx context.Context, tenant, to string) (api.Tenant, error)
+	// MoveFrom moves a tenant only if it runs on from as the move begins.
+	MoveFrom(ctx context.Context, tenant, from, to string) (api.Tenant, error)
 	BalanceMoves(ctx context.Context) ([]store.Move, error)
 	LeaseClient
 }
@@ -407,7 +408,7 @@ func balance(ctx context.Context, client Client, dryRun bool, out io.Writer) err
 			continue
 		}
 		start := time.Now()
-		if _, err := client.Move(ctx, move.Tenant, move.To); err != nil {
+		if _, err := client.MoveFrom(ctx, move.Tenant, move.From, move.To); err != nil {
 			return fmt.Errorf("move %s to %s: %w (moved %d before it)", move.Tenant, move.To, err, i)
 		}
 		fmt.Fprintf(out, "%s moved from %s to %s in %v\n", move.Tenant, move.From, move.To, time.Since(start).Round(time.Second))
@@ -450,7 +451,7 @@ func drain(ctx context.Context, client Client, node, target string, out io.Write
 			continue
 		}
 		start := time.Now()
-		if _, err := client.Move(ctx, tenant.Spec.Name, target); err != nil {
+		if _, err := client.MoveFrom(ctx, tenant.Spec.Name, node, target); err != nil {
 			return fmt.Errorf("move %s: %w (moved %d before it)", tenant.Spec.Name, err, moved)
 		}
 		moved++

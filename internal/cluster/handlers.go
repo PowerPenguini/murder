@@ -842,11 +842,12 @@ func (c *Cluster) handleRemove(w http.ResponseWriter, r *http.Request) {
 	// identity key stays as departed, which Raft checks it by until it is
 	// out of the voters too.
 	if known {
-		if err := c.config.Store.RemoveNode(name, r.URL.Query().Get("actor")); err != nil {
+		fence := store.Fence{Lease: r.URL.Query().Get("lease")}
+		if err := c.config.Store.RemoveNodeFenced(name, r.URL.Query().Get("actor"), fence); err != nil {
 			switch {
 			case errors.Is(err, ErrNotLeader) || errors.Is(err, ErrNoLeader):
 				c.moved(w)
-			case errors.Is(err, store.ErrInUse), errors.Is(err, store.ErrFrozen):
+			case errors.Is(err, store.ErrInUse), errors.Is(err, store.ErrFrozen), errors.Is(err, store.ErrConflict):
 				writeError(w, http.StatusConflict, err)
 			default:
 				writeError(w, http.StatusServiceUnavailable, err)
@@ -1122,7 +1123,7 @@ func (c *Cluster) handleMove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := c.config.Moves.Move(r.Context(), r.PathValue("name"), request.To, request.Actor); err != nil {
+	if err := c.config.Moves.Move(store.WithFence(r.Context(), request.Fence), r.PathValue("name"), request.To, request.Actor); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}

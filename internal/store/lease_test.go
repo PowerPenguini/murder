@@ -230,3 +230,137 @@ func TestOpenUpgradesSchemaVersion19(t *testing.T) {
 		t.Fatalf("user_version = %d, %v", version, err)
 	}
 }
+
+// movingStore is a store of node-1 in a cluster with nbg-1 and hel-1,
+// running tenant acme.
+func movingStore(t *testing.T) *SQLite {
+	t.Helper()
+	st, _ := withApp(t, options())
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	for i, node := range []string{"node-1", "nbg-1", "hel-1"} {
+		if err := st.PutNode(Node{Name: node, Address: "10.0.0." + string(rune('1'+i)) + ":7400"}, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return st
+}
+
+// A move made for an operation is fenced by its lease: once the lease is
+// broken, or expired and taken by another, neither its start nor its
+// handover is written, and the tenant stays on its node once the move is
+// cancelled, as a failed move is.
+func TestAMoveUnderALostLeaseIsNotHandedOver(t *testing.T) {
+	st := movingStore(t)
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	st.now = func() time.Time { return now }
+	lease, err := st.TakeLease("drain", "node node-1 to nbg-1", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence := Fence{Lease: lease.ID, From: "node-1"}
+	if _, err := st.StartMoveFenced("acme", "nbg-1", "alice", fence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.BreakLease(lease.ID, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.FinishMoveFenced("acme", "alice", fence); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("a handover under a broken lease: %v", err)
+	}
+	if record, _ := st.Get("acme"); record.Node != "node-1" || record.MoveTo != "nbg-1" {
+		t.Fatalf("after the refused handover: %+v", record)
+	}
+	if _, err := st.CancelMove("acme", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := st.Get("acme"); record.Node != "node-1" || record.MoveTo != "" {
+		t.Fatalf("after the undo: %+v", record)
+	}
+	// Expired, and taken by another operation: refused too, from the
+	// start.
+	old, err := st.TakeLease("balance", "", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(LeaseTTL)
+	if _, err := st.TakeLease("reboot", "node node-1", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartMoveFenced("acme", "nbg-1", "alice", Fence{Lease: old.ID}); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("a move under an expired lease: %v", err)
+	}
+	// Unexpired but past its time as the step is written: refused.
+	current := st.Lease()
+	now = current.Expires
+	if _, err := st.StartMoveFenced("acme", "nbg-1", "bob", Fence{Lease: current.ID}); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("a move at its lease's expiry: %v", err)
+	}
+	// A node's removal under a lost lease is refused alike.
+	if err := st.RemoveNodeFenced("hel-1", "alice", Fence{Lease: old.ID}); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("a removal under a lost lease: %v", err)
+	}
+}
+
+// The batch of a fenced write checks the lease itself as it is applied:
+// on a node where the lease is no longer that one, every node refuses it
+// alike.
+func TestAFencedBatchChecksTheLeaseAsItIsApplied(t *testing.T) {
+	st := movingStore(t)
+	entries := logged(t, st)
+	lease, err := st.TakeLease("drain", "", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartMoveFenced("acme", "nbg-1", "alice", Fence{Lease: lease.ID}); err != nil {
+		t.Fatal(err)
+	}
+	fenced := (*entries)[len(*entries)-1]
+	if !strings.Contains(fenced.Statements[0].SQL, "NOT EXISTS (SELECT 1 FROM operation_lease") {
+		t.Fatalf("the fenced batch: %+v", fenced.Statements)
+	}
+	if _, err := st.CancelMove("acme", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.BreakLease(lease.ID, "root"); err != nil {
+		t.Fatal(err)
+	}
+	// The same batch, applied to the state as it is now.
+	fenced.Version = st.state.Load().version
+	if err := st.Apply(fenced); !Refused(err) {
+		t.Fatalf("a fenced batch of a broken lease applied: %v", err)
+	}
+	if record, _ := st.Get("acme"); record.MoveTo != "" {
+		t.Fatalf("after the refused batch: %+v", record)
+	}
+}
+
+// Moves under a lease follow the state, not the plan: a tenant no longer on
+// the node the operation planned it on is not moved, and a move whose
+// target a failover took out is not handed over; failover wins.
+func TestAFailoverWinsOverAMoveUnderALease(t *testing.T) {
+	st := movingStore(t)
+	lease, err := st.TakeLease("drain", "node nbg-1 to node-1", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartMoveFenced("acme", "nbg-1", "alice", Fence{Lease: lease.ID, From: "nbg-1"}); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "runs on node node-1 now, not on node nbg-1 where the operation planned it") {
+		t.Fatalf("a move of a tenant the plan placed elsewhere: %v", err)
+	}
+	fence := Fence{Lease: lease.ID, From: "node-1"}
+	if _, err := st.StartMoveFenced("acme", "hel-1", "alice", fence); err != nil {
+		t.Fatal(err)
+	}
+	// Its target is failed over while the data goes across: the move is
+	// cancelled, and stays so.
+	if _, err := st.FailOver("hel-1", "murder (failover)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.FinishMoveFenced("acme", "alice", fence); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "a failover of its node or its target cancels a move") {
+		t.Fatalf("a handover to a node failed over: %v", err)
+	}
+	if record, _ := st.Get("acme"); record.Node != "node-1" || record.MoveTo != "" {
+		t.Fatalf("after the failover: %+v", record)
+	}
+}

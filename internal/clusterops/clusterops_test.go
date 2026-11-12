@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -223,6 +224,12 @@ func (a *fakeAgent) List(context.Context) ([]api.Tenant, error) {
 }
 
 func (a *fakeAgent) Move(ctx context.Context, tenant, to string) (api.Tenant, error) {
+	return a.MoveFrom(ctx, tenant, "", to)
+}
+
+// MoveFrom refuses as the agent does: beside another operation's lease,
+// and a tenant that no longer runs where the plan had it.
+func (a *fakeAgent) MoveFrom(ctx context.Context, tenant, from, to string) (api.Tenant, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -233,6 +240,13 @@ func (a *fakeAgent) Move(ctx context.Context, tenant, to string) (api.Tenant, er
 	}
 	if a.failMove[tenant] {
 		return api.Tenant{}, &api.Error{Status: http.StatusConflict, Message: "the copy did not arrive"}
+	}
+	if from != "" {
+		for _, t := range a.tenants {
+			if t.Spec.Name == tenant && t.Node != from {
+				return api.Tenant{}, &api.Error{Status: http.StatusConflict, Message: fmt.Sprintf("conflicting change: tenant %s runs on node %s now, not on node %s where the operation planned it", tenant, t.Node, from)}
+			}
+		}
 	}
 	for i := range a.tenants {
 		if a.tenants[i].Spec.Name == tenant {
