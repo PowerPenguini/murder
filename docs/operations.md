@@ -666,10 +666,14 @@ long to be undone (create a tenant of the name again, archive it and
 customer who left for a year. The leader does it, and records it in the
 audit log as `backup.forgotten` of the tenant; a backup still locked (a
 shorter `forgetPurgedAfter`) stays and is tried again at each hourly run.
-Only a purge the state records lets backups go: a tenant missing from the
-state with none recorded (a state put back from a copy older than the
-tenant, say) keeps its backups, thinned out, and so do backups made after
-the purge, which the logs then name. Archived tenants, still in the state,
+Only a purge the state records lets backups go, and only while no tenant
+of the name is in the state, archived or not: a name used again keeps
+every backup. A tenant missing from the state with no purge recorded (a
+state put back from a copy older than the tenant, say) keeps its
+backups, thinned out. A backup's time is the clock of the node that made
+it, so one stamped later than 10 minutes before the purge may be of a
+tenant of the name made since: it stays, thinned out, with every one
+after it, and the logs name it. Archived tenants, still in the state,
 and the copies of the state keep theirs as ever. `murder backups forget
 TENANT -yes` deletes a purged tenant's backups at once (in production, once
 their locks end). Use one bucket per cluster, or per node without a

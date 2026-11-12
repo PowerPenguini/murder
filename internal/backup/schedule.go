@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -94,6 +95,9 @@ type Scheduler struct {
 	// running is held by a run or a replacement.
 	running  chan struct{}
 	verified time.Time
+	// keptNew is, for each purged tenant whose newest backups are kept as
+	// perhaps a new tenant's, the purge that was said, so it is said once.
+	keptNew map[string]time.Time
 
 	setUp        func() (*Backups, error)
 	identityFile string
@@ -135,7 +139,7 @@ func NewScheduler(c SchedulerConfig) *Scheduler {
 	}
 	return &Scheduler{
 		state: c.State, leader: leader, every: c.Every, verify: c.VerifyEvery, log: c.Log, exclusive: c.Exclusive, hold: c.Hold,
-		running: make(chan struct{}, 1), last: map[string]time.Time{}, failing: map[string]bool{}, why: map[string]string{},
+		running: make(chan struct{}, 1), keptNew: map[string]time.Time{}, last: map[string]time.Time{}, failing: map[string]bool{}, why: map[string]string{},
 		identityFile: c.IdentityFile, setUp: c.SetUp,
 	}
 }
@@ -478,28 +482,29 @@ func (a *Scheduler) pruneGone(ctx context.Context) {
 	}
 }
 
-// forgetPurged deletes every backup of a tenant not in the state, once it
-// was purged long enough ago, and records in the audit log what went. It
-// reports whether it tried, so the backups are not thinned out besides.
+// forgetPurged deletes the backups of a purged tenant, once it was purged
+// long enough ago, and records in the audit log what went. It reports
+// whether it left nothing for pruneGone to thin out.
 //
-// Only a purge recorded in the state lets backups go: a tenant missing
-// from the state with none, as after the state was put back from a copy
-// older than the tenant, may have no data but its backups. Nor do backups
-// made after the purge go, of a tenant of the same name the state does not
-// know; neither should be, and both are said. A backup still locked stays,
-// and is tried again next run: its lock ends before long, as the newest a
-// purged tenant keeps is locked for LockFor at most.
+// Purged means two things at once: no tenant of the name in the state,
+// archived or not, and a purge of it recorded. A tenant missing from the
+// state with no purge, as after the state was put back from a copy older
+// than the tenant, may have no data but its backups: they stay. A name
+// can be used again after its purge, and a backup's time is the clock of
+// the node that made it, which may run behind: so the state is read again
+// just before anything goes, and a backup stamped later than the purge
+// less clockSkew may be a new tenant's. It stays, with every backup after
+// it, thinned out as any, and said once; murder backups forget deletes
+// them. A backup still locked stays, and is tried again next run: its lock
+// ends before long, as the newest a purged tenant keeps is locked for
+// LockFor at most.
 func (a *Scheduler) forgetPurged(ctx context.Context, name string) bool {
 	purged, err := a.state.PurgedAt(name)
 	if err != nil {
 		a.log.Warn("find when a tenant was purged", "tenant", name, "error", err)
 		return false
 	}
-	if purged.IsZero() {
-		return false
-	}
-	after := a.backups.Policy.forgetPurged()
-	if a.backups.now().Sub(purged) < after {
+	if purged.IsZero() || a.backups.now().Sub(purged) < a.backups.Policy.forgetPurged() {
 		return false
 	}
 	list, err := a.backups.List(ctx, name)
@@ -507,15 +512,32 @@ func (a *Scheduler) forgetPurged(ctx context.Context, name string) bool {
 		a.log.Warn("list the backups of a purged tenant", "tenant", name, "error", err)
 		return true
 	}
-	if len(list) == 0 {
+	// The first backup that may be of a tenant of the name made since.
+	kept := len(list)
+	for i, backup := range list {
+		if backup.At.After(purged.Add(-clockSkew)) {
+			kept = i
+			break
+		}
+	}
+	if kept < len(list) && !a.keptNew[name].Equal(purged) {
+		a.keptNew[name] = purged
+		a.log.Warn("a purged tenant has backups made about or after its purge, which may be of a tenant of the name made since: they are kept, thinned out, and murder backups forget deletes them",
+			"tenant", name, "purged", purged, "first", list[kept].Key)
+	}
+	doomed := list[:kept]
+	if len(doomed) == 0 {
+		return kept == len(list)
+	}
+	// Read again just before: a tenant of the name created since the list
+	// pruneGone read keeps every backup.
+	if _, err := a.state.Get(name); !errors.Is(err, store.ErrNotFound) {
+		if err != nil {
+			a.log.Warn("check that a purged tenant is still gone", "tenant", name, "error", err)
+		}
 		return true
 	}
-	if newest := list[len(list)-1]; newest.At.After(purged) {
-		a.log.Warn("a purged tenant has backups made after its purge, which the state knows nothing of: they are kept, and murder backups forget deletes them",
-			"tenant", name, "purged", purged, "newest", newest.Key)
-		return false
-	}
-	deleted, err := a.backups.Forget(ctx, name)
+	deleted, err := a.backups.Delete(ctx, doomed)
 	if deleted > 0 {
 		a.log.Info("deleted the backups of a purged tenant", "tenant", name, "purged", purged, "deleted", deleted, "of", len(list))
 		detail := fmt.Sprintf("%d of %d backups deleted, the tenant purged %s", deleted, len(list), purged.UTC().Format(time.RFC3339))
@@ -526,8 +548,12 @@ func (a *Scheduler) forgetPurged(ctx context.Context, name string) bool {
 	if err != nil {
 		a.log.Warn("some backups of a purged tenant are not deleted yet, locked perhaps; trying again next run", "tenant", name, "error", err)
 	}
-	return true
+	return kept == len(list)
 }
+
+// clockSkew is how far a node's clock may run behind another's: a backup
+// stamped within it before a purge may have been made after it.
+const clockSkew = 10 * time.Minute
 
 // forgottenAction is the audit log's event of a purged tenant's backups
 // deleted.

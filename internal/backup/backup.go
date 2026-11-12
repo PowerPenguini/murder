@@ -561,6 +561,12 @@ func (b *Backups) Forget(ctx context.Context, tenant string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	return b.Delete(ctx, backups)
+}
+
+// Delete deletes the backups given. In production, those still locked
+// stay until their locks end, and each is reported as an error.
+func (b *Backups) Delete(ctx context.Context, backups []Backup) (int, error) {
 	deleted := 0
 	var errs []error
 	for _, backup := range backups {
