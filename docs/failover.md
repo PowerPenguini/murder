@@ -221,8 +221,10 @@ dead. Then the leader:
    up to 4 tenants at once. Each promoted tenant is held, as during a move:
    every edge holds its requests until its new node finds it healthy and
    lets them through, so none fails while the app starts. A tenant that
-   runs but is still not healthy after 2 minutes gets its requests all
-   the same. The images are on the node already: a node pulls ahead the
+   is still not healthy 2 minutes after its new node first found it held
+   gets its requests all the same, whether it runs or never started, so
+   held requests never wait for ever nor take up the places every edge
+   has for them. The images are on the node already: a node pulls ahead the
    image of every tenant whose copy it keeps, and its sweep of unused
    images leaves them.
 
@@ -325,7 +327,11 @@ cluster:
     away with the shortest delays;
   - on the replica's node: tenants starting side by side, images pulled
     ahead and kept, a failed-over tenant held until healthy, 2 minutes at
-    most;
+    most, whether it runs or never starts;
+  - on an in-process cluster of three nodes with real Raft and a fake
+    provider: a node stops, the leader powers it off, waits for the
+    settle, and promotes its tenants, which every other node then sees
+    held on their replicas' nodes;
   - the restart-policy update;
   - the first pass waiting for catch-up.
 - **On 3 Hetzner servers**, with a client writing a counter to a tenant and

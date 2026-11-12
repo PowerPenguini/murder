@@ -50,9 +50,12 @@ const healthChecks = 16
 const tenantSteps = 4
 
 // heldMax is how long requests for a tenant that moved or failed over here
-// wait for it to be healthy. An app that never passes its health check,
-// though it runs, then gets them: it may well serve, and requests that
-// wait for ever serve nothing.
+// wait for it to be healthy. After that they go to it as they would to any
+// tenant: an app that runs but never passes its health check may well
+// serve, and one that never starts (its image missing, its start failing)
+// answers them with an error at once. Requests held for ever serve
+// nothing, and take the places every edge has for held requests
+// (edge.MaxHeld), which all tenants share.
 const heldMax = 2 * time.Minute
 
 // A tenant that moved here, whose requests wait for it, is checked every
@@ -455,8 +458,8 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		byName[record.Spec.Name] = Status{Phase: PhaseMoving, Message: "moving to node " + record.MoveTo, Generation: record.Generation, CheckedAt: time.Now().UTC()}
 	}
 	// A tenant that moved or failed over here is served once it is
-	// healthy: until then, requests for it wait, heldMax at most once it
-	// runs.
+	// healthy: until then, requests for it wait, heldMax at most from the
+	// pass that first found it held, whether or not it ever runs.
 	now, heldSince := time.Now(), map[string]time.Time{}
 	for i, record := range records {
 		if !record.MoveHeld || released[i] {
@@ -468,8 +471,8 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 			since = now
 		}
 		ready := statuses[i].Phase == PhaseRunning && statuses[i].Healthy || statuses[i].Phase == PhaseSuspended
-		if !ready && statuses[i].Phase == PhaseRunning && now.Sub(since) >= heldMax {
-			r.log.Warn("a tenant that moved or failed over here is not healthy yet; its requests no longer wait for it", "tenant", name, "held", now.Sub(since).Round(time.Second))
+		if !ready && now.Sub(since) >= heldMax {
+			r.log.Warn("a tenant that moved or failed over here is not healthy yet; its requests no longer wait for it", "tenant", name, "phase", statuses[i].Phase, "held", now.Sub(since).Round(time.Second))
 			ready = true
 		}
 		if !ready {

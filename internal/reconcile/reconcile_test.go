@@ -2602,3 +2602,28 @@ func TestAHeldTenantIsServedAfterAWhileAnyway(t *testing.T) {
 		t.Fatalf("held since: %v", f.reconciler.heldSince)
 	}
 }
+
+// Nor does a tenant that never starts at all, say as its start keeps
+// failing, keep its requests, and the places of the edges' held requests,
+// for ever.
+func TestAHeldTenantThatNeverStartsIsServedAfterAWhileAnyway(t *testing.T) {
+	f := newFixture(t)
+	f.runtime.failStart = errors.New("the engine refuses")
+	movedHere(t, f, "broken")
+	_ = f.reconciler.Reconcile(context.Background())
+	if status, _ := f.reconciler.Status("broken"); status.Phase != PhaseFailed {
+		t.Fatalf("broken = %+v", status)
+	}
+	if record, _ := f.store.Get("broken"); !record.MoveHeld {
+		t.Fatal("served at once, though it never started")
+	}
+	since, ok := f.reconciler.heldSince["broken"]
+	if !ok {
+		t.Fatal("the hold of a tenant that does not run is not timed")
+	}
+	f.reconciler.heldSince["broken"] = since.Add(-heldMax)
+	_ = f.reconciler.Reconcile(context.Background())
+	if record, _ := f.store.Get("broken"); record.MoveHeld {
+		t.Fatalf("still held after %s, though it never started", heldMax)
+	}
+}

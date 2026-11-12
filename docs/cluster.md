@@ -319,10 +319,22 @@ cluster:
 ```
 
 Shorter delays fail over sooner: `after: 15s` (and so `settle: 30s`) has
-tenants back about 30 s after their node's last answer. They cost
-something else, not safety: a node that stalls for longer than `after`,
-say a host that freezes under load, is powered off. A tenant runs
-elsewhere only once its old node is confirmed off, however short they are.
+tenants back about 30 s after their node's last answer. What they trade:
+
+- **Promotion still waits for the confirmed power-off**, however short
+  the delays. A tenant never runs elsewhere while the provider has not
+  reported its old node off.
+- **`settle` guards one case only:** a power-off confirmed for the wrong
+  machine. Then the "dead" node still runs its tenants, and if it answers
+  again before `settle` has passed since its last answer, its tenants
+  stay. After `settle`, they run twice.
+- **A shorter `after` shortens that window with it**, as `settle` is
+  twice `after` unless set. An operator who lowers either accepts a
+  shorter time for a wrongly powered-off node to show itself. The
+  defaults (30 s and 60 s) keep the window at 30 s after the node counts
+  as dead.
+- **A node that stalls for longer than `after`**, say a host that freezes
+  under load, is powered off.
 
 The leader never runs a tenant elsewhere unless the old node is confirmed
 off, so no tenant ever runs twice. When the power-off cannot be confirmed
