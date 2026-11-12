@@ -1727,6 +1727,23 @@ func (s *SQLite) Forget(name, actor string) error {
 	return err
 }
 
+// PurgedAt is when a tenant of the name was last purged, or the zero time
+// if none was: the purge's event is all that is left of it, the tenant's
+// row gone. A tenant created again since is not purged, which the caller
+// checks against the tenants it lists.
+func (s *SQLite) PurgedAt(name string) (time.Time, error) {
+	var at string
+	err := s.db.QueryRow(`SELECT at FROM events WHERE tenant = ? AND action = 'tenant.purged' AND id <= ? ORDER BY id DESC LIMIT 1`,
+		name, s.state.Load().lastEvent).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parseTime(at), nil
+}
+
 func (s *SQLite) Events(query EventQuery) ([]Event, error) {
 	limit := query.Limit
 	if limit <= 0 || limit > 1000 {

@@ -36,9 +36,10 @@ const backupsUsage = `Usage: murder backups <command> [arguments]
                               TIME (RFC 3339); what it had is kept aside
   state [-at TIME] -identity F -out FILE [-offline]
                               write a copy of the cluster's state
-  forget TENANT -yes          delete every backup of a purged tenant (in
+  forget TENANT -yes          delete every backup of a purged tenant now (in
                               production, those locked stay until their
-                              locks end)
+                              locks end); the leader does it by itself
+                              backups.forgetPurgedAfter after the purge
 
 verify, restore, state and forget take -reason TEXT and -ticket REF: each is
 recorded in the access register through the agent before a backup is read
@@ -386,6 +387,7 @@ func newBackups(cfg config.Agent) (*backup.Backups, *backup.S3, error) {
 	policy := backup.Policy{
 		Mode: backup.Mode(b.Mode), KeepHourly: b.KeepHourly.Duration, KeepDaily: b.KeepDaily.Duration,
 		KeepMonthly: b.KeepMonthly.Duration, LockFor: b.LockFor.Duration, KeepLocal: b.KeepLocal,
+		ForgetPurged: b.ForgetPurgedAfter.Duration,
 	}
 	if err := policy.Validate(); err != nil {
 		return nil, nil, err

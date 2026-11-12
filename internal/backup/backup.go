@@ -46,6 +46,10 @@ type Policy struct {
 	// KeepLocal is how many backup snapshots each tenant keeps on its node,
 	// to go back to in a moment.
 	KeepLocal int
+	// ForgetPurged is how long after a tenant's purge every backup of it is
+	// deleted, the newest too; zero is KeepDaily. Until then a purge done
+	// by mistake can still be undone from the bucket.
+	ForgetPurged time.Duration
 }
 
 // Validate checks the policy against its mode.
@@ -65,10 +69,26 @@ func (p Policy) Validate() error {
 	default:
 		return fmt.Errorf("backup mode %q: test or production", p.Mode)
 	}
+	if p.ForgetPurged < 0 {
+		return errors.New("backups of purged tenants cannot be forgotten before their purge")
+	}
 	if p.KeepHourly <= 0 || p.KeepDaily < p.KeepHourly || p.KeepMonthly < p.KeepDaily || p.KeepLocal < 1 {
 		return errors.New("backups need keepHourly, keepDaily (at least keepHourly), keepMonthly (at least keepDaily) and keepLocal (at least 1)")
 	}
 	return nil
+}
+
+// forgetPurged is how long after its purge a tenant's backups are deleted.
+// KeepDaily by default: a purged tenant's newest backup, the one the
+// thinning keeps, was locked for at most LockFor, which is at most
+// KeepDaily, so by then every lock has ended and nothing is tried in vain;
+// and it is as long as a daily backup of a tenant still here is kept.
+// KeepMonthly would keep the data of a customer who left for a year.
+func (p Policy) forgetPurged() time.Duration {
+	if p.ForgetPurged > 0 {
+		return p.ForgetPurged
+	}
+	return p.KeepDaily
 }
 
 // lockFor is how long a backup taken at, the first of its day or not, is

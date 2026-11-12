@@ -658,9 +658,22 @@ each day for 30 days, the first of each month for a year (`keepHourly`,
 `keepDaily`, `keepMonthly`). The newest backup of a tenant always stays,
 however old, so backups that keep failing never cost the last one that
 worked. A purged tenant's backups are thinned out the same way, down to that
-newest one; `murder backups forget TENANT -yes` deletes the rest (in
-production, once their locks end). Use one bucket per cluster, or per node
-without a cluster: backups are kept by tenant name.
+newest one, and then deleted, every one, once `forgetPurgedAfter` has passed
+since the purge (`keepDaily` by default, 30 days). By then the lock of each
+has ended (no lock outlasts `keepDaily`), and a purge done by mistake had as
+long to be undone (create a tenant of the name again, archive it and
+`murder backups restore` it) as a daily backup is kept; `keepMonthly` would keep the data of a
+customer who left for a year. The leader does it, and records it in the
+audit log as `backup.forgotten` of the tenant; a backup still locked (a
+shorter `forgetPurgedAfter`) stays and is tried again at each hourly run.
+Only a purge the state records lets backups go: a tenant missing from the
+state with none recorded (a state put back from a copy older than the
+tenant, say) keeps its backups, thinned out, and so do backups made after
+the purge, which the logs then name. Archived tenants, still in the state,
+and the copies of the state keep theirs as ever. `murder backups forget
+TENANT -yes` deletes a purged tenant's backups at once (in production, once
+their locks end). Use one bucket per cluster, or per node without a
+cluster: backups are kept by tenant name.
 
 ```yaml
 backups:

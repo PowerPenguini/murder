@@ -63,6 +63,17 @@ type fakeState struct {
 	dir       string
 	snapshots []string
 	stale     []string
+	// purged is when each tenant was purged; notes are the audit log's
+	// events recorded, "tenant action: detail".
+	purged map[string]time.Time
+	notes  []string
+}
+
+func (s *fakeState) PurgedAt(name string) (time.Time, error) { return s.purged[name], nil }
+
+func (s *fakeState) NoteTenant(tenant, action, detail, _ string) error {
+	s.notes = append(s.notes, tenant+" "+action+": "+detail)
+	return nil
 }
 
 func (s *fakeState) ReplicaStale(name, why, _ string) error {
@@ -222,6 +233,102 @@ func TestBackupsOfPurgedTenantsAreThinnedOut(t *testing.T) {
 	list, _ := f.backups.List(context.Background(), "gone")
 	if len(list) == 0 || len(list) >= 3 || !list[len(list)-1].At.Equal(f.clock.Add(-100*24*time.Hour-time.Hour)) {
 		t.Fatalf("backups of a purged tenant: %v", list)
+	}
+}
+
+// Once the policy's time after its purge has passed, every backup of a
+// purged tenant goes, the newest too, and the audit log says so; before,
+// they are thinned out as any. A locked backup stays, tried again next run.
+// A tenant gone with no purge recorded, an archived tenant and the state
+// keep theirs.
+func TestBackupsOfPurgedTenantsAreForgotten(t *testing.T) {
+	f := newFixture(t, Production)
+	f.backups.Policy.ForgetPurged = 10 * 24 * time.Hour
+	f.store.locked = true
+	archived := record("archived", "n1")
+	archived.ArchivedAt = f.clock
+	state := &fakeState{node: "n1", dir: t.TempDir(), records: []store.Record{record("gone", "n1"), record("lost", "n1"), archived}}
+	for _, name := range []string{"gone", "lost", "archived"} {
+		f.volumes.write(t, name, "db", name)
+	}
+	s := newScheduler(state, func() (*Backups, error) { return f.backups, nil }, nil)
+	for range 3 {
+		if _, err := s.RunNow(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.volumes.write(t, "archived", "db", f.clock.String())
+		f.clock = f.clock.Add(time.Hour)
+	}
+	// gone is purged; lost leaves the state with no purge recorded, as
+	// after the state was put back from a copy older than it.
+	state.records = []store.Record{archived}
+	state.purged = map[string]time.Time{"gone": f.clock}
+	count := func(tenant string) int {
+		list, err := f.backups.List(context.Background(), tenant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(list)
+	}
+	// Before its time, they are thinned out as any: the first of the day
+	// stays, locked, and the newest.
+	f.clock = f.clock.Add(5 * 24 * time.Hour)
+	if _, err := s.RunNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if count("gone") != 2 || len(state.notes) != 0 {
+		t.Fatalf("forgotten before its time: %d left, %v", count("gone"), state.notes)
+	}
+	// Past its time, the newest goes, whose lock ended; the first of the
+	// day is locked for LockFor, 30 days, and stays to be tried again.
+	f.clock = f.clock.Add(6 * 24 * time.Hour)
+	if _, err := s.RunNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if count("gone") != 1 || len(state.notes) != 1 || !strings.HasPrefix(state.notes[0], "gone backup.forgotten: 1 of 2 backups deleted") {
+		t.Fatalf("one still locked: %d left, %v", count("gone"), state.notes)
+	}
+	if _, err := s.RunNow(context.Background()); err != nil || count("gone") != 1 || len(state.notes) != 1 {
+		t.Fatalf("tried again while locked: %v, %d left, %v", err, count("gone"), state.notes)
+	}
+	// Once its lock ends, it goes too.
+	f.clock = f.clock.Add(30 * 24 * time.Hour)
+	if _, err := s.RunNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if count("gone") != 0 || len(state.notes) != 2 || !strings.HasPrefix(state.notes[1], "gone backup.forgotten: 1 of 1 backups deleted") {
+		t.Fatalf("after the lock: %d left, %v", count("gone"), state.notes)
+	}
+	if count("lost") == 0 || count("archived") == 0 {
+		t.Fatalf("lost %d, archived %d", count("lost"), count("archived"))
+	}
+	if states, _ := f.backups.States(context.Background()); len(states) == 0 {
+		t.Fatal("the state's backups went")
+	}
+	// Nothing more is said once nothing is left.
+	if _, err := s.RunNow(context.Background()); err != nil || len(state.notes) != 2 {
+		t.Fatalf("again: %v, %v", err, state.notes)
+	}
+}
+
+// Backups of a purged tenant's name made after its purge, which the
+// state knows nothing of, stay.
+func TestBackupsAfterAPurgeStay(t *testing.T) {
+	f := newFixture(t, Test)
+	state := &fakeState{node: "n1", dir: t.TempDir(), records: []store.Record{record("gone", "n1")}}
+	f.volumes.write(t, "gone", "db", "v1")
+	s := newScheduler(state, func() (*Backups, error) { return f.backups, nil }, nil)
+	if _, err := s.RunNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state.records = nil
+	state.purged = map[string]time.Time{"gone": f.clock.Add(-time.Hour)}
+	f.clock = f.clock.Add(100 * 24 * time.Hour)
+	if _, err := s.RunNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := f.backups.List(context.Background(), "gone"); len(list) != 1 || len(state.notes) != 0 {
+		t.Fatalf("a backup after the purge: %v, %v", list, state.notes)
 	}
 }
 

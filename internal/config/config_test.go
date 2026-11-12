@@ -148,7 +148,8 @@ func TestBackupsFitTheirMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if test.Backups.LockFor.Duration != 0 || test.Backups.Every.Duration != time.Hour || test.Backups.KeepHourly.Duration != 48*time.Hour || test.Backups.KeepLocal != 24 {
+	if test.Backups.LockFor.Duration != 0 || test.Backups.Every.Duration != time.Hour || test.Backups.KeepHourly.Duration != 48*time.Hour || test.Backups.KeepLocal != 24 ||
+		test.Backups.ForgetPurgedAfter.Duration != 30*24*time.Hour {
 		t.Fatalf("test backups = %+v", test.Backups)
 	}
 	production, err := Parse([]byte(base + "  mode: production\n"))
@@ -159,7 +160,7 @@ func TestBackupsFitTheirMode(t *testing.T) {
 		t.Fatalf("production backups = %+v", production.Backups)
 	}
 	week, err := Parse([]byte(base + "  mode: production\n  keepDaily: 168h\n"))
-	if err != nil || week.Backups.LockFor.Duration != 168*time.Hour {
+	if err != nil || week.Backups.LockFor.Duration != 168*time.Hour || week.Backups.ForgetPurgedAfter.Duration != 168*time.Hour {
 		t.Fatalf("the default lock with daily backups kept a week: %+v, %v", week.Backups, err)
 	}
 	endpoint := func(value string) string {
@@ -172,6 +173,7 @@ func TestBackupsFitTheirMode(t *testing.T) {
 		"another mode":            {base + "  mode: maybe\n", "mode must be"},
 		"negative verifyEvery":    {base + "  mode: test\n  verifyEvery: -1h\n", "verifyEvery"},
 		"verifyEvery below every": {base + "  mode: test\n  every: 2h\n  keepHourly: 48h\n  verifyEvery: 1h\n", "verifyEvery"},
+		"negative forget":         {base + "  mode: test\n  forgetPurgedAfter: -1h\n", "forgetPurgedAfter"},
 		"plain http":              {endpoint("http://hel1.your-objectstorage.com"), "endpoint"},
 		"no host":                 {endpoint("https://"), "endpoint"},
 		"a path":                  {endpoint("https://hel1.your-objectstorage.com/bucket"), "endpoint"},

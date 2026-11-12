@@ -26,6 +26,11 @@ type State interface {
 	SnapshotFile() (string, error)
 	// ReplicaStale records that a tenant's copy no longer matches its data.
 	ReplicaStale(name, why, actor string) error
+	// PurgedAt is when a tenant of the name was last purged; the zero time
+	// if none was.
+	PurgedAt(name string) (time.Time, error)
+	// NoteTenant records an event of a tenant's in the audit log.
+	NoteTenant(tenant, action, detail, actor string) error
 }
 
 // Result is how backing up one tenant, or the cluster's state, went.
@@ -445,8 +450,9 @@ func (a *Scheduler) backUpState(ctx context.Context) Result {
 	return result
 }
 
-// pruneGone thins out the backups of purged tenants as any others, down
-// to the newest, which stays until murder backups forget.
+// pruneGone thins out the backups of tenants no longer in the state as any
+// others, down to the newest; and deletes every backup of a purged one,
+// the newest too, once the policy's time after its purge has passed.
 func (a *Scheduler) pruneGone(ctx context.Context) {
 	names, err := a.backups.Tenants(ctx)
 	if err != nil {
@@ -461,6 +467,9 @@ func (a *Scheduler) pruneGone(ctx context.Context) {
 		if known[name] {
 			continue
 		}
+		if a.forgetPurged(ctx, name) {
+			continue
+		}
 		if deleted, err := a.backups.Prune(ctx, name); err != nil {
 			a.log.Warn("delete old backups of a purged tenant", "tenant", name, "error", err)
 		} else if deleted > 0 {
@@ -468,6 +477,61 @@ func (a *Scheduler) pruneGone(ctx context.Context) {
 		}
 	}
 }
+
+// forgetPurged deletes every backup of a tenant not in the state, once it
+// was purged long enough ago, and records in the audit log what went. It
+// reports whether it tried, so the backups are not thinned out besides.
+//
+// Only a purge recorded in the state lets backups go: a tenant missing
+// from the state with none, as after the state was put back from a copy
+// older than the tenant, may have no data but its backups. Nor do backups
+// made after the purge go, of a tenant of the same name the state does not
+// know; neither should be, and both are said. A backup still locked stays,
+// and is tried again next run: its lock ends before long, as the newest a
+// purged tenant keeps is locked for LockFor at most.
+func (a *Scheduler) forgetPurged(ctx context.Context, name string) bool {
+	purged, err := a.state.PurgedAt(name)
+	if err != nil {
+		a.log.Warn("find when a tenant was purged", "tenant", name, "error", err)
+		return false
+	}
+	if purged.IsZero() {
+		return false
+	}
+	after := a.backups.Policy.forgetPurged()
+	if a.backups.now().Sub(purged) < after {
+		return false
+	}
+	list, err := a.backups.List(ctx, name)
+	if err != nil {
+		a.log.Warn("list the backups of a purged tenant", "tenant", name, "error", err)
+		return true
+	}
+	if len(list) == 0 {
+		return true
+	}
+	if newest := list[len(list)-1]; newest.At.After(purged) {
+		a.log.Warn("a purged tenant has backups made after its purge, which the state knows nothing of: they are kept, and murder backups forget deletes them",
+			"tenant", name, "purged", purged, "newest", newest.Key)
+		return false
+	}
+	deleted, err := a.backups.Forget(ctx, name)
+	if deleted > 0 {
+		a.log.Info("deleted the backups of a purged tenant", "tenant", name, "purged", purged, "deleted", deleted, "of", len(list))
+		detail := fmt.Sprintf("%d of %d backups deleted, the tenant purged %s", deleted, len(list), purged.UTC().Format(time.RFC3339))
+		if noted := a.state.NoteTenant(name, forgottenAction, detail, "murder"); noted != nil {
+			a.log.Error("record the deletion of a purged tenant's backups in the audit log", "tenant", name, "detail", detail, "error", noted)
+		}
+	}
+	if err != nil {
+		a.log.Warn("some backups of a purged tenant are not deleted yet, locked perhaps; trying again next run", "tenant", name, "error", err)
+	}
+	return true
+}
+
+// forgottenAction is the audit log's event of a purged tenant's backups
+// deleted.
+const forgottenAction = "backup.forgotten"
 
 // loadIdentity reads the identity verifications need, if not yet read;
 // one that cannot be read skips verifying, not backing up.
