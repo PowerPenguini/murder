@@ -347,8 +347,10 @@ func (f *fakeRuntime) takeEvents() []string {
 }
 
 // fakeVolumes records snapshots and keeps directories below a temp root.
+// A pass reconciles tenants side by side: mu guards what it records.
 type fakeVolumes struct {
 	volume.Dir
+	mu sync.Mutex
 	// runtime, if set, logs snapshots among the container events.
 	runtime   *fakeRuntime
 	destroyed []string
@@ -371,19 +373,24 @@ type fakeVolumes struct {
 func (f *fakeVolumes) LateMounts() bool { return true }
 
 func (f *fakeVolumes) Serving(context.Context, string, int) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	serving := !f.notServing
 	f.notServing = false
 	return serving, nil
 }
 
 func (f *fakeVolumes) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (string, error) {
+	f.mu.Lock()
 	if f.diskGB == nil {
 		f.diskGB = map[string]int{}
 	}
 	f.diskGB[tenant] = diskGB
+	limitErr := f.limitErr
+	f.mu.Unlock()
 	path, err := f.Dir.Ensure(ctx, tenant, uid, gid, diskGB)
 	if err == nil {
-		err = f.limitErr
+		err = limitErr
 	}
 	return path, err
 }
@@ -393,6 +400,8 @@ func (f *fakeVolumes) Snapshot(ctx context.Context, tenant, reason string) (stri
 }
 
 func (f *fakeVolumes) SnapshotImage(_ context.Context, tenant, reason, image string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.failSnapshot != nil {
 		return "", f.failSnapshot
 	}
@@ -414,6 +423,8 @@ func (f *fakeVolumes) SnapshotImage(_ context.Context, tenant, reason, image str
 }
 
 func (f *fakeVolumes) RestoreSnapshot(_ context.Context, tenant, reason, image string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var newest string
 	for _, name := range f.snapshots {
 		if strings.HasPrefix(name, tenant+"@murder-"+reason+"-") && !slices.Contains(f.destroyed, name) && image != "" && f.images[name] == image {
@@ -433,18 +444,24 @@ func (f *fakeVolumes) RestoreSnapshot(_ context.Context, tenant, reason, image s
 }
 
 func (f *fakeVolumes) DestroySnapshot(_ context.Context, tenant, snapshot string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.destroyed = append(f.destroyed, tenant+"@"+snapshot)
 	return nil
 }
 
 func (f *fakeVolumes) Prune(_ context.Context, tenant, reason string, keep int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.pruned = append(f.pruned, fmt.Sprintf("%s@%s keep %d", tenant, reason, keep))
 	return f.failPrune
 }
 
 func (f *fakeVolumes) PruneKeeping(ctx context.Context, tenant, reason string, keep int, image string) error {
 	if image != "" {
+		f.mu.Lock()
 		f.prunedKeeping = append(f.prunedKeeping, tenant+" "+image)
+		f.mu.Unlock()
 	}
 	return f.Prune(ctx, tenant, reason, keep)
 }
@@ -456,12 +473,16 @@ func (f *fakeVolumes) IsReplica(_ context.Context, tenant string) (bool, error) 
 }
 
 func (f *fakeVolumes) DropReplica(ctx context.Context, tenant string) error {
+	f.mu.Lock()
 	f.removed = append(f.removed, "copy "+tenant)
+	f.mu.Unlock()
 	return f.Dir.Remove(ctx, tenant)
 }
 
 func (f *fakeVolumes) Remove(ctx context.Context, tenant string) error {
+	f.mu.Lock()
 	f.removed = append(f.removed, tenant)
+	f.mu.Unlock()
 	return f.Dir.Remove(ctx, tenant)
 }
 

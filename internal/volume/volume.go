@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/spec"
@@ -294,9 +295,14 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (s
 		} else if len(replaced) > 0 {
 			return "", fmt.Errorf("tenant %s has no data, but a restore put its data aside in %s: rename it back to %s, or destroy it, first", tenant, strings.Join(replaced, ", "), dataset)
 		}
-		if _, err := z.Run(ctx, "zfs", "create", "-p",
+		// One create at a time: -p creates the parent if it is missing,
+		// and two tenants' creates side by side would both try to.
+		createMu.Lock()
+		_, err := z.Run(ctx, "zfs", "create", "-p",
 			"-o", "mountpoint="+mountpoint, "-o", "setuid=off", "-o", "devices=off",
-			"-o", "refquota="+refquota(diskGB), "-o", ownerProperty+"="+tenant, dataset); err != nil {
+			"-o", "refquota="+refquota(diskGB), "-o", ownerProperty+"="+tenant, dataset)
+		createMu.Unlock()
+		if err != nil {
 			return "", err
 		}
 		return mountpoint, chownIfNeeded(mountpoint, uid, gid)
@@ -330,6 +336,10 @@ func (z ZFS) Ensure(ctx context.Context, tenant string, uid, gid, diskGB int) (s
 	}
 	return mountpoint, limitErr
 }
+
+// createMu serializes the creation of tenants' datasets, which the
+// reconciler may ask for for several tenants at once.
+var createMu sync.Mutex
 
 func refquota(diskGB int) string {
 	if diskGB == 0 {
