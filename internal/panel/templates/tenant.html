@@ -120,10 +120,19 @@
 {{define "domains"}}{{$d := .}}{{$t := .Tenant}}
 <section id="domains">
   <div class="head"><h2>Domains</h2><span class="dim">its own host names, besides <span class="mono">{{$t.Host}}</span></span></div>
-  {{with $d.Review}}<div class="notices" id="domain-review">{{if .Remove}}
+  {{with $d.Review}}<div class="notices" id="domain-review">{{if .Primary}}
+    <div class="nrow" role="status">{{if .Name}}
+      <p class="nhead"><strong>Make <span class="mono">{{.Name}}</span> {{$t.Spec.Name}}'s canonical host?</strong></p>
+      <p class="hint">Requests for its other hosts are redirected there, path and query kept (308, permanent: browsers remember it). A domain takes them once it has its certificate; until then every host serves {{$t.Spec.Name}} as before. Challenges for certificates are answered on every host all the same.</p>{{else}}
+      <p class="nhead"><strong>Stop redirecting to <span class="mono">{{$t.Canonical}}</span>?</strong></p>
+      <p class="hint">Each host serves {{$t.Spec.Name}} again. Browsers that followed the redirect may remember it until their cache is cleared.</p>{{end}}
+      <form method="post" action="/tenants/{{$t.Spec.Name}}" class="row spaced"><input type="hidden" name="do" value="domain-primary"><input type="hidden" name="domain" value="{{.Name}}">
+        <button type="submit" class="primary">{{if .Name}}Make {{.Name}} canonical{{else}}Stop redirecting{{end}}</button> <a href="/tenants/{{$t.Spec.Name}}#domains">Cancel</a>
+      </form>
+    </div>{{else if .Remove}}
     <div class="nrow" role="status">
       <p class="nhead"><strong>Remove <span class="mono">{{.Name}}</span> from {{$t.Spec.Name}}?</strong></p>
-      <p class="hint">Requests for it are answered 404 at once, on every node, and its certificate is dropped: adding it back orders a new one. {{$t.Spec.Name}} stays at <span class="mono">{{$t.Host}}</span>. Type the domain to confirm.</p>
+      <p class="hint">Requests for it are answered 404 at once, on every node, and the leader revokes its certificate with the CA: adding it back orders a new one. {{$t.Spec.Name}} stays at <span class="mono">{{$t.Host}}</span>. Type the domain to confirm.</p>
       <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="domain-remove"><input type="hidden" name="domain" value="{{.Name}}">
         <input type="text" name="confirm" placeholder="{{.Name}}" data-confirm="{{.Name}}" aria-label="type {{.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
         <div class="row"><button type="submit" class="danger">Remove {{.Name}}</button> <a href="/tenants/{{$t.Spec.Name}}#domains">Keep it</a></div>
@@ -133,7 +142,7 @@
       <p class="nhead"><strong>Add <span class="mono">{{.Name}}</span> to {{$t.Spec.Name}}?</strong>{{with .Display}} <span class="dim">{{.}}</span>{{end}}</p>
       <p class="hint">At the domain's DNS provider, create:</p>
       <table class="kv"><tbody>{{range .Records}}<tr><td class="mono">{{.Name}} {{.Type}}</td><td class="mono">{{.Value}}</td></tr>{{end}}</tbody></table>
-      <p class="hint spaced">Once the cluster sees it point here, every node serves it as {{$t.Spec.Name}}, and the leader asks the CA for its certificate (over HTTP, port 80), which it renews 30 days before it expires. Nothing is stored until you add it.</p>
+      <p class="hint spaced">Once the cluster sees it point here, every node serves it as {{$t.Spec.Name}}, and the leader asks the CA for its certificate (checked on port 80, or 443 where 80 is closed), which it renews 30 days before it expires. Nothing is stored until you add it.</p>
       <form method="post" action="/tenants/{{$t.Spec.Name}}" class="row spaced"><input type="hidden" name="do" value="domain-add"><input type="hidden" name="domain" value="{{.Name}}"><input type="hidden" name="reviewed" value="{{.Token}}">
         <button type="submit" class="primary">Add {{.Name}}</button> <a href="/tenants/{{$t.Spec.Name}}#domains">Cancel</a>
       </form>
@@ -145,7 +154,7 @@
     <tbody>
     {{range $d.Rows}}
       <tr>
-        <td class="l-main mono">{{.Name}}{{with .Display}} <span class="dim">{{.}}</span>{{end}}</td>
+        <td class="l-main mono">{{.Name}}{{with .Display}} <span class="dim">{{.}}</span>{{end}}{{if .Canonical}} <span class="st ok">canonical</span>{{end}}</td>
         <td class="l-sub" data-label="State"><span class="st {{.State.Kind}}">{{.State.Label}}</span>{{if or .Detail .Next}}<div class="small">{{if .Bad}}<span class="red-text-inline">{{.Detail}}</span>{{else}}<span class="dim">{{.Detail}}</span>{{end}}{{with .Next}} <span class="dim">· {{.}}</span>{{end}}</div>{{end}}</td>
         <td class="l-sub mono" data-label="DNS">{{range $i, $r := .Records}}{{if $i}}<br>{{end}}{{$r.Type}} {{$r.Value}}{{end}}</td>
         <td class="l-sub" data-label="Certificate">{{if .NotAfter.IsZero}}<span class="dim">none yet</span>{{else}}until {{.NotAfter.Format "2 Jan 2006"}}{{end}}</td>
@@ -154,6 +163,7 @@
             <summary aria-label="what to do with {{.Name}}">⋯</summary>
             <div class="pop acts">
               <form method="post" action="/tenants/{{$t.Spec.Name}}" class="stack"><input type="hidden" name="do" value="domain-check"><input type="hidden" name="domain" value="{{.Name}}"><button type="submit">Check its DNS now</button></form>
+              {{if not .Canonical}}<a href="/tenants/{{$t.Spec.Name}}?do=domain-primary&amp;domain={{.Name}}#domain-review">Make it canonical…</a>{{end}}
               <a href="/tenants/{{$t.Spec.Name}}?do=domain-remove&amp;domain={{.Name}}#domain-review">Remove…</a>
             </div>
           </details>
@@ -164,6 +174,8 @@
     {{end}}
     </tbody>
   </table>
+  {{if $t.Canonical}}<p class="hint spaced">Its other hosts redirect to <span class="mono">{{$t.Canonical}}</span>.{{if and $d.Acts (not $t.Archived)}} <a href="/tenants/{{$t.Spec.Name}}?do=domain-primary&amp;domain=#domain-review">Stop redirecting…</a>{{if ne $t.Canonical $t.Host}} · <a href="/tenants/{{$t.Spec.Name}}?do=domain-primary&amp;domain={{$t.Host}}#domain-review">Redirect to {{$t.Host}} instead…</a>{{end}}{{end}}</p>
+  {{else if and $d.Acts (not $t.Archived) $t.Domains}}<p class="hint spaced">Each host serves it. <a href="/tenants/{{$t.Spec.Name}}?do=domain-primary&amp;domain={{$t.Host}}#domain-review">Redirect its domains to {{$t.Host}}…</a></p>{{end}}
   {{if and $d.Acts (not $t.Archived) (not $d.Full)}}
   <form method="get" action="/tenants/{{$t.Spec.Name}}#domain-review" class="row spaced"><input type="hidden" name="do" value="domain-add">
     <label class="field">Add a domain <input type="text" name="domain" value="{{$d.Given}}" placeholder="app.customer.com" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"></label>

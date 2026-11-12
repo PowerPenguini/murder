@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -97,50 +98,13 @@ func followRoutes(ctx context.Context, client *api.Client, table *edge.LiveTable
 }
 
 func TestPebbleIssuesACertificateForATenantsDomain(t *testing.T) {
-	if _, err := os.Stat(dockerSocket()); err != nil {
-		t.Skipf("no Docker socket: %v", err)
-	}
-	for _, image := range []string{"ghcr.io/letsencrypt/pebble:latest", "ghcr.io/letsencrypt/pebble-challtestsrv:latest"} {
-		if output, err := exec.Command("docker", "image", "inspect", image).CombinedOutput(); err != nil {
-			if output, err = exec.Command("docker", "pull", "-q", image).CombinedOutput(); err != nil {
-				t.Skipf("no %s: %v\n%s", image, err, output)
-			}
-		}
-	}
+	needPebble(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	httpPort, httpsPort, acmePort, pebbleAdmin, dnsPort, dnsAdmin, tlsPort := freePort(t), freePort(t), freePort(t), freePort(t), freePort(t), freePort(t), freePort(t)
+	httpPort, httpsPort, tlsPort := freePort(t), freePort(t), freePort(t)
 
-	// DNS: every name leads to the loopback, where the edge listens; no
-	// IPv6, where it does not.
-	container(t, "ghcr.io/letsencrypt/pebble-challtestsrv:latest",
-		"-dnsserver", "127.0.0.1:"+strconv.Itoa(dnsPort), "-management", "127.0.0.1:"+strconv.Itoa(dnsAdmin),
-		"-http01", "", "-https01", "", "-tlsalpn01", "", "-doh", "", "-defaultIPv4", "127.0.0.1", "-defaultIPv6", "")
-	// The CA checks HTTP-01 challenges at the edge's port.
-	config := map[string]any{"pebble": map[string]any{
-		"listenAddress": "127.0.0.1:" + strconv.Itoa(acmePort), "managementListenAddress": "127.0.0.1:" + strconv.Itoa(pebbleAdmin),
-		"certificate": "test/certs/localhost/cert.pem", "privateKey": "test/certs/localhost/key.pem",
-		"httpPort": httpPort, "tlsPort": tlsPort, "ocspResponderURL": "", "externalAccountBindingRequired": false,
-		"retryAfter": map[string]int{"authz": 1, "order": 1}, "keyAlgorithm": "ecdsa",
-		"profiles": map[string]any{"default": map[string]any{"description": "90 days", "validityPeriod": 7776000}},
-	}}
 	dir := t.TempDir()
-	data, _ := json.Marshal(config)
-	if err := os.WriteFile(filepath.Join(dir, "pebble.json"), data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	container(t, "-v", dir+":/murder:ro", "-e", "PEBBLE_VA_NOSLEEP=1", "-e", "PEBBLE_WFE_NONCEREJECT=0", "-e", "PEBBLE_AUTHZREUSE=0",
-		"ghcr.io/letsencrypt/pebble:latest", "-config", "/murder/pebble.json", "-dnsserver", "127.0.0.1:"+strconv.Itoa(dnsPort))
-	// Pebble's own API speaks HTTPS with a test certificate.
-	insecure := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
-	directory := fmt.Sprintf("https://127.0.0.1:%d/dir", acmePort)
-	waitFor(t, "Pebble answers", func() error {
-		response, err := insecure.Get(directory)
-		if err == nil {
-			response.Body.Close()
-		}
-		return err
-	})
+	directory, pebbleAdmin, dnsPort, insecure := startPebble(t, dir, httpPort, tlsPort)
 
 	// A tenant on Docker, as the lifecycle test runs one.
 	tenant := "it-" + hex.EncodeToString(randomBytes(3))
@@ -303,6 +267,32 @@ func TestPebbleIssuesACertificateForATenantsDomain(t *testing.T) {
 	}
 	response.Body.Close()
 
+	// Made canonical, the tenant's own name redirects to it, over plain
+	// HTTP and HTTPS alike, and the domain itself is served.
+	if err := n.client.SetCanonical(ctx, tenant, name); err != nil {
+		t.Fatal(err)
+	}
+	insecureNoRedirect := &http.Client{Timeout: 10 * time.Second, CheckRedirect: noRedirect.CheckRedirect, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	waitFor(t, "the tenant's own name redirects to its canonical host", func() error {
+		for _, url := range []string{"http://127.0.0.1:" + strconv.Itoa(httpPort), "https://127.0.0.1:" + strconv.Itoa(httpsPort)} {
+			request, _ := http.NewRequest(http.MethodGet, url+"/info?x=1", nil)
+			request.Host = tenant + "." + baseDomain
+			response, err := insecureNoRedirect.Do(request)
+			if err != nil {
+				return err
+			}
+			response.Body.Close()
+			if response.StatusCode != http.StatusPermanentRedirect || response.Header.Get("Location") != "https://"+name+"/info?x=1" {
+				return fmt.Errorf("%s: %s to %q", url, response.Status, response.Header.Get("Location"))
+			}
+		}
+		return nil
+	})
+	if response, err = secure.Get("https://" + name + "/info"); err != nil || response.StatusCode != 200 {
+		t.Fatalf("the canonical host: %v %v", response, err)
+	}
+	response.Body.Close()
+
 	// A new leader renews it 30 days before it expires, with the
 	// cluster's account, which it reads from the state: the one before
 	// stopped leading.
@@ -337,6 +327,84 @@ func TestPebbleIssuesACertificateForATenantsDomain(t *testing.T) {
 		}
 		return nil
 	})
+
+	// The leader revokes its certificate with the CA, which says so.
+	second.Step(ctx)
+	if left := n.store.Revocations(); len(left) != 0 {
+		t.Fatalf("not revoked: %+v", left)
+	}
+	if events, _ := n.client.Events(ctx, store.EventQuery{Tenant: tenant, Limit: 1}); events[0].Action != "domain.revoked" {
+		t.Fatalf("events %+v", events)
+	}
+	block, _ := pem.Decode([]byte(renewed.Certificate))
+	revokedLeaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = insecure.Get(fmt.Sprintf("https://127.0.0.1:%d/cert-status-by-serial/%x", pebbleAdmin, revokedLeaf.SerialNumber))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(status), "Revoked") {
+		t.Fatalf("Pebble has the certificate as %s", status)
+	}
+}
+
+// needPebble skips a test without Docker or Pebble's images.
+func needPebble(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat(dockerSocket()); err != nil {
+		t.Skipf("no Docker socket: %v", err)
+	}
+	for _, image := range []string{"ghcr.io/letsencrypt/pebble:latest", "ghcr.io/letsencrypt/pebble-challtestsrv:latest"} {
+		if output, err := exec.Command("docker", "image", "inspect", image).CombinedOutput(); err != nil {
+			if output, err = exec.Command("docker", "pull", "-q", image).CombinedOutput(); err != nil {
+				t.Skipf("no %s: %v\n%s", image, err, output)
+			}
+		}
+	}
+}
+
+// startPebble runs pebble-challtestsrv, whose DNS leads every name to the
+// loopback, and Pebble, which checks HTTP-01 challenges at httpPort and
+// TLS-ALPN-01 ones at tlsPort of the loopback. It returns Pebble's
+// directory, its management port, the DNS server's port and a client for
+// Pebble's own API, which speaks HTTPS with a test certificate.
+func startPebble(t *testing.T, dir string, httpPort, tlsPort int) (string, int, int, *http.Client) {
+	t.Helper()
+	acmePort, pebbleAdmin, dnsPort, dnsAdmin := freePort(t), freePort(t), freePort(t), freePort(t)
+	// DNS: every name leads to the loopback, where the edge listens; no
+	// IPv6, where it does not.
+	container(t, "ghcr.io/letsencrypt/pebble-challtestsrv:latest",
+		"-dnsserver", "127.0.0.1:"+strconv.Itoa(dnsPort), "-management", "127.0.0.1:"+strconv.Itoa(dnsAdmin),
+		"-http01", "", "-https01", "", "-tlsalpn01", "", "-doh", "", "-defaultIPv4", "127.0.0.1", "-defaultIPv6", "")
+	config := map[string]any{"pebble": map[string]any{
+		"listenAddress": "127.0.0.1:" + strconv.Itoa(acmePort), "managementListenAddress": "127.0.0.1:" + strconv.Itoa(pebbleAdmin),
+		"certificate": "test/certs/localhost/cert.pem", "privateKey": "test/certs/localhost/key.pem",
+		"httpPort": httpPort, "tlsPort": tlsPort, "ocspResponderURL": "", "externalAccountBindingRequired": false,
+		"retryAfter": map[string]int{"authz": 1, "order": 1}, "keyAlgorithm": "ecdsa",
+		"profiles": map[string]any{"default": map[string]any{"description": "90 days", "validityPeriod": 7776000}},
+	}}
+	data, _ := json.Marshal(config)
+	if err := os.WriteFile(filepath.Join(dir, "pebble.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	container(t, "-v", dir+":/murder:ro", "-e", "PEBBLE_VA_NOSLEEP=1", "-e", "PEBBLE_WFE_NONCEREJECT=0", "-e", "PEBBLE_AUTHZREUSE=0",
+		"ghcr.io/letsencrypt/pebble:latest", "-config", "/murder/pebble.json", "-dnsserver", "127.0.0.1:"+strconv.Itoa(dnsPort))
+	// Pebble's own API speaks HTTPS with a test certificate.
+	insecure := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	directory := fmt.Sprintf("https://127.0.0.1:%d/dir", acmePort)
+	waitFor(t, "Pebble answers", func() error {
+		response, err := insecure.Get(directory)
+		if err == nil {
+			response.Body.Close()
+		}
+		return err
+	})
+
+	return directory, pebbleAdmin, dnsPort, insecure
 }
 
 func statusOf(t *testing.T, client *http.Client, url, host string) int {

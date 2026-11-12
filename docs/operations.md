@@ -413,6 +413,8 @@ sudo murder tenant domain add acme app.customer.com   # prints the DNS record to
 sudo murder tenant domain list acme                   # state, DNS record, certificate, why
 sudo murder tenant domain check acme app.customer.com # check its DNS now, after changing it
 sudo murder tenant domain remove acme app.customer.com -yes
+sudo murder tenant domain primary acme app.customer.com # redirect its other hosts there
+sudo murder tenant domain primary acme -none            # stop redirecting
 ```
 
 The panel's tenant page does the same (Domains). A name is kept in lower
@@ -448,12 +450,48 @@ for a name that does not point here: its rate limits count failures. Once
 it does, every edge routes the name to the tenant, exactly as its own
 name (moves, holds, 503s for a suspended tenant), and the leader orders
 its certificate from `edge.tls.ca` (Let's Encrypt by default) with the
-HTTP-01 challenge: every node's edge answers it on port 80, so the
-customer's DNS provider needs no API. The certificate is renewed 30 days
+HTTP-01 challenge on port 80 or the TLS-ALPN-01 challenge on port 443:
+every node's edge answers both, so the customer's DNS provider needs no
+API. The certificate is renewed 30 days
 before it expires; the old one is served until the new one is there. A
 failed order is tried again after 5 minutes, then less and less often,
 6 hours apart at most. Plain HTTP for a domain with its certificate goes
 to HTTPS; before it has one, port 80 answers 503.
+
+**Removing a domain.** `domain remove`, and purging the tenant, stop
+every edge routing the name at once and delete its certificate and key
+from the state, so nothing renews it. The certificate is kept, without
+its key, for the leader to revoke with the CA (reason: cessation of
+operation), signed with the cluster's account that ordered it: the CA
+then no longer vouches that the name is the tenant's. This is best
+effort. A failure is tried again after 5 minutes, then less and less
+often, five times in all; then the leader gives up and the certificate
+simply runs out. A certificate that expired meanwhile is only
+forgotten, and one the CA has revoked already counts as revoked. Each
+outcome is logged and in the audit log (`domain.revoked`,
+`domain.revoke-failed`, with the serial). A certificate from another CA
+than `edge.tls.ca` is set to now, or ordered while no CA was set,
+cannot be revoked this way.
+
+**One canonical host.** A tenant reachable at several names, such as
+`customer.com` and `www.customer.com`, or a domain and its own
+`acme.<baseDomain>`, can name one of them canonical with `domain primary`
+(or the panel's Domains box, after a review): one of its domains, or its
+own name below the base domain. Every edge then answers a request for
+any other host of the tenant with a 308 redirect to the canonical one,
+over HTTPS, with the same path and query; a 308 keeps the method and
+body, so a form posted to the old name is posted again. Plain HTTP goes
+straight to `https://<canonical>` in one redirect, so a name that only
+redirects needs no certificate of its own for plain HTTP; HTTPS to it
+does. Requests for `/.well-known/acme-challenge/` are answered before any
+redirect, so names that redirect still get and renew their certificates.
+A domain becomes canonical in effect only once the edges can serve it:
+once its DNS was checked and, with TLS, it has its certificate; until
+then every host serves the tenant as before, and nothing is sent where it
+would fail. `tenant show` has the host as `canonical`, `domain list`
+marks it. Removing the canonical domain removes the redirect. Browsers
+remember a permanent redirect: pick the canonical host before announcing
+the others.
 
 The states, in `domain list` and the panel: `verifying` (not checked yet),
 `pending` (its DNS does not point at the cluster, said why; with
@@ -462,7 +500,9 @@ The states, in `domain list` and the panel: `verifying` (not checked yet),
 until it expires) and `failed` (ordering it failed, say the CA could not
 reach the name; said why, with the next attempt). Each change is in the audit log (`domain.added`,
 `domain.verified`, `domain.pending`, `domain.issued`, `domain.renewed`,
-`domain.failed`, `domain.removed`). On the leader, `/metrics` has
+`domain.failed`, `domain.removed`, `domain.revoked`,
+`domain.revoke-failed`, and `tenant.canonical` for a change of canonical
+host). On the leader, `/metrics` has
 `murder_domain_state`, `murder_domain_certificate_expiry_timestamp_seconds`
 and `murder_domain_failing` for each domain: alert on an expiry less than
 20 days away, or on a domain failing for a day.
@@ -474,18 +514,36 @@ What it needs:
   routed, without certificates (plain HTTP when TLS is off). `internal`
   with `ca` set (`email` optional), as for a test cluster, still orders
   domains' certificates from that CA (say Let's Encrypt's staging one).
-- Port 80 open to the internet on every node the name leads to: the CA
-  asks any of them, from several places. Keep it open in the provider's
-  firewall (`test/hetzner` opens 80 and 443). The edge listens on
-  `edge.http` (`:80`) already; the leader checks that every node's edge
-  answers a challenge, at its private address and that port, before the
-  CA is asked.
+- Port 80 or port 443 open to the internet on every node the name leads
+  to: the CA asks any of them, from several places. Keep both open in the
+  provider's firewall where you can (`test/hetzner` opens 80 and 443). The
+  edge listens on `edge.http` (`:80`) and `edge.https` (`:443`) already;
+  the leader checks that every node's edge answers a challenge, at its
+  private address and `edge.http`'s port, before the CA is asked, so the
+  edges keep listening on port 80 even where the internet does not reach
+  it.
 - Every node on a release with schema 18: the leader orders nothing until
-  every node runs one, so a rolling upgrade finishes first.
+  every node runs one, so a rolling upgrade finishes first. Canonical
+  hosts and revocation need schema 19 on every node: the leader orders,
+  renews and revokes nothing until every node runs it.
 
 The cluster has one ACME account per CA, made with the first order, its
 key sealed with the master key in the state: every leader uses it.
-TLS-ALPN-01 is not used.
+**Port 80 closed or filtered.** The leader offers the CA both challenges
+it answers, HTTP-01 and TLS-ALPN-01 (RFC 8737), and the client library
+(acmez) picks one; when the CA cannot reach port 80 (a connection or
+timeout failure), the order is made again with TLS-ALPN-01, which the CA
+checks with a TLS handshake on port 443 that asks for the `acme-tls/1`
+protocol. Every edge answers that handshake itself, with a certificate
+made for the challenge, from the challenges in its routes, as it answers
+HTTP-01: a node that does not run the tenant answers as well as the one
+that does, and the handshake is never relayed. Only a client that asks
+for `acme-tls/1` alone gets it; browsers never do. What does not work:
+a proxy or CDN in front of the nodes that ends TLS itself (TLS-ALPN-01
+needs the handshake to reach the edge, and HTTP-01 then needs port 80);
+and a failed attempt still counts against the CA's limits on failed
+validations, so open port 80 where you can. Ports 80 and 443 both
+filtered leave a domain `failed`, said why.
 
 ## Back up and restore
 

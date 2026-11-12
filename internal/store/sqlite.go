@@ -87,8 +87,11 @@ type snapshot struct {
 	domains    map[string]Domain
 	challenges map[string]Challenge
 	accounts   map[string]ACMEAccount
-	panel      panelState
-	images     map[string]bool
+	// revocations are the certificates of removed domains the leader
+	// revokes, by fingerprint.
+	revocations map[string]Revocation
+	panel       panelState
+	images      map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
 	lastEvent int64
@@ -460,7 +463,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 	if err := closeRows(rows); err != nil {
 		return err
 	}
-	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next, app_revision, before_revision, canary, hold, restore, moved_on FROM tenants`+where("name"), args...)
+	rows, err = q.Query(`SELECT name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, archived_at, node, rollout, move_to, move_held, replica, replica_ready, replica_next, app_revision, before_revision, canary, hold, restore, moved_on, canonical FROM tenants`+where("name"), args...)
 	if err != nil {
 		return err
 	}
@@ -469,7 +472,7 @@ func loadTenants(q querier, state *snapshot, names []string) error {
 		var name, overrides, created, updated string
 		var suspended bool
 		var archivedAt sql.NullString
-		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext, &record.AppRevision, &record.BeforeRevision, &record.Canary, &record.Hold, &record.Restore, &record.MovedOn); err != nil {
+		if err := rows.Scan(&name, &record.App, &overrides, &suspended, &record.Subnet, &record.DataImage, &record.PreviousImage, &record.Generation, &created, &updated, &archivedAt, &record.Node, &record.Rollout, &record.MoveTo, &record.MoveHeld, &record.Replica, &record.ReplicaReady, &record.ReplicaNext, &record.AppRevision, &record.BeforeRevision, &record.Canary, &record.Hold, &record.Restore, &record.MovedOn, &record.Canonical); err != nil {
 			rows.Close()
 			return err
 		}
@@ -1707,6 +1710,14 @@ func (s *SQLite) Forget(name, actor string) error {
 		app, detail := "", "leftover data"
 		if ok {
 			app, detail = record.App, ""
+			// Its domains go with it; their certificates are revoked.
+			for _, domainName := range slices.Sorted(maps.Keys(current.domains)) {
+				if domain := current.domains[domainName]; domain.Tenant == name {
+					if err := revokeLater(tx, domain, now); err != nil {
+						return err
+					}
+				}
+			}
 			if err := tx.Exec(`DELETE FROM tenants WHERE name = ?`, name); err != nil {
 				return err
 			}

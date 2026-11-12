@@ -102,6 +102,26 @@ func (a *demoActor) AddDomain(_ context.Context, tenant, name string) (api.Domai
 	return api.DomainAdded{Domain: domain, Added: true}, nil
 }
 
+func (a *demoActor) SetCanonical(_ context.Context, tenant, host string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	t, ok := a.tenants[tenant]
+	if !ok {
+		return &api.Error{Status: 404, Message: "tenant " + tenant + ": not found"}
+	}
+	if host != "" && host != t.Host && !slices.ContainsFunc(t.Domains, func(d api.Domain) bool { return d.Name == host }) {
+		return &api.Error{Status: 400, Message: "invalid: " + host + " is not a domain of tenant " + tenant + ", nor its own name " + t.Host + "; add it first"}
+	}
+	t.Canonical = host
+	t.Domains = slices.Clone(t.Domains)
+	for i := range t.Domains {
+		t.Domains[i].Canonical = t.Domains[i].Name == host
+	}
+	a.tenants[tenant] = t
+	a.record("tenant.canonical", tenant, host)
+	return nil
+}
+
 func (a *demoActor) RemoveDomain(_ context.Context, tenant, name string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -114,6 +134,9 @@ func (a *demoActor) RemoveDomain(_ context.Context, tenant, name string) error {
 		return &api.Error{Status: 404, Message: "tenant " + tenant + " has no domain " + name + ": not found"}
 	}
 	t.Domains = slices.Delete(slices.Clone(t.Domains), index, index+1)
+	if t.Canonical == name {
+		t.Canonical = ""
+	}
 	a.tenants[tenant] = t
 	a.record("domain.removed", tenant, name)
 	return nil

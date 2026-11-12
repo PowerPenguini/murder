@@ -217,7 +217,7 @@ func TestOpenUpgradesSchemaVersion4(t *testing.T) {
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{`ALTER TABLE tenants DROP COLUMN app_revision`, `ALTER TABLE tenants DROP COLUMN before_revision`, `ALTER TABLE tenants DROP COLUMN canary`, `ALTER TABLE tenants DROP COLUMN hold`, `ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN moved_on`, `DROP TABLE admissions`, `DROP TABLE departed_keys`, `DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `DROP TABLE rollouts`, `DROP TABLE app_revisions`, `ALTER TABLE apps DROP COLUMN tag`, `ALTER TABLE apps DROP COLUMN revision`, `ALTER TABLE apps DROP COLUMN latest`, `ALTER TABLE apps DROP COLUMN latest_at`, `ALTER TABLE nodes DROP COLUMN failed_at`, `ALTER TABLE nodes DROP COLUMN away_until`, `ALTER TABLE nodes DROP COLUMN copies_refused_until`, `DROP TABLE nodes`, `DROP TABLE devices`, `DROP TABLE panel_sessions`, `DROP TABLE panel_enrollments`, `DROP TABLE panel_passkeys`, `DROP TABLE panel_users`, `DROP TABLE panel_secrets`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`, `ALTER TABLE tenants DROP COLUMN rollout`, `ALTER TABLE tenants DROP COLUMN move_to`, `ALTER TABLE tenants DROP COLUMN move_held`, `ALTER TABLE tenants DROP COLUMN replica`, `ALTER TABLE tenants DROP COLUMN replica_ready`, `ALTER TABLE tenants DROP COLUMN replica_next`} {
+	for _, statement := range []string{`ALTER TABLE tenants DROP COLUMN app_revision`, `ALTER TABLE tenants DROP COLUMN before_revision`, `ALTER TABLE tenants DROP COLUMN canary`, `ALTER TABLE tenants DROP COLUMN hold`, `ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN moved_on`, `DROP TABLE admissions`, `DROP TABLE departed_keys`, `DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `DROP TABLE rollouts`, `DROP TABLE app_revisions`, `ALTER TABLE apps DROP COLUMN tag`, `ALTER TABLE apps DROP COLUMN revision`, `ALTER TABLE apps DROP COLUMN latest`, `ALTER TABLE apps DROP COLUMN latest_at`, `ALTER TABLE nodes DROP COLUMN failed_at`, `ALTER TABLE nodes DROP COLUMN away_until`, `ALTER TABLE nodes DROP COLUMN copies_refused_until`, `DROP TABLE nodes`, `DROP TABLE devices`, `DROP TABLE panel_sessions`, `DROP TABLE panel_enrollments`, `DROP TABLE panel_passkeys`, `DROP TABLE panel_users`, `DROP TABLE panel_secrets`, `DROP INDEX tenants_node`, `ALTER TABLE tenants DROP COLUMN node`, `ALTER TABLE tenants DROP COLUMN rollout`, `ALTER TABLE tenants DROP COLUMN move_to`, `ALTER TABLE tenants DROP COLUMN move_held`, `ALTER TABLE tenants DROP COLUMN replica`, `ALTER TABLE tenants DROP COLUMN replica_ready`, `ALTER TABLE tenants DROP COLUMN replica_next`} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -275,7 +275,7 @@ func TestOpenUpgradesSchemaVersion5(t *testing.T) {
 		`ALTER TABLE tenants DROP COLUMN canary`,
 		`ALTER TABLE tenants DROP COLUMN hold`,
 		`ALTER TABLE tenants DROP COLUMN restore`, `ALTER TABLE tenants DROP COLUMN moved_on`,
-		`DROP TABLE admissions`, `DROP TABLE departed_keys`, `DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `DROP TABLE rollouts`,
+		`DROP TABLE admissions`, `DROP TABLE departed_keys`, `DROP TRIGGER events_id_bounded`, `DROP TRIGGER events_id_kept_bounded`, `DROP TRIGGER nodes_key_kept`, `DROP TRIGGER nodes_key_not_replaced`, `ALTER TABLE nodes DROP COLUMN key`, `DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `DROP TABLE rollouts`,
 		`DROP TABLE app_revisions`,
 		`ALTER TABLE apps DROP COLUMN tag`,
 		`ALTER TABLE apps DROP COLUMN revision`,
@@ -349,7 +349,7 @@ func TestAStateFromBeforeIdentityKeysStillServes(t *testing.T) {
 		`ALTER TABLE nodes DROP COLUMN key`,
 		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '4'), ('applied', '9'), ('cluster', 'acme')`,
 		`INSERT INTO nodes (name, address, created_at) VALUES ('n1', '10.0.0.1:7400', '2026-10-01T00:00:00Z')`,
-		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`,
+		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `ALTER TABLE rollouts DROP COLUMN first`, `PRAGMA user_version = 15`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -416,7 +416,7 @@ func TestOpenUpgradesSchemaVersion16(t *testing.T) {
 	}
 	for _, statement := range []string{
 		schema,
-		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE rollouts DROP COLUMN first`,
+		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `ALTER TABLE rollouts DROP COLUMN first`,
 		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '3'), ('applied', '0')`,
 		`INSERT INTO apps (name, spec, created_at, updated_at, revision) VALUES ('web', '` + marshal(normalizeApp(appSpec())) + `', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 2)`,
 		`INSERT INTO rollouts (app, to_revision, state, wave, wave_started, reason, started_at, updated_at, actor) VALUES ('web', 2, 'running', 1, '2026-10-01T00:00:00Z', '', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 'bob')`,

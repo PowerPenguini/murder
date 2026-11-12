@@ -24,6 +24,13 @@ func (c *Client) RemoveDomain(ctx context.Context, tenant, name string) error {
 	return c.do(ctx, http.MethodDelete, tenantPath(tenant)+"/domains/"+url.PathEscape(name), nil, nil)
 }
 
+// SetCanonical names the host the edges redirect a tenant's other hosts
+// to: one of its domains, or its own name below the base domain; "" for
+// none.
+func (c *Client) SetCanonical(ctx context.Context, tenant, host string) error {
+	return c.do(ctx, http.MethodPut, tenantPath(tenant)+"/canonical", CanonicalRequest{Host: host}, nil)
+}
+
 // CheckDomain has the cluster's leader check a domain at once, as after
 // its DNS records were changed.
 func (c *Client) CheckDomain(ctx context.Context, tenant, name string) error {

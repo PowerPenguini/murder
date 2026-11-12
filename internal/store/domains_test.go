@@ -300,7 +300,7 @@ func TestOpenUpgradesSchemaVersion17(t *testing.T) {
 	}
 	for _, statement := range []string{
 		schema,
-		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`,
+		`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`,
 		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '3'), ('applied', '0')`,
 		`INSERT INTO apps (name, spec, created_at, updated_at, revision) VALUES ('web', '` + marshal(normalizeApp(appSpec())) + `', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 1)`,
 		`INSERT INTO tenants (name, app, overrides, suspended, subnet, data_image, previous_image, generation, created_at, updated_at, node)
@@ -329,6 +329,12 @@ func TestOpenUpgradesSchemaVersion17(t *testing.T) {
 	if _, _, err := st.AddDomain("acme", "app.customer.com", "alice"); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.SetCanonical("acme", "app.customer.com", "acme.example.com", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := st.Get("acme"); record.Canonical != "app.customer.com" {
+		t.Fatalf("canonical %q", record.Canonical)
+	}
 	// A batch of the release before still applies.
 	recorded := &recorder{}
 	if err := event(recorded, time.Now(), "murder", "tenant.restarted", "acme", "web", "old release"); err != nil {
@@ -352,7 +358,7 @@ func TestASnapshotFromBeforeDomainsInstalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `UPDATE meta SET value = '10' WHERE key = 'applied'`, `PRAGMA user_version = 17`} {
+	for _, statement := range []string{`DROP TABLE acme_challenges`, `DROP TABLE acme_accounts`, `DROP TABLE domains`, `ALTER TABLE tenants DROP COLUMN canonical`, `DROP TABLE acme_revocations`, `UPDATE meta SET value = '10' WHERE key = 'applied'`, `PRAGMA user_version = 17`} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -372,5 +378,97 @@ func TestASnapshotFromBeforeDomainsInstalls(t *testing.T) {
 	}
 	if len(node.Domains()) != 0 || len(node.List()) != 1 || node.List()[0].Spec.Name != "acme" {
 		t.Fatalf("after the install: %v %v", node.Domains(), node.List())
+	}
+}
+
+// A tenant's canonical host is one of its domains or its own name; it
+// goes with the domain it names, and a tenant that is not live gets none.
+func TestACanonicalHostIsOneOfTheTenantsHosts(t *testing.T) {
+	st := withTenant(t, "acme", "beta")
+	for _, name := range []string{"app.customer.com", "www.customer.com"} {
+		if _, _, err := st.AddDomain("acme", name, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := st.AddDomain("beta", "beta.customer.com", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"beta.customer.com", "else.customer.com", "beta.example.com"} {
+		if err := st.SetCanonical("acme", bad, "acme.example.com", "alice"); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: %v", bad, err)
+		}
+	}
+	if err := st.SetCanonical("nobody", "", "nobody.example.com", "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("no such tenant: %v", err)
+	}
+	canonical := func() string {
+		t.Helper()
+		record, err := st.Get("acme")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record.Canonical
+	}
+	if err := st.SetCanonical("acme", "acme.example.com", "acme.example.com", "alice"); err != nil || canonical() != "acme.example.com" {
+		t.Fatalf("its own name: %q %v", canonical(), err)
+	}
+	if err := st.SetCanonical("acme", "app.customer.com", "acme.example.com", "alice"); err != nil || canonical() != "app.customer.com" {
+		t.Fatalf("a domain: %q %v", canonical(), err)
+	}
+	// The same again changes nothing, and says nothing.
+	version := st.state.Load().version
+	if err := st.SetCanonical("acme", "app.customer.com", "acme.example.com", "alice"); err != nil || st.state.Load().version != version {
+		t.Fatalf("the same again: %v", err)
+	}
+	events, _ := st.Events(EventQuery{Tenant: "acme", Limit: 1})
+	if events[0].Action != "tenant.canonical" || !strings.Contains(events[0].Detail, "app.customer.com") {
+		t.Fatalf("events %+v", events)
+	}
+	// Another domain removed leaves it; its own removed takes it.
+	if err := st.RemoveDomain("acme", "www.customer.com", "alice"); err != nil || canonical() != "app.customer.com" {
+		t.Fatalf("another domain removed: %q %v", canonical(), err)
+	}
+	if err := st.RemoveDomain("acme", "app.customer.com", "alice"); err != nil || canonical() != "" {
+		t.Fatalf("the canonical domain removed: %q %v", canonical(), err)
+	}
+	if err := st.SetCanonical("acme", "acme.example.com", "acme.example.com", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetCanonical("acme", "", "acme.example.com", "alice"); err != nil || canonical() != "" {
+		t.Fatalf("none: %q %v", canonical(), err)
+	}
+	if err := st.Archive("beta", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetCanonical("beta", "beta.customer.com", "beta.example.com", "bob"); !errors.Is(err, ErrArchived) {
+		t.Fatalf("an archived tenant: %v", err)
+	}
+}
+
+// A domain has one challenge at a time: a new one takes the place of the
+// one before.
+func TestANewChallengeReplacesTheDomainsOld(t *testing.T) {
+	st := withTenant(t, "acme")
+	for _, name := range []string{"app.customer.com", "www.customer.com"} {
+		if _, _, err := st.AddDomain("acme", name, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expires := time.Now().Add(time.Minute)
+	for _, challenge := range []Challenge{
+		{Token: "first", Domain: "app.customer.com", KeyAuth: "first.x", ExpiresAt: expires},
+		{Token: "other", Domain: "www.customer.com", KeyAuth: "other.x", ExpiresAt: expires},
+		{Token: "second", Domain: "app.customer.com", KeyAuth: "second.x", ExpiresAt: expires},
+	} {
+		if err := st.PutChallenge(challenge); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var tokens []string
+	for _, challenge := range st.Challenges() {
+		tokens = append(tokens, challenge.Token)
+	}
+	if !reflect.DeepEqual(tokens, []string{"other", "second"}) {
+		t.Fatalf("challenges %v", tokens)
 	}
 }

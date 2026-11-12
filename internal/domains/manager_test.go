@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mholt/acmez/v3/acme"
+
 	"github.com/PowerPenguini/murder/internal/metrics"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
@@ -385,5 +387,144 @@ func TestMetrics(t *testing.T) {
 	f.m.WriteMetrics(metrics.NewWriter(&out))
 	if out.Len() != 0 {
 		t.Errorf("metrics off the leader: %s", out.String())
+	}
+}
+
+// issued gives acme a domain with its certificate, as the leader gets one.
+func (f *fixture) issued(name string) store.Domain {
+	f.t.Helper()
+	f.dns.cnames[name] = "acme.murder.example.net"
+	if _, _, err := f.st.AddDomain("acme", name, "alice"); err != nil {
+		f.t.Fatal(err)
+	}
+	f.m.Step(f.t.Context())
+	d := f.domain(name)
+	if d.State != store.DomainActive || d.Certificate == "" {
+		f.t.Fatalf("not issued: %+v", d)
+	}
+	return d
+}
+
+// A removed domain's certificate is revoked by the leader, with its
+// serial; a failure is tried again later, a few times, then given up,
+// and every outcome is in the audit log.
+func TestARemovedDomainsCertificateIsRevoked(t *testing.T) {
+	f := newFixture(t)
+	var revoked []*x509.Certificate
+	var refuse error
+	f.m.revoke = func(_ context.Context, leaf *x509.Certificate) error {
+		if refuse != nil {
+			return refuse
+		}
+		revoked = append(revoked, leaf)
+		return nil
+	}
+	d := f.issued("app.customer.com")
+	if err := f.st.RemoveDomain("acme", d.Name, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if list := f.st.Revocations(); len(list) != 1 || list[0].Domain != d.Name || list[0].Tenant != "acme" || list[0].Certificate != d.Certificate {
+		t.Fatalf("revocations %+v", list)
+	}
+	f.m.Step(t.Context())
+	leaf, _ := leafOf(d.Certificate)
+	if len(revoked) != 1 || revoked[0].SerialNumber.Cmp(leaf.SerialNumber) != 0 || len(f.st.Revocations()) != 0 {
+		t.Fatalf("revoked %v, left %+v", revoked, f.st.Revocations())
+	}
+	if got := f.actions(2); got[0] != "domain.revoked" || got[1] != "domain.removed" {
+		t.Fatalf("events %v", got)
+	}
+
+	// A CA that refuses: tried again after 5 minutes, then less and less
+	// often, and given up after revokeAttempts.
+	refuse = errors.New("the CA is down")
+	d = f.issued("www.customer.com")
+	if err := f.st.RemoveDomain("acme", d.Name, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.m.Step(t.Context())
+	list := f.st.Revocations()
+	if len(list) != 1 || list[0].Attempts != 1 || !list[0].NextAt.Equal(f.now.Add(5*time.Minute)) {
+		t.Fatalf("after a failure: %+v", list)
+	}
+	f.m.Step(t.Context())
+	if f.st.Revocations()[0].Attempts != 1 {
+		t.Fatal("a revocation not due was tried")
+	}
+	for attempt := 2; attempt <= revokeAttempts; attempt++ {
+		f.now = f.st.Revocations()[0].NextAt
+		f.m.Step(t.Context())
+	}
+	if len(f.st.Revocations()) != 0 {
+		t.Fatalf("not given up: %+v", f.st.Revocations())
+	}
+	events, _ := f.st.Events(store.EventQuery{Limit: 1})
+	if events[0].Action != "domain.revoke-failed" || !strings.Contains(events[0].Detail, "the CA is down") {
+		t.Fatalf("events %+v", events)
+	}
+}
+
+// A purge revokes the certificates of the tenant's domains; one the CA
+// says is revoked already counts as revoked.
+func TestAPurgeRevokesItsDomainsCertificates(t *testing.T) {
+	f := newFixture(t)
+	calls := 0
+	f.m.revoke = func(context.Context, *x509.Certificate) error {
+		calls++
+		return acme.Problem{Type: acme.ProblemTypeAlreadyRevoked, Detail: "already revoked"}
+	}
+	f.issued("app.customer.com")
+	f.issued("www.customer.com")
+	if err := f.st.Archive("acme", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.Forget("acme", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.st.Revocations()) != 2 {
+		t.Fatalf("revocations %+v", f.st.Revocations())
+	}
+	f.m.Step(t.Context())
+	if calls != 2 || len(f.st.Revocations()) != 0 {
+		t.Fatalf("%d calls, left %+v", calls, f.st.Revocations())
+	}
+	if got := f.actions(2); got[0] != "domain.revoked" || got[1] != "domain.revoked" {
+		t.Fatalf("events %v", got)
+	}
+}
+
+// A certificate that expired before its turn came is only forgotten.
+func TestAnExpiredCertificateIsNotRevoked(t *testing.T) {
+	f := newFixture(t)
+	f.m.revoke = func(context.Context, *x509.Certificate) error { t.Fatal("an expired certificate revoked"); return nil }
+	d := f.issued("app.customer.com")
+	if err := f.st.RemoveDomain("acme", d.Name, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.now = d.NotAfter.Add(time.Second)
+	f.m.Step(t.Context())
+	if len(f.st.Revocations()) != 0 {
+		t.Fatalf("left %+v", f.st.Revocations())
+	}
+	if got := f.actions(1); got[0] != "domain.removed" {
+		t.Fatalf("events %v", got)
+	}
+}
+
+// Without a CA nothing can be revoked: that is said, and forgotten.
+func TestNoCANoRevocation(t *testing.T) {
+	f := newFixture(t)
+	f.m.revoke = func(context.Context, *x509.Certificate) error { t.Fatal("revoked without a CA"); return nil }
+	d := f.issued("app.customer.com")
+	f.m.CA = ""
+	if err := f.st.RemoveDomain("acme", d.Name, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.m.Step(t.Context())
+	if len(f.st.Revocations()) != 0 {
+		t.Fatal("kept")
+	}
+	if events, _ := f.st.Events(store.EventQuery{Limit: 1}); events[0].Action != "domain.revoke-failed" || !strings.Contains(events[0].Detail, "no CA") {
+		t.Fatalf("events %+v", events)
 	}
 }

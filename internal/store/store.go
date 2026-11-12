@@ -137,6 +137,10 @@ type Record struct {
 	// MovedOn is the node it ran on as its rollout moved it: the one that
 	// keeps the snapshot its data can go back to.
 	MovedOn string `json:"movedOn,omitempty"`
+	// Canonical is the host the edges redirect the tenant's other hosts
+	// to: one of its domains, or its own name below the base domain;
+	// empty for none.
+	Canonical string `json:"canonical,omitempty"`
 	// BeforeImage is the image of BeforeRevision, as the tenant composes
 	// it: the one its data would go back to. Derived, not stored.
 	BeforeImage string `json:"-"`
@@ -457,6 +461,8 @@ type Store interface {
 	AddDomain(tenant, name, actor string) (Domain, bool, error)
 	RemoveDomain(tenant, name, actor string) error
 	CheckDomainNow(tenant, name, actor string) error
+	SetCanonical(tenant, host, own, actor string) error
+	Revocations() []Revocation
 	Challenges() []Challenge
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.

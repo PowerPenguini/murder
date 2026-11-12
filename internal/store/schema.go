@@ -11,8 +11,8 @@ import (
 // schemaVersion is the version of the schema below, kept in PRAGMA
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
-// versions 4 to 17 in place.
-const schemaVersion = 18
+// versions 4 to 18 in place.
+const schemaVersion = 19
 
 // IdentitySchema is the schema version that pins each node's identity
 // key in the state: a node registers its key only once every node runs a
@@ -24,6 +24,11 @@ const IdentitySchema = 16
 // and writes certificates only once every node runs a release of this
 // version or later, which applies those writes.
 const DomainsSchema = 18
+
+// RevocationsSchema is the schema version that keeps the certificates of
+// removed domains, which the leader revokes: it revokes only once every
+// node runs a release of this version or later, which applies its writes.
+const RevocationsSchema = 19
 
 // oldestSchema is the oldest schema version Open upgrades.
 const oldestSchema = 4
@@ -139,7 +144,11 @@ CREATE TABLE tenants (
 	restore TEXT NOT NULL DEFAULT '',
 	-- moved_on is the node it ran on as its rollout moved it, which keeps
 	-- the snapshot its data can go back to.
-	moved_on TEXT NOT NULL DEFAULT ''
+	moved_on TEXT NOT NULL DEFAULT '',
+	-- The host the edges send the tenant's requests to, with a redirect,
+	-- when they come for its other hosts: one of its domains, or its own
+	-- name below the base domain; empty for none.
+	canonical TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX tenants_app ON tenants (app);
@@ -278,6 +287,8 @@ CREATE TABLE secrets (
 ) STRICT;
 
 ` + domainTables + `
+
+` + revocationsTable + `
 
 -- The audit log. It outlives the tenants and apps it names.
 CREATE TABLE events (
@@ -530,6 +541,19 @@ func upgrade(db *sql.DB) error {
 	if version == 17 {
 		if _, err := tx.Exec(domainTables); err != nil {
 			return err
+		}
+		version = 18
+	}
+	// Version 19 keeps each tenant's canonical host, and the certificates
+	// of removed domains the leader revokes.
+	if version == 18 {
+		for _, statement := range []string{
+			`ALTER TABLE tenants ADD COLUMN canonical TEXT NOT NULL DEFAULT ''`,
+			revocationsTable,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
@@ -882,4 +906,22 @@ CREATE TABLE panel_sessions (
 CREATE TABLE panel_secrets (
 	name  TEXT PRIMARY KEY,
 	value TEXT NOT NULL
+) STRICT;`
+
+// revocationsTable keeps the certificates of domains taken from their
+// tenant, or purged with it, until the leader has revoked them with the
+// CA, or gave up.
+const revocationsTable = `-- Certificates of removed domains the leader revokes with the CA:
+-- fingerprint is the SHA-256 of the chain, hex; attempts counts failures
+-- in a row, next_at is when the leader tries again. A certificate that
+-- expired meanwhile is only dropped.
+CREATE TABLE acme_revocations (
+	fingerprint TEXT PRIMARY KEY,
+	domain      TEXT NOT NULL,
+	tenant      TEXT NOT NULL,
+	certificate TEXT NOT NULL,
+	not_after   TEXT NOT NULL,
+	created_at  TEXT NOT NULL,
+	attempts    INTEGER NOT NULL DEFAULT 0,
+	next_at     TEXT NOT NULL
 ) STRICT;`

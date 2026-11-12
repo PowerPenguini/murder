@@ -24,6 +24,8 @@ import (
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/hetzner/v2"
 	"github.com/libdns/namecheap"
+	"github.com/mholt/acmez/v3"
+	"github.com/mholt/acmez/v3/acme"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -429,6 +431,14 @@ type DomainCertificates struct {
 
 	mu    sync.Mutex
 	cache map[string]domainCertificate
+	// challenges are the TLS-ALPN-01 certificates made, by domain, for
+	// the key authorization they hold.
+	challenges map[string]challengeCertificate
+}
+
+type challengeCertificate struct {
+	keyAuth string
+	parsed  *tls.Certificate
 }
 
 type domainCertificate struct {
@@ -449,7 +459,7 @@ const domainCacheMost = 4096
 // NewDomainCertificates serves the certificates of domains, opening their
 // keys with open.
 func NewDomainCertificates(domains Domains, open func(domain, sealed string) (string, error), log *slog.Logger) *DomainCertificates {
-	return &DomainCertificates{domains: domains, open: open, log: log, now: time.Now, cache: map[string]domainCertificate{}}
+	return &DomainCertificates{domains: domains, open: open, log: log, now: time.Now, cache: map[string]domainCertificate{}, challenges: map[string]challengeCertificate{}}
 }
 
 // Certificate returns the certificate of the tenant's domain serverName,
@@ -486,6 +496,44 @@ func (d *DomainCertificates) Certificate(serverName string) *tls.Certificate {
 	return entry.parsed
 }
 
+// Challenge returns the certificate that answers a TLS-ALPN-01 challenge
+// under way for the tenant's domain serverName (RFC 8737), or an error if
+// there is none. Every edge has the challenges in its routes, as it has
+// the HTTP-01 ones, so the CA may ask any node, whichever runs the tenant:
+// the handshake is answered where it arrives, never passed on.
+func (d *DomainCertificates) Challenge(serverName string) (*tls.Certificate, error) {
+	name := strings.TrimSuffix(strings.ToLower(serverName), ".")
+	challenges, ok := d.domains.(DomainChallenges)
+	if !ok || name == "" {
+		return nil, fmt.Errorf("no ACME challenge for %q", serverName)
+	}
+	challenge, ok := challenges.DomainChallenge(name)
+	if !ok {
+		return nil, fmt.Errorf("no ACME challenge for %q", serverName)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if cached, ok := d.challenges[name]; ok && cached.keyAuth == challenge.KeyAuth {
+		return cached.parsed, nil
+	}
+	certificate, err := acmez.TLSALPN01ChallengeCert(acme.Challenge{Identifier: acme.Identifier{Type: "dns", Value: name}, KeyAuthorization: challenge.KeyAuth})
+	if err != nil {
+		return nil, err
+	}
+	// Challenges are few and short: the set starts over rather than grow.
+	if len(d.challenges) >= 64 {
+		clear(d.challenges)
+	}
+	d.challenges[name] = challengeCertificate{keyAuth: challenge.KeyAuth, parsed: certificate}
+	return certificate, nil
+}
+
+// acmeChallenge reports whether a client asks for nothing but the
+// TLS-ALPN-01 protocol, as a CA checking a challenge does.
+func acmeChallenge(hello *tls.ClientHelloInfo) bool {
+	return len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == acmez.ACMETLS1Protocol
+}
+
 func (d *DomainCertificates) parse(name string, route DomainRoute) (*tls.Certificate, error) {
 	key, err := d.open(name, route.Key)
 	if err != nil {
@@ -499,14 +547,24 @@ func (d *DomainCertificates) parse(name string, route DomainRoute) (*tls.Certifi
 }
 
 // ServeDomains has the certificates serve tenants' own domains by the
-// name a client asks for (SNI), and every other name as before.
+// name a client asks for (SNI), and every other name as before. A CA that
+// asks for acme-tls/1 gets the certificate of the TLS-ALPN-01 challenge
+// under way for the name, or no handshake: never a real certificate.
 func (c *Certificates) ServeDomains(domains *DomainCertificates) {
 	if c == nil || domains == nil {
 		return
 	}
 	config := c.Config.Clone()
+	// The protocol must be offered for the handshake to choose it; no
+	// browser asks for it, and an HTTP server does not serve on it.
+	if !slices.Contains(config.NextProtos, acmez.ACMETLS1Protocol) {
+		config.NextProtos = append(slices.Clone(config.NextProtos), acmez.ACMETLS1Protocol)
+	}
 	fallback := config.GetCertificate
 	config.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if acmeChallenge(hello) {
+			return domains.Challenge(hello.ServerName)
+		}
 		if certificate := domains.Certificate(hello.ServerName); certificate != nil {
 			return certificate, nil
 		}
