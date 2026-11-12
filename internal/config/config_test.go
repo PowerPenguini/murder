@@ -188,20 +188,34 @@ func TestBackupsFitTheirMode(t *testing.T) {
 }
 
 // Failover needs a provider to power nodes off, and a delay long enough
-// that a busy node is not powered off; it waits 30 s by default.
+// that a busy node is not powered off; it waits 30 s by default, and runs
+// tenants elsewhere twice that long after the node last answered.
 func TestFailoverNeedsAProvider(t *testing.T) {
 	base := "baseDomain: example.com\nvolumes: {driver: zfs, parent: tank/murder/tenants}\ncluster:\n  address: 10.0.0.2:7400\n  failover:\n"
 	agent, err := Parse([]byte(base + "    hetzner: {tokenFile: /etc/murder/hcloud.token, servers: {n1: murder-n1}}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f := agent.Cluster.Failover; f.After.Duration != 30*time.Second || f.Hetzner.Servers["n1"] != "murder-n1" {
+	if f := agent.Cluster.Failover; f.After.Duration != 30*time.Second || f.Settle.Duration != time.Minute || f.Hetzner.Servers["n1"] != "murder-n1" {
 		t.Fatalf("failover = %+v", f)
+	}
+	// A shorter delay shortens the settle with it, unless it is set.
+	token := "    hetzner: {tokenFile: /etc/murder/hcloud.token}\n"
+	agent, err = Parse([]byte(base + "    after: 15s\n" + token))
+	if err != nil || agent.Cluster.Failover.Settle.Duration != 30*time.Second {
+		t.Fatalf("after 15s: %+v, %v", agent.Cluster.Failover, err)
+	}
+	agent, err = Parse([]byte(base + "    after: 15s\n    settle: 25s\n" + token))
+	if err != nil || agent.Cluster.Failover.Settle.Duration != 25*time.Second {
+		t.Fatalf("settle 25s: %+v, %v", agent.Cluster.Failover, err)
 	}
 	for name, extra := range map[string]string{
 		"no provider":      "    after: 30s\n",
 		"a relative token": "    hetzner: {tokenFile: hcloud.token}\n",
-		"too soon":         "    after: 5s\n    hetzner: {tokenFile: /etc/murder/hcloud.token}\n",
+		"too soon":         "    after: 5s\n" + token,
+		"too late":         "    after: 6m\n" + token,
+		"settled too soon": "    after: 30s\n    settle: 35s\n" + token,
+		"settled too late": "    settle: 11m\n" + token,
 	} {
 		if _, err := Parse([]byte(base + extra)); err == nil || !strings.Contains(err.Error(), "failover") {
 			t.Errorf("%s: %v", name, err)

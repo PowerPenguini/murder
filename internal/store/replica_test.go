@@ -136,6 +136,16 @@ func TestAFailoverGivesTenantsToTheirReplicas(t *testing.T) {
 		if record.Node != before[name].Replica || record.Replica != "" || record.Generation != before[name].Generation+1 {
 			t.Fatalf("%s after the failover: %+v (replica was %s)", name, record, before[name].Replica)
 		}
+		// Its requests wait for it until its new node lets them through.
+		if !record.MoveHeld {
+			t.Fatalf("%s is not held after the failover", name)
+		}
+		if err := st.ReleaseHold(name); err != nil {
+			t.Fatal(err)
+		}
+		if record, _ := st.Get(name); record.MoveHeld {
+			t.Fatalf("%s is still held", name)
+		}
 	}
 	if c, _ := st.Get("c"); c.Replica == "nbg-1" {
 		t.Fatal("a copy stays on the failed node")

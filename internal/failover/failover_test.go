@@ -28,6 +28,8 @@ type fixture struct {
 	leader   bool
 	fenced   []string
 	fenceErr error
+	// fenceTakes is how long the provider takes to confirm a power-off.
+	fenceTakes time.Duration
 	// on is a node the provider reports on again after its power-off.
 	on string
 	// onWait runs during the settle wait.
@@ -53,6 +55,7 @@ func (f *fixture) PowerOff(_ context.Context, node store.Node) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fenced = append(f.fenced, node.Name)
+	f.clock = f.clock.Add(f.fenceTakes)
 	return f.fenceErr
 }
 
@@ -203,6 +206,68 @@ func TestADeadNodeFailsOverOnceConfirmedOff(t *testing.T) {
 		if node.Failed() {
 			t.Fatalf("node %s still failed", node.Name)
 		}
+	}
+}
+
+// The timeline follows cluster.failover: with after 15 s, a dead node is
+// powered off at the first round 15 s after it last answered, and its
+// tenants run elsewhere twice that long after, not 60 s.
+func TestTheTimelineFollowsTheDelays(t *testing.T) {
+	f := newFixture(t)
+	f.monitor.After = 15 * time.Second
+	f.fenceTakes = 4 * time.Second
+	f.check(t)
+	died := f.now()
+	f.down["n2"] = true
+	for range 7 {
+		f.advance(2 * time.Second)
+		f.check(t)
+	}
+	if len(f.fenced) != 0 {
+		t.Fatalf("acted after 14 s: fenced %v", f.fenced)
+	}
+	f.advance(2 * time.Second)
+	f.check(t)
+	if !slices.Equal(f.fenced, []string{"n2"}) {
+		t.Fatalf("fenced %v", f.fenced)
+	}
+	// Powered off at 16 s, confirmed at 20 s: 10 s more until 30 s.
+	if !slices.Equal(f.waited, []time.Duration{10 * time.Second}) {
+		t.Fatalf("waited %v", f.waited)
+	}
+	if f.nodeOf(t, "a") == "n2" || f.nodeOf(t, "b") == "n2" {
+		t.Fatal("the tenants still run on n2")
+	}
+	if at := f.now().Sub(died); at != 30*time.Second {
+		t.Fatalf("failed over %v after the last answer", at)
+	}
+	// Held at the edges until they answer on their new node.
+	if a, _ := f.store.Get("a"); !a.MoveHeld {
+		t.Fatal("a failed-over tenant is not held")
+	}
+}
+
+// A settle set apart from after is kept; a power-off confirmed after it
+// has passed is followed at once by the failover, with no wait.
+func TestASlowPowerOffWaitsNoLonger(t *testing.T) {
+	f := newFixture(t)
+	f.monitor.After, f.monitor.Settle = 15*time.Second, 25*time.Second
+	f.fenceTakes = 12 * time.Second
+	f.check(t)
+	died := f.now()
+	f.down["n2"] = true
+	for range 8 {
+		f.advance(2 * time.Second)
+		f.check(t)
+	}
+	if !slices.Equal(f.fenced, []string{"n2"}) || len(f.waited) != 0 {
+		t.Fatalf("fenced %v, waited %v", f.fenced, f.waited)
+	}
+	if f.nodeOf(t, "a") == "n2" {
+		t.Fatal("a still runs on n2")
+	}
+	if at := f.now().Sub(died); at != 28*time.Second {
+		t.Fatalf("failed over %v after the last answer", at)
 	}
 }
 
@@ -432,6 +497,24 @@ func TestANodeAwayIsLeftAlone(t *testing.T) {
 	f.check(t)
 	if len(f.fenced) != 1 {
 		t.Fatalf("after its away mark: fenced %v", f.fenced)
+	}
+}
+
+// The shortest delays allowed leave a node away alone all the same.
+func TestANodeAwayIsLeftAloneWithShortDelays(t *testing.T) {
+	f := newFixture(t)
+	f.monitor.After, f.monitor.Settle = 10*time.Second, 20*time.Second
+	f.check(t)
+	if err := f.store.Away("n2", f.now().Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	f.down["n2"] = true
+	for range 60 {
+		f.advance(2 * time.Second)
+		f.check(t)
+	}
+	if len(f.fenced) != 0 || f.nodeOf(t, "a") != "n2" {
+		t.Fatalf("a node away was powered off: %v", f.fenced)
 	}
 }
 

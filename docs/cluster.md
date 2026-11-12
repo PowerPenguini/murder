@@ -399,25 +399,63 @@ its tenants start with its agent after a reboot.
 ## When a node dies
 
 The cluster's leader probes every node every 2 s. With `cluster.failover`
-set, it handles a node that has not answered for 30 s as follows:
+set, it handles a node that has not answered for 30 s (`after`) as follows:
 
 1. It powers the node off through the Hetzner Cloud API.
 2. It waits until Hetzner confirms the server is off, and until at least
-   60 s have passed since the node last answered.
+   60 s (`settle`) have passed since the node last answered.
 3. It runs the node's tenants from their replicas: each replica's node
    mounts its copy and starts the tenant, and every edge routes to it.
 
-The tenants are away for about 70–90 s. They lose the writes of their last
+Where the time goes, from the node's last answer, with the defaults:
+
+| Phase | Time | What decides it |
+| --- | --- | --- |
+| Detection | 30–32 s | `after`, and the 2 s rounds of probes |
+| Power-off, confirmed | +2–10 s | Hetzner; its status is read every second |
+| Settle | until 60 s | `settle`: the node may still answer meanwhile |
+| Promotion | well under a second | one entry in the cluster's log |
+| Start | a few seconds | the replica's node starts up to 4 tenants at once, from an image it pulled ahead |
+| Routes | as soon as healthy | edges hold requests for the tenant until its new node finds it healthy, 2 minutes at most |
+
+So the tenants are away for about 65 s. They lose the writes of their last
 ~15 s of replication, plus any taken until the power-off: up to about 60 s
 in the worst case.
+
+The replica's node does not wait for a failover to fetch a tenant's image:
+it pulls the image of every tenant whose copy it keeps ahead, and keeps it
+until it no longer keeps the copy. Requests that reach an edge while the
+tenant starts on its new node wait there, as for a move, rather than fail.
 
 ```yaml
 cluster:
   address: 10.0.0.2:7400
   failover:
+    after: 30s       # unanswered this long counts as dead; 10s to 5m
+    # settle: 60s    # tenants run elsewhere at the earliest this long after
+    #                # the last answer; twice `after` by default, at least
+    #                # `after` + 10s, at most 10m
     hetzner:
       tokenFile: /etc/murder/hcloud.token   # read/write token of the project
 ```
+
+Shorter delays fail over sooner: `after: 15s` (and so `settle: 30s`) has
+tenants back about 30 s after their node's last answer. What they trade:
+
+- **Promotion still waits for the confirmed power-off**, however short
+  the delays. A tenant never runs elsewhere while the provider has not
+  reported its old node off.
+- **`settle` guards one case only:** a power-off confirmed for the wrong
+  machine. Then the "dead" node still runs its tenants, and if it answers
+  again before `settle` has passed since its last answer, its tenants
+  stay. After `settle`, they run twice.
+- **A shorter `after` shortens that window with it**, as `settle` is
+  twice `after` unless set. An operator who lowers either accepts a
+  shorter time for a wrongly powered-off node to show itself. The
+  defaults (30 s and 60 s) keep the window at 30 s after the node counts
+  as dead.
+- **A node that stalls for longer than `after`**, say a host that freezes
+  under load, is powered off.
 
 The leader never runs a tenant elsewhere unless the old node is confirmed
 off, so no tenant ever runs twice. When the power-off cannot be confirmed

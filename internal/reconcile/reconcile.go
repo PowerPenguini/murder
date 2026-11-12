@@ -43,6 +43,21 @@ const (
 // healthChecks is how many health checks run at once.
 const healthChecks = 16
 
+// tenantSteps is how many tenants without a container a pass starts at
+// once. Side by side, the tenants a failover gives a node, or all of a
+// node's after a boot, start in about the time of one, not one after the
+// other; four keep a small node's engine and disk from being swamped.
+const tenantSteps = 4
+
+// heldMax is how long requests for a tenant that moved or failed over here
+// wait for it to be healthy. After that they go to it as they would to any
+// tenant: an app that runs but never passes its health check may well
+// serve, and one that never starts (its image missing, its start failing)
+// answers them with an error at once. Requests held for ever serve
+// nothing, and take the places every edge has for held requests
+// (edge.MaxHeld), which all tenants share.
+const heldMax = 2 * time.Minute
+
 // A tenant that moved here, whose requests wait for it, is checked every
 // heldHealthEvery until it is healthy, for heldHealthWait at most in a pass.
 const (
@@ -128,16 +143,21 @@ type Reconciler struct {
 	// replacedWaits are the waits, within a pass, for replaced containers
 	// to answer.
 	replacedWaits sync.WaitGroup
-	// replaceNotice and replacedWait are replaceNotice and heldHealthWait;
-	// tests shorten them.
+	// replaceNotice and replacedWait are replaceNotice and heldHealthWait,
+	// the latter for held tenants too; tests shorten them.
 	replaceNotice, replacedWait time.Duration
 	// started is when the reconciler began: exits before it are the
 	// server's or the engine's doing, or happened while the agent was
 	// down, not the app's.
 	started time.Time
 	// exits counts, per tenant, the app's exits its container was started
-	// again after; passes alone use it.
-	exits map[string]appExits
+	// again after; passes alone use it, under exitsMu, as their tenant
+	// steps run side by side.
+	exitsMu sync.Mutex
+	exits   map[string]appExits
+	// heldSince is when a pass first found each tenant held here, waiting
+	// to be healthy; passes alone use it.
+	heldSince map[string]time.Time
 }
 
 // New returns a reconciler. All dependencies are required.
@@ -159,7 +179,7 @@ func New(st State, rt runtime.Runtime, volumes volume.Volumes, key *secrets.Key,
 		imageRetryAt:  map[string]time.Time{},
 		replacing:     &replacing{tenants: map[string]bool{}, changed: make(chan struct{})},
 		replaceNotice: replaceNotice, replacedWait: heldHealthWait,
-		started: time.Now(), exits: map[string]appExits{},
+		started: time.Now(), exits: map[string]appExits{}, heldSince: map[string]time.Time{},
 		backend: Backend,
 		pulls:   newPulls(life, rt.PullImage),
 		life:    life,
@@ -330,18 +350,47 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	if err := r.removeOrphanNetworks(step, wanted); err != nil {
 		errs = append(errs, err)
 	}
+	// A tenant with no container yet, as one that failed over or moved
+	// here, or every tenant after a boot, starts beside up to
+	// tenantSteps-1 others: nothing of it runs that a start could
+	// disturb. A tenant with a container is reconciled one at a time, as
+	// its container may be replaced, which holds its requests meanwhile.
+	// An interrupted pass begins no further tenant; those begun finish.
 	statuses := make([]Status, len(records))
-	for i, record := range records {
-		if err := r.interrupted(ctx); err != nil {
-			return errors.Join(append(errs, err)...)
-		}
+	stepErrs := make([]error, len(records))
+	var starts sync.WaitGroup
+	slots := make(chan struct{}, tenantSteps)
+	run := func(i int, record store.Record) {
 		status, err := r.reconcileTenant(step, record, byTenant[record.Spec.Name])
 		if err != nil {
 			status.Phase, status.Healthy, status.Message = PhaseFailed, false, err.Error()
-			errs = append(errs, fmt.Errorf("tenant %s: %w", record.Spec.Name, err))
+			stepErrs[i] = fmt.Errorf("tenant %s: %w", record.Spec.Name, err)
 		}
 		statuses[i] = status
 	}
+	for i, record := range records {
+		fresh := len(byTenant[record.Spec.Name]) == 0
+		if fresh {
+			slots <- struct{}{}
+		}
+		if err := r.interrupted(ctx); err != nil {
+			if fresh {
+				<-slots
+			}
+			starts.Wait()
+			return errors.Join(append(append(errs, stepErrs...), err)...)
+		}
+		if !fresh {
+			run(i, record)
+			continue
+		}
+		starts.Go(func() {
+			defer func() { <-slots }()
+			run(i, record)
+		})
+	}
+	starts.Wait()
+	errs = append(errs, stepErrs...)
 	// Side by side, so tenants that do not answer cost one timeout, not one
 	// each.
 	var checks sync.WaitGroup
@@ -363,7 +412,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 			// healthy; its app takes a moment to listen once started, so
 			// it is checked again at once, not at the next pass.
 			if record.MoveHeld {
-				deadline := time.Now().Add(heldHealthWait)
+				deadline := time.Now().Add(r.replacedWait)
 				for !healthy && time.Now().Before(deadline) && ctx.Err() == nil {
 					select {
 					case <-ctx.Done():
@@ -408,15 +457,34 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	for _, record := range moving {
 		byName[record.Spec.Name] = Status{Phase: PhaseMoving, Message: "moving to node " + record.MoveTo, Generation: record.Generation, CheckedAt: time.Now().UTC()}
 	}
-	// A tenant that moved here is served once it is healthy: until then,
-	// requests for it wait.
+	// A tenant that moved or failed over here is served once it is
+	// healthy: until then, requests for it wait, heldMax at most from the
+	// pass that first found it held, whether or not it ever runs.
+	now, heldSince := time.Now(), map[string]time.Time{}
 	for i, record := range records {
-		if record.MoveHeld && !released[i] && (statuses[i].Phase == PhaseRunning && statuses[i].Healthy || statuses[i].Phase == PhaseSuspended) {
-			if err := r.store.ReleaseHold(record.Spec.Name); err != nil {
-				errs = append(errs, fmt.Errorf("tenant %s: serve it: %w", record.Spec.Name, err))
-			}
+		if !record.MoveHeld || released[i] {
+			continue
+		}
+		name := record.Spec.Name
+		since, seen := r.heldSince[name]
+		if !seen {
+			since = now
+		}
+		ready := statuses[i].Phase == PhaseRunning && statuses[i].Healthy || statuses[i].Phase == PhaseSuspended
+		if !ready && now.Sub(since) >= heldMax {
+			r.log.Warn("a tenant that moved or failed over here is not healthy yet; its requests no longer wait for it", "tenant", name, "phase", statuses[i].Phase, "held", now.Sub(since).Round(time.Second))
+			ready = true
+		}
+		if !ready {
+			heldSince[name] = since
+			continue
+		}
+		if err := r.store.ReleaseHold(name); err != nil {
+			heldSince[name] = since
+			errs = append(errs, fmt.Errorf("tenant %s: serve it: %w", name, err))
 		}
 	}
+	r.heldSince = heldSince
 	r.mu.Lock()
 	r.statuses = byName
 	r.passAt, r.passErrors = time.Now(), len(errs)
@@ -424,6 +492,9 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	images := map[string]bool{}
 	for _, record := range records {
 		images[record.Spec.Image] = true
+	}
+	for _, image := range r.prepull(ctx) {
+		images[image] = true
 	}
 	r.pulls.keep(images)
 	r.sweepImages(ctx)
@@ -501,6 +572,19 @@ func (r *Reconciler) LastPass() (time.Time, int) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.passAt, r.passErrors
+}
+
+// kept lists the live tenants of other nodes whose copy this node keeps,
+// or is being given: a failover would run them here.
+func (r *Reconciler) kept() []store.Record {
+	var records []store.Record
+	self := r.store.Node()
+	for _, record := range r.store.List() {
+		if record.Node != self && !record.Archived() && (record.Replica == self || record.ReplicaNext == self) {
+			records = append(records, record)
+		}
+	}
+	return records
 }
 
 // own lists the tenants this node runs, archived ones too.

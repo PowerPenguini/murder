@@ -233,7 +233,9 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		// The engine starts no container by itself (runtime.RestartPolicy):
 		// a stopped one is started here. One an older release's policy has
 		// the engine restarting is left to it.
+		r.exitsMu.Lock()
 		exits := r.exits[tenant.Name]
+		r.exitsMu.Unlock()
 		if exits.container != current.ID {
 			exits = appExits{container: current.ID}
 		}
@@ -262,13 +264,13 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 				restarted = true
 			}
 			if err := r.runtime.Start(ctx, current.ID); err != nil {
-				r.exits[tenant.Name] = exits
+				r.setExits(tenant.Name, exits)
 				return Status{}, fmt.Errorf("start: %w", err)
 			}
 			r.log.Info("started a stopped tenant container", "tenant", tenant.Name, "container", current.ID, "exit", exits.last, "app_exited", restarted)
 			state = runtime.ContainerState{}
 		}
-		r.exits[tenant.Name] = exits
+		r.setExits(tenant.Name, exits)
 		status = Status{Phase: PhaseRunning, ContainerID: current.ID, Restarts: state.Restarts + exits.count}
 		switch {
 		case exits.count > 0:
@@ -285,6 +287,12 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, record store.Record, e
 		return status, nil
 	}
 	return Status{Phase: PhaseRunning, ContainerID: current.ID}, nil
+}
+
+func (r *Reconciler) setExits(tenant string, exits appExits) {
+	r.exitsMu.Lock()
+	defer r.exitsMu.Unlock()
+	r.exits[tenant] = exits
 }
 
 // ExitDetail is how an app exit is said in the audit log: its code first,

@@ -14,12 +14,16 @@ dies without warning.
   taking writes over its public edge until the power-off, about 30–45 s
   later. So up to about 60 s of writes in the worst case. A node that just
   crashed takes none after its death.
-- **Recovery time (RTO):** about 70–90 s from the node's death until its
-  tenants serve again from their replicas:
-  - 30 s until the node counts as dead;
+- **Recovery time (RTO):** about 65 s from the node's death until its
+  tenants serve again from their replicas, with the default delays:
+  - 30 s until the node counts as dead (`failover.after`);
   - the provider's power-off, confirmed;
-  - at least 60 s since the node was last seen;
-  - the start of the containers.
+  - at least 60 s since the node was last seen (`failover.settle`, twice
+    `after` by default);
+  - the start of the containers, up to 4 at once, from images their new
+    node pulled ahead;
+  - the first health check they pass: edges hold their requests until
+    then.
 - **No split brain:** a tenant never runs on two nodes that both take
   writes. A replica is promoted only once the old node is **confirmed powered
   off** by the provider's API, or an operator states that it is. Without that,
@@ -187,7 +191,8 @@ dropped.
 ## Failure detection and fencing (leader)
 
 The Raft leader probes every other node's cluster port every 2 s, with a 2 s
-timeout. A node that has not answered for `failover.after` (30 s) counts as
+timeout; a round begins every 2 s, however long the last one's probes took.
+A node that has not answered for `failover.after` (30 s) counts as
 dead. Then the leader:
 
 1. **Checks there is something to run elsewhere.** If none of the node's
@@ -201,15 +206,27 @@ dead. Then the leader:
      private address. A wrong name never powers off, or confirms off,
      another machine.
    - It then calls `POST /servers/{id}/actions/poweroff`, and reads
-     `GET /servers/{id}` until the status is `off`. That read is the
-     confirmation. It is tried for up to 3 minutes, and a failed read is
-     simply tried again.
-3. **Waits** until at least 60 s have passed since the node last answered.
+     `GET /servers/{id}` every second until the status is `off`. That read
+     is the confirmation. It is tried for up to 3 minutes, and a failed
+     read is simply tried again. Hetzner allows a project 3600 calls an
+     hour; a confirmation within 10 s takes about 10.
+3. **Waits** until at least `failover.settle` (60 s) has passed since the
+   node last answered. A node that answers again meanwhile keeps its
+   tenants: should the power-off have been confirmed for the wrong
+   machine, it is the node's time to show it.
 4. **Checks again**, and stops if the node answered meanwhile, or if the
    provider no longer reports it off.
 5. **Writes `FailOver(node)`.** The replica nodes' reconcilers see tenants of
-   their own, mount the datasets (`canmount=on`) and start the containers. The
-   edges route to them as soon as the state changes.
+   their own, mount the datasets (`canmount=on`) and start the containers,
+   up to 4 tenants at once. Each promoted tenant is held, as during a move:
+   every edge holds its requests until its new node finds it healthy and
+   lets them through, so none fails while the app starts. A tenant that
+   is still not healthy 2 minutes after its new node first found it held
+   gets its requests all the same, whether it runs or never started, so
+   held requests never wait for ever nor take up the places every edge
+   has for them. The images are on the node already: a node pulls ahead the
+   image of every tenant whose copy it keeps, and its sweep of unused
+   images leaves them.
 
 **What the leader never does:**
 
@@ -278,12 +295,18 @@ The operator powers the node on again. To keep it from serving stale data:
 ```yaml
 cluster:
   failover:
-    after: 30s                       # unreachable this long counts as dead
+    after: 30s                       # unreachable this long counts as dead; 10s to 5m
+    # settle: 60s                    # tenants run elsewhere at the earliest this long
+    #                                # after the last answer; twice after by default,
+    #                                # at least after + 10s, at most 10m
     hetzner:
       tokenFile: /etc/murder/hcloud.token   # read/write token of the project
       # servers: {n1: murder-n1}     # Hetzner server names, if not the node names
 ```
 
+- **Shorter delays** fail over sooner, at the risk of powering off a node
+  that only stalled for longer than `after`. They never let a tenant run
+  twice: promotion still needs the confirmed power-off.
 - **Without `failover`:** replication still runs, and failover is manual
   (`cluster failover -powered-off`).
 - **The token can power off and delete every server of the project.** It
@@ -300,7 +323,15 @@ cluster:
   - pruning;
   - the leader's state machine, with a fake clock, fake prober and fake
     provider: power-off timing, a blocked confirmation, frozen changes, a
-    leader change;
+    leader change, the timeline with shorter `after` and `settle`, a node
+    away with the shortest delays;
+  - on the replica's node: tenants starting side by side, images pulled
+    ahead and kept, a failed-over tenant held until healthy, 2 minutes at
+    most, whether it runs or never starts;
+  - on an in-process cluster of three nodes with real Raft and a fake
+    provider: a node stops, the leader powers it off, waits for the
+    settle, and promotes its tenants, which every other node then sees
+    held on their replicas' nodes;
   - the restart-policy update;
   - the first pass waiting for catch-up.
 - **On 3 Hetzner servers**, with a client writing a counter to a tenant and

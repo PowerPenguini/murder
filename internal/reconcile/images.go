@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/runtime"
@@ -40,6 +41,10 @@ func (r *Reconciler) sweepImages(ctx context.Context) {
 				needed[image] = true
 			}
 		}
+	}
+	// So does a tenant whose copy this node keeps, pulled ahead (prepull).
+	for _, record := range r.kept() {
+		needed[record.Spec.Image] = true
 	}
 	now := time.Now()
 	var candidates []string
@@ -102,7 +107,42 @@ func (r *Reconciler) needed(image string) bool {
 			return true
 		}
 	}
+	for _, record := range r.kept() {
+		if record.Spec.Image == image {
+			return true
+		}
+	}
 	return false
+}
+
+// prepull fetches, in the background, the image of every tenant whose copy
+// this node keeps, unless the node has it: should the tenant's node die,
+// the tenant starts here at once, not after its image is pulled from a
+// registry, which may take minutes or be down itself. A suspended tenant
+// starts no container, and needs none. It returns the images it keeps.
+func (r *Reconciler) prepull(ctx context.Context) []string {
+	var images []string
+	for _, record := range r.kept() {
+		image := record.Spec.Image
+		if record.Spec.Suspended || image == "" || slices.Contains(images, image) {
+			continue
+		}
+		images = append(images, image)
+		present, err := r.runtime.HasImage(ctx, image)
+		switch {
+		case err != nil:
+			r.log.Warn("inspect the image of a tenant whose copy this node keeps", "tenant", record.Spec.Name, "image", image, "error", err)
+		case present:
+			r.pulls.present(image)
+		default:
+			// A failed pull is tried again later, with growing delays; it
+			// is said at each pass until then, so only at debug level.
+			if err := r.pulls.fetch(image); err != nil && !errors.Is(err, errPulling) {
+				r.log.Debug("pull ahead the image of a tenant whose copy this node keeps", "tenant", record.Spec.Name, "image", image, "error", err)
+			}
+		}
+	}
+	return images
 }
 
 func (r *Reconciler) forgetImage(image string) {

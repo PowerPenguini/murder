@@ -336,7 +336,14 @@ func (s *SQLite) FailOver(node, actor string) (FailedOver, error) {
 					outcome.Stranded = append(outcome.Stranded, name)
 					continue
 				}
-				if err := tx.Exec(`UPDATE tenants SET node = replica, replica = '', replica_ready = 0, replica_next = '', move_to = '', move_held = 0, generation = generation + 1, updated_at = ? WHERE name = ? AND node = ? AND replica_ready = 1`, formatTime(now), name, node); err != nil {
+				// Requests for it wait at every edge, as for a move, until
+				// it answers on its new node, which then lets them through
+				// (ReleaseHold): none fails while its app starts there.
+				held := 1
+				if record.Spec.Suspended {
+					held = 0
+				}
+				if err := tx.Exec(`UPDATE tenants SET node = replica, replica = '', replica_ready = 0, replica_next = '', move_to = '', move_held = ?, generation = generation + 1, updated_at = ? WHERE name = ? AND node = ? AND replica_ready = 1`, held, formatTime(now), name, node); err != nil {
 					return err
 				}
 				if err := event(tx, now, actor, "tenant.failed-over", name, record.App, node+" → "+record.Replica); err != nil {
