@@ -65,14 +65,12 @@ type fakeAgent struct {
 	moved    []string
 
 	// lease is the operation lease held now, "" for none; leases counts
-	// those taken, released those let go. renewals counts renewals;
-	// lostAfter, if set, has the lease broken at that renewal.
+	// those taken, released those let go. renewals counts renewals.
 	lease     string
 	leaseKind string
 	leases    int
 	released  int
 	renewals  int
-	lostAfter int
 }
 
 func newFakeAgent(running map[string]string) *fakeAgent {

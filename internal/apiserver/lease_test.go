@@ -32,7 +32,7 @@ type leaseCluster struct {
 
 func (c leaseCluster) EveryNodeRuns(_ context.Context, schema int) error {
 	if c.schema < schema {
-		return errors.New("node n2 runs a release of schema version 18, before 19")
+		return errors.New("node n2 runs a release of schema version 19, before 20")
 	}
 	return nil
 }

@@ -715,6 +715,10 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 			back("problem", selfReboot(nodes, node))
 			return
 		}
+		if nodes.Lease != nil {
+			back("problem", fmt.Sprintf("%v: %s", store.ErrLeased, nodes.Lease))
+			return
+		}
 		toJob(s.Jobs.Start(JobReboot, "Reboot "+node, user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			return clusterops.Reboot(ctx, agent, node, opts, out)
 		}))

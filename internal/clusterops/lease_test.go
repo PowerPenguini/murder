@@ -36,9 +36,6 @@ func (a *fakeAgent) RenewLease(_ context.Context, id string) (store.Lease, error
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.renewals++
-	if a.lostAfter > 0 && a.renewals >= a.lostAfter && a.lease == id {
-		a.lease = "" // a person broke it
-	}
 	if a.lease != id {
 		return store.Lease{}, &api.Error{Status: http.StatusGone, Message: "conflicting change: the operation no longer holds the cluster"}
 	}
@@ -156,14 +153,21 @@ func TestAnOperationStopsOnceItsLeaseIsBroken(t *testing.T) {
 	defer func(every time.Duration) { renewEvery = every }(renewEvery)
 	renewEvery = 10 * time.Millisecond
 	agent := newFakeAgent(old3())
-	agent.lostAfter = 3
 	agent.tenants = []api.Tenant{tenant("a", "n2", false), tenant("b", "n2", false)}
-	client := slowAgent{agent, 100 * time.Millisecond}
+	// A person breaks the lease once the first tenant moved; the drain
+	// renews it while that move still runs.
+	client := slowAgent{agent, 100 * time.Millisecond, func() {
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+		if len(agent.moved) == 1 {
+			agent.lease = ""
+		}
+	}}
 	err := Drain(context.Background(), client, "n2", "n3", io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "lost the cluster's operation lease") {
 		t.Fatalf("drain: %v", err)
 	}
-	if agent.renewals < 3 || len(agent.moved) != 1 {
+	if agent.renewals < 1 || len(agent.moved) != 1 {
 		t.Fatalf("renewals %d, moved %v", agent.renewals, agent.moved)
 	}
 }
@@ -174,7 +178,7 @@ func TestALongOperationRenewsItsLease(t *testing.T) {
 	renewEvery = 10 * time.Millisecond
 	agent := newFakeAgent(old3())
 	agent.tenants = []api.Tenant{tenant("a", "n2", false), tenant("b", "n2", false)}
-	if err := Drain(context.Background(), slowAgent{agent, 60 * time.Millisecond}, "n2", "n3", io.Discard); err != nil {
+	if err := Drain(context.Background(), slowAgent{agent, 60 * time.Millisecond, nil}, "n2", "n3", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if agent.renewals < 4 || agent.released != 1 {
@@ -182,16 +186,21 @@ func TestALongOperationRenewsItsLease(t *testing.T) {
 	}
 }
 
-// slowAgent takes its time over each move, after it moved the tenant.
+// slowAgent takes its time over each move, after it moved the tenant;
+// moved, if set, runs as each move is made.
 type slowAgent struct {
 	*fakeAgent
 	delay time.Duration
+	moved func()
 }
 
 func (a slowAgent) MoveFrom(ctx context.Context, tenant, from, to string) (api.Tenant, error) {
 	moved, err := a.fakeAgent.MoveFrom(ctx, tenant, from, to)
 	if err != nil {
 		return moved, err
+	}
+	if a.moved != nil {
+		a.moved()
 	}
 	select {
 	case <-time.After(a.delay):
