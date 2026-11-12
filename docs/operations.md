@@ -670,10 +670,11 @@ Only a purge the state records lets backups go, and only while no tenant
 of the name is in the state, archived or not: a name used again keeps
 every backup. A tenant missing from the state with no purge recorded (a
 state put back from a copy older than the tenant, say) keeps its
-backups, thinned out. A backup's time is the clock of the node that made
-it, so one stamped later than 10 minutes before the purge may be of a
-tenant of the name made since: it stays, thinned out, with every one
-after it, and the logs name it. Archived tenants, still in the state,
+backups, thinned out. A name purged, used again and purged again loses
+every backup once `forgetPurgedAfter` has passed since the newer purge.
+Backups stamped after the purge, of a tenant of the name the state does
+not know (one lost when the state was put back from an older copy), stay,
+thinned out, and the logs name them. Archived tenants, still in the state,
 and the copies of the state keep theirs as ever. `murder backups forget
 TENANT -yes` deletes a purged tenant's backups at once (in production, once
 their locks end). Use one bucket per cluster, or per node without a

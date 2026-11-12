@@ -384,28 +384,6 @@ func TestANameUsedAgainKeepsItsBackups(t *testing.T) {
 	}
 }
 
-// A backup stamped less than clockSkew before the purge may be of a tenant
-// of the name made since: it stays, and so does every one after it.
-func TestBackupsAboutThePurgeStay(t *testing.T) {
-	f := keepAll(t)
-	f.volumes.write(t, "acme", "db", "v")
-	purged := f.clock.Add(24 * time.Hour)
-	for _, before := range []time.Duration{time.Hour, 5 * time.Minute, -time.Hour} {
-		f.clock = purged.Add(-before)
-		f.backUp(t, "acme")
-	}
-	state := &fakeState{node: "n1", dir: t.TempDir(), purged: map[string]time.Time{"acme": purged}}
-	s := newScheduler(state, func() (*Backups, error) { return f.backups, nil }, nil)
-	f.clock = purged.Add(20 * 24 * time.Hour)
-	if _, err := s.RunNow(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	list, _ := f.backups.List(context.Background(), "acme")
-	if len(list) != 2 || !list[0].At.Equal(purged.Add(-5*time.Minute)) || len(state.notes) != 1 || !strings.HasPrefix(state.notes[0], "acme backup.forgotten: 1 of 3") {
-		t.Fatalf("left %v, %v", list, state.notes)
-	}
-}
-
 // A name purged, made again and purged again loses every backup, of both,
 // once the time has passed since the newer purge, and not before.
 func TestATenantPurgedTwiceIsForgottenFromTheNewerPurge(t *testing.T) {
