@@ -373,8 +373,15 @@ var DNSProviders = []string{"hetzner", "namecheap"}
 // Failover runs a dead node's tenants from their replicas.
 type Failover struct {
 	// After is how long a node goes unanswered before it counts as dead;
-	// 30 s by default.
+	// 30 s by default, from 10 s to 5 minutes.
 	After Duration `yaml:"after"`
+	// Settle is how long after a node last answered its tenants may run
+	// elsewhere at the earliest, once its power-off is confirmed: twice
+	// After by default, at least After plus 10 s and at most 10 minutes.
+	// It is the time a node that counts as dead has to answer again, and
+	// keep its tenants, should the power-off be confirmed for the wrong
+	// machine.
+	Settle Duration `yaml:"settle"`
 	// Hetzner powers nodes off through the Hetzner Cloud API.
 	Hetzner *HetznerFence `yaml:"hetzner"`
 }
@@ -511,8 +518,13 @@ func Parse(data []byte) (Agent, error) {
 		if agent.Cluster.Dir == "" {
 			agent.Cluster.Dir = "/var/lib/murder/cluster"
 		}
-		if f := agent.Cluster.Failover; f != nil && f.After.Duration == 0 {
-			f.After.Duration = 30 * time.Second
+		if f := agent.Cluster.Failover; f != nil {
+			if f.After.Duration == 0 {
+				f.After.Duration = 30 * time.Second
+			}
+			if f.Settle.Duration == 0 {
+				f.Settle.Duration = 2 * f.After.Duration
+			}
 		}
 		if d := agent.Cluster.DNS; d != nil {
 			if d.Zone == "" {
@@ -743,6 +755,15 @@ func (c Cluster) problems() []string {
 	if f := c.Failover; f != nil {
 		if f.After.Duration < 10*time.Second {
 			problems = append(problems, "cluster.failover.after must be at least 10s: shorter, a busy node would be powered off")
+		}
+		if f.After.Duration > 5*time.Minute {
+			problems = append(problems, "cluster.failover.after must be at most 5m: by then a silent node's copies go to other nodes anyway")
+		}
+		if f.Settle.Duration < f.After.Duration+10*time.Second {
+			problems = append(problems, "cluster.failover.settle must be at least cluster.failover.after plus 10s: a node that counts as dead must have time to answer again before its tenants run elsewhere")
+		}
+		if f.Settle.Duration > 10*time.Minute {
+			problems = append(problems, "cluster.failover.settle must be at most 10m")
 		}
 		if f.Hetzner == nil {
 			problems = append(problems, "cluster.failover needs a provider to power nodes off (hetzner); without one, fail a node over by hand: murder cluster failover NODE -powered-off")

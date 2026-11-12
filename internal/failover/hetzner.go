@@ -26,8 +26,9 @@ type Hetzner struct {
 	// Endpoint is the API's base URL; Hetzner's if empty.
 	Endpoint string
 	Client   *http.Client
-	// Poll is how often the server's status is read until it is off; 2 s
-	// if zero.
+	// Poll is how often the server's status is read until it is off; 1 s
+	// if zero. Hetzner allows a project 3600 calls an hour, refilled one a
+	// second: a power-off confirmed within 10 s takes about 10 of them.
 	Poll time.Duration
 }
 
@@ -90,7 +91,7 @@ func (h *Hetzner) PowerOff(ctx context.Context, node store.Node) error {
 	}
 	poll := h.Poll
 	if poll == 0 {
-		poll = 2 * time.Second
+		poll = time.Second
 	}
 	last := server.Status
 	for {

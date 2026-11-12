@@ -49,7 +49,9 @@ type Monitor struct {
 	// 30 s if zero.
 	After time.Duration
 	// Settle is how long after a node last answered its tenants may run
-	// elsewhere at the earliest; 60 s if zero.
+	// elsewhere at the earliest; twice After if zero. It is the time a node
+	// that counts as dead has to answer again, and keep its tenants, should
+	// its power-off be confirmed for the wrong machine.
 	Settle time.Duration
 	// Interval is how often nodes are probed; 2 s if zero.
 	Interval time.Duration
@@ -102,7 +104,7 @@ func (m *Monitor) now() time.Time {
 }
 
 func (m *Monitor) after() time.Duration  { return or(m.After, 30*time.Second) }
-func (m *Monitor) settle() time.Duration { return or(m.Settle, 60*time.Second) }
+func (m *Monitor) settle() time.Duration { return or(m.Settle, 2*m.after()) }
 
 func or(d, otherwise time.Duration) time.Duration {
 	if d > 0 {
@@ -111,15 +113,19 @@ func or(d, otherwise time.Duration) time.Duration {
 	return otherwise
 }
 
-// Run watches until ctx ends.
+// Run watches until ctx ends. Rounds begin every interval, however long
+// the last one's probes took: a node that does not answer costs its
+// probe's whole timeout, and a wait of an interval after that would have
+// a dead node counted as dead up to an interval late.
 func (m *Monitor) Run(ctx context.Context) {
-	interval := or(m.Interval, 2*time.Second)
+	ticker := time.NewTicker(or(m.Interval, 2*time.Second))
+	defer ticker.Stop()
 	for {
 		m.Check(ctx)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(interval):
+		case <-ticker.C:
 		}
 	}
 }

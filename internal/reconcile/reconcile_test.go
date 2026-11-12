@@ -73,6 +73,8 @@ type fakeRuntime struct {
 	// exit. onStop runs when Stop is called.
 	state  runtime.ContainerState
 	onStop func()
+	// onStart runs when Start is called, before the container starts.
+	onStart func(id string)
 }
 
 type fakeContainer struct {
@@ -235,6 +237,9 @@ func (f *fakeRuntime) Create(_ context.Context, spec runtime.ContainerSpec) (str
 }
 
 func (f *fakeRuntime) Start(_ context.Context, id string) error {
+	if f.onStart != nil {
+		f.onStart(id)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failStart != nil {
@@ -2463,5 +2468,137 @@ func TestStatusSaysWhoWroteTheData(t *testing.T) {
 	want := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 	if status, _ := f.reconciler.Status("acme"); status.DataOwner != want || status.DataMixed {
 		t.Fatalf("data owner %q (mixed %v), want %s", status.DataOwner, status.DataMixed, want)
+	}
+}
+
+// The tenants of a pass start side by side, up to tenantSteps at once: a
+// node given every tenant of a dead one starts them in about the time of
+// one.
+func TestTenantsStartSideBySide(t *testing.T) {
+	f := newFixture(t)
+	for i := range tenantSteps {
+		f.create(t, fmt.Sprintf("t%d", i))
+	}
+	var started sync.WaitGroup
+	started.Add(tenantSteps)
+	all := make(chan struct{})
+	go func() { started.Wait(); close(all) }()
+	var alone atomic.Int32
+	f.runtime.onStart = func(string) {
+		started.Done()
+		// Each start waits for every other to begin: one at a time, the
+		// first would wait for ever.
+		select {
+		case <-all:
+		case <-time.After(5 * time.Second):
+			alone.Add(1)
+		}
+	}
+	f.reconcile(t)
+	if n := alone.Load(); n > 0 {
+		t.Fatalf("%d tenants started without the others beside them", n)
+	}
+	for i := range tenantSteps {
+		if status, _ := f.reconciler.Status(fmt.Sprintf("t%d", i)); status.Phase != PhaseRunning {
+			t.Fatalf("t%d = %+v", i, status)
+		}
+	}
+}
+
+// keptHere makes a tenant of another node, whose copy this node keeps, as
+// Raft hands this node the state.
+func keptHere(t *testing.T, f *fixture, name, image string) *store.SQLite {
+	t.Helper()
+	sourcePath := filepath.Join(t.TempDir(), "source.db")
+	if err := store.Init(sourcePath, "other-node"); err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.Open(sourcePath, store.Options{NetworkPool: netip.MustParsePrefix("10.240.0.0/16"), Sealer: func(string, string, spec.Secret) (string, error) { return "sealed", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+	var index uint64
+	source.Replicate(func(batch store.Batch) (uint64, error) {
+		index++
+		return index, errors.Join(source.ApplyEntry(index, batch), f.store.ApplyEntry(index, batch))
+	}, func() error { return nil })
+	app := spec.Tenant{Image: image, HealthPath: "/health", User: fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
+	if _, err := source.PutApp(store.App{Name: name, Spec: app}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	for i, node := range []string{"other-node", "test-node"} {
+		if err := source.PutNode(store.Node{Name: node, Address: fmt.Sprintf("10.0.0.%d:7400", i+1)}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := source.Create(store.NewTenant{Name: name, App: name, Node: "other-node"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.PlaceReplicas("test"); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := f.store.Get(name); record.Replica != "test-node" {
+		t.Fatalf("%s's copy is on %q", name, record.Replica)
+	}
+	return source
+}
+
+// A node pulls ahead the image of every tenant whose copy it keeps, so a
+// failover starts the tenant without waiting for a registry, and keeps the
+// image from its sweep of unused ones; once the copy is elsewhere, the
+// image goes.
+func TestTheImageOfAKeptCopyIsPulledAhead(t *testing.T) {
+	const image = "registry.test/app@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+	f := newFixture(t)
+	source := keptHere(t, f, "remote", image)
+	f.reconcile(t)
+	if !slices.Contains(f.runtime.pulled, image) || !f.runtime.images[image] {
+		t.Fatalf("pulled %v", f.runtime.pulled)
+	}
+	if _, ok := f.reconciler.Status("remote"); ok || f.runtime.count() != 0 {
+		t.Fatal("a tenant of another node was started here")
+	}
+	f.reconcile(t)
+	if len(f.runtime.removedImages) != 0 {
+		t.Fatalf("the sweep removed %v", f.runtime.removedImages)
+	}
+	if _, err := source.SetSuspended("remote", true, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Archive("remote", "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if !slices.Equal(f.runtime.removedImages, []string{image}) {
+		t.Fatalf("removed %v once the tenant was archived", f.runtime.removedImages)
+	}
+}
+
+// Requests for a tenant that moved or failed over here wait for it to be
+// healthy, but not for ever: one that runs and never passes its health
+// check gets them after heldMax.
+func TestAHeldTenantIsServedAfterAWhileAnyway(t *testing.T) {
+	f := newFixture(t)
+	sick := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	t.Cleanup(sick.Close)
+	f.reconciler.backend = func(store.Record) (string, error) { return strings.TrimPrefix(sick.URL, "http://"), nil }
+	f.reconciler.replacedWait = 200 * time.Millisecond
+	movedHere(t, f, "sick")
+	_ = f.reconciler.Reconcile(context.Background())
+	if record, _ := f.store.Get("sick"); !record.MoveHeld {
+		t.Fatal("served at once, though not healthy")
+	}
+	since, ok := f.reconciler.heldSince["sick"]
+	if !ok {
+		t.Fatal("the hold's start is not recorded")
+	}
+	f.reconciler.heldSince["sick"] = since.Add(-heldMax)
+	_ = f.reconciler.Reconcile(context.Background())
+	if record, _ := f.store.Get("sick"); record.MoveHeld {
+		t.Fatalf("still held after %s", heldMax)
+	}
+	if len(f.reconciler.heldSince) != 0 {
+		t.Fatalf("held since: %v", f.reconciler.heldSince)
 	}
 }

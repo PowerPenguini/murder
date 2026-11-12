@@ -499,7 +499,7 @@ func newMonitor(cfg *config.Cluster, baseDomain, panelName string, st *store.SQL
 	if cfg.Failover == nil {
 		return monitor
 	}
-	monitor.After = cfg.Failover.After.Duration
+	monitor.After, monitor.Settle = cfg.Failover.After.Duration, cfg.Failover.Settle.Duration
 	if h := cfg.Failover.Hetzner; h != nil {
 		token, err := readSecret(h.TokenFile)
 		if err != nil {
