@@ -135,8 +135,11 @@ func checkOwnSettings(cfg config.Agent, configPath string, h Host) []Result {
 			}
 		}
 		if d.Problem != "" {
-			results = append(results, Result{Warning, "config", fmt.Sprintf("%s: %s, from %s: %s", d.Key, value, d.From, d.Problem),
-				"see that sshd -T and ss run (as root), or name the ports in " + config.NodeFileName + ": hostFirewall: {ssh: [22, …]}"})
+			fix := "see that sshd -T, ss and systemctl run (as root), or name the ports in " + config.NodeFileName + ": hostFirewall: {ssh: [22, …]}"
+			if strings.HasSuffix(d.Key, "publicAddresses") {
+				fix = "if an address is gone for good, name those left in " + config.NodeFileName + " (" + d.Key + "); otherwise see why the interface was not up"
+			}
+			results = append(results, Result{Warning, "config", fmt.Sprintf("%s: %s, from %s: %s", d.Key, value, d.From, d.Problem), fix})
 			continue
 		}
 		results = append(results, Result{OK, "config", fmt.Sprintf("%s: %s, from %s", d.Key, value, d.From), ""})

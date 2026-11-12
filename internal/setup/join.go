@@ -201,6 +201,7 @@ func Adopt(bundle cluster.Bundle, own Own) (Install, config.Agent, error) {
 	if agent.HostFirewall != nil {
 		in.SSHPorts = own.SSHPorts
 	}
+	in.Public = own.Public
 	// Files land where the cluster keeps them, beside the config only.
 	for file, data := range bundle.Files {
 		if path.Dir(file) != ConfigDir {

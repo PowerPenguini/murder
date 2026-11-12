@@ -86,7 +86,8 @@ func TestSetupTurnsTheHostFirewallOn(t *testing.T) {
 func TestTheHostFirewallKeepsEverySSHPortOpen(t *testing.T) {
 	host := newFakeHost()
 	host.commands["sshd -T"] = "port 22\nlistenaddress 192.0.2.10:2200\nlistenaddress [2001:db8::1]:2201\npasswordauthentication no\n"
-	host.commands["systemctl show -p Listen --value ssh.socket"] = "[::]:2202 (Stream)\n0.0.0.0:2203 (Stream)\n"
+	host.commands["systemctl show -p LoadState -p Listen ssh.socket"] = "LoadState=loaded\nListen=[::]:2202 (Stream)\nListen=0.0.0.0:2203 (Stream)\n"
+	host.commands["systemctl show -p LoadState -p Listen sshd.socket"] = "LoadState=not-found\n"
 	host.commands["ss -H -ltunp"] = "tcp LISTEN 0 4096 0.0.0.0:2222 0.0.0.0:* users:((\"systemd\",pid=1,fd=50))\n"
 	facts := Inspect(context.Background(), host)
 	if !slices.Equal(facts.SSHPorts, []int{22, 2200, 2201, 2202, 2203}) {

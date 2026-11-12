@@ -485,10 +485,15 @@ func (probe) Hostname() (string, error) { return "fsn-1.example.com", nil }
 func (probe) Addresses() ([]netip.Addr, error) {
 	return []netip.Addr{netip.MustParseAddr("10.0.0.2")}, nil
 }
-func (probe) Pools() ([]string, error)   { return []string{"tank"}, nil }
-func (probe) SSHPorts() ([]int, error)   { return []int{22}, nil }
-func (probe) RecordedSSHPorts() []int    { return nil }
-func (probe) RecordSSHPorts([]int) error { return nil }
+func (probe) Pools() ([]string, error)         { return []string{"tank"}, nil }
+func (probe) SSHPorts() ([]int, error)         { return []int{22}, nil }
+func (probe) RecordedSSHPorts() ([]int, error) { return nil, errors.New("none") }
+func (probe) OpenTCPPorts() ([]int, error)     { return nil, errors.New("none") }
+func (probe) RecordedPublicAddresses() ([]string, error) {
+	return nil, errors.New("none")
+}
+func (probe) RecordPublicAddresses([]string) error { return nil }
+func (probe) RecordSSHPorts([]int) error           { return nil }
 
 // The doctor says what the config left out and where it was found, what
 // node.yaml sets, and what the config sets that the host gives the same.
@@ -515,5 +520,11 @@ func TestOwnSettings(t *testing.T) {
 	results = checkOwnSettings(cfg, "/etc/murder/agent.yaml", Host{Root: root})
 	if !has(results, Warning, "hostFirewall.ssh: 22, 2222") || has(results, OK, "hostFirewall.ssh") {
 		t.Errorf("incomplete ssh: %+v", results)
+	}
+	// Public addresses kept from before are a warning too.
+	cfg.Detected = append(cfg.Detected, config.Detected{Key: "cluster.publicAddresses", Value: "203.0.113.10, 203.0.113.11", From: "the host's public addresses", Problem: "found only 203.0.113.11 of the public addresses recorded before"})
+	results = checkOwnSettings(cfg, "/etc/murder/agent.yaml", Host{Root: root})
+	if !has(results, Warning, "cluster.publicAddresses: 203.0.113.10, 203.0.113.11") {
+		t.Errorf("kept public addresses: %+v", results)
 	}
 }

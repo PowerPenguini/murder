@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/PowerPenguini/murder/internal/firewall"
 )
 
 // Runner runs a command and returns its standard output.
@@ -43,7 +45,19 @@ func (Exec) Run(ctx context.Context, name string, args ...string) (string, error
 }
 
 // System answers from this host.
-type System struct{}
+type System struct {
+	// StateDir holds the records; /var/lib/murder if empty, for tests.
+	StateDir string
+}
+
+// record is where System keeps the record at file (one of the *Record
+// paths).
+func (s System) record(file string) string {
+	if s.StateDir == "" {
+		return file
+	}
+	return filepath.Join(s.StateDir, filepath.Base(file))
+}
 
 func (System) Hostname() (string, error)        { return os.Hostname() }
 func (System) Addresses() ([]netip.Addr, error) { return Addresses() }
@@ -61,32 +75,89 @@ func (System) SSHPorts() ([]int, error) {
 	return SSHPorts(ctx, Exec{})
 }
 
-// SSHPortsRecord keeps the SSH ports the last complete detection found,
-// so one that fails, as with ss not there yet early at boot, closes none
-// of them.
-const SSHPortsRecord = "/var/lib/murder/ssh-ports"
+// Records keep what the last complete detection found, so a start whose
+// detection fails or finds too little, as early at boot before ss or an
+// interface is there, takes nothing away: closing SSH's port locks the
+// operator out, and dropping a node's public address from the cluster's
+// DNS records is an outage. They are root's alone, beside the database.
+const (
+	SSHPortsRecord        = "/var/lib/murder/ssh-ports"
+	PublicAddressesRecord = "/var/lib/murder/public-addresses"
+)
 
-// RecordedSSHPorts are the ports SSHPortsRecord keeps; none without it.
-func (System) RecordedSSHPorts() []int {
-	data, err := os.ReadFile(SSHPortsRecord)
+// ErrNothingRecorded is a record's error when there is none to go by: it
+// is missing, unreadable, corrupt or empty.
+var ErrNothingRecorded = errors.New("nothing recorded")
+
+// RecordedSSHPorts are the ports SSHPortsRecord keeps.
+func (s System) RecordedSSHPorts() ([]int, error) {
+	data, err := readRecord(s.record(SSHPortsRecord))
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return ParsePorts(string(data))
+	return ParsePortsRecord(data)
 }
 
 // RecordSSHPorts keeps ports in SSHPortsRecord. It fails without root,
 // as for the CLI run by a member of the socket's group: the agent and the
 // firewall, which run as root, keep it.
-func (System) RecordSSHPorts(ports []int) error {
-	if err := os.MkdirAll(filepath.Dir(SSHPortsRecord), 0o755); err != nil {
+func (s System) RecordSSHPorts(ports []int) error {
+	return writeRecord(s.record(SSHPortsRecord), FormatPorts(ports))
+}
+
+// RecordedPublicAddresses are the addresses PublicAddressesRecord keeps.
+func (s System) RecordedPublicAddresses() ([]string, error) {
+	data, err := readRecord(s.record(PublicAddressesRecord))
+	if err != nil {
+		return nil, err
+	}
+	return ParseAddressesRecord(data)
+}
+
+// RecordPublicAddresses keeps addresses in PublicAddressesRecord.
+func (s System) RecordPublicAddresses(addresses []string) error {
+	return writeRecord(s.record(PublicAddressesRecord), strings.Join(addresses, " ")+"\n")
+}
+
+// OpenTCPPorts are the TCP ports the loaded host firewall opens to every
+// address now; it needs root.
+func (System) OpenTCPPorts() ([]int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	listing, err := Exec{}.Run(ctx, "nft", "list", "table", "inet", "murder")
+	if err != nil {
+		return nil, err
+	}
+	return firewall.OpenTCP(listing), nil
+}
+
+func readRecord(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrNothingRecorded, err)
+	}
+	return string(data), nil
+}
+
+// writeRecord replaces path with text, readable by root alone.
+func writeRecord(path, text string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	temp := SSHPortsRecord + ".new"
-	if err := os.WriteFile(temp, []byte(FormatPorts(ports)), 0o644); err != nil {
+	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(temp, SSHPortsRecord)
+	defer os.Remove(temp.Name())
+	// CreateTemp makes it 0600.
+	if _, err := temp.WriteString(text); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temp.Name(), path)
 }
 
 // FormatPorts is ports as SSHPortsRecord keeps them: "22 2222\n".
@@ -98,16 +169,45 @@ func FormatPorts(ports []int) string {
 	return strings.Join(texts, " ") + "\n"
 }
 
-// ParsePorts reads FormatPorts' text, leaving out what is not a port.
-func ParsePorts(text string) []int {
+// ParsePortsRecord reads FormatPorts' text strictly: one line of ports
+// and nothing else. Anything else, or no port, is ErrNothingRecorded: a
+// record half read must not pass for what was found.
+func ParsePortsRecord(text string) ([]int, error) {
+	line, ok := strings.CutSuffix(text, "\n")
+	if !ok || strings.Contains(line, "\n") || strings.TrimSpace(line) == "" {
+		return nil, fmt.Errorf("%w: %q is not one line of ports", ErrNothingRecorded, text)
+	}
 	var ports []int
-	for _, field := range strings.Fields(text) {
-		if port, err := strconv.Atoi(field); err == nil && port > 0 && port < 65536 {
-			ports = append(ports, port)
+	for _, field := range strings.Split(line, " ") {
+		port, err := strconv.Atoi(field)
+		if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != field {
+			return nil, fmt.Errorf("%w: %q is not a port", ErrNothingRecorded, field)
 		}
+		ports = append(ports, port)
 	}
 	slices.Sort(ports)
-	return slices.Compact(ports)
+	return slices.Compact(ports), nil
+}
+
+// ParseAddressesRecord reads a record of public addresses as strictly:
+// one line of IPv4 addresses that are public.
+func ParseAddressesRecord(text string) ([]string, error) {
+	line, ok := strings.CutSuffix(text, "\n")
+	if !ok || strings.Contains(line, "\n") || strings.TrimSpace(line) == "" {
+		return nil, fmt.Errorf("%w: %q is not one line of addresses", ErrNothingRecorded, text)
+	}
+	var addresses []string
+	for _, field := range strings.Split(line, " ") {
+		address, err := netip.ParseAddr(field)
+		if err != nil || address.String() != field {
+			return nil, fmt.Errorf("%w: %q is not an address", ErrNothingRecorded, field)
+		}
+		if _, public := Classify([]netip.Addr{address}); len(public) != 1 {
+			return nil, fmt.Errorf("%w: %s is not a public IPv4 address", ErrNothingRecorded, field)
+		}
+		addresses = append(addresses, field)
+	}
+	return addresses, nil
 }
 
 // Addresses are those of the host's own interfaces that are up: not
@@ -206,22 +306,22 @@ func SSHPorts(ctx context.Context, runner Runner) ([]int, error) {
 			}
 		}
 	}
+	// A socket-activated ssh's ports are its socket unit's, whether or not
+	// an sshd holds one yet: before the first connection none does.
 	for _, unit := range []string{"ssh.socket", "sshd.socket"} {
-		// "Listen=[::]:22 (Stream)", one line for each.
-		output, err := runner.Run(ctx, "systemctl", "show", "-p", "Listen", "--value", unit)
+		listen, err := socketListen(ctx, runner, unit)
 		if err != nil {
+			failed = append(failed, err)
 			continue
 		}
-		for _, field := range strings.Fields(output) {
-			if i := strings.LastIndex(field, ":"); i >= 0 {
-				addPort(field[i+1:])
+		for _, address := range listen {
+			if i := strings.LastIndex(address, ":"); i >= 0 {
+				addPort(address[i+1:])
 			} else {
-				addPort(field)
+				addPort(address)
 			}
 		}
 	}
-	// A unit that does not exist shows an empty value: only sshd -T and ss
-	// failing leave ports unknown.
 	sockets, err := ListSockets(ctx, runner)
 	if err != nil {
 		failed = append(failed, err)
@@ -233,6 +333,42 @@ func SSHPorts(ctx context.Context, runner Runner) ([]int, error) {
 	}
 	slices.Sort(ports)
 	return slices.Compact(ports), errors.Join(failed...)
+}
+
+// socketListen is what a socket unit listens on: "[::]:22". A unit that
+// does not exist has none, which is no failure; systemctl failing, or
+// answering without the unit's state, is one: the unit may hold a port.
+func socketListen(ctx context.Context, runner Runner, unit string) ([]string, error) {
+	// "LoadState=loaded", then "Listen=[::]:22 (Stream)", one line each.
+	output, err := runner.Run(ctx, "systemctl", "show", "-p", "LoadState", "-p", "Listen", unit)
+	if err != nil {
+		return nil, fmt.Errorf("ask systemd about %s: %w", unit, err)
+	}
+	var state string
+	var listen []string
+	for line := range strings.Lines(output) {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
+		switch key {
+		case "LoadState":
+			state = value
+		case "Listen":
+			if address, _, _ := strings.Cut(value, " "); address != "" {
+				listen = append(listen, address)
+			}
+		}
+	}
+	switch state {
+	case "not-found", "masked":
+		// No such unit, or one that cannot start: it holds no port.
+		return nil, nil
+	case "loaded":
+		return listen, nil
+	case "":
+		return nil, fmt.Errorf("systemctl show %s: no LoadState", unit)
+	default:
+		// masked, error, bad-setting: what it would listen on is unknown.
+		return nil, fmt.Errorf("systemctl show %s: LoadState=%s", unit, state)
+	}
 }
 
 // SSHDSettings is sshd -T, by lowercase name, with every value of a

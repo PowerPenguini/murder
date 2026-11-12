@@ -270,8 +270,12 @@ func TestStepsInstallEverything(t *testing.T) {
 		t.Errorf("socket drop-in %q", dropIn)
 	}
 	// The SSH ports setup found seed the record the agent keeps them in.
-	if string(host.files["/var/lib/murder/ssh-ports"]) != "22\n" {
-		t.Errorf("ssh ports record %q", host.files["/var/lib/murder/ssh-ports"])
+	if string(host.files["/var/lib/murder/ssh-ports"]) != "22\n" || host.modes["/var/lib/murder/ssh-ports"] != 0o600 {
+		t.Errorf("ssh ports record %q, mode %v", host.files["/var/lib/murder/ssh-ports"], host.modes["/var/lib/murder/ssh-ports"])
+	}
+	// And the public addresses it found, with the interfaces up.
+	if string(host.files["/var/lib/murder/public-addresses"]) != "203.0.113.10\n" || host.modes["/var/lib/murder/public-addresses"] != 0o600 {
+		t.Errorf("public addresses record %q, mode %v", host.files["/var/lib/murder/public-addresses"], host.modes["/var/lib/murder/public-addresses"])
 	}
 	if string(host.files[HetznerTokenFile]) != "hcloud-s3cret\n" || strings.Contains(string(host.files[ConfigFile]), "s3cret") {
 		t.Fatal("the token is not kept in its own file")

@@ -9,6 +9,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/hostprobe"
 )
 
 const clusterConfig = `# written by murder setup
@@ -56,10 +57,15 @@ func (h detectHost) Addresses() ([]netip.Addr, error) {
 	}
 	return out, nil
 }
-func (h detectHost) Pools() ([]string, error)   { return h.pools, nil }
-func (h detectHost) SSHPorts() ([]int, error)   { return h.ssh, nil }
-func (h detectHost) RecordedSSHPorts() []int    { return nil }
-func (h detectHost) RecordSSHPorts([]int) error { return nil }
+func (h detectHost) Pools() ([]string, error)         { return h.pools, nil }
+func (h detectHost) SSHPorts() ([]int, error)         { return h.ssh, nil }
+func (h detectHost) RecordedSSHPorts() ([]int, error) { return nil, hostprobe.ErrNothingRecorded }
+func (h detectHost) OpenTCPPorts() ([]int, error)     { return nil, hostprobe.ErrNothingRecorded }
+func (h detectHost) RecordedPublicAddresses() ([]string, error) {
+	return nil, hostprobe.ErrNothingRecorded
+}
+func (h detectHost) RecordPublicAddresses([]string) error { return nil }
+func (h detectHost) RecordSSHPorts([]int) error           { return nil }
 
 // A cluster whose config names the inviting node's own settings: the
 // host keeps that config as it is, and names its own in node.yaml.

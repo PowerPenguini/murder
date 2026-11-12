@@ -61,7 +61,7 @@ them on the host at every start:
 | --- | --- |
 | `node` | the host name's first label (the database keeps the name it was made with; a renamed host keeps it) |
 | `cluster.address` | the host's only private IPv4 address, port 7400; several is refused, naming them |
-| `cluster.publicAddresses` (`publicAddresses` alone) | the public IPv4 addresses of the host's interfaces; `[]` says none |
+| `cluster.publicAddresses` (`publicAddresses` alone) | the public IPv4 addresses of the host's interfaces; `[]` says none. Never fewer than were last found (see below) |
 | `volumes.parent` | `<pool>/murder/tenants` of the host's only ZFS pool, with `driver: zfs` |
 | `hostFirewall.ssh` | the ports sshd listens on (`sshd -T`, its sockets, `ssh.socket`), at every start; never fewer than the last complete detection found (see [Harden the node](operations.md#harden-the-node)) |
 | `panel.tunnel.address` | the cluster's state: the address it has for this node, or else the lowest one no node has, which the panel records there |
@@ -81,10 +81,22 @@ cluster: {address: 10.0.0.2:7400}
 volumes: {parent: fast/murder/tenants}
 ```
 
-A setting given in either file wins over what the host has. Public
-addresses found on the host feed the state's records (DNS, the panel's
-endpoint), not the host firewall, which opens ports on every address the
-host has: an interface up late at boot opens and closes nothing.
+A setting given in either file wins over what the host has.
+
+Public addresses found on the host feed the cluster's DNS records
+(`cluster.dns`) and the panel's tunnel endpoint, so a node that starts
+before its public interface is up must not vanish from them. The last
+addresses found, when there were any, are kept in
+`/var/lib/murder/public-addresses` (root's alone; setup writes the first).
+A start that finds none keeps those, and one that finds only some of them
+keeps them all, each with a warning in the agent's log and from
+`murder doctor`: an interface not up yet looks exactly like an address
+removed for good. An address found beyond them is taken, and kept. To
+remove an address, or change them on purpose, set `publicAddresses`
+(`cluster.publicAddresses` in a cluster) in `node.yaml`; then nothing is
+found or kept. The host firewall does not use them at all: it opens
+ports on every address the host has, so an interface up late at boot
+opens and closes nothing.
 `murder doctor` reports, under `config`, what the agent found and from
 where, what `node.yaml` sets, and which settings the config names that
 the host would give the same: take those out to share the file. Why a

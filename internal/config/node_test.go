@@ -21,12 +21,25 @@ type fakeHost struct {
 	sshErr    error
 	// record is the record of SSH ports, shared by copies; nil keeps none.
 	record *sshRecord
+	// open is what the running host firewall opens; openErr when it
+	// cannot be read.
+	open    []int
+	openErr error
+	// public is the record of public addresses; nil keeps none.
+	public *publicRecord
 }
 
+// sshRecord holds ports; none (nil) is nothing recorded, as a missing,
+// unreadable, corrupt or empty file.
 type sshRecord struct {
 	ports  []int
 	writes int
 	fail   error
+}
+
+type publicRecord struct {
+	addresses []string
+	writes    int
 }
 
 func (h fakeHost) Hostname() (string, error) {
@@ -53,11 +66,32 @@ func (h fakeHost) Pools() ([]string, error) {
 
 func (h fakeHost) SSHPorts() ([]int, error) { return h.ssh, h.sshErr }
 
-func (h fakeHost) RecordedSSHPorts() []int {
-	if h.record == nil {
-		return nil
+func (h fakeHost) RecordedSSHPorts() ([]int, error) {
+	if h.record == nil || h.record.ports == nil {
+		return nil, errors.New("nothing recorded: corrupt")
 	}
-	return h.record.ports
+	return h.record.ports, nil
+}
+
+func (h fakeHost) OpenTCPPorts() ([]int, error) {
+	if h.open == nil && h.openErr == nil {
+		return nil, errors.New("nft: not found")
+	}
+	return h.open, h.openErr
+}
+
+func (h fakeHost) RecordedPublicAddresses() ([]string, error) {
+	if h.public == nil || h.public.addresses == nil {
+		return nil, errors.New("nothing recorded")
+	}
+	return h.public.addresses, nil
+}
+
+func (h fakeHost) RecordPublicAddresses(addresses []string) error {
+	if h.public != nil {
+		h.public.addresses, h.public.writes = slices.Clone(addresses), h.public.writes+1
+	}
+	return nil
 }
 
 func (h fakeHost) RecordSSHPorts(ports []int) error {
@@ -213,17 +247,19 @@ cluster: {address: 10.0.0.2:7500, publicAddresses: [203.0.113.10]}
 }
 
 // The SSH ports the host firewall opens never shrink on a detection that
-// failed: a port closed by mistake locks the operator out.
+// failed or found only some: a port closed by mistake locks the operator
+// out.
 func TestSSHPortsNeverShrinkOnAFailedDetection(t *testing.T) {
 	config := []byte("baseDomain: example.com\nhostFirewall:\n")
 	record := &sshRecord{}
 	host := fakeHost{name: "n1", addresses: []string{"203.0.113.10"}, ssh: []int{22, 2222}, record: record}
+	last := func(agent Agent) Detected { return agent.Detected[len(agent.Detected)-1] }
 	agent, err := ParseOn(config, nil, host)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A complete detection is recorded, and is no problem.
-	if !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) || !slices.Equal(record.ports, []int{22, 2222}) || agent.Detected[len(agent.Detected)-1].Problem != "" {
+	if !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) || !slices.Equal(record.ports, []int{22, 2222}) || last(agent).Problem != "" {
 		t.Fatalf("ssh %v, record %v, detected %+v", agent.HostFirewall.SSH, record.ports, agent.Detected)
 	}
 	// At the next start ss is missing and sshd -T fails: nothing found,
@@ -233,23 +269,31 @@ func TestSSHPortsNeverShrinkOnAFailedDetection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := agent.Detected[len(agent.Detected)-1]
-	if !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) || d.Problem == "" || !strings.Contains(d.Problem, "ss: not found") || record.writes != 1 {
+	if d := last(agent); !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) || !strings.Contains(d.Problem, "ss: not found") || record.writes != 1 {
 		t.Fatalf("ssh %v, detected %+v, writes %d", agent.HostFirewall.SSH, d, record.writes)
 	}
 	if rules, err := agent.HostRules(); err != nil || !slices.Contains(rules.PublicTCP, 2222) {
 		t.Fatalf("rules %+v, %v", rules, err)
 	}
-	// Partial: sshd -T answers 22 but the sockets cannot be read; 2222
+	// Partial: sshd -T answers 22 but a socket unit cannot be asked; 2222
 	// stays open.
-	host.ssh, host.sshErr = []int{22}, errors.New("ss: not found")
+	host.ssh, host.sshErr = []int{22}, errors.New("systemctl show ssh.socket: exit status 1")
 	if agent, err = ParseOn(config, nil, host); err != nil || !slices.Equal(agent.HostFirewall.SSH, []int{22, 2222}) || record.writes != 1 {
 		t.Fatalf("partial: ssh %v, %v, writes %d", agent.HostFirewall.SSH, err, record.writes)
 	}
-	// A failed detection with no record opens 22, as before.
-	host.record, host.ssh = &sshRecord{}, nil
-	if agent, err = ParseOn(config, nil, host); err != nil || !slices.Equal(agent.HostFirewall.SSH, []int{22}) || !strings.Contains(agent.Detected[len(agent.Detected)-1].From, "22") {
-		t.Fatalf("no record: ssh %v, %v", agent.HostFirewall.SSH, err)
+	// Nothing recorded (missing, unreadable, corrupt or empty) and the
+	// detection fails: what was found, 22, and what the running firewall
+	// opens to everyone, which held SSH's port until now.
+	host.record, host.ssh = &sshRecord{}, []int{22}
+	host.open = []int{22, 80, 443, 2222}
+	if agent, err = ParseOn(config, nil, host); err != nil || !slices.Equal(agent.HostFirewall.SSH, []int{22, 80, 443, 2222}) || !strings.Contains(last(agent).Problem, "running host firewall opens (22, 80, 443, 2222)") {
+		t.Fatalf("no record: ssh %v, %+v, %v", agent.HostFirewall.SSH, last(agent), err)
+	}
+	// And the running firewall cannot be read either: 22 beside what was
+	// found, said plainly.
+	host.ssh, host.open, host.openErr = nil, nil, errors.New("nft: operation not permitted")
+	if agent, err = ParseOn(config, nil, host); err != nil || !slices.Equal(agent.HostFirewall.SSH, []int{22}) || !strings.Contains(last(agent).Problem, "may close") {
+		t.Fatalf("nothing to go by: ssh %v, %+v, %v", agent.HostFirewall.SSH, last(agent), err)
 	}
 	// A complete detection that finds sshd moved off a port is believed:
 	// the record follows it.
@@ -257,10 +301,10 @@ func TestSSHPortsNeverShrinkOnAFailedDetection(t *testing.T) {
 	if agent, err = ParseOn(config, nil, host); err != nil || !slices.Equal(agent.HostFirewall.SSH, []int{2222}) || !slices.Equal(record.ports, []int{2222}) {
 		t.Fatalf("moved: ssh %v, record %v, %v", agent.HostFirewall.SSH, record.ports, err)
 	}
-	// A record that cannot be written is said, when it holds other ports.
+	// A record that cannot be written is said.
 	record.fail = errors.New("read-only file system")
 	host.ssh = []int{22}
-	if agent, err = ParseOn(config, nil, host); err != nil || !strings.Contains(agent.Detected[len(agent.Detected)-1].Problem, "read-only") {
+	if agent, err = ParseOn(config, nil, host); err != nil || !strings.Contains(last(agent).Problem, "read-only") {
 		t.Fatalf("unwritable record: %+v, %v", agent.Detected, err)
 	}
 	// Derivable tries detection without recording anything.
@@ -268,6 +312,60 @@ func TestSSHPortsNeverShrinkOnAFailedDetection(t *testing.T) {
 	explicit, err := ParseOn([]byte("baseDomain: example.com\nhostFirewall: {ssh: [22]}\n"), nil, host)
 	if err != nil || !slices.Contains(explicit.Derivable(host), "hostFirewall.ssh") || record.writes != 0 {
 		t.Fatalf("derivable %v, writes %d, %v", explicit.Derivable(host), record.writes, err)
+	}
+}
+
+// Public addresses found on the host never drop one recorded before: a
+// node up before its public interface would otherwise vanish from the
+// cluster's DNS records. Only an explicit publicAddresses removes one.
+func TestPublicAddressesNeverShrinkOnAStart(t *testing.T) {
+	config := []byte("baseDomain: example.com\ncluster: {}\n")
+	record := &publicRecord{}
+	host := fakeHost{name: "n1", addresses: []string{"10.0.0.2", "203.0.113.11", "203.0.113.10"}, public: record}
+	last := func(agent Agent) Detected {
+		for _, d := range agent.Detected {
+			if d.Key == "cluster.publicAddresses" {
+				return d
+			}
+		}
+		t.Fatalf("not detected: %+v", agent.Detected)
+		return Detected{}
+	}
+	agent, err := ParseOn(config, nil, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Found, in order, recorded, no problem.
+	if want := []string{"203.0.113.10", "203.0.113.11"}; !slices.Equal(agent.Cluster.PublicAddresses, want) || !slices.Equal(record.addresses, want) || last(agent).Problem != "" {
+		t.Fatalf("public %v, record %v, %+v", agent.Cluster.PublicAddresses, record.addresses, last(agent))
+	}
+	// Up before its public interface: none found, the recorded ones kept.
+	host.addresses = []string{"10.0.0.2"}
+	agent, err = ParseOn(config, nil, host)
+	if err != nil || !slices.Equal(agent.Cluster.PublicAddresses, []string{"203.0.113.10", "203.0.113.11"}) || !strings.Contains(last(agent).Problem, "no public address was found") || record.writes != 1 {
+		t.Fatalf("none found: %v, %+v, %v", agent.Cluster.PublicAddresses, last(agent), err)
+	}
+	// One of two found: both kept, with a warning; the record unchanged.
+	host.addresses = []string{"10.0.0.2", "203.0.113.11"}
+	agent, err = ParseOn(config, nil, host)
+	if err != nil || !slices.Equal(agent.Cluster.PublicAddresses, []string{"203.0.113.10", "203.0.113.11"}) || !strings.Contains(last(agent).Problem, "found only 203.0.113.11") || record.writes != 1 {
+		t.Fatalf("subset: %v, %+v, %v", agent.Cluster.PublicAddresses, last(agent), err)
+	}
+	// A new address is believed and recorded.
+	host.addresses = []string{"10.0.0.2", "203.0.113.10", "203.0.113.11", "198.51.100.7"}
+	agent, err = ParseOn(config, nil, host)
+	if want := []string{"198.51.100.7", "203.0.113.10", "203.0.113.11"}; err != nil || !slices.Equal(agent.Cluster.PublicAddresses, want) || !slices.Equal(record.addresses, want) || last(agent).Problem != "" {
+		t.Fatalf("added: %v, record %v, %v", agent.Cluster.PublicAddresses, record.addresses, err)
+	}
+	// An address dropped for good is dropped by naming the others.
+	agent, err = ParseOn([]byte("baseDomain: example.com\ncluster: {publicAddresses: [203.0.113.10]}\n"), nil, host)
+	if err != nil || !slices.Equal(agent.Cluster.PublicAddresses, []string{"203.0.113.10"}) || agent.IsDetected("cluster.publicAddresses") {
+		t.Fatalf("explicit: %v, %v", agent.Cluster.PublicAddresses, err)
+	}
+	// Nothing recorded and none found: none, as before.
+	host.addresses, host.public = []string{"10.0.0.2"}, &publicRecord{}
+	if agent, err = ParseOn(config, nil, host); err != nil || len(agent.Cluster.PublicAddresses) != 0 || last(agent).Problem != "" {
+		t.Fatalf("none at all: %v, %+v, %v", agent.Cluster.PublicAddresses, last(agent), err)
 	}
 }
 

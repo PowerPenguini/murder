@@ -138,8 +138,11 @@ type Install struct {
 	// key in this file.
 	SSH string
 	// SSHPorts seed the record of SSH ports (hostprobe.SSHPortsRecord), so
-	// even the first start whose detection of them fails keeps them open.
+	// even the first start whose detection of them fails keeps them open;
+	// Public that of public addresses, as for one before its interface is
+	// up.
 	SSHPorts []int
+	Public   []string
 }
 
 // Install is what setup installs for the settings.
@@ -148,6 +151,7 @@ func (s Settings) Install() Install {
 	if s.HostFirewall {
 		in.SSHPorts = s.SSHPorts
 	}
+	in.Public = s.Public
 	if s.HetznerToken != "" {
 		in.Secrets[HetznerTokenFile] = []byte(s.HetznerToken + "\n")
 	}
@@ -197,16 +201,25 @@ func liveRestore(ctx context.Context, host Host) error {
 	return nil
 }
 
-// recordSSHPorts adds ports to the record of SSH ports: with -force, the
-// ports a node kept stay.
+// recordSSHPorts adds ports to the record of SSH ports, root's alone:
+// with -force, the ports a node recorded stay.
 func recordSSHPorts(host Host, ports []int) error {
 	if data, err := host.ReadFile(hostprobe.SSHPortsRecord); err == nil {
-		ports = append(slices.Clone(ports), hostprobe.ParsePorts(string(data))...)
+		if recorded, err := hostprobe.ParsePortsRecord(string(data)); err == nil {
+			ports = append(slices.Clone(ports), recorded...)
+		}
 	}
-	if err := host.MkdirAll(path.Dir(hostprobe.SSHPortsRecord), 0o755); err != nil {
+	ports = slices.Clone(ports)
+	slices.Sort(ports)
+	return writeRecord(host, hostprobe.SSHPortsRecord, hostprobe.FormatPorts(slices.Compact(ports)))
+}
+
+// writeRecord writes one of the agent's records, root's alone.
+func writeRecord(host Host, file, text string) error {
+	if err := host.MkdirAll(path.Dir(file), 0o755); err != nil {
 		return err
 	}
-	return host.WriteFile(hostprobe.SSHPortsRecord, []byte(hostprobe.FormatPorts(hostprobe.ParsePorts(hostprobe.FormatPorts(ports)))), 0o644)
+	return host.WriteFile(file, []byte(text), 0o600)
 }
 
 // Units are the services setup enables and starts, in order.
@@ -328,6 +341,13 @@ func Steps(host Host, in Install, force bool, initialize func() error) ([]Step, 
 		}
 		if cfg.HostFirewall != nil && cfg.IsDetected("hostFirewall.ssh") && len(in.SSHPorts) > 0 {
 			if err := recordSSHPorts(host, in.SSHPorts); err != nil {
+				return err
+			}
+		}
+		// The public addresses setup found, while the node's interfaces
+		// were up: setting it up again records what it finds now.
+		if (cfg.IsDetected("publicAddresses") || cfg.IsDetected("cluster.publicAddresses")) && len(in.Public) > 0 {
+			if err := writeRecord(host, hostprobe.PublicAddressesRecord, strings.Join(in.Public, " ")+"\n"); err != nil {
 				return err
 			}
 		}

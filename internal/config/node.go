@@ -49,9 +49,18 @@ type Host interface {
 	// it could find, perhaps none.
 	SSHPorts() ([]int, error)
 	// RecordedSSHPorts are the ports the last complete detection found,
-	// which RecordSSHPorts keeps; none if it never ran.
-	RecordedSSHPorts() []int
+	// which RecordSSHPorts keeps; an error when there is nothing to go by
+	// (no record, or one unreadable, corrupt or empty).
+	RecordedSSHPorts() ([]int, error)
 	RecordSSHPorts(ports []int) error
+	// OpenTCPPorts are the TCP ports the loaded host firewall opens to
+	// everyone now; an error when it cannot be read.
+	OpenTCPPorts() ([]int, error)
+	// RecordedPublicAddresses are the last public addresses found that
+	// were not none, which RecordPublicAddresses keeps; an error as for
+	// RecordedSSHPorts.
+	RecordedPublicAddresses() ([]string, error)
+	RecordPublicAddresses(addresses []string) error
 }
 
 // Detected is a setting the config left out, found on the host.
@@ -226,8 +235,9 @@ func (a *Agent) Detect(host Host) error {
 			for _, address := range public {
 				found = append(found, address.String())
 			}
-			*target = found
-			note(key, strings.Join(found, ", "), "the host's public addresses")
+			var problem string
+			*target, problem = stablePublic(host, found)
+			a.Detected = append(a.Detected, Detected{Key: key, Value: strings.Join(*target, ", "), From: "the host's public addresses", Problem: problem})
 		}
 	}
 	if v := &a.Volumes; v.Driver == "zfs" && v.Parent == "" {
@@ -258,39 +268,80 @@ func (a *Agent) Detect(host Host) error {
 // detectSSH finds the ports the host firewall opens for SSH. A port the
 // firewall closes by mistake locks the operator out, and one it opens
 // needlessly costs little, so the set never shrinks on a detection that
-// failed: then the ports found are opened beside those the last complete
-// detection found, and 22 if there are none. Only a complete detection,
-// sshd and its sockets both asked, replaces the record, as when sshd was
-// moved off a port.
+// failed or found only some (sshd -T, ss or a socket unit not answering):
+// then the ports found are opened beside those the last complete
+// detection recorded. With no record to go by, they are opened beside 22
+// and every TCP port the running host firewall opens to everyone, which
+// held SSH's until now. Only a complete detection replaces the record, as
+// when sshd was moved off a port.
 func (a *Agent) detectSSH(host Host) []int {
 	found, err := host.SSHPorts()
 	if err == nil && len(found) == 0 {
 		err = errors.New("sshd named no port")
 	}
+	recorded, recordErr := host.RecordedSSHPorts()
 	if err == nil {
-		recorded := host.RecordedSSHPorts()
 		d := Detected{Key: "hostFirewall.ssh", Value: joinPorts(found), From: "the ports sshd listens on"}
-		if !slices.Equal(recorded, found) {
-			if recordErr := host.RecordSSHPorts(found); recordErr != nil && recorded != nil {
-				// The record keeps ports this detection did not find: a
-				// later failed one would open them again, the safe way.
-				d.Problem = fmt.Sprintf("the ports could not be recorded (%v): a start whose detection fails opens those recorded before, %s", recordErr, joinPorts(recorded))
+		if recordErr != nil || !slices.Equal(recorded, found) {
+			if writeErr := host.RecordSSHPorts(found); writeErr != nil {
+				d.Problem = fmt.Sprintf("the ports could not be recorded (%v): a start whose detection fails goes by the record as it is", writeErr)
 			}
 		}
 		a.Detected = append(a.Detected, d)
 		return found
 	}
-	recorded := host.RecordedSSHPorts()
-	ports := append(slices.Clone(found), recorded...)
-	from := "those found before"
-	if len(ports) == 0 {
-		ports, from = []int{22}, "22, as nothing was found before"
+	var ports []int
+	var from, problem string
+	if recordErr == nil {
+		ports = union(found, recorded)
+		from = "those recorded before"
+		problem = fmt.Sprintf("sshd's ports could not all be found (%v): kept those recorded before (%s) open beside what was found (%s); set hostFirewall.ssh to name them", err, joinPorts(recorded), joinPorts(found))
+	} else {
+		ports = union(found, []int{22})
+		from = "22"
+		open, openErr := host.OpenTCPPorts()
+		if openErr == nil {
+			ports = union(ports, open)
+			from = "22, and what the running host firewall opens"
+			problem = fmt.Sprintf("sshd's ports could not all be found (%v), and none were recorded before (%v): opened what was found (%s), 22, and every TCP port the running host firewall opens (%s); set hostFirewall.ssh to name them", err, recordErr, joinPorts(found), joinPorts(open))
+		} else {
+			problem = fmt.Sprintf("sshd's ports could not all be found (%v), none were recorded before (%v), and the running host firewall could not be read (%v): opened only what was found (%s) and 22, so another SSH port may close; set hostFirewall.ssh to name them", err, recordErr, openErr, joinPorts(found))
+		}
 	}
-	slices.Sort(ports)
-	ports = slices.Compact(ports)
-	a.Detected = append(a.Detected, Detected{Key: "hostFirewall.ssh", Value: joinPorts(ports), From: "the ports sshd listens on, and " + from,
-		Problem: fmt.Sprintf("sshd's ports could not all be found (%v): kept %s open beside what was found (%s); set hostFirewall.ssh to name them", err, from, joinPorts(found))})
+	a.Detected = append(a.Detected, Detected{Key: "hostFirewall.ssh", Value: joinPorts(ports), From: "the ports sshd listens on, and " + from, Problem: problem})
 	return ports
+}
+
+// stablePublic are the public addresses to go by for found, those of the
+// host's interfaces now, and what is amiss with them. A node that starts
+// before its public interface is up finds none, or too few; the cluster
+// would then publish no DNS records for it, or too few, and the panel's
+// tunnel lose its endpoint. A late interface looks exactly like an address
+// removed for good, so detection never drops one: none found keeps those
+// recorded, and some of them found keeps them all, each with a warning.
+// Only an explicit publicAddresses removes an address. Addresses found
+// beyond the record are believed, and recorded.
+func stablePublic(host Host, found []string) ([]string, string) {
+	slices.SortFunc(found, func(a, b string) int { return netip.MustParseAddr(a).Compare(netip.MustParseAddr(b)) })
+	recorded, recordErr := host.RecordedPublicAddresses()
+	switch {
+	case recordErr == nil && len(found) == 0:
+		return recorded, fmt.Sprintf("no public address was found on the host, as before its interface is up: kept those recorded before (%s); set publicAddresses to change them", strings.Join(recorded, ", "))
+	case recordErr == nil && len(found) < len(recorded) && !slices.ContainsFunc(found, func(f string) bool { return !slices.Contains(recorded, f) }):
+		return recorded, fmt.Sprintf("found only %s of the public addresses recorded before (%s): kept them all, as an interface may not be up yet; set publicAddresses to drop one", strings.Join(found, ", "), strings.Join(recorded, ", "))
+	}
+	if len(found) > 0 && (recordErr != nil || !slices.Equal(found, recorded)) {
+		if err := host.RecordPublicAddresses(found); err != nil {
+			return found, fmt.Sprintf("the addresses could not be recorded (%v): a start that finds fewer goes by the record as it is", err)
+		}
+	}
+	return found, ""
+}
+
+func union(a, b []int) []int {
+	out := append(slices.Clone(a), b...)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // IsDetected reports whether the setting key was left out and found.
@@ -347,7 +398,8 @@ func (a Agent) Derivable(host Host) []string {
 // nothing.
 type noRecord struct{ Host }
 
-func (noRecord) RecordSSHPorts([]int) error { return nil }
+func (noRecord) RecordSSHPorts([]int) error           { return nil }
+func (noRecord) RecordPublicAddresses([]string) error { return nil }
 
 // clone copies a, with its own copies of what Detect changes.
 func (a Agent) clone() Agent {
