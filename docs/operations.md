@@ -848,13 +848,19 @@ answer, answers that it cannot write, or that changes are frozen; never when
 it refuses the access itself), the access is written to
 `/var/lib/murder/access-offline.jsonl` on that host instead (readable by root
 only, on disk before the read goes ahead) and a warning says so. Once the
-agent records again, `sudo murder access sync` records each one (its time as
-when the access was, its person as the record says) and empties the file;
-the agent records each record once, however many syncs send it, on whichever
-node. A line cut short (a full disk, say) is no record: the next one starts
-on a line of its own, and a sync leaves the damaged line in the file and
-says so, for a person to read and record with `murder access log`. `murder
-doctor` warns while records or damaged lines wait in the file. `restore` and `forget` need the agent anyway, and
+agent records again, it records each one itself (its time as when the
+access was, its person as the record says) and empties the file: when it
+starts, and every minute while the file holds records, once the cluster
+answers. `sudo murder access sync` does the same at once, by hand. The
+register records each record once, however many syncs send it, the agent's
+and by hand, on whichever node, and one that stopped halfway too; a record
+it cannot record stays in the file for the next. A line cut short (a full
+disk, say) is no record: the next one starts on a line of its own, and a
+sync leaves the damaged line in the file and says so (the agent in its
+log), for a person to read and record with `murder access log`. `murder
+doctor` warns once a record has waited more than 15 minutes (the agent not
+running, or the cluster not answering), and while damaged lines are in the
+file. `restore` and `forget` need the agent anyway, and
 take no `-offline`. Restoring the state by hand (`murder restore`) is done
 with the agent stopped: record the copy you read with `backups state
 -offline`, and sync once the agent runs.

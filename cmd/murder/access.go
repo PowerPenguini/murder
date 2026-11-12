@@ -29,7 +29,8 @@ const accessUsage = `Usage: murder access <command> [options]
                     copies of the whole state (every tenant's), or all
   sync [-offline-file F]
                     record, through the agent, the accesses written to this
-                    node's offline file while the agent could not record them
+                    node's offline file while the agent could not record them;
+                    the agent does it by itself every minute, this at once
 
 Every read of a tenant's data through Murder (a secret, its logs, a backup,
 a copy of the state) is recorded in the register first, and refused if it
@@ -37,7 +38,7 @@ cannot be: the agent records who, when, which tenant, what, why (-reason)
 and at whose request (-ticket: the customer's ticket, or "incident" or
 "legal", each perhaps followed by ":REF", when no customer asked).
 -offline writes the access to the offline file instead (` + access.OfflineFile + `)
-when the agent cannot record it; "murder access sync" records it later.
+when the agent cannot record it; the agent records it once it can.
 `
 
 // reasonFlags are the -reason and -ticket of a command that reads a
@@ -128,8 +129,9 @@ func recordAccess(ctx context.Context, client *api.Client, request access.Reques
 WARNING: the agent could not record this access in the register:
   %v
 It is written to %s on this host alone (record %s).
-Run "murder access sync" on this host as soon as the agent answers again,
-or the register misses this access.
+The agent records it by itself once it runs and the cluster answers again;
+"murder access sync" on this host does it at once. Until then the register
+misses this access.
 
 `, err, offlineFile, record.ID)
 	return access.Entry{Tenant: record.Tenant, Kind: record.Kind, What: record.What, Purpose: record.Purpose, Ticket: record.Ticket,

@@ -453,18 +453,24 @@ func TestEdgeSocket(t *testing.T) {
 	}
 }
 
-// Accesses written offline, not in the register yet, are a warning until
-// they are synced.
+// Accesses written offline, not in the register yet, are a warning once
+// they wait longer than the agent takes to record them.
 func TestOfflineAccessesWait(t *testing.T) {
 	h := fakeHost(t, nil)
 	if results := checkOfflineAccesses(h); len(results) != 0 {
 		t.Fatalf("none waiting: %+v", results)
 	}
-	if _, err := access.WriteOffline(h.path(access.OfflineFile), access.Request{Kind: access.State, Purpose: "cluster lost", Ticket: "incident"}, "root", "", h.Now()); err != nil {
+	if _, err := access.WriteOffline(h.path(access.OfflineFile), access.Request{Kind: access.State, Purpose: "cluster lost", Ticket: "incident"}, "root", "", h.Now().Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if results := checkOfflineAccesses(h); !has(results, Warning, "an access to a tenant's data waits") || results[0].Fix != "murder access sync" {
-		t.Fatalf("one waiting: %+v", results)
+	if results := checkOfflineAccesses(h); !has(results, OK, "an access to a tenant's data waits") {
+		t.Fatalf("one waiting a minute: %+v", results)
+	}
+	if _, err := access.WriteOffline(h.path(access.OfflineFile), access.Request{Kind: access.State, Purpose: "cluster lost", Ticket: "incident"}, "root", "", h.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if results := checkOfflineAccesses(h); !has(results, Warning, "2 accesses to tenants' data wait") || !has(results, Warning, "for 1h0m0s") || results[0].Fix != "murder access sync" {
+		t.Fatalf("one waiting an hour: %+v", results)
 	}
 }
 

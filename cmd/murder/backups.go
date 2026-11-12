@@ -45,7 +45,7 @@ verify, restore, state and forget take -reason TEXT and -ticket REF: each is
 recorded in the access register through the agent before a backup is read
 ("murder access" says more). With -offline, verify and state go ahead when
 the agent cannot record them, such as in a disaster recovery: the access is
-written to this host's offline file, for "murder access sync" later.
+written to this host's offline file, which the agent records once it can.
   destroy -yes                delete every backup and the bucket (test mode
                               only: production backups are locked)
 

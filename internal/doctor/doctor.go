@@ -351,9 +351,16 @@ func checkBackups(cfg config.Agent, h Host) []Result {
 	return results
 }
 
+// offlineGrace is how long an access may wait in the offline file before
+// doctor warns: the agent records the file's accesses itself, within a
+// minute of the cluster answering, so one older than this tells of an
+// agent not running, or of a cluster that has not answered for a while.
+const offlineGrace = 15 * time.Minute
+
 // checkOfflineAccesses warns of accesses to tenants' data written to the
-// node's offline file while the agent could not record them: the register
-// misses them until they are synced.
+// node's offline file while the agent could not record them, once they
+// wait longer than the agent takes to record them: the register misses
+// them until they are synced. Damaged lines the agent never records.
 func checkOfflineAccesses(h Host) []Result {
 	records, damaged, err := access.ReadOffline(h.path(access.OfflineFile))
 	switch {
@@ -364,14 +371,25 @@ func checkOfflineAccesses(h Host) []Result {
 	case len(damaged) > 0:
 		return []Result{{Warning, "access register", fmt.Sprintf("%s holds %d damaged lines and %d records not in the register yet", access.OfflineFile, len(damaged), len(records)),
 			"murder access sync; record the damaged lines' accesses with murder access log, then remove them"}}
-	case len(records) > 0:
-		said := fmt.Sprintf("%d accesses to tenants' data wait", len(records))
-		if len(records) == 1 {
-			said = "an access to a tenant's data waits"
-		}
-		return []Result{{Warning, "access register", said + " in " + access.OfflineFile + ", not in the register yet", "murder access sync"}}
+	case len(records) == 0:
+		return nil
 	}
-	return nil
+	oldest := records[0].At
+	for _, record := range records {
+		if record.At.Before(oldest) {
+			oldest = record.At
+		}
+	}
+	said := fmt.Sprintf("%d accesses to tenants' data wait", len(records))
+	if len(records) == 1 {
+		said = "an access to a tenant's data waits"
+	}
+	waited := h.Now().Sub(oldest)
+	if waited <= offlineGrace {
+		return []Result{{OK, "access register", said + " in " + access.OfflineFile + "; the agent records them once the cluster answers", ""}}
+	}
+	return []Result{{Warning, "access register", fmt.Sprintf("%s in %s, not in the register for %s: is the agent running, and the cluster answering?", said, access.OfflineFile, waited.Round(time.Minute)),
+		"murder access sync"}}
 }
 
 // checkSSH reads sshd's effective configuration, and returns the ports

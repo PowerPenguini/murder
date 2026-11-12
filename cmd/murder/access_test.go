@@ -302,6 +302,37 @@ func TestOfflineAccessesAreSyncedOnce(t *testing.T) {
 	}
 }
 
+// The agent's own sync and one by hand record each offline record once
+// between them, as of who made it.
+func TestTheAgentsSyncAndOneByHandRecordOnce(t *testing.T) {
+	socket, st := registerAgent(t)
+	out := capture(t)
+	offline := filepath.Join(t.TempDir(), "access-offline.jsonl")
+	record, err := access.WriteOffline(offline, access.Request{Tenant: "acme", Kind: access.Manual, What: "read its files", Purpose: "the cluster is down", Ticket: "incident"},
+		"jan via root", "jan", time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, _ := os.ReadFile(offline)
+	if synced, err := access.SyncOffline(offline, st); err != nil || synced.Recorded != 1 {
+		t.Fatalf("the agent's sync: %+v, %v", synced, err)
+	}
+	// The same record, as a sync by hand read it before the agent's ended.
+	if err := os.WriteFile(offline, line, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"access", "sync", "-socket", socket, "-offline-file", offline}); err != nil {
+		t.Fatal(err)
+	}
+	got := registered(t, socket, "acme")
+	if len(got) != 1 || got[0].Offline != record.ID || got[0].Actor != "jan via root" || !got[0].When().Equal(record.At) {
+		t.Fatalf("recorded: %+v (%s)", got, out)
+	}
+	if _, err := os.Stat(offline); !os.IsNotExist(err) {
+		t.Fatal("the offline file stays")
+	}
+}
+
 // Backups commands that decrypt a tenant's data record the access first,
 // and refuse -offline where they need the agent anyway.
 func TestBackupsReadsAreRecordedFirst(t *testing.T) {
