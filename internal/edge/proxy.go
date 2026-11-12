@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
@@ -110,7 +112,21 @@ type Proxy struct {
 	// waiting for its tenant to arrive, or for its body to be kept. A
 	// request that finds none is not held.
 	held chan struct{}
+	// validity keeps, by certificate chain, when the leaf of a tenant's
+	// domain's certificate is valid: the canonical host is redirected to
+	// only while its certificate is (see canonicalHost).
+	validityMu sync.Mutex
+	validity   map[string]validity
+	now        func() time.Time
 }
+
+// validity is when a certificate's leaf is valid; zero for one that does
+// not parse.
+type validity struct{ notBefore, notAfter time.Time }
+
+// validityMost is how many chains are kept parsed before the set starts
+// over: one per tenant's domain, renewed every few weeks.
+const validityMost = 4096
 
 // MaxHeld is how many requests an edge holds at once before passing them
 // on.
@@ -233,7 +249,7 @@ func hopOf(r *http.Request) *hop { return r.Context().Value(hopKey{}).(*hop) }
 
 // NewProxy returns a proxy for tenants below baseDomain.
 func NewProxy(baseDomain string, routes Routes, log *slog.Logger) *Proxy {
-	p := &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, stats: metrics.NewEdge(), served: metrics.NewEdge(), holdMoving: HoldMoving, held: make(chan struct{}, MaxHeld)}
+	p := &Proxy{baseDomain: strings.ToLower(baseDomain), routes: routes, log: log, stats: metrics.NewEdge(), served: metrics.NewEdge(), holdMoving: HoldMoving, held: make(chan struct{}, MaxHeld), validity: map[string]validity{}, now: time.Now}
 	p.local = p.reverseProxy(newTransport(nil), false)
 	p.relayed = p.reverseProxy(newTransport(nil), true)
 	return p
@@ -537,9 +553,12 @@ func acmeToken(token string) bool {
 // tenant's canonical host, when the tenant has one and host is another of
 // its hosts, and the canonical host can take the request over scheme. The
 // tenant's own name below the base domain always can; one of its domains
-// once the edges route it and, over HTTPS, once it has its certificate.
-// Until then every host serves the tenant as it would without one, rather
-// than send clients where they would find nothing.
+// once the edges route it and, over HTTPS, while it has a certificate
+// valid now. Plain HTTP that redirects goes to HTTPS, so it asks the same
+// of the canonical host (scheme "https"). Otherwise every host serves the
+// tenant as it would without one, rather than send clients where the
+// handshake fails: say the routes the edge serves from, saved on disk or
+// not confirmed for a while, still hold a certificate that expired.
 func (p *Proxy) canonicalHost(host, scheme string) (string, bool) {
 	host = hostName(host)
 	tenant, ok := p.Tenant(host)
@@ -555,10 +574,34 @@ func (p *Proxy) canonicalHost(host, scheme string) (string, bool) {
 		return route.Canonical, true
 	}
 	domain, ok := p.domain(route.Canonical)
-	if !ok || domain.Tenant != tenant || scheme == "https" && domain.Certificate == "" {
+	if !ok || domain.Tenant != tenant || scheme == "https" && !p.certificateValid(domain.Certificate) {
 		return "", false
 	}
 	return route.Canonical, true
+}
+
+// certificateValid reports whether chain, PEM, holds a leaf valid now.
+// Each chain is parsed once.
+func (p *Proxy) certificateValid(chain string) bool {
+	if chain == "" {
+		return false
+	}
+	p.validityMu.Lock()
+	valid, ok := p.validity[chain]
+	if !ok {
+		if len(p.validity) >= validityMost {
+			clear(p.validity)
+		}
+		if block, _ := pem.Decode([]byte(chain)); block != nil && block.Type == "CERTIFICATE" {
+			if leaf, err := x509.ParseCertificate(block.Bytes); err == nil {
+				valid = validity{notBefore: leaf.NotBefore, notAfter: leaf.NotAfter}
+			}
+		}
+		p.validity[chain] = valid
+	}
+	p.validityMu.Unlock()
+	now := p.now()
+	return !valid.notAfter.IsZero() && !now.Before(valid.notBefore) && now.Before(valid.notAfter)
 }
 
 // redirectCanonical answers a request for one of a tenant's hosts that is
@@ -842,8 +885,10 @@ func (p *Proxy) RedirectToHTTPS(ready func() bool) http.Handler {
 			return
 		}
 		// A host that is not its tenant's canonical one goes there over
-		// HTTPS at once, in one redirect: it needs no certificate of its
-		// own for that.
+		// HTTPS at once, in one redirect, while the canonical host has a
+		// valid certificate (the HTTPS listener's own condition): it needs
+		// no certificate of its own for that. Otherwise it goes to HTTPS
+		// on its own name, as without a canonical host.
 		if ready() && p.redirectCanonical(w, r, "https") {
 			return
 		}

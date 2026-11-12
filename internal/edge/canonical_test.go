@@ -1,12 +1,20 @@
 package edge
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A tenant's hosts other than its canonical one redirect there, path and
@@ -122,5 +130,104 @@ func TestCanonicalHostsVersionTheTable(t *testing.T) {
 	}
 	if len(versions) != 3 {
 		t.Fatalf("versions %v", versions)
+	}
+}
+
+// certificateBetween is a certificate for name valid from notBefore to
+// notAfter, PEM, with its key, PEM.
+func certificateBetween(t *testing.T, name string, notBefore, notAfter time.Time) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: name}, DNSNames: []string{name},
+		NotBefore: notBefore, NotAfter: notAfter, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, _ := x509.MarshalPKCS8PrivateKey(key)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+}
+
+// A canonical domain whose certificate is missing, expired or not valid
+// yet takes no redirects, over plain HTTP or HTTPS: plain HTTP goes to
+// HTTPS on the host asked, and HTTPS serves the tenant there, as without
+// a canonical host. Once its certificate is valid, both redirect to it.
+func TestNoRedirectToACanonicalDomainWithoutAValidCertificate(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "app at "+r.Host) }))
+	defer backend.Close()
+	address := strings.TrimPrefix(backend.URL, "http://")
+	wwwCert, wwwKey := selfSigned(t, "www.customer.com")
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	now := time.Now()
+	expired, expiredKey := certificateBetween(t, "customer.com", now.Add(-90*24*time.Hour), now.Add(-time.Minute))
+	early, earlyKey := certificateBetween(t, "customer.com", now.Add(time.Hour), now.Add(90*24*time.Hour))
+	valid, validKey := certificateBetween(t, "customer.com", now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	serve := func(certificate, key string) (plain, secure *httptest.Server) {
+		live := &LiveTable{}
+		canonical := DomainRoute{Tenant: "acme"}
+		if certificate != "" {
+			canonical.Certificate, canonical.Key = certificate, sealed("customer.com", key)
+		}
+		live.Set(NewTableWith(map[string]Route{"acme": {Backend: address, Canonical: "customer.com"}}, map[string]DomainRoute{
+			"customer.com":     canonical,
+			"www.customer.com": {Tenant: "acme", Certificate: wwwCert, Key: sealed("www.customer.com", wwwKey)},
+		}, nil))
+		proxy := NewProxy("example.com", live, quietLog())
+		return httptest.NewServer(proxy.RedirectToHTTPS(func() bool { return true })), httptest.NewTLSServer(proxy)
+	}
+	for name, c := range map[string]struct{ certificate, key string }{
+		"missing":       {},
+		"expired":       {expired, expiredKey},
+		"not valid yet": {early, earlyKey},
+	} {
+		plain, secure := serve(c.certificate, c.key)
+		for _, host := range []string{"www.customer.com", "acme.example.com"} {
+			response, _ := get(t, noRedirect, plain.URL+"/a?b=1", host)
+			if want := "https://" + host + "/a?b=1"; response.StatusCode != http.StatusPermanentRedirect || response.Header.Get("Location") != want {
+				t.Errorf("%s certificate, plain HTTP to %s: %s to %q, want %q", name, host, response.Status, response.Header.Get("Location"), want)
+			}
+			response, body := get(t, noRedirect, secure.URL+"/a?b=1", host)
+			if response.StatusCode != 200 || body != "app at "+host {
+				t.Errorf("%s certificate, HTTPS to %s: %s %q to %q", name, host, response.Status, body, response.Header.Get("Location"))
+			}
+		}
+		plain.Close()
+		secure.Close()
+	}
+	plain, secure := serve(valid, validKey)
+	defer plain.Close()
+	defer secure.Close()
+	for _, url := range []string{plain.URL, secure.URL} {
+		for _, host := range []string{"www.customer.com", "acme.example.com"} {
+			if response, _ := get(t, noRedirect, url+"/a?b=1", host); response.StatusCode != http.StatusPermanentRedirect || response.Header.Get("Location") != "https://customer.com/a?b=1" {
+				t.Errorf("a valid certificate, %s to %s: %s to %q", url, host, response.Status, response.Header.Get("Location"))
+			}
+		}
+	}
+}
+
+// A canonical domain's certificate that expires while the edge runs stops
+// the redirects from then on.
+func TestRedirectsStopWhenTheCanonicalCertificateExpires(t *testing.T) {
+	now := time.Now()
+	certificate, key := certificateBetween(t, "customer.com", now.Add(-time.Hour), now.Add(time.Hour))
+	live := &LiveTable{}
+	live.Set(NewTableWith(map[string]Route{"acme": {Backend: "127.0.0.1:1", Canonical: "customer.com"}},
+		map[string]DomainRoute{"customer.com": {Tenant: "acme", Certificate: certificate, Key: sealed("customer.com", key)}}, nil))
+	proxy := NewProxy("example.com", live, quietLog())
+	if _, ok := proxy.canonicalHost("acme.example.com", "https"); !ok {
+		t.Fatal("no redirect while the certificate is valid")
+	}
+	proxy.now = func() time.Time { return now.Add(2 * time.Hour) }
+	if host, ok := proxy.canonicalHost("acme.example.com", "https"); ok {
+		t.Fatalf("a redirect to %s after its certificate expired", host)
+	}
+	// Plain HTTP, with TLS off, needs no certificate.
+	if _, ok := proxy.canonicalHost("acme.example.com", "http"); !ok {
+		t.Fatal("no redirect over plain HTTP with TLS off")
 	}
 }
