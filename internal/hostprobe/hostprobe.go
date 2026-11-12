@@ -128,7 +128,14 @@ func (System) OpenTCPPorts() ([]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	return firewall.OpenTCP(listing), nil
+	// A loaded table opens the edge's ports at the least, so a listing
+	// that yields none was not understood (nft printing rules another
+	// way): it must not pass for a firewall that opens nothing.
+	ports := firewall.OpenTCP(listing)
+	if len(ports) == 0 {
+		return nil, errors.New("nft list table inet murder: no open TCP port recognised in its listing")
+	}
+	return ports, nil
 }
 
 func readRecord(path string) (string, error) {
