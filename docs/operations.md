@@ -692,9 +692,27 @@ each day for 30 days, the first of each month for a year (`keepHourly`,
 `keepDaily`, `keepMonthly`). The newest backup of a tenant always stays,
 however old, so backups that keep failing never cost the last one that
 worked. A purged tenant's backups are thinned out the same way, down to that
-newest one; `murder backups forget TENANT -yes` deletes the rest (in
-production, once their locks end). Use one bucket per cluster, or per node
-without a cluster: backups are kept by tenant name.
+newest one, and then deleted, every one, once `forgetPurgedAfter` has passed
+since the purge (`keepDaily` by default, 30 days). By then the lock of each
+has ended (no lock outlasts `keepDaily`), and a purge done by mistake had as
+long to be undone (create a tenant of the name again, archive it and
+`murder backups restore` it) as a daily backup is kept; `keepMonthly` would keep the data of a
+customer who left for a year. The leader does it, and records it in the
+audit log as `backup.forgotten` of the tenant; a backup still locked (a
+shorter `forgetPurgedAfter`) stays and is tried again at each hourly run.
+Only a purge the state records lets backups go, and only while no tenant
+of the name is in the state, archived or not: a name used again keeps
+every backup. A tenant missing from the state with no purge recorded (a
+state put back from a copy older than the tenant, say) keeps its
+backups, thinned out. A name purged, used again and purged again loses
+every backup once `forgetPurgedAfter` has passed since the newer purge.
+Backups stamped after the purge, of a tenant of the name the state does
+not know (one lost when the state was put back from an older copy), stay,
+thinned out, and the logs name them. Archived tenants, still in the state,
+and the copies of the state keep theirs as ever. `murder backups forget
+TENANT -yes` deletes a purged tenant's backups at once (in production, once
+their locks end). Use one bucket per cluster, or per node without a
+cluster: backups are kept by tenant name.
 
 ```yaml
 backups:
@@ -869,13 +887,19 @@ answer, answers that it cannot write, or that changes are frozen; never when
 it refuses the access itself), the access is written to
 `/var/lib/murder/access-offline.jsonl` on that host instead (readable by root
 only, on disk before the read goes ahead) and a warning says so. Once the
-agent records again, `sudo murder access sync` records each one (its time as
-when the access was, its person as the record says) and empties the file;
-the agent records each record once, however many syncs send it, on whichever
-node. A line cut short (a full disk, say) is no record: the next one starts
-on a line of its own, and a sync leaves the damaged line in the file and
-says so, for a person to read and record with `murder access log`. `murder
-doctor` warns while records or damaged lines wait in the file. `restore` and `forget` need the agent anyway, and
+agent records again, it records each one itself (its time as when the
+access was, its person as the record says) and empties the file: when it
+starts, and every minute while the file holds records, once the cluster
+answers. `sudo murder access sync` does the same at once, by hand. The
+register records each record once, however many syncs send it, the agent's
+and by hand, on whichever node, and one that stopped halfway too; a record
+it cannot record stays in the file for the next. A line cut short (a full
+disk, say) is no record: the next one starts on a line of its own, and a
+sync leaves the damaged line in the file and says so (the agent in its
+log), for a person to read and record with `murder access log`. `murder
+doctor` warns once a record has waited more than 15 minutes (the agent not
+running, or the cluster not answering), and while damaged lines are in the
+file. `restore` and `forget` need the agent anyway, and
 take no `-offline`. Restoring the state by hand (`murder restore`) is done
 with the agent stopped: record the copy you read with `backups state
 -offline`, and sync once the agent runs.

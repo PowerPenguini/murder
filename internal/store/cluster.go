@@ -1003,6 +1003,15 @@ func (s *SQLite) Note(action, detail, actor string) error {
 	return err
 }
 
+// NoteTenant is Note of a tenant's, there or gone, so its events show it:
+// as the deletion of a purged tenant's backups.
+func (s *SQLite) NoteTenant(tenant, action, detail, actor string) error {
+	_, err := s.writeAs(firstBatchSchema, false, false, func(tx *recorder, _ *snapshot, now time.Time) error {
+		return event(tx, now, actor, action, tenant, "", detail)
+	})
+	return err
+}
+
 func (s *SQLite) StartMove(name, target, actor string) (Record, error) {
 	return s.StartMoveFenced(name, target, actor, Fence{})
 }

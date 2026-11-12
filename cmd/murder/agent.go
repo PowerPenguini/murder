@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/access"
 	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/cluster"
 	"github.com/PowerPenguini/murder/internal/config"
@@ -335,6 +336,10 @@ func runAgent(args []string) error {
 	if backups != nil {
 		go backups.Run(ctx)
 	}
+	// Accesses written to this host's offline file while no agent or no
+	// quorum could record them go to the register by themselves, rather
+	// than wait for someone to run murder access sync.
+	go (&access.Syncer{Path: access.OfflineFile, Register: st, Every: access.SyncEvery, Log: log.With("component", "access")}).Run(ctx)
 	if replicator != nil {
 		go replicator.Run(ctx)
 	}

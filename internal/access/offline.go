@@ -15,7 +15,8 @@ import (
 
 // OfflineFile is where a node keeps the accesses it could not have the
 // agent record: during a disaster recovery, with no agent or no quorum.
-// "murder access sync" records them once the agent can.
+// The agent records them by itself once it can (see Syncer), and "murder
+// access sync" at once.
 const OfflineFile = "/var/lib/murder/access-offline.jsonl"
 
 // OfflineRecord is an access written to a node's offline file.

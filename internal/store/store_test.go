@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/PowerPenguini/murder/internal/spec"
 )
@@ -304,6 +305,38 @@ func TestDeleteAppOnlyWhenUnused(t *testing.T) {
 	}
 	if err := st.DeleteApp("web", "a"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete a missing app = %v", err)
+	}
+}
+
+// A purge is found by its event, the newest when a name was purged twice;
+// a note of the tenant's is among its events.
+func TestAPurgeIsFoundByItsEvent(t *testing.T) {
+	st, _ := withApp(t, options())
+	if at, err := st.PurgedAt("acme"); err != nil || !at.IsZero() {
+		t.Fatalf("never purged: %v, %v", at, err)
+	}
+	var purges []time.Time
+	for range 2 {
+		if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "a"); err != nil {
+			t.Fatal(err)
+		}
+		_ = st.Archive("acme", "a")
+		before := time.Now()
+		if err := st.Forget("acme", "a"); err != nil {
+			t.Fatal(err)
+		}
+		purges = append(purges, before)
+	}
+	at, err := st.PurgedAt("acme")
+	if err != nil || at.Before(purges[1].Add(-time.Second)) {
+		t.Fatalf("purged at %v (purges from %v), %v", at, purges, err)
+	}
+	if err := st.NoteTenant("acme", "backup.forgotten", "3 of 3 backups deleted", "murder"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := st.Events(EventQuery{Tenant: "acme", Limit: 1})
+	if err != nil || len(events) != 1 || events[0].Action != "backup.forgotten" || events[0].Actor != "murder" || events[0].Detail != "3 of 3 backups deleted" {
+		t.Fatalf("note: %+v, %v", events, err)
 	}
 }
 

@@ -273,6 +273,11 @@ type Backups struct {
 	LockFor     Duration `yaml:"lockFor"`
 	VerifyEvery Duration `yaml:"verifyEvery"`
 	KeepLocal   int      `yaml:"keepLocal"`
+	// ForgetPurgedAfter is how long after a tenant's purge every backup of
+	// it is deleted, keepDaily by default: by then the locks of its
+	// backups have ended, and a purge done by mistake had as long to be
+	// undone as a daily backup is kept.
+	ForgetPurgedAfter Duration `yaml:"forgetPurgedAfter"`
 }
 
 func (b Backups) problems(driver string) []string {
@@ -301,6 +306,9 @@ func (b Backups) problems(driver string) []string {
 		problems = append(problems, "production backups need backups.lockFor")
 	case b.LockFor.Duration > b.KeepDaily.Duration:
 		problems = append(problems, "backups.lockFor must not outlast backups.keepDaily")
+	}
+	if b.ForgetPurgedAfter.Duration < 0 {
+		problems = append(problems, "backups.forgetPurgedAfter must not be negative")
 	}
 	if b.VerifyEvery.Duration < b.Every.Duration {
 		problems = append(problems, "backups.verifyEvery must be at least backups.every")
@@ -547,6 +555,9 @@ func Parse(data []byte) (Agent, error) {
 		}
 		if b.KeepLocal == 0 {
 			b.KeepLocal = 24
+		}
+		if b.ForgetPurgedAfter.Duration == 0 {
+			b.ForgetPurgedAfter.Duration = b.KeepDaily.Duration
 		}
 	}
 	return agent, agent.validate(true)

@@ -36,7 +36,7 @@ var actions = map[string]string{
 	"tenant.replica": "copy placed", "tenant.replica-moving": "copy moving", "tenant.replica-ready": "copy ready",
 	"access.state": "copy of the whole state read", "access.secret": "secret read", "access.logs": "logs read",
 	"access.backup-verify": "backup read through", "access.backup-restore": "backup put back", "access.backup-forget": "backups deleted",
-	"access.manual": "data reached outside Murder",
+	"access.manual": "data reached outside Murder", "backup.forgotten": "purged tenant's backups deleted",
 }
 
 // actionText is an action as people say it.
@@ -132,7 +132,7 @@ var predicates = map[string]string{
 	"domain.failed": "could not get a domain's certificate",
 	"access.secret": "had a secret read", "access.logs": "had its logs read", "access.backup-verify": "had its backup read through",
 	"access.backup-restore": "had its data put back from a backup", "access.backup-forget": "had its backups deleted",
-	"access.manual": "had its data reached outside Murder",
+	"access.manual": "had its data reached outside Murder", "backup.forgotten": "had its backups deleted after its purge",
 }
 
 // eventRow is one row of an events table: an event, or a run of the same
