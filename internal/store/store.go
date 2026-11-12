@@ -388,6 +388,11 @@ type Store interface {
 	StartMove(name, target, actor string) (Record, error)
 	HoldMove(name string) error
 	FinishMove(name, actor string) (Record, error)
+	// StartMoveFenced, FinishMoveFenced and RemoveNodeFenced are those
+	// writes for an operation that holds the cluster's lease (see Fence).
+	StartMoveFenced(name, target, actor string, fence Fence) (Record, error)
+	FinishMoveFenced(name, actor string, fence Fence) (Record, error)
+	RemoveNodeFenced(name, actor string, fence Fence) error
 	ReleaseHold(name string) error
 	CancelMove(name, actor string) (bool, error)
 	// PlaceReplicas gives every tenant whose replica is missing, on its own
@@ -503,6 +508,16 @@ type Store interface {
 	ThawIf(reason, actor string) error
 	ThawOwn(reason, actor string) error
 	TakeOverFreeze(from, reason, actor string) error
+	// Lease is the cluster's operation lease, expired or not (see Lease).
+	// TakeLease has an operation hold it, refused while changes are
+	// frozen or another holds it; RenewLease keeps it; ReleaseLease lets
+	// go of it once the operation ended; BreakLease takes it away from a
+	// holder a person knows is gone.
+	Lease() Lease
+	TakeLease(kind, detail, actor string) (Lease, error)
+	RenewLease(id string) (Lease, error)
+	ReleaseLease(id, actor string) error
+	BreakLease(id, actor string) (Lease, error)
 	// Note records an event, frozen or not.
 	Note(action, detail, actor string) error
 	// Access records an access to a tenant's data, of an action that

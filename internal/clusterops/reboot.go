@@ -53,7 +53,8 @@ type moved struct{ tenant, to string }
 // changing nothing, when changes are frozen, when no other node can take
 // the tenants, when node would not come back as it runs (its units do not
 // start at boot), or when the cluster would lose its majority meanwhile
-// (unless opts.Force). Node "" or "-" is this node.
+// (unless opts.Force), or while another operation holds the cluster's
+// lease, which it holds itself meanwhile. Node "" or "-" is this node.
 func Reboot(ctx context.Context, client RebootClient, node string, opts RebootOptions, out io.Writer) error {
 	if opts.Wait <= 0 {
 		opts.Wait = 15 * time.Minute
@@ -81,12 +82,23 @@ func Reboot(ctx context.Context, client RebootClient, node string, opts RebootOp
 	if node == self && !opts.Stay {
 		return fmt.Errorf("this command runs on node %s, which it would reboot, so it could not move the tenants back once it is up: run \"murder node reboot %s\" on another node of the cluster, which waits for it and moves them back, or add -stay to leave them where they move", node, node)
 	}
+	// Frozen changes refuse the lease too; said here as for a reboot.
+	if view, err := client.Nodes(ctx); err == nil && view.Frozen != "" {
+		return frozenRefusal(view.Frozen)
+	}
+	return Leased(ctx, client, "reboot", "node "+node, out, func(ctx context.Context) error {
+		return rebootNode(ctx, client, node, self, members, opts, out)
+	})
+}
+
+// rebootNode is Reboot, under the cluster's operation lease.
+func rebootNode(ctx context.Context, client RebootClient, node, self string, members cluster.Status, opts RebootOptions, out io.Writer) error {
 	view, err := client.Nodes(ctx)
 	if err != nil {
 		return err
 	}
 	if view.Frozen != "" {
-		return fmt.Errorf("changes are frozen (%s): a reboot moves tenants, so nothing was changed; reboot once that is over", view.Frozen)
+		return frozenRefusal(view.Frozen)
 	}
 	states := map[string]api.NodeState{}
 	for _, state := range view.Nodes {
@@ -152,14 +164,33 @@ func Reboot(ctx context.Context, client RebootClient, node string, opts RebootOp
 			return fmt.Errorf("%w\nnode %s was not rebooted; no tenant was moved", cause, node)
 		}
 		fmt.Fprintf(out, "node %s does not reboot: moving its tenants back\n", node)
-		if err := moveBack(ctx, client, node, done, out, "node "+node+" was not rebooted and runs its tenants again"); err != nil {
+		finished := "node " + node + " was not rebooted and runs its tenants again"
+		if leaseLost(ctx) {
+			// The reboot's lease is gone, so its context and its lease
+			// with it: the moves back go under a lease of their own,
+			// taken once. One another operation holds now is not fought
+			// over: that one may be moving these tenants itself.
+			took := false
+			err := Leased(withoutLease(ctx), client, "reboot", "node "+node+" (moving its tenants back)", out, func(ctx context.Context) error {
+				took = true
+				return moveBack(ctx, client, node, done, out, finished)
+			})
+			switch {
+			case !took:
+				return fmt.Errorf("%w\nnode %s was not rebooted, and its tenants were not moved back: %w\n%s; once that operation ended, move them back with:\n%s", cause, node, err, whereMoved(done, node), moveBackCommands(done, node))
+			case err != nil:
+				return fmt.Errorf("%w\nnode %s was not rebooted, and moving its tenants back failed: %w", cause, node, err)
+			}
+			return fmt.Errorf("%w\nnode %s was not rebooted; its tenants were moved back", cause, node)
+		}
+		if err := moveBack(ctx, client, node, done, out, finished); err != nil {
 			return fmt.Errorf("%w\nnode %s was not rebooted, and moving its tenants back failed: %w", cause, node, err)
 		}
 		return fmt.Errorf("%w\nnode %s was not rebooted; its tenants were moved back", cause, node)
 	}
 	for _, move := range plan {
 		start := time.Now()
-		if _, err := client.Move(ctx, move.tenant, move.to); err != nil {
+		if _, err := client.MoveFrom(ctx, move.tenant, node, move.to); err != nil {
 			return undo(fmt.Errorf("move %s to %s: %w", move.tenant, move.to, err))
 		}
 		done = append(done, move)
@@ -320,7 +351,7 @@ func moveBack(ctx context.Context, client Client, node string, done []moved, out
 			continue
 		}
 		start := time.Now()
-		if _, err := client.Move(ctx, move.tenant, node); err != nil {
+		if _, err := client.MoveFrom(ctx, move.tenant, move.to, node); err != nil {
 			return fmt.Errorf("move %s back to %s: %w\nmoved %d back before it; %s", move.tenant, node, err, back, whereMoved(done[i:], node))
 		}
 		back++
@@ -328,4 +359,19 @@ func moveBack(ctx context.Context, client Client, node string, done []moved, out
 	}
 	fmt.Fprintf(out, "%s (%d moved back)\n", finished, back)
 	return nil
+}
+
+// frozenRefusal refuses a reboot while changes are frozen.
+func frozenRefusal(frozen string) error {
+	return fmt.Errorf("changes are frozen (%s): a reboot moves tenants, so nothing was changed; reboot once that is over", frozen)
+}
+
+// moveBackCommands are the commands that move the tenants a reboot moved
+// back to node, one per line.
+func moveBackCommands(done []moved, node string) string {
+	var lines []string
+	for _, move := range done {
+		lines = append(lines, "  murder tenant move "+move.tenant+" -to "+node)
+	}
+	return strings.Join(lines, "\n")
 }

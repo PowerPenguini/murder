@@ -14,8 +14,10 @@ type Nodes struct {
 	Self    string `json:"self"`
 	Leader  string `json:"leader,omitempty"`
 	// Frozen says why changes are refused, while an upgrade runs.
-	Frozen string      `json:"frozen,omitempty"`
-	Nodes  []NodeState `json:"nodes"`
+	Frozen string `json:"frozen,omitempty"`
+	// Lease is the operation that holds the cluster now, if one does.
+	Lease *store.Lease `json:"lease,omitempty"`
+	Nodes []NodeState  `json:"nodes"`
 }
 
 // NodeState is one node and whether it answers this node now.

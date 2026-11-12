@@ -39,6 +39,9 @@ type Cluster interface {
 	Ping(ctx context.Context, node string) error
 	// CatchUp applies here what the cluster has applied.
 	CatchUp() error
+	// EveryNodeRuns returns nil once every other node runs a release of
+	// schema version schema or later.
+	EveryNodeRuns(ctx context.Context, schema int) error
 	// CreateOn has node create tenant to run there.
 	CreateOn(ctx context.Context, node string, tenant store.NewTenant, actor string) (store.Record, error)
 }
@@ -118,6 +121,9 @@ func (s *Server) clusterStatus(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if lease := s.store.Lease(); lease.Held(time.Now()) {
+		status.Lease = &lease
+	}
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -196,7 +202,12 @@ func (s *Server) removeNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errNoCluster)
 		return
 	}
-	if err := s.cluster.Remove(r.Context(), r.PathValue("name"), actor(r)); err != nil {
+	if err := s.leased(r); err != nil {
+		writeError(w, err)
+		return
+	}
+	ctx := store.WithFence(r.Context(), store.Fence{Lease: r.Header.Get(api.LeaseHeader)})
+	if err := s.cluster.Remove(ctx, r.PathValue("name"), actor(r)); err != nil {
 		writeError(w, err)
 		return
 	}

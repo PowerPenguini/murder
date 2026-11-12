@@ -69,8 +69,13 @@ var ErrUnhealthy = errors.New("the tenant moved but is not healthy on its new no
 
 // Move moves tenant from this node to target. Until the tenant is the
 // target's, a failure leaves it here, running as before; what the state
-// says decides that, not what a failed call returned.
+// says decides that, not what a failed call returned. A move made for an
+// operation that holds the cluster's lease carries its fence in ctx
+// (store.WithFence): its start and its handover are refused once the
+// operation lost the lease, and the move is then undone like any other
+// that fails before the handover.
 func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err error) {
+	fence := store.FenceOf(ctx)
 	if !m.begin(tenant) {
 		return fmt.Errorf("%w: tenant %s is moving already", store.ErrConflict, tenant)
 	}
@@ -84,7 +89,7 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 	if ctx.Err() != nil {
 		return fmt.Errorf("the move was given up before it began: %w", context.Cause(ctx))
 	}
-	record, err := m.Store.StartMove(tenant, target, actor)
+	record, err := m.Store.StartMoveFenced(tenant, target, actor, fence)
 	if err != nil {
 		return err
 	}
@@ -129,7 +134,7 @@ func (m *Mover) Move(ctx context.Context, tenant, target, actor string) (err err
 			return fmt.Errorf("copy the last changes: %w", err)
 		}
 	}
-	if _, err := m.Store.FinishMove(tenant, actor); err != nil {
+	if _, err := m.Store.FinishMoveFenced(tenant, actor, fence); err != nil {
 		// The handover may have been made all the same.
 		if m.settled(tenant) != target {
 			return err

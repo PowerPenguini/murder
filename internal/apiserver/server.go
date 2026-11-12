@@ -108,6 +108,7 @@ func (s *Server) Stop() { s.stopOnce.Do(func() { close(s.stopping) }) }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.clusterRoutes(mux)
+	s.leaseRoutes(mux)
 	s.keyRoutes(mux)
 	s.upgradeRoutes(mux)
 	s.rebootRoutes(mux)

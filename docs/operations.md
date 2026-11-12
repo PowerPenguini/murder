@@ -210,8 +210,10 @@ reach only the private ports.
 An update of the kernel or the C library takes effect at the next reboot;
 `murder doctor` warns while one waits. Reboot with `murder node reboot`,
 which checks first that the node comes back as it runs: Murder's units and
-Docker start at boot (`systemctl enable` the one it names otherwise), and
-changes are not frozen.
+Docker start at boot (`systemctl enable` the one it names otherwise),
+changes are not frozen, and no other operation (a drain, a balance) holds
+the cluster: the reboot holds it itself meanwhile (see
+[One operation at a time](cluster.md#one-operation-at-a-time)).
 
 In a cluster, run it on another node, naming the node to reboot: its
 tenants move to other nodes, it reboots, and once it is back they move
@@ -243,7 +245,10 @@ sudo murder upgrade ./murder          # every node of the cluster, one after the
 ```
 
 It freezes changes (the panel and CLI only read meanwhile, so nodes of two
-releases exchange none) under a freeze of its own, which names the binary,
+releases exchange none), refused while a drain, a balance, a replace or a
+reboot holds the cluster (see
+[One operation at a time](cluster.md#one-operation-at-a-time)): it begins
+once that one ended, under a freeze of its own, which names the binary,
 the node that runs the upgrade and an operation id; it then reads again
 what every node runs. Then, node by node: the node checks that the upgrade
 still holds the freeze and the binary (its hash, that it runs, no older
@@ -644,7 +649,9 @@ node:
 The cluster takes no change while a rotation runs (a few tens of seconds):
 no node joins, no tenant is created, no app changes; tenants keep serving.
 Every node must answer: bring a stopped node back, or take a failed one out
-of the cluster, first. A rotation stopped part way (a node lost meanwhile,
+of the cluster, first. Nor does a rotation begin while a drain, a balance, a
+replace or a reboot holds the cluster: it says which, and changes nothing
+(see [One operation at a time](cluster.md#one-operation-at-a-time)). A rotation stopped part way (a node lost meanwhile,
 `Ctrl-C`) goes on where it was when `murder key rotate` runs again, from
 the node that made the key. Afterwards, copy the new key file to where you
 keep the master key, and keep the old key with the database backups made

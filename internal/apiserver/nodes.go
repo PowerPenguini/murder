@@ -15,6 +15,9 @@ const nodePingTimeout = 2 * time.Second
 
 func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 	view := api.Nodes{Cluster: s.store.Cluster(), Self: s.store.Node(), Frozen: s.store.Frozen()}
+	if lease := s.store.Lease(); lease.Held(time.Now()) {
+		view.Lease = &lease
+	}
 	members := s.store.Nodes()
 	if len(members) == 0 {
 		// A node in no cluster yet: itself alone.

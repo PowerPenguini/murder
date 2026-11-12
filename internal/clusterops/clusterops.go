@@ -31,8 +31,10 @@ type Client interface {
 	TakeOverFreeze(ctx context.Context, from, reason string) error
 	ThawOwn(ctx context.Context, reason string) error
 	List(ctx context.Context) ([]api.Tenant, error)
-	Move(ctx context.Context, tenant, to string) (api.Tenant, error)
+	// MoveFrom moves a tenant only if it runs on from as the move begins.
+	MoveFrom(ctx context.Context, tenant, from, to string) (api.Tenant, error)
 	BalanceMoves(ctx context.Context) ([]store.Move, error)
+	LeaseClient
 }
 
 func shortSHA(sha string) string {
@@ -380,9 +382,18 @@ func (e *refusedError) Error() string { return e.err.Error() }
 func (e *refusedError) Unwrap() error { return e.err }
 
 // Balance moves tenants from the nodes running the most to those running
-// the fewest, one after the other, as the agent plans it; dryRun only
-// prints the plan.
+// the fewest, one after the other, as the agent plans it, under the
+// cluster's operation lease; dryRun only prints the plan, and takes none.
 func Balance(ctx context.Context, client Client, dryRun bool, out io.Writer) error {
+	if dryRun {
+		return balance(ctx, client, true, out)
+	}
+	return Leased(ctx, client, "balance", "", out, func(ctx context.Context) error {
+		return balance(ctx, client, false, out)
+	})
+}
+
+func balance(ctx context.Context, client Client, dryRun bool, out io.Writer) error {
 	moves, err := client.BalanceMoves(ctx)
 	if err != nil {
 		return err
@@ -397,7 +408,7 @@ func Balance(ctx context.Context, client Client, dryRun bool, out io.Writer) err
 			continue
 		}
 		start := time.Now()
-		if _, err := client.Move(ctx, move.Tenant, move.To); err != nil {
+		if _, err := client.MoveFrom(ctx, move.Tenant, move.From, move.To); err != nil {
 			return fmt.Errorf("move %s to %s: %w (moved %d before it)", move.Tenant, move.To, err, i)
 		}
 		fmt.Fprintf(out, "%s moved from %s to %s in %v\n", move.Tenant, move.From, move.To, time.Since(start).Round(time.Second))
@@ -410,8 +421,26 @@ func Balance(ctx context.Context, client Client, dryRun bool, out io.Writer) err
 
 // Drain moves every tenant of node, live or archived, to target, one after
 // the other, telling out each move, and stops at the first that does not
-// move.
+// move. It holds the cluster's operation lease meanwhile.
 func Drain(ctx context.Context, client Client, node, target string, out io.Writer) error {
+	return Leased(ctx, client, "drain", "node "+node+" to "+target, out, func(ctx context.Context) error {
+		return drain(ctx, client, node, target, out)
+	})
+}
+
+// Replace drains node to target, then takes node out of the cluster, under
+// one operation lease: no other operation moves a tenant onto node
+// between the two.
+func Replace(ctx context.Context, client Client, remove func(ctx context.Context, node string) error, node, target string, out io.Writer) error {
+	return Leased(ctx, client, "replace", "node "+node+" with "+target, out, func(ctx context.Context) error {
+		if err := drain(ctx, client, node, target, out); err != nil {
+			return err
+		}
+		return remove(ctx, node)
+	})
+}
+
+func drain(ctx context.Context, client Client, node, target string, out io.Writer) error {
 	tenants, err := client.List(ctx)
 	if err != nil {
 		return err
@@ -422,7 +451,7 @@ func Drain(ctx context.Context, client Client, node, target string, out io.Write
 			continue
 		}
 		start := time.Now()
-		if _, err := client.Move(ctx, tenant.Spec.Name, target); err != nil {
+		if _, err := client.MoveFrom(ctx, tenant.Spec.Name, node, target); err != nil {
 			return fmt.Errorf("move %s: %w (moved %d before it)", tenant.Spec.Name, err, moved)
 		}
 		moved++

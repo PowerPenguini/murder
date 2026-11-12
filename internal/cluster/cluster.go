@@ -1135,10 +1135,15 @@ func (c *Cluster) join(ctx context.Context, peer string, request joinRequest, ou
 	}
 }
 
-// Remove takes a node out of the cluster, once there is a leader to ask.
+// Remove takes a node out of the cluster, once there is a leader to ask,
+// under the lease of the operation ctx carries the fence of, if any.
 func (c *Cluster) Remove(ctx context.Context, node, actor string) error {
+	path := "/cluster/v1/nodes/" + node + "?actor=" + url.QueryEscape(actor)
+	if lease := store.FenceOf(ctx).Lease; lease != "" {
+		path += "&lease=" + url.QueryEscape(lease)
+	}
 	for {
-		err := c.toLeader(ctx, http.MethodDelete, "/cluster/v1/nodes/"+node+"?actor="+url.QueryEscape(actor), nil, nil)
+		err := c.toLeader(ctx, http.MethodDelete, path, nil, nil)
 		if !errors.Is(err, ErrNoLeader) && !errors.Is(err, ErrNotLeader) {
 			return err
 		}
@@ -1216,8 +1221,9 @@ func (c *Cluster) StatusOn(ctx context.Context, node, tenant string, out any) er
 
 // MoveOn has node move one of its tenants to another node; it returns once
 // the move is done.
+// The fence of the operation it is made for, if any, goes with it.
 func (c *Cluster) MoveOn(ctx context.Context, node, tenant, to, actor string) error {
-	body := marshal(moveRequest{To: to, Actor: actor})
+	body := marshal(moveRequest{To: to, Actor: actor, Fence: store.FenceOf(ctx)})
 	return c.stream(ctx, node, http.MethodPost, "/cluster/v1/tenants/"+url.PathEscape(tenant)+"/move", bytes.NewReader(body), nil)
 }
 
@@ -1260,6 +1266,10 @@ func (c *Cluster) ReplicateOn(ctx context.Context, node, tenant string, whole bo
 type moveRequest struct {
 	To    string `json:"to"`
 	Actor string `json:"actor"`
+	// Fence is the operation's the move is made for; nodes of a release
+	// before the lease ignore it, and none is sent before every node
+	// keeps the lease.
+	Fence store.Fence `json:"fence,omitzero"`
 }
 
 // stream sends a request with any body to node and decodes its answer.
@@ -1382,6 +1392,8 @@ type Status struct {
 	// LastContact is when a follower last heard from the leader.
 	LastContact time.Time `json:"lastContact,omitzero"`
 	Members     []Member  `json:"members"`
+	// Lease is the operation that holds the cluster now, if one does.
+	Lease *store.Lease `json:"lease,omitempty"`
 }
 
 // Member is one voter of the cluster.

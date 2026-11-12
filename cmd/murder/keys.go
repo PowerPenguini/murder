@@ -175,7 +175,9 @@ func (k *keyRotator) Rotate(ctx context.Context, actor string) (rotation.Result,
 	// way out. A rotation that stopped on this node takes its own freeze
 	// over.
 	reason := store.RotationFreeze + k.node
-	if err := k.store.Freeze(reason, actor); err != nil {
+	if err := k.store.Freeze(reason, actor); errors.Is(err, store.ErrLeased) {
+		return rotation.Result{}, fmt.Errorf("%w; no key was changed", err)
+	} else if err != nil {
 		return rotation.Result{}, fmt.Errorf("%w (a rotation from another node runs there to its end; `murder upgrade -thaw` ends a freeze no one ends)", err)
 	}
 	defer func() {

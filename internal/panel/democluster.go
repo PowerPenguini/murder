@@ -295,6 +295,16 @@ func (a *demoActor) Roll(_ context.Context, name string) (api.Tenant, error) {
 	return a.change(name, "tenant.rolled", "", func(*api.Tenant) error { return nil })
 }
 
+// MoveFrom is Move, only of a tenant that runs on from ("" for any).
+func (a *demoActor) MoveFrom(ctx context.Context, name, from, to string) (api.Tenant, error) {
+	if from != "" {
+		if t, err := a.Get(ctx, name); err == nil && t.Node != from {
+			return api.Tenant{}, &api.Error{Status: 409, Message: fmt.Sprintf("tenant %s runs on node %s now, not on node %s", name, t.Node, from)}
+		}
+	}
+	return a.Move(ctx, name, to)
+}
+
 func (a *demoActor) Move(_ context.Context, name, to string) (api.Tenant, error) {
 	return a.change(name, "tenant.moved", "", func(t *api.Tenant) error {
 		if t.Replica == to {

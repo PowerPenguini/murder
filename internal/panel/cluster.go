@@ -380,6 +380,9 @@ type clusterData struct {
 	Mixed   bool
 	Nodes   []nodeRow
 	Frozen  string
+	// Lease is the operation that holds the cluster now, begun from any
+	// node's panel or command line, if one does.
+	Lease *store.Lease
 	// Rotating says a master key rotation holds the freeze.
 	Rotating bool
 	// Busy is the job that changes the cluster now, if one does;
@@ -528,7 +531,7 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	data := clusterData{Frozen: nodes.Frozen, Self: nodes.Self, Rotating: strings.HasPrefix(nodes.Frozen, store.RotationFreeze)}
+	data := clusterData{Frozen: nodes.Frozen, Lease: nodes.Lease, Self: nodes.Self, Rotating: strings.HasPrefix(nodes.Frozen, store.RotationFreeze)}
 	if moves, err := agent.BalanceMoves(ctx); err == nil {
 		data.Balance = moves
 	}
@@ -660,8 +663,21 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 	defer cancel()
+	// An operation begun elsewhere, from another panel or a command line,
+	// holds the cluster: the job would be refused as it begins.
+	held := func() bool {
+		nodes, err := agent.Nodes(ctx)
+		if err == nil && nodes.Lease != nil {
+			back("problem", fmt.Sprintf("%v: %s", store.ErrLeased, nodes.Lease))
+			return true
+		}
+		return false
+	}
 	switch r.FormValue("do") {
 	case "balance":
+		if held() {
+			return
+		}
 		toJob(s.Jobs.Start(JobBalance, "Balance the tenants", user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
 			return clusterops.Balance(ctx, agent, false, out)
 		}))
@@ -673,6 +689,9 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 		to := r.FormValue("to")
 		if to == "" || to == node {
 			back("problem", "pick the node to move the tenants to")
+			return
+		}
+		if held() {
 			return
 		}
 		toJob(s.Jobs.Start(JobDrain, "Drain "+node+" to "+to, user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
@@ -694,6 +713,10 @@ func (s *Server) clusterAction(w http.ResponseWriter, r *http.Request) {
 		// back. With them left where they move, the job is done by then.
 		if node == nodes.Self && !opts.Stay {
 			back("problem", selfReboot(nodes, node))
+			return
+		}
+		if nodes.Lease != nil {
+			back("problem", fmt.Sprintf("%v: %s", store.ErrLeased, nodes.Lease))
 			return
 		}
 		toJob(s.Jobs.Start(JobReboot, "Reboot "+node, user, s.now, s.log, func(ctx context.Context, out io.Writer) error {
@@ -827,6 +850,9 @@ func (s *Server) upgradeAction(w http.ResponseWriter, r *http.Request) {
 		return
 	case nodes.Frozen != "":
 		back("changes are frozen (" + nodes.Frozen + "): the panel begins no upgrade until they are taken again")
+		return
+	case nodes.Lease != nil:
+		back(fmt.Sprintf("%v: %s; the panel begins no upgrade until it ends", store.ErrLeased, nodes.Lease))
 		return
 	}
 	path, err := s.receiveBinary(r)

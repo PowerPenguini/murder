@@ -18,9 +18,11 @@ type State interface {
 	// (ReleaseHold); CancelMove leaves it here, and reports whether there
 	// was a move to cancel. Cancelling and releasing work while changes
 	// are frozen: a frozen state must not strand a tenant.
-	StartMove(name, target, actor string) (store.Record, error)
+	// Both take the fence of the operation the move is made for, if any
+	// (see store.Fence).
+	StartMoveFenced(name, target, actor string, fence store.Fence) (store.Record, error)
 	HoldMove(name string) error
-	FinishMove(name, actor string) (store.Record, error)
+	FinishMoveFenced(name, actor string, fence store.Fence) (store.Record, error)
 	ReleaseHold(name string) error
 	CancelMove(name, actor string) (bool, error)
 }
