@@ -37,7 +37,12 @@ the missing ones and the commands that install them. Then it:
   when setup ran left open;
 - creates the dataset `<pool>/murder/tenants`;
 - writes `/etc/murder/agent.yaml` with only what differs from the defaults,
-  and the tokens it was given as `0600` files beside it;
+  and nothing of the node's own, so every node of a cluster can have the
+  same file (see [One config for every node](cluster.md#one-config-for-every-node));
+  `/etc/murder/node.yaml` with what of the node's own the agent would not
+  find on the host (a `-cluster-address` other than its only private
+  address, say), when there is any; and the tokens it was given as `0600`
+  files beside it;
 - makes the master key and the database (`murder init`);
 - starts `murder-firewall`, `murder-agent`, `murder-edge` (with
   `murder-edge.socket`, which holds its ports; see
@@ -101,6 +106,10 @@ The nodes of a cluster share a config, so there it prints the
   firewall is on (or another firewall filters the host's ports).
 - **Services and backups.** Murder's units start at boot, the database was
   copied in the last 3 hours and tenants are backed up to a bucket.
+- **Config.** The node's own settings the config leaves out, as found on
+  the host (its name, cluster and public addresses, ZFS pool, SSH ports),
+  what `node.yaml` sets, and which settings the config names that the host
+  would give the same.
 - **SSH.** From sshd's effective configuration (`sshd -T`, so `Include` and
   `Match` count): no passwords, no root login with one, and every port
   sshd listens on open in `hostFirewall.ssh` (from `sshd -T`, and from the
@@ -144,18 +153,36 @@ sudo sysctl --system
 
 The host firewall is off in a config without `hostFirewall`, as it closes
 every port the host serves besides SSH and Murder's. `murder setup` turns
-it on (`-no-host-firewall` leaves it off): `hostFirewall.ssh` gets the
-ports sshd listens on (`sshd -T`, and its sockets, a socket-activated
-ssh's too), and what else listened beyond loopback when setup ran goes in
+it on (`-no-host-firewall` leaves it off): it leaves `hostFirewall.ssh`
+out, so the agent opens the ports sshd listens on (`sshd -T`, and its
+sockets, a socket-activated ssh's too) as it finds them at every start,
+and a port sshd moves to is open once the agent restarts. That
+includes the ports of a socket-activated ssh's `ssh.socket` or
+`sshd.socket`, whether or not an sshd holds them yet. The ports never
+shrink by accident: each complete detection (`sshd -T`, `ss` and both
+socket units answered; a unit that does not exist is no failure) is kept
+in `/var/lib/murder/ssh-ports`, root's alone, which setup seeds. A start
+whose detection fails or is partial, as with `ss` not there yet early at
+boot, opens what it found beside the ports kept there. With nothing kept
+to go by (no file, or one unreadable, corrupt or empty), it opens what
+it found, 22, and every TCP port the running host firewall opens to
+everyone, which held SSH's until then; if that cannot be read either,
+only what it found and 22. Either way the agent and `murder firewall` log
+a warning and `murder doctor` warns under `config`. A port opened
+needlessly costs less than SSH locked out. Only a complete detection that
+no longer finds a port, as after sshd was moved off it, closes it; name
+the ports in `hostFirewall.ssh` to decide yourself. What else
+listened beyond loopback when setup ran goes in
 `open`, or in `private` when it listened on a private address only, each
 with a comment naming the process, so setup closes nothing that served.
-A host joining a cluster (`setup -join`) adds its own SSH ports and
-listeners to the cluster's `hostFirewall` the same way.
+A host joining a cluster (`setup -join`) adds its own listeners, and its
+SSH ports where the cluster's config lists some, to the cluster's
+`hostFirewall` in its `node.yaml`.
 Take out what should not be public. Docker's published ports, the DHCP
 client, mDNS and LLMNR are left out: the first pass the host's input rules
 anyway, and the others need no opening. With `hostFirewall` set, the same table
-drops what reaches the host from outside unless it goes to SSH (port 22,
-or `hostFirewall.ssh`), the edge ports, the panel's tunnel or a port in
+drops what reaches the host from outside unless it goes to SSH (the ports
+sshd listens on, or `hostFirewall.ssh` where set), the edge ports, the panel's tunnel or a port in
 `hostFirewall.open`; the cluster port, the relay port and metrics not on
 loopback (and `hostFirewall.private`) are open to private networks only.
 Replies, loopback, ICMP and DHCP pass. It covers IPv4 and IPv6.

@@ -189,7 +189,7 @@ func TestSSH(t *testing.T) {
 		t.Errorf("keys only: %+v, %v", results, ports)
 	}
 	h = fakeHost(t, map[string]string{"sshd -T": "port 22\nport 2222\npasswordauthentication yes\npermitrootlogin yes\n"})
-	results, _ = checkSSH(context.Background(), parse(t, "hostFirewall: {}\n"), h)
+	results, _ = checkSSH(context.Background(), parse(t, "hostFirewall: {ssh: [22]}\n"), h)
 	if !has(results, Failure, "takes passwords") || !has(results, Failure, "root may log in") || !has(results, Failure, "port 2222, which hostFirewall.ssh does not open") {
 		t.Errorf("open: %+v", results)
 	}
@@ -476,4 +476,55 @@ func fixOf(results []Result, text string) string {
 		}
 	}
 	return ""
+}
+
+// probe is what the host gives a node's own settings.
+type probe struct{}
+
+func (probe) Hostname() (string, error) { return "fsn-1.example.com", nil }
+func (probe) Addresses() ([]netip.Addr, error) {
+	return []netip.Addr{netip.MustParseAddr("10.0.0.2")}, nil
+}
+func (probe) Pools() ([]string, error)         { return []string{"tank"}, nil }
+func (probe) SSHPorts() ([]int, error)         { return []int{22}, nil }
+func (probe) RecordedSSHPorts() ([]int, error) { return nil, errors.New("none") }
+func (probe) OpenTCPPorts() ([]int, error)     { return nil, errors.New("none") }
+func (probe) RecordedPublicAddresses() ([]string, error) {
+	return nil, errors.New("none")
+}
+func (probe) RecordPublicAddresses([]string) error { return nil }
+func (probe) RecordSSHPorts([]int) error           { return nil }
+
+// The doctor says what the config left out and where it was found, what
+// node.yaml sets, and what the config sets that the host gives the same.
+func TestOwnSettings(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc/murder"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc/murder/node.yaml"), []byte("volumes: {parent: tank/murder/tenants}\nnode: fsn-1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ParseOn([]byte("baseDomain: example.com\ncluster: {}\nvolumes: {driver: zfs}\n"), []byte("volumes: {parent: tank/murder/tenants}\nnode: fsn-1\n"), probe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := checkOwnSettings(cfg, "/etc/murder/agent.yaml", Host{Root: root, Probe: probe{}})
+	for _, want := range []string{"cluster.address: 10.0.0.2:7400, from the host's only private address", "cluster.publicAddresses: none", "/etc/murder/node.yaml sets node, volumes.parent", "the config sets node, volumes.parent, which the host gives the same"} {
+		if !has(results, OK, want) {
+			t.Errorf("no %q in %+v", want, results)
+		}
+	}
+	// SSH ports found incomplete are a warning, with what was kept.
+	cfg.Detected = append(cfg.Detected, config.Detected{Key: "hostFirewall.ssh", Value: "22, 2222", From: "the ports sshd listens on, and those found before", Problem: "sshd's ports could not all be found (ss: not found)"})
+	results = checkOwnSettings(cfg, "/etc/murder/agent.yaml", Host{Root: root})
+	if !has(results, Warning, "hostFirewall.ssh: 22, 2222") || has(results, OK, "hostFirewall.ssh") {
+		t.Errorf("incomplete ssh: %+v", results)
+	}
+	// Public addresses kept from before are a warning too.
+	cfg.Detected = append(cfg.Detected, config.Detected{Key: "cluster.publicAddresses", Value: "203.0.113.10, 203.0.113.11", From: "the host's public addresses", Problem: "found only 203.0.113.11 of the public addresses recorded before"})
+	results = checkOwnSettings(cfg, "/etc/murder/agent.yaml", Host{Root: root})
+	if !has(results, Warning, "cluster.publicAddresses: 203.0.113.10, 203.0.113.11") {
+		t.Errorf("kept public addresses: %+v", results)
+	}
 }

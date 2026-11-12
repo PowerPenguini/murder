@@ -13,6 +13,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/PowerPenguini/murder/internal/config"
+	"github.com/PowerPenguini/murder/internal/hostprobe"
 )
 
 // Paths a node is installed at.
@@ -20,6 +23,8 @@ const (
 	Binary     = "/usr/local/bin/murder"
 	ConfigDir  = "/etc/murder"
 	ConfigFile = "/etc/murder/agent.yaml"
+	// NodeFile holds the node's own settings the agent would not find.
+	NodeFile   = "/etc/murder/node.yaml"
 	UnitDir    = "/etc/systemd/system"
 	SysctlFile = "/etc/sysctl.d/90-murder.conf"
 	// HardeningFile keeps the kernel from taking redirects and source
@@ -32,7 +37,7 @@ const (
 )
 
 // ClusterPort is where nodes reach each other on the private network.
-const ClusterPort = 7400
+const ClusterPort = config.ClusterPort
 
 // minDockerAPI is the oldest Engine API the agent speaks (Docker 25).
 const minDockerAPI = "1.44"
@@ -84,6 +89,9 @@ type Facts struct {
 	// SSH is what sshd lets in, and SSHPorts the ports it listens on.
 	SSH      SSH
 	SSHPorts []int
+	// SSHPortsErr says what of sshd could not be asked: SSHPorts are then
+	// only those found, and 22 if none.
+	SSHPortsErr error
 	// Listeners are the ports the host firewall would close: what
 	// listens beyond loopback, other than Murder and sshd.
 	Listeners []Listener
@@ -113,24 +121,19 @@ func Inspect(ctx context.Context, host Host) Facts {
 	}
 	_, err = host.Run(ctx, "nft", "--version")
 	facts.Nftables = err == nil
-	if out, err := host.Run(ctx, "zpool", "list", "-H", "-o", "name"); err == nil {
+	if pools, err := hostprobe.Pools(ctx, host); err == nil {
 		facts.ZFS = true
-		facts.Pools = strings.Fields(out)
+		facts.Pools = pools
 	}
 	facts.CgroupV2 = host.Exists("/sys/fs/cgroup/cgroup.controllers")
 	facts.Hostname, _ = host.Hostname()
 	addresses, _ := host.Addresses()
-	for _, address := range addresses {
-		switch {
-		case !address.Is4() || address.IsLoopback() || address.IsLinkLocalUnicast():
-		case address.IsPrivate() || cgnat.Contains(address):
-			facts.Private = append(facts.Private, address)
-		case address.IsGlobalUnicast():
-			facts.Public = append(facts.Public, address)
-		}
-	}
+	facts.Private, facts.Public = hostprobe.Classify(addresses)
 	facts.SSH = inspectSSH(ctx, host)
-	facts.SSHPorts = sshPorts(ctx, host)
+	facts.SSHPorts, facts.SSHPortsErr = hostprobe.SSHPorts(ctx, host)
+	if len(facts.SSHPorts) == 0 {
+		facts.SSHPorts = []int{22}
+	}
 	facts.Listeners = listeners(ctx, host, facts.SSHPorts)
 	facts.Installed = host.Exists(ConfigFile)
 	facts.HasKey, facts.HasDatabase = host.Exists(KeyFile), host.Exists(DatabaseFile)
@@ -144,9 +147,6 @@ func Inspect(ctx context.Context, host Host) Facts {
 	}
 	return facts
 }
-
-// cgnat is shared address space, private to a provider's network.
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
 
 // Problems names what the host lacks for Murder, with how to get it; none
 // means it is ready.
@@ -256,13 +256,15 @@ type Settings struct {
 	Failover       bool
 	ManageDNS      bool
 	Panel          bool
-	TunnelAddress  string
 	// HostFirewall drops what reaches the host besides SSH on SSHPorts,
 	// Murder's ports and Open (to everyone) and Private (to private
 	// networks), which list what listened when setup ran.
 	HostFirewall  bool
 	SSHPorts      []int
 	Open, Private []Listener
+	// NodeConfig is node.yaml: what of the above the agent would not find
+	// on the host; nil when it finds it all.
+	NodeConfig []byte
 }
 
 var (
@@ -370,8 +372,14 @@ func Settle(opts Options, facts Facts) (Settings, []string) {
 		}
 		s.Open, s.Private = splitListeners(facts.Listeners)
 	}
-	if s.Panel {
-		s.TunnelAddress = "10.77.0.1"
+	// The panel takes its address in the tunnel from the cluster's state:
+	// the first node's is 10.77.0.1.
+	if len(problems) == 0 {
+		own := ownValues{Node: s.Node, ClusterAddress: s.ClusterAddress, Public: s.Public, ZFSPool: s.ZFSPool}
+		var err error
+		if s.NodeConfig, _, err = nodeConfig(Config(s), nil, own, factsHost{facts}); err != nil {
+			problems = append(problems, err.Error())
+		}
 	}
 	return s, problems
 }

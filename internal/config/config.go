@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/firewall"
+	"github.com/PowerPenguini/murder/internal/hostprobe"
 	"github.com/PowerPenguini/murder/internal/records"
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/strictyaml"
@@ -28,15 +28,17 @@ import (
 // Agent configures one node's agent.
 type Agent struct {
 	// Node names this node; the agent only manages Docker objects carrying
-	// its node label. "murder init" stores it in the state (the host name if
-	// unset here); afterwards the database decides and a different value
-	// here is an error, so renaming the host changes nothing.
+	// its node label. "murder init" stores it in the state (the host name's
+	// first label if unset here); afterwards the database decides and a
+	// different value set here is an error, so renaming the host changes
+	// nothing.
 	Node string `yaml:"node"`
 	// BaseDomain is the domain tenants live below: <tenant>.<BaseDomain>.
 	BaseDomain string `yaml:"baseDomain"`
 	// PublicAddresses are a node alone's public IP addresses, where clients
 	// reach its edge: a tenant's own domain must point at them before its
 	// certificate is ordered. A node of a cluster has cluster.publicAddresses.
+	// Left out, they are the public addresses of the host's interfaces.
 	PublicAddresses []string `yaml:"publicAddresses"`
 	// Database holds the node's apps, tenants, secrets and audit log.
 	Database      string `yaml:"database"`
@@ -94,6 +96,10 @@ type Agent struct {
 	// ImageChecks is how often the cluster's leader asks apps' registries
 	// which image each app's tag names now (5m); 0 asks never.
 	ImageChecks Duration `yaml:"imageChecks"`
+
+	// Detected are the node's own settings the config left out, as found
+	// on the host (see Detect).
+	Detected []Detected `yaml:"-"`
 }
 
 // Registry is how the node signs in to one private registry.
@@ -146,8 +152,10 @@ func registriesProblems(registries []Registry) []string {
 
 // HostFirewall lists what reaches the host besides Murder's own ports.
 type HostFirewall struct {
-	// SSH are the ports sshd listens on, open to everyone; 22 by default.
-	// A port missing here locks SSH out (connections already open stay).
+	// SSH are the ports sshd listens on, open to everyone. Left out, they
+	// are found from sshd at every start, so a port sshd moved to is open
+	// once the agent starts again; a port missing here locks SSH out
+	// (connections already open stay).
 	SSH []int `yaml:"ssh"`
 	// Open are more ports open to everyone, and Private more ports open
 	// to private networks only, as "9100/tcp" or "53/udp".
@@ -156,7 +164,11 @@ type HostFirewall struct {
 }
 
 // HostRules is what the host firewall lets in; nil when hostFirewall is
-// unset.
+// unset. The rules name ports, and for the private ones the private
+// source networks, never the node's own addresses: what is open is open
+// on every address the host has. So public addresses found on the host,
+// which may differ from one start to the next (an interface up late at
+// boot, a new DHCP lease), change nothing here; only the ports do.
 func (a Agent) HostRules() (*firewall.Host, error) {
 	h := a.HostFirewall
 	if h == nil {
@@ -170,7 +182,7 @@ func (a Agent) HostRules() (*firewall.Host, error) {
 		}
 		rules.PublicTCP = append(rules.PublicTCP, port)
 	}
-	if len(h.SSH) == 0 {
+	if h.SSH != nil && len(h.SSH) == 0 {
 		problems = append(problems, "hostFirewall.ssh must name the SSH ports, or the firewall locks SSH out")
 	}
 	edgePorts, err := a.EdgePorts()
@@ -182,10 +194,8 @@ func (a Agent) HostRules() (*firewall.Host, error) {
 		rules.PublicUDP = append(rules.PublicUDP, t.Port)
 	}
 	if a.Cluster != nil {
-		if _, port, err := net.SplitHostPort(a.Cluster.Address); err == nil {
-			if number, err := strconv.Atoi(port); err == nil {
-				rules.PrivateTCP = append(rules.PrivateTCP, number)
-			}
+		if port := a.Cluster.Port(); port > 0 {
+			rules.PrivateTCP = append(rules.PrivateTCP, port)
 		}
 		rules.PrivateTCP = append(rules.PrivateTCP, a.Edge.RelayPort)
 	}
@@ -304,7 +314,9 @@ func (b Backups) problems(driver string) []string {
 // Cluster sets up the node's part of a cluster.
 type Cluster struct {
 	// Address is where the node listens for other nodes and where they
-	// reach it: its IP address on the private network and a port.
+	// reach it: its IP address on the private network and a port. Left
+	// out, it is the host's only private address, at port 7400; a host
+	// with several names it in node.yaml.
 	Address string `yaml:"address"`
 	// Dir holds the cluster's log and snapshots.
 	Dir string `yaml:"dir"`
@@ -313,6 +325,8 @@ type Cluster struct {
 	Failover *Failover `yaml:"failover"`
 	// PublicAddresses are the node's public IP addresses, where clients
 	// reach its edge; the DNS records name them while the node serves.
+	// Left out, they are the public addresses of the host's interfaces;
+	// [] says it has none.
 	PublicAddresses []string `yaml:"publicAddresses"`
 	// DNS, if set, has the leader keep the base domain's wildcard records
 	// naming the public addresses of the nodes that serve.
@@ -336,6 +350,8 @@ type Panel struct {
 type Tunnel struct {
 	// Address is this node's address in the tunnel, different on every
 	// node and below the network's 100th address, where devices begin.
+	// Left out, the panel takes the one the cluster's state has for this
+	// node, or else the lowest one no node has, and records it there.
 	Address string `yaml:"address"`
 	// Network is the tunnel's network, the same on every node;
 	// 10.77.0.0/24 by default.
@@ -392,7 +408,8 @@ type HetznerFence struct {
 // Volumes selects the data volume driver.
 type Volumes struct {
 	// Driver is "dir" (Root/<tenant>) or "zfs" (Parent/<tenant> mounted at
-	// MountRoot/<tenant>). Root and MountRoot default to /srv/murder/tenants.
+	// MountRoot/<tenant>). Root and MountRoot default to /srv/murder/tenants;
+	// Parent to <pool>/murder/tenants on a host with one ZFS pool.
 	Driver    string `yaml:"driver"`
 	Root      string `yaml:"root"`
 	Parent    string `yaml:"parent"`
@@ -450,16 +467,10 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// Load reads the file at path and fills in defaults.
-func Load(path string) (Agent, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Agent{}, err
-	}
-	return Parse(data)
-}
-
-// Parse reads a configuration and fills in defaults.
+// Parse reads a configuration and fills in defaults. It checks what is
+// set, and lets the node's own settings be left out, as in a config the
+// nodes of a cluster share: Detect finds those, then Validate checks the
+// whole. Load does both.
 func Parse(data []byte) (Agent, error) {
 	agent := Agent{
 		Database:      "/var/lib/murder/murder.db",
@@ -504,9 +515,6 @@ func Parse(data []byte) (Agent, error) {
 	if agent.HostFirewall == nil && bareKey(data, "hostFirewall") {
 		agent.HostFirewall = &HostFirewall{}
 	}
-	if h := agent.HostFirewall; h != nil && h.SSH == nil {
-		h.SSH = []int{22}
-	}
 	if agent.Cluster != nil {
 		if agent.Cluster.Dir == "" {
 			agent.Cluster.Dir = "/var/lib/murder/cluster"
@@ -541,18 +549,23 @@ func Parse(data []byte) (Agent, error) {
 			b.KeepLocal = 24
 		}
 	}
-	return agent, agent.Validate()
+	return agent, agent.validate(true)
 }
 
-// Validate reports settings that cannot work.
-func (a Agent) Validate() error {
+// Validate reports settings that cannot work, the node's own ones
+// included.
+func (a Agent) Validate() error { return a.validate(false) }
+
+// validate reports settings that cannot work; shared lets the node's own
+// settings be left out, for Detect to find.
+func (a Agent) validate(shared bool) error {
 	var problems []string
 	if a.BaseDomain == "" || strings.HasPrefix(a.BaseDomain, ".") || strings.Contains(a.BaseDomain, "/") {
 		problems = append(problems, "baseDomain must be a domain name")
 	}
 	problems = append(problems, registriesProblems(a.Registries)...)
 	if a.Cluster != nil {
-		problems = append(problems, a.Cluster.problems()...)
+		problems = append(problems, a.Cluster.problems(shared)...)
 		if len(a.PublicAddresses) > 0 {
 			problems = append(problems, "publicAddresses is for a node alone: a node of a cluster has them under cluster.publicAddresses")
 		}
@@ -573,6 +586,8 @@ func (a Agent) Validate() error {
 		switch {
 		case err != nil || !network.Addr().Is4() || network.Bits() > 24:
 			problems = append(problems, "panel.tunnel.network must be an IPv4 network, a /24 or larger, such as 10.77.0.0/24")
+		case t.Address == "":
+			// The panel takes one from the cluster's state.
 		case addressErr != nil || !network.Contains(address) || address == network.Masked().Addr():
 			problems = append(problems, "panel.tunnel.address must be this node's address in panel.tunnel.network")
 		case hostNumber(network, address) >= 100:
@@ -605,7 +620,7 @@ func (a Agent) Validate() error {
 			problems = append(problems, "volumes.root must be an absolute path")
 		}
 	case "zfs":
-		if a.Volumes.Parent == "" || !strings.HasPrefix(a.Volumes.MountRoot, "/") {
+		if a.Volumes.Parent == "" && !shared || !strings.HasPrefix(a.Volumes.MountRoot, "/") {
 			problems = append(problems, "zfs volumes need parent and an absolute mountRoot")
 		}
 	default:
@@ -663,7 +678,7 @@ func (a Agent) Validate() error {
 	}
 	if a.Edge.RelayPort < 1 || a.Edge.RelayPort > 65535 {
 		problems = append(problems, "edge.relayPort must be a port")
-	} else if a.Cluster != nil && a.RelayAddress() == a.Cluster.Address {
+	} else if a.Cluster != nil && a.Cluster.Port() == a.Edge.RelayPort {
 		problems = append(problems, "edge.relayPort must differ from the cluster address's port")
 	}
 	if a.Edge.Drain.Duration < 0 {
@@ -723,18 +738,30 @@ func (a Agent) Scheme() string {
 	return "https"
 }
 
-// sharedAddressSpace (RFC 6598) is private too: Tailscale and some
-// WireGuard setups use it.
-var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+// Port is the cluster address's port: ClusterPort when the address is
+// left out, to be found on the host; 0 if it is not an address.
+func (c Cluster) Port() int {
+	if c.Address == "" {
+		return ClusterPort
+	}
+	_, port, err := net.SplitHostPort(c.Address)
+	number, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil {
+		return 0
+	}
+	return number
+}
 
-func (c Cluster) problems() []string {
+func (c Cluster) problems(shared bool) []string {
 	var problems []string
 	host, port, err := net.SplitHostPort(c.Address)
 	address, parseErr := netip.ParseAddr(host)
 	number, portErr := strconv.Atoi(port)
-	if err != nil || parseErr != nil || address.IsUnspecified() || portErr != nil || number < 1 || number > 65535 {
+	if c.Address == "" && shared {
+		// Detect finds it.
+	} else if err != nil || parseErr != nil || address.IsUnspecified() || portErr != nil || number < 1 || number > 65535 {
 		problems = append(problems, "cluster.address must be the node's IP address on the private network and a port, such as 10.0.0.2:7400")
-	} else if !address.IsPrivate() && !address.IsLoopback() && !sharedAddressSpace.Contains(address) {
+	} else if !address.IsPrivate() && !address.IsLoopback() && !hostprobe.CGNAT.Contains(address) {
 		problems = append(problems, "cluster.address must be on a private network: other nodes reach the cluster's state there")
 	}
 	if !strings.HasPrefix(c.Dir, "/") {
@@ -763,7 +790,7 @@ func (c Cluster) problems() []string {
 		} else if d.Provider == "namecheap" && d.TTL.Duration > records.MaxNamecheapTTL {
 			problems = append(problems, "cluster.dns.ttl must be at most 60000s with namecheap")
 		}
-		if len(c.PublicAddresses) == 0 {
+		if len(c.PublicAddresses) == 0 && !(shared && c.PublicAddresses == nil) {
 			problems = append(problems, "cluster.dns needs cluster.publicAddresses: without them the records never name this node")
 		}
 	}

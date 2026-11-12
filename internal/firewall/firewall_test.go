@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -108,5 +109,32 @@ func TestHostRules(t *testing.T) {
 	}
 	if without := Rules(sources, []int{80, 443}, nil, nil); strings.Contains(without, "iif lo") || !strings.Contains(without, "ip saddr { 10.240.0.0/16 } counter drop\n\t}\n\tchain forward") {
 		t.Errorf("rules without a host:\n%s", without)
+	}
+}
+
+// OpenTCP reads back, from nft's listing of the table, the TCP ports the
+// host rules open to everyone.
+func TestOpenTCP(t *testing.T) {
+	listing := `table inet murder {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		ip saddr { 10.240.0.0/16 } tcp dport { 80, 443 } accept
+		tcp dport { 22, 80, 443, 2222 } accept
+		udp dport 51820 accept
+		ip saddr { 10.0.0.0/8 } tcp dport { 7400, 7402 } accept
+		counter packets 0 bytes 0 drop
+	}
+}
+`
+	if ports := OpenTCP(listing); !slices.Equal(ports, []int{22, 80, 443, 2222}) {
+		t.Fatalf("ports %v", ports)
+	}
+	if ports := OpenTCP("\t\ttcp dport 2222 accept\n"); !slices.Equal(ports, []int{2222}) {
+		t.Fatalf("one port %v", ports)
+	}
+	// What Rules writes is what OpenTCP reads.
+	script := Rules([]netip.Prefix{netip.MustParsePrefix("10.240.0.0/16")}, []int{80, 443}, nil, &Host{PublicTCP: []int{2222, 22, 80, 443}, PrivateTCP: []int{7400}})
+	if ports := OpenTCP(script); !slices.Equal(ports, []int{22, 80, 443, 2222}) {
+		t.Fatalf("from Rules %v", ports)
 	}
 }

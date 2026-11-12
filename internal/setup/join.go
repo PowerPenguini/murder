@@ -32,6 +32,9 @@ type Own struct {
 	// off nothing that served.
 	SSHPorts      []int
 	Open, Private []Listener
+	// Host answers what the agent will find on the host by itself, which
+	// node.yaml need not name; nil finds nothing.
+	Host config.Host
 }
 
 // SettleOwn makes a joining host's own choices: from the options, then
@@ -75,6 +78,7 @@ func SettleOwn(opts Options, facts Facts, peer netip.AddrPort) (Own, []string) {
 	}
 	own.SSHPorts = facts.SSHPorts
 	own.Open, own.Private = splitListeners(facts.Listeners)
+	own.Host = factsHost{facts}
 	return own, problems
 }
 
@@ -123,21 +127,28 @@ func choosePool(asked string, facts Facts) (string, string) {
 }
 
 // Adopt makes the cluster's config, from the node that invited the host,
-// the host's own: its name, addresses, data and place in the panel's
-// tunnel; everything else stays as the cluster has it. It returns what
-// to install.
+// the host's own. The config itself it keeps byte for byte, so every node
+// of the cluster has the same; what is the host's own (its name,
+// addresses, data, place in the panel's tunnel, and the listeners and
+// ports the cluster's config binds or opens on the inviting node alone)
+// goes in node.yaml, where the agent would not find it by itself. It
+// returns what to install.
 func Adopt(bundle cluster.Bundle, own Own) (Install, config.Agent, error) {
-	var doc yaml.Node
+	var doc, work yaml.Node
 	if err := yaml.Unmarshal(bundle.Config, &doc); err != nil || doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
 		return Install{}, config.Agent{}, fmt.Errorf("the cluster's config is not a YAML mapping: %v", err)
 	}
-	root := doc.Content[0]
+	if err := yaml.Unmarshal(bundle.Config, &work); err != nil {
+		return Install{}, config.Agent{}, err
+	}
+	root, changed := doc.Content[0], work.Content[0]
 	theirs, err := config.Parse(bundle.Config)
 	if err != nil {
 		return Install{}, config.Agent{}, fmt.Errorf("the cluster's config: %w", err)
 	}
 	// Listeners the inviting node bound to an address of its own bind to
-	// this host's same address.
+	// this host's same address. A cluster's config that leaves the
+	// addresses out has the inviting node's in its node.yaml, not here.
 	moved := map[string]string{}
 	if theirs.Cluster != nil {
 		if address, err := netip.ParseAddrPort(theirs.Cluster.Address); err == nil {
@@ -151,49 +162,46 @@ func Adopt(bundle cluster.Bundle, own Own) (Install, config.Agent, error) {
 			}
 		}
 	}
-	for _, keys := range [][]string{{"edge", "http"}, {"edge", "https"}, {"edge", "metrics"}, {"metrics"}} {
-		value := get(root, keys...)
+	listeners := [][]string{{"edge", "http"}, {"edge", "https"}, {"edge", "metrics"}, {"metrics"}}
+	for _, keys := range listeners {
+		value := get(changed, keys...)
 		if value == nil || value.Kind != yaml.ScalarNode {
 			continue
 		}
 		host, port, ok := strings.Cut(value.Value, ":")
 		if ours, mine := moved[host]; ok && mine {
-			set(root, scalar(ours+":"+port), keys...)
+			set(changed, scalar(ours+":"+port), keys...)
 		}
 	}
-	set(root, scalar(own.Node), "node")
-	set(root, scalar(own.ClusterAddress), "cluster", "address")
-	if len(own.Public) > 0 {
-		set(root, sequence(own.Public), "cluster", "publicAddresses")
-	} else {
-		remove(root, "cluster", "publicAddresses")
+	keepOwnPorts(changed, own)
+	over := &yaml.Node{Kind: yaml.MappingNode}
+	for _, keys := range append(listeners, []string{"hostFirewall", "ssh"}, []string{"hostFirewall", "open"}, []string{"hostFirewall", "private"}) {
+		if value := get(changed, keys...); value != nil && !sameNode(value, get(root, keys...)) {
+			set(over, value, keys...)
+		}
 	}
-	// The cluster's mount paths stay; the pool is this host's.
-	if own.ZFSPool != "" {
-		set(root, scalar("zfs"), "volumes", "driver")
-		set(root, scalar(own.ZFSPool+"/murder/tenants"), "volumes", "parent")
-	} else {
-		set(root, scalar("dir"), "volumes", "driver")
-		remove(root, "volumes", "parent")
+	values := ownValues{Node: own.Node, ClusterAddress: own.ClusterAddress, Public: own.Public, ZFSPool: own.ZFSPool}
+	// The address the inviting node handed out, where the cluster's config
+	// names the inviting node's; else the panel takes one from the state.
+	if t := theirs.Panel.Tunnel; t != nil && t.Address != "" {
+		values.TunnelAddress = bundle.TunnelAddress
 	}
-	keepOwnPorts(root, own)
-	if bundle.TunnelAddress != "" {
-		set(root, scalar(bundle.TunnelAddress), "panel", "tunnel", "address")
+	host := own.Host
+	if host == nil {
+		host = nowhere{}
 	}
-	var out bytes.Buffer
-	encoder := yaml.NewEncoder(&out)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(&doc); err != nil {
-		return Install{}, config.Agent{}, err
-	}
-	agent, err := config.Parse(out.Bytes())
+	nodeData, agent, err := nodeConfig(bundle.Config, over, values, host)
 	if err != nil {
 		return Install{}, config.Agent{}, fmt.Errorf("the cluster's config, made this host's: %w", err)
 	}
 	if agent.Cluster == nil {
 		return Install{}, config.Agent{}, fmt.Errorf("the cluster's config has no cluster section")
 	}
-	in := Install{Config: out.Bytes(), Secrets: map[string][]byte{}, ZFSPool: own.ZFSPool, Panel: agent.Panel.Tunnel != nil}
+	in := Install{Config: bundle.Config, NodeConfig: nodeData, Secrets: map[string][]byte{}, ZFSPool: own.ZFSPool, Panel: agent.Panel.Tunnel != nil}
+	if agent.HostFirewall != nil {
+		in.SSHPorts = own.SSHPorts
+	}
+	in.Public = own.Public
 	// Files land where the cluster keeps them, beside the config only.
 	for file, data := range bundle.Files {
 		if path.Dir(file) != ConfigDir {
@@ -229,30 +237,34 @@ func keepOwnPorts(root *yaml.Node, own Own) {
 	case firewall == nil:
 		return
 	case firewall.Kind == yaml.ScalarNode && firewall.ShortTag() == "!!null":
-		// A bare "hostFirewall:" turns it on with every default.
-		firewall = &yaml.Node{Kind: yaml.MappingNode}
-		set(root, firewall, "hostFirewall")
+		// A bare "hostFirewall:" turns it on with every default; it
+		// becomes a mapping once there is something to add.
+		bare := &yaml.Node{Kind: yaml.MappingNode}
+		defer func() {
+			if len(bare.Content) > 0 {
+				set(root, bare, "hostFirewall")
+			}
+		}()
+		firewall = bare
 	case firewall.Kind != yaml.MappingNode:
 		return // config.Parse says what is wrong with it
 	}
-	// SSH: the host's ports beside the cluster's, which keep their
-	// layout and comments; 22 when the cluster relied on the default.
-	list := get(firewall, "ssh")
-	if list == nil || list.Kind != yaml.SequenceNode {
-		list = &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle, Content: []*yaml.Node{scalar("22")}}
-		set(firewall, list, "ssh")
-	}
-	var ssh []int
-	for _, item := range list.Content {
-		var port int
-		if item.Decode(&port) == nil { // 22, but also 0x16 or 2_2, as config.Parse reads them
-			ssh = append(ssh, port)
+	// SSH: left out, the agent finds this host's ports at every start.
+	// Named, the host's ports go beside the cluster's, which keep their
+	// layout and comments.
+	if list := get(firewall, "ssh"); list != nil && list.Kind == yaml.SequenceNode {
+		var ssh []int
+		for _, item := range list.Content {
+			var port int
+			if item.Decode(&port) == nil { // 22, but also 0x16 or 2_2, as config.Parse reads them
+				ssh = append(ssh, port)
+			}
 		}
-	}
-	for _, port := range own.SSHPorts {
-		if !slices.Contains(ssh, port) {
-			list.Content = append(list.Content, scalar(strconv.Itoa(port)))
-			ssh = append(ssh, port)
+		for _, port := range own.SSHPorts {
+			if !slices.Contains(ssh, port) {
+				list.Content = append(list.Content, scalar(strconv.Itoa(port)))
+				ssh = append(ssh, port)
+			}
 		}
 	}
 	entries := func(key string) []string {
@@ -285,6 +297,20 @@ func keepOwnPorts(root *yaml.Node, own Own) {
 	add("open", own.Open, entries("open"))
 	// What is open to everyone needs no opening to private networks.
 	add("private", own.Private, append(entries("open"), entries("private")...))
+}
+
+// sameNode reports whether a and b are the same YAML, comments aside.
+func sameNode(a, b *yaml.Node) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	encode := func(n *yaml.Node) string {
+		var out bytes.Buffer
+		encoder := yaml.NewEncoder(&out)
+		_ = encoder.Encode(n)
+		return out.String()
+	}
+	return encode(a) == encode(b)
 }
 
 func scalar(value string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Value: value} }

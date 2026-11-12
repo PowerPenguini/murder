@@ -141,6 +141,11 @@ func runSetup(args []string) error {
 	}
 	if *dryRun {
 		fmt.Fprintf(stdout, "\n%s would be:\n\n%s", setup.ConfigFile, setup.Config(settings))
+		if settings.NodeConfig != nil {
+			fmt.Fprintf(stdout, "\n%s would be:\n\n%s", setup.NodeFile, settings.NodeConfig)
+		} else {
+			fmt.Fprintf(stdout, "\nNo %s: the agent finds this node's own settings on the host.\n", setup.NodeFile)
+		}
 		return nil
 	}
 	if interactive && !ask.yes("\nGo on?", true) {

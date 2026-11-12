@@ -149,9 +149,20 @@ func TestTheConfigIsOneTheAgentAccepts(t *testing.T) {
 			if len(problems) > 0 {
 				t.Fatalf("problems: %v", problems)
 			}
-			agent, err := config.Parse(Config(s))
+			// The agent finds the node's own settings on the host: the
+			// config names none of them, and node.yaml only one it would
+			// not find.
+			agent, err := config.ParseOn(Config(s), s.NodeConfig, factsHost{facts})
 			if err != nil {
-				t.Fatalf("%v\n%s", err, Config(s))
+				t.Fatalf("%v\n%s\n%s", err, Config(s), s.NodeConfig)
+			}
+			for _, own := range []string{"node:", "address:", "publicAddresses", "parent:", "ssh:"} {
+				if strings.Contains(string(Config(s)), own) {
+					t.Fatalf("the shared config names %s:\n%s", own, Config(s))
+				}
+			}
+			if wantOwn := opts.ClusterAddress == "10.0.0.2:7500"; wantOwn != (s.NodeConfig != nil) || wantOwn && !strings.HasSuffix(string(s.NodeConfig), "\ncluster:\n  address: 10.0.0.2:7500\n") {
+				t.Fatalf("node.yaml:\n%s", s.NodeConfig)
 			}
 			if agent.Node != "fsn-1" || agent.BaseDomain != "example.com" || agent.Edge.TLS.Mode != s.TLS {
 				t.Fatalf("agent %+v", agent)
@@ -178,7 +189,7 @@ func TestSettleTakesWhatTheHostHas(t *testing.T) {
 		t.Fatal(problems)
 	}
 	want := Settings{Domain: "example.com", Node: "fsn-1", TLS: "acme", Email: "ops@example.com", DNSProvider: "hetzner", DNSToken: "tok",
-		ZFSPool: "tank", ClusterAddress: "10.0.0.2:7400", Public: []string{"203.0.113.10"}, HetznerToken: "tok", Failover: true, Panel: true, TunnelAddress: "10.77.0.1"}
+		ZFSPool: "tank", ClusterAddress: "10.0.0.2:7400", Public: []string{"203.0.113.10"}, HetznerToken: "tok", Failover: true, Panel: true}
 	if !equalSettings(s, want) {
 		t.Fatalf("settings\n%+v, want\n%+v", s, want)
 	}
@@ -195,7 +206,7 @@ func TestSettleTakesWhatTheHostHas(t *testing.T) {
 func equalSettings(a, b Settings) bool {
 	return a.Domain == b.Domain && a.Node == b.Node && a.TLS == b.TLS && a.Email == b.Email && a.DNSProvider == b.DNSProvider &&
 		a.DNSToken == b.DNSToken && a.ZFSPool == b.ZFSPool && a.ClusterAddress == b.ClusterAddress && slices.Equal(a.Public, b.Public) &&
-		a.HetznerToken == b.HetznerToken && a.Failover == b.Failover && a.ManageDNS == b.ManageDNS && a.Panel == b.Panel && a.TunnelAddress == b.TunnelAddress
+		a.HetznerToken == b.HetznerToken && a.Failover == b.Failover && a.ManageDNS == b.ManageDNS && a.Panel == b.Panel
 }
 
 func TestSettleSaysWhatItCannotChoose(t *testing.T) {
@@ -258,6 +269,14 @@ func TestStepsInstallEverything(t *testing.T) {
 	if dropIn := string(host.files[EdgeSocketDropIn]); !strings.HasSuffix(dropIn, "ListenStream=\nListenStream=80\nListenStream=443\nListenStream=10.0.0.2:7402\n") {
 		t.Errorf("socket drop-in %q", dropIn)
 	}
+	// The SSH ports setup found seed the record the agent keeps them in.
+	if string(host.files["/var/lib/murder/ssh-ports"]) != "22\n" || host.modes["/var/lib/murder/ssh-ports"] != 0o600 {
+		t.Errorf("ssh ports record %q, mode %v", host.files["/var/lib/murder/ssh-ports"], host.modes["/var/lib/murder/ssh-ports"])
+	}
+	// And the public addresses it found, with the interfaces up.
+	if string(host.files["/var/lib/murder/public-addresses"]) != "203.0.113.10\n" || host.modes["/var/lib/murder/public-addresses"] != 0o600 {
+		t.Errorf("public addresses record %q, mode %v", host.files["/var/lib/murder/public-addresses"], host.modes["/var/lib/murder/public-addresses"])
+	}
 	if string(host.files[HetznerTokenFile]) != "hcloud-s3cret\n" || strings.Contains(string(host.files[ConfigFile]), "s3cret") {
 		t.Fatal("the token is not kept in its own file")
 	}
@@ -285,6 +304,7 @@ func TestForceRestartsWhatRuns(t *testing.T) {
 	host.exe = Binary
 	s, _ := Settle(Options{Domain: "example.com", ZFSPool: "none", ClusterAddress: "none"}, Inspect(context.Background(), host))
 	host.files[ConfigFile] = []byte("old")
+	host.files[NodeFile] = []byte("node: old\n")
 	steps, _ := Steps(host, s.Install(), true, func() error { return nil })
 	for _, step := range steps {
 		if err := step.Do(context.Background()); err != nil {
@@ -297,6 +317,41 @@ func TestForceRestartsWhatRuns(t *testing.T) {
 	}
 	if string(host.files[ConfigFile]) == "old" {
 		t.Fatal("-force kept the old config")
+	}
+	// A node.yaml of the earlier setup would be read over the new config.
+	if _, ok := host.files[NodeFile]; ok {
+		t.Fatal("-force kept the old node.yaml")
+	}
+}
+
+// A host whose own settings the agent would not find all by itself gets
+// node.yaml beside the shared config, with only those.
+func TestSetupWritesWhatTheHostCannotTell(t *testing.T) {
+	host := newFakeHost()
+	host.exe = Binary
+	host.addrs = append(host.addrs, "192.168.5.2")
+	host.commands["zpool list -H -o name"] = "tank\nfast\n"
+	host.commands["zfs create -p fast/murder/tenants"] = ""
+	s, problems := Settle(Options{Domain: "example.com", Node: "edge-1", ZFSPool: "fast", ClusterAddress: "192.168.5.2"}, Inspect(context.Background(), host))
+	if len(problems) > 0 {
+		t.Fatal(problems)
+	}
+	want := "node: edge-1\ncluster:\n  address: 192.168.5.2:7400\nvolumes:\n  parent: fast/murder/tenants\n"
+	if !strings.HasSuffix(string(s.NodeConfig), want) {
+		t.Fatalf("node.yaml\n%s\nwant it to end in\n%s", s.NodeConfig, want)
+	}
+	steps, _ := Steps(host, s.Install(), false, func() error { return nil })
+	for _, step := range steps {
+		if err := step.Do(context.Background()); err != nil {
+			t.Fatalf("%s: %v", step.Say, err)
+		}
+	}
+	if string(host.files[NodeFile]) != string(s.NodeConfig) || host.modes[NodeFile] != 0o644 || strings.Contains(string(host.files[ConfigFile]), "edge-1") {
+		t.Fatalf("node.yaml %q, config\n%s", host.files[NodeFile], host.files[ConfigFile])
+	}
+	// The relay listens on the address node.yaml names.
+	if dropIn := string(host.files[EdgeSocketDropIn]); !strings.Contains(dropIn, "ListenStream=192.168.5.2:7402") {
+		t.Fatalf("socket drop-in %q", dropIn)
 	}
 }
 

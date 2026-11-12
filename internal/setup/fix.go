@@ -83,7 +83,7 @@ func addHostFirewall(ctx context.Context, host Host, configPath, block string) e
 	switch {
 	case err != nil:
 		return Skipped{fmt.Sprintf("the agent would refuse %s with hostFirewall added (%v): doctor left it as it was; add it by hand:\n%s", configPath, err, block)}
-	case agent.HostFirewall == nil || len(agent.HostFirewall.SSH) == 0:
+	case agent.HostFirewall == nil:
 		return Skipped{fmt.Sprintf("hostFirewall added to the end of %s does not take: doctor left it as it was; add it by hand:\n%s", configPath, block)}
 	}
 	if err := host.WriteFile(configPath+".before-host-firewall", old, 0o644); err != nil {

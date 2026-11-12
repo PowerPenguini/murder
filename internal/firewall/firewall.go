@@ -133,6 +133,32 @@ func (h *Host) rules() string {
 	return b.String()
 }
 
+// OpenTCP are the TCP ports a listing of the loaded table (nft list
+// table inet murder) opens to every address: the host rule with no source
+// to match, as rules writes it, in nft's way of printing it back ("tcp
+// dport 22 accept" for one port, "tcp dport { 22, 80 } accept" for more).
+func OpenTCP(listing string) []int {
+	var ports []int
+	for line := range strings.Lines(listing) {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "tcp dport ")
+		if !ok {
+			continue
+		}
+		rest, ok = strings.CutSuffix(rest, " accept")
+		if !ok {
+			continue
+		}
+		rest = strings.Trim(rest, "{} ")
+		for _, field := range strings.Split(rest, ",") {
+			if port, err := strconv.Atoi(strings.TrimSpace(field)); err == nil && port > 0 && port < 65536 {
+				ports = append(ports, port)
+			}
+		}
+	}
+	slices.Sort(ports)
+	return slices.Compact(ports)
+}
+
 // portList is ports for an nft set, sorted and without repeats; empty when
 // there are none.
 func portList(ports []int) string {

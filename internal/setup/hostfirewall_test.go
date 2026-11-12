@@ -59,7 +59,8 @@ func TestSetupTurnsTheHostFirewallOn(t *testing.T) {
 		t.Fatal(problems)
 	}
 	text := string(Config(s))
-	agent, err := config.Parse([]byte(text))
+	// The SSH ports are left out, for the agent to find at every start.
+	agent, err := config.ParseOn([]byte(text), s.NodeConfig, factsHost{facts})
 	if err != nil {
 		t.Fatalf("%v\n%s", err, text)
 	}
@@ -67,7 +68,7 @@ func TestSetupTurnsTheHostFirewallOn(t *testing.T) {
 	if h == nil || !slices.Equal(h.SSH, []int{22, 2222}) || !slices.Equal(h.Open, []string{"9100/tcp"}) || !slices.Equal(h.Private, []string{"5432/tcp"}) {
 		t.Fatalf("hostFirewall %+v in\n%s", h, text)
 	}
-	if !strings.Contains(text, "9100/tcp  # node_exporter") {
+	if !strings.Contains(text, "9100/tcp  # node_exporter") || strings.Contains(text, "ssh:") {
 		t.Fatalf("the config does not say what listens:\n%s", text)
 	}
 	if _, err := agent.HostRules(); err != nil {
@@ -85,14 +86,15 @@ func TestSetupTurnsTheHostFirewallOn(t *testing.T) {
 func TestTheHostFirewallKeepsEverySSHPortOpen(t *testing.T) {
 	host := newFakeHost()
 	host.commands["sshd -T"] = "port 22\nlistenaddress 192.0.2.10:2200\nlistenaddress [2001:db8::1]:2201\npasswordauthentication no\n"
-	host.commands["systemctl show -p Listen --value ssh.socket"] = "[::]:2202 (Stream)\n0.0.0.0:2203 (Stream)\n"
+	host.commands["systemctl show -p LoadState -p Listen ssh.socket"] = "LoadState=loaded\nListen=[::]:2202 (Stream)\nListen=0.0.0.0:2203 (Stream)\n"
+	host.commands["systemctl show -p LoadState -p Listen sshd.socket"] = "LoadState=not-found\n"
 	host.commands["ss -H -ltunp"] = "tcp LISTEN 0 4096 0.0.0.0:2222 0.0.0.0:* users:((\"systemd\",pid=1,fd=50))\n"
 	facts := Inspect(context.Background(), host)
 	if !slices.Equal(facts.SSHPorts, []int{22, 2200, 2201, 2202, 2203}) {
 		t.Fatalf("ssh ports %v", facts.SSHPorts)
 	}
 	s, _ := Settle(Options{Domain: "example.com", ClusterAddress: "none", ZFSPool: "none"}, facts)
-	agent, err := config.Parse(Config(s))
+	agent, err := config.ParseOn(Config(s), s.NodeConfig, factsHost{facts})
 	if err != nil {
 		t.Fatal(err)
 	}

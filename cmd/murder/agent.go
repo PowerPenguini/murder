@@ -77,12 +77,8 @@ func runInit(args []string) error {
 		fmt.Printf("master key %s already exists\n", cfg.MasterKeyFile)
 	}
 	if _, err := os.Stat(cfg.Database); errors.Is(err, os.ErrNotExist) {
+		// The config's, or else the host name's first label.
 		node := cfg.Node
-		if node == "" {
-			if node, err = os.Hostname(); err != nil {
-				return fmt.Errorf("set node in %s: the host name is unknown: %w", *configPath, err)
-			}
-		}
 		if err := store.Init(cfg.Database, node); err != nil {
 			return err
 		}
@@ -106,6 +102,7 @@ func runAgent(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	warnDetected(cfg, log)
 	// Nothing below waits on it: systemctl may be slow while the host boots.
 	go refreshInstall(cfg, log)
 	key, err := secrets.LoadKey(cfg.MasterKeyFile)
@@ -122,7 +119,9 @@ func runAgent(args []string) error {
 	}
 	defer st.Close()
 	node := st.Node()
-	if cfg.Node != "" && cfg.Node != node {
+	// A name found from the host name gives way to the database's: the
+	// host may have been renamed since. One the config sets must match.
+	if cfg.Node != node && !cfg.IsDetected("node") {
 		return fmt.Errorf("config names node %q but the database belongs to node %q", cfg.Node, node)
 	}
 	// Run alone, a node of a cluster would change its state apart from the
@@ -789,6 +788,16 @@ func storeSubnets(st store.Store) []netip.Prefix {
 	return subnets
 }
 
+// warnDetected logs the node's own settings found incomplete on the host,
+// such as SSH ports kept open from before because sshd could not be asked.
+func warnDetected(cfg config.Agent, log *slog.Logger) {
+	for _, d := range cfg.Detected {
+		if d.Problem != "" {
+			log.Warn("a setting of this node's own was found incomplete", "setting", d.Key, "value", d.Value, "problem", d.Problem)
+		}
+	}
+}
+
 // runFirewall loads the tenant firewall once, for murder-firewall.service,
 // which runs before Docker starts the tenants at boot.
 func runFirewall(args []string) error {
@@ -801,6 +810,8 @@ func runFirewall(args []string) error {
 	if err != nil {
 		return err
 	}
+	// It runs early at boot, where ss or sshd may not answer yet.
+	warnDetected(cfg, slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	if cfg.Firewall != config.FirewallNftables {
 		fmt.Println("the tenant firewall is off in", *configPath)
 		return nil
