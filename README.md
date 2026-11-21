@@ -52,7 +52,7 @@ between servers, to you; Murder does it with ZFS. An app is configuration
   [Security model](docs/security.md)
 - **Plugins.** Tenants reach providers' APIs through the edge, with a key
   they never see, through a small container on each node: Murder's own
-  for OpenAI and HERE, or one of yours, written with
+  for OpenAI, HERE and GUS's REGON database, or one of yours, written with
   [pluginsdk](pluginsdk). Murder counts
   each tenant's tokens, requests and transactions, and stops a tenant at a
   hard limit or says when it passes a soft one. [Plugins](docs/plugins.md)
@@ -141,7 +141,7 @@ What setup does, and how to do it by hand, is in
 | [docs/operations.md](docs/operations.md) | install, upgrade Murder, back up and restore |
 | [docs/cluster.md](docs/cluster.md) | join nodes, move tenants, copies, a dead node, DNS |
 | [docs/failover.md](docs/failover.md) | how failover decides, and what was tested |
-| [docs/plugins.md](docs/plugins.md) | plugins: OpenAI, HERE and containers of your own for tenants, their keys, usage and limits |
+| [docs/plugins.md](docs/plugins.md) | plugins: OpenAI, HERE, GUS and plugins of your own for tenants, their keys, usage and limits |
 | [docs/panel.md](docs/panel.md) | the administration panel |
 | [docs/security.md](docs/security.md) | what tenants can and cannot reach |
 | [docs/design.md](docs/design.md) | the design and why |

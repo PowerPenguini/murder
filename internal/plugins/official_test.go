@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -543,4 +544,115 @@ func TestTheExamplesFilesAreTaken(t *testing.T) {
 	if _, err := Parse([]byte("kind: openai\n")); err == nil || !strings.Contains(err.Error(), "ghcr.io/powerpenguini/murder-openai") {
 		t.Fatalf("kind openai: %v", err)
 	}
+}
+
+// birCall is a tenant's call to BIR1, as its client writes it: to the
+// plugin's address, with a key of its own if any.
+func birCall(operation, body string) string {
+	return `<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:ns="http://CIS/BIR/PUBL/2014/07" xmlns:dat="http://CIS/BIR/PUBL/2014/07/DataContract">` +
+		`<soap:Header xmlns:wsa="http://www.w3.org/2005/08/addressing"><wsa:To>http://10.240.0.1:4180/gus/wsBIR/UslugaBIRzewnPubl.svc</wsa:To>` +
+		`<wsa:Action>http://CIS/BIR/PUBL/2014/07/IUslugaBIRzewnPubl/` + operation + `</wsa:Action></soap:Header><soap:Body>` + body + `</soap:Body></soap:Envelope>`
+}
+
+// birAnswer answers as BIR1 does, an envelope in a multipart of XOP.
+func birAnswer(rw http.ResponseWriter, result string) {
+	rw.Header().Set("Content-Type", `multipart/related; type="application/xop+xml";start="<http://tempuri.org/0>";boundary="uuid:x";start-info="application/soap+xml"`)
+	io.WriteString(rw, "--uuid:x\r\nContent-ID: <http://tempuri.org/0>\r\nContent-Type: application/xop+xml;charset=utf-8;type=\"application/soap+xml\"\r\n\r\n"+
+		`<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>`+result+`</s:Body></s:Envelope>`+"\r\n--uuid:x--\r\n")
+}
+
+// A tenant's client logs in to BIR1 with any key, and searches with the
+// session it got: the login goes with the operator's key, in the body the
+// plugin wrote, every call to the service's own address; searches count
+// an entity a number.
+func TestGUSLogsInWithTheKeyInTheBodyAndCountsSearches(t *testing.T) {
+	var mu sync.Mutex
+	var sent []string
+	w := newPluginFixture(t, "gus", Grant{}, func(rw http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		sent = append(sent, string(body))
+		mu.Unlock()
+		switch {
+		case strings.Contains(string(body), "Zaloguj"):
+			birAnswer(rw, `<ZalogujResponse xmlns="http://CIS/BIR/PUBL/2014/07"><ZalogujResult>ey6nu6e2428xp3b434gx</ZalogujResult></ZalogujResponse>`)
+		case strings.Contains(string(body), "Raport"):
+			rw.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(rw, `<s:Fault>bad session for key operator-key</s:Fault>`)
+		default:
+			birAnswer(rw, `<DaneSzukajPodmiotyResponse xmlns="http://CIS/BIR/PUBL/2014/07"><DaneSzukajPodmiotyResult>&lt;root&gt;&lt;dane&gt;&lt;Regon&gt;000331501&lt;/Regon&gt;&lt;/dane&gt;&lt;/root&gt;</DaneSzukajPodmiotyResult></DaneSzukajPodmiotyResponse>`)
+		}
+	}, nil)
+	const svc = "/wsBIR/UslugaBIRzewnPubl.svc"
+	response, body := post(t, w, svc, "application/soap+xml; charset=utf-8", birCall("Zaloguj", `<ns:Zaloguj><ns:pKluczUzytkownika>murder-key-guess</ns:pKluczUzytkownika></ns:Zaloguj>`))
+	if response.StatusCode != 200 || !strings.Contains(body, "<ZalogujResult>ey6nu6e2428xp3b434gx</ZalogujResult>") {
+		t.Fatalf("login: %d %s", response.StatusCode, body)
+	}
+	login := w.upstream(t)
+	mu.Lock()
+	first := sent[0]
+	mu.Unlock()
+	if login.Host != "wyszukiwarkaregon.stat.gov.pl" || login.URL.Path != svc || !strings.Contains(first, "<ns:pKluczUzytkownika>operator-key</ns:pKluczUzytkownika>") ||
+		strings.Contains(first, "murder-key") || !strings.Contains(first, "<wsa:To>https://wyszukiwarkaregon.stat.gov.pl"+svc+"</wsa:To>") ||
+		!strings.HasPrefix(login.Header.Get("Content-Type"), "application/soap+xml") {
+		t.Fatalf("GUS got %s%s: %s", login.Host, login.URL.Path, first)
+	}
+	request, _ := http.NewRequest(http.MethodPost, w.server.URL+"/p"+svc, strings.NewReader(birCall("DaneSzukajPodmioty", `<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nipy>5261040828,5261040829</dat:Nipy></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`)))
+	request.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
+	request.Header.Set("sid", "ey6nu6e2428xp3b434gx")
+	if response := w.as(t, "127.0.0.1", request); response.StatusCode != 200 {
+		t.Fatalf("search: %d", response.StatusCode)
+	}
+	if sid := w.upstream(t).Header.Get("sid"); sid != "ey6nu6e2428xp3b434gx" {
+		t.Fatalf("the session went as %q", sid)
+	}
+	// A fault that says the key is answered without it, and counts no
+	// report.
+	response, body = post(t, w, svc, "application/soap+xml", birCall("DanePobierzPelnyRaport", `<ns:DanePobierzPelnyRaport><ns:pRegon>000331501</ns:pRegon><ns:pNazwaRaportu>BIR11OsPrawna</ns:pNazwaRaportu></ns:DanePobierzPelnyRaport>`))
+	if response.StatusCode != 500 || strings.Contains(body, "operator-key") {
+		t.Fatalf("a fault: %d %s", response.StatusCode, body)
+	}
+	w.upstream(t)
+	if w.used("searches") != 2 || w.used("reports") != 0 || w.used(MetricRequests) != 3 {
+		t.Fatalf("searches %d, reports %d, requests %d", w.used("searches"), w.used("reports"), w.used(MetricRequests))
+	}
+	// What is not a call of BIR1's is refused before it goes.
+	if response, _ := post(t, w, svc, "application/json", `{"nip":"5261040828"}`); response.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("JSON: %d", response.StatusCode)
+	}
+	if response, _ := post(t, w, svc, "application/soap+xml", birCall("Usun", `<ns:Usun/>`)); response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an operation unknown: %d", response.StatusCode)
+	}
+}
+
+// With MURDER_TEST_GUS=1, a tenant logs in to GUS's own test service and
+// finds GUS by its NIP, through the edge, with the service's published test
+// key.
+func TestGUSsTestServiceThroughTheEdge(t *testing.T) {
+	if os.Getenv("MURDER_TEST_GUS") != "1" {
+		t.Skip("reaches wyszukiwarkaregontest.stat.gov.pl: MURDER_TEST_GUS=1")
+	}
+	w := newPluginFixture(t, "gus", Grant{}, ok, func(spec *Spec) { spec.Hosts = []string{"wyszukiwarkaregontest.stat.gov.pl"} })
+	w.proxy.Transport = NewTransport()
+	w.proxy.open = func(string, string) (string, error) { return "abcde12345abcde12345", nil }
+	const svc = "/wsBIR/UslugaBIRzewnPubl.svc"
+	_, body := post(t, w, svc, "application/soap+xml; charset=utf-8", birCall("Zaloguj", `<ns:Zaloguj><ns:pKluczUzytkownika>any</ns:pKluczUzytkownika></ns:Zaloguj>`))
+	start := strings.Index(body, "<ZalogujResult>")
+	end := strings.Index(body, "</ZalogujResult>")
+	if start < 0 || end < start+len("<ZalogujResult>")+1 {
+		t.Fatalf("no session: %s", body)
+	}
+	sid := body[start+len("<ZalogujResult>") : end]
+	request, _ := http.NewRequest(http.MethodPost, w.server.URL+"/p"+svc, strings.NewReader(birCall("DaneSzukajPodmioty", `<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nip>5261040828</dat:Nip></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`)))
+	request.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
+	request.Header.Set("sid", sid)
+	response := w.as(t, "127.0.0.1", request)
+	found, _ := io.ReadAll(response.Body)
+	if response.StatusCode != 200 || !strings.Contains(string(found), "000331501") {
+		t.Fatalf("%d %s", response.StatusCode, found)
+	}
+	if w.used("searches") != 1 {
+		t.Fatalf("searches %d", w.used("searches"))
+	}
+	t.Logf("found: %.300s", found)
 }

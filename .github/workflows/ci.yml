@@ -32,4 +32,4 @@ jobs:
           docker run --rm --privileged --tmpfs /run -e MURDER_TEST_MOUNTS=1 -e TMPDIR=/run -v "$PWD/pluginhost.test:/pluginhost.test:ro" busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec /pluginhost.test -test.run Tmpfs -test.v
       - run: go build -o murder ./cmd/murder
       # Murder's plugins run on arm64 nodes too (the release builds both).
-      - run: GOARCH=arm64 go build -o /dev/null ./plugins/openai && GOARCH=arm64 go build -o /dev/null ./plugins/here
+      - run: GOARCH=arm64 go build -o /dev/null ./plugins/...

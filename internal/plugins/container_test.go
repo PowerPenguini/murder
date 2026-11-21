@@ -34,8 +34,8 @@ func TestMain(m *testing.M) {
 }
 
 // testPlugin builds a plugin of this repository's for the tests, as a
-// program: the test plugin, Murder's openai and here, or the Anthropic
-// example.
+// program: the test plugin, Murder's openai, here and gus, or the
+// Anthropic example.
 func testPlugin(t *testing.T, name string) string {
 	t.Helper()
 	buildOnce.Do(func() {
@@ -46,7 +46,7 @@ func testPlugin(t *testing.T, name string) string {
 		}
 		buildDir = dir
 		built = map[string]string{}
-		for name, pkg := range map[string]string{"test": "./testdata/plugin", "anthropic": "../../examples/plugins/anthropic", "openai": "../../plugins/openai", "here": "../../plugins/here"} {
+		for name, pkg := range map[string]string{"test": "./testdata/plugin", "anthropic": "../../examples/plugins/anthropic", "openai": "../../plugins/openai", "here": "../../plugins/here", "gus": "../../plugins/gus"} {
 			out := filepath.Join(dir, name)
 			command := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", out, pkg)
 			command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=")
@@ -156,6 +156,11 @@ func TestAManifestIsHeldToWhatAPluginMay(t *testing.T) {
 	if err := good.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	inBody := good
+	inBody.Key = KeyPlace{Body: true}
+	if err := inBody.Validate(); err != nil || inBody.Key.String() != "the body the plugin writes" {
+		t.Fatalf("a key in the body: %v", err)
+	}
 	for name, change := range map[string]func(*Manifest){
 		"another ABI":       func(m *Manifest) { m.ABI = 1 },
 		"no hosts":          func(m *Manifest) { m.Hosts = nil },
@@ -165,6 +170,9 @@ func TestAManifestIsHeldToWhatAPluginMay(t *testing.T) {
 		"the key in Host":   func(m *Manifest) { m.Key = KeyPlace{Header: "Host"} },
 		"the key in Cookie": func(m *Manifest) { m.Key = KeyPlace{Header: "cookie"} },
 		"a prefix in query": func(m *Manifest) { m.Key = KeyPlace{Query: "key", Prefix: "x"} },
+		"a prefix in body":  func(m *Manifest) { m.Key = KeyPlace{Body: true, Prefix: "x"} },
+		"body and a header": func(m *Manifest) { m.Key.Body = true },
+		"a media type":      func(m *Manifest) { m.RequestBodyTypes = []string{"JSON"} },
 		"a bad metric":      func(m *Manifest) { m.Metrics = []string{"Tokens!"} },
 		"a body too large":  func(m *Manifest) { m.RequestBody = MaxRequestBody + 1 },
 		"a bad name":        func(m *Manifest) { m.Name = "My Plugin" },

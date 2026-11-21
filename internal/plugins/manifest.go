@@ -75,16 +75,23 @@ type Manifest struct {
 }
 
 // KeyPlace is where a key goes on a request: in a header, after a prefix,
-// as in Authorization: Bearer KEY, or in a parameter of the query.
+// as in Authorization: Bearer KEY, in a parameter of the query, or in the
+// body the plugin writes, for an API that takes it there, as a login
+// does: the plugin writes the request's key mark where the key goes, and
+// the edge puts the key in its place.
 type KeyPlace struct {
 	Header string `json:"header,omitempty"`
 	Prefix string `json:"prefix,omitempty"`
 	Query  string `json:"query,omitempty"`
+	Body   bool   `json:"body,omitempty"`
 }
 
 // String says where the key goes, as plugin show says it.
 func (k KeyPlace) String() string {
-	if k.Query != "" {
+	switch {
+	case k.Body:
+		return "the body the plugin writes"
+	case k.Query != "":
 		return "query " + k.Query
 	}
 	return "header " + textproto.CanonicalMIMEHeaderKey(k.Header) + ": " + k.Prefix + "KEY"
@@ -130,9 +137,17 @@ func (m Manifest) Validate() error {
 			problems = append(problems, err.Error())
 		}
 	}
+	places := 0
+	for _, place := range []bool{m.Key.Header != "", m.Key.Query != "", m.Key.Body} {
+		if place {
+			places++
+		}
+	}
 	switch key := m.Key; {
-	case key.Header != "" && key.Query != "", key.Header == "" && key.Query == "":
-		problems = append(problems, "the key goes either in a header or in the query")
+	case places != 1:
+		problems = append(problems, "the key goes in a header, in the query or in the body, one of them")
+	case key.Body && key.Prefix != "":
+		problems = append(problems, "a prefix is for a key in a header")
 	case key.Header != "" && (!headerToken.MatchString(key.Header) || reservedHeader(key.Header)):
 		problems = append(problems, fmt.Sprintf("header %q cannot carry the key", key.Header))
 	case key.Query != "" && !queryName.MatchString(key.Query):

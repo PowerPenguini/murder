@@ -104,7 +104,7 @@
   else as well. Reading or changing a plugin's key takes the API socket,
   as every other change does. See [Plugins](plugins.md).
 - **Plugins' containers.** A plugin runs an image the operator installs,
-  Murder's own for OpenAI and HERE or another, in a container on each
+  Murder's own for OpenAI, HERE and GUS or another, in a container on each
   node, out of the edge's process:
   - no network at all: it reaches nothing, and what it is shown cannot
     leave but through the edge;
@@ -115,7 +115,9 @@
     every call, as root without overriding permissions.
   The container never sees a key. The edge puts the key on the request
   itself, and only for a request to one of the hosts the manifest names,
-  over HTTPS; it uses a container only once the container says the
+  over HTTPS. A key that goes in the body goes only where the plugin put a
+  mark, new for each request and never shown to the tenant, in a body the
+  plugin wrote: a tenant cannot have its own body carry it; it uses a container only once the container says the
   manifest its image's label said as it was installed. The container does
   see what tenants send and what providers answer, and decides what is
   passed on and counted, and may take an event out of a stream it meters,

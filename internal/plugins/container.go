@@ -288,6 +288,10 @@ type (
 		Header map[string][]string `json:"header"`
 		Hosts  []string            `json:"hosts"`
 		Config map[string]any      `json:"config,omitempty"`
+		// KeyMark is what the plugin writes where the key goes, for a key
+		// in the body: new for each request, and never the tenant's to
+		// know.
+		KeyMark string `json:"keyMark,omitempty"`
 		// BodyFollows says the request's body follows the JSON.
 		BodyFollows bool `json:"bodyFollows,omitempty"`
 	}
@@ -424,7 +428,11 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 	if h.manifest.Key.Query != "" {
 		query = withoutKey(query, h.manifest.Key.Query)
 	}
-	input, err := json.Marshal(moduleRequest{Tenant: h.x.tenant, Plugin: h.x.plugin, Method: r.Method, Path: "/" + rest, Query: query, Header: header, Hosts: h.hosts, Config: h.x.spec.Config, BodyFollows: read})
+	var mark string
+	if h.manifest.Key.Body {
+		mark = "murder-key-" + newSession()
+	}
+	input, err := json.Marshal(moduleRequest{Tenant: h.x.tenant, Plugin: h.x.plugin, Method: r.Method, Path: "/" + rest, Query: query, Header: header, Hosts: h.hosts, Config: h.x.spec.Config, KeyMark: mark, BodyFollows: read})
 	if err != nil {
 		return nil, err
 	}
@@ -467,6 +475,12 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 		err = h.headers(r.Header, forward)
 	}
 	if err == nil && forward.ReplaceBody {
+		// The key goes in the body the plugin wrote, where it put the
+		// mark: never in the tenant's, which the tenant could have had the
+		// provider say back.
+		if mark != "" {
+			replaced = bytes.ReplaceAll(replaced, []byte(mark), []byte(h.x.key))
+		}
 		if len(replaced) > MaxRequestBody {
 			err = fmt.Errorf("the container replaces the request's body with %d bytes, more than %d", len(replaced), MaxRequestBody)
 		} else {
@@ -595,12 +609,13 @@ func (h *containerHandler) headers(header http.Header, forward moduleForward) er
 
 // authorize puts the key where the plugin's manifest says.
 func (h *containerHandler) authorize(out *http.Request) {
-	if key := h.manifest.Key; key.Header != "" {
+	switch key := h.manifest.Key; {
+	case key.Header != "":
 		out.Header.Set(key.Header, key.Prefix+h.x.key)
-	} else {
+	case key.Query != "":
 		out.URL.RawQuery = withKey(out.URL.RawQuery, key.Query, h.x.key)
 	}
-	if h.meter || h.manifest.Key.Query != "" {
+	if h.meter || h.manifest.Key.Query != "" || h.manifest.Key.Body {
 		// The container reads the answer uncompressed, and an error is read
 		// so to take a key in the query out of it.
 		out.Header.Set("Accept-Encoding", "identity")
@@ -610,7 +625,7 @@ func (h *containerHandler) authorize(out *http.Request) {
 func (h *containerHandler) response(response *http.Response) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.manifest.Key.Query != "" {
+	if h.manifest.Key.Query != "" || h.manifest.Key.Body {
 		scrubErrorBody(response, h.x.key)
 	}
 	if !h.meter || h.failed {

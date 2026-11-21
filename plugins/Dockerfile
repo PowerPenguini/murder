@@ -1,4 +1,4 @@
-# The image of one of Murder's plugins, PLUGIN (openai or here), built from
+# The image of one of Murder's plugins, PLUGIN (openai, here or gus), built from
 # the repository's root, with the manifest the plugin prints as the label
 # Murder reads it from:
 #

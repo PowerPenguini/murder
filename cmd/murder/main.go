@@ -36,7 +36,7 @@ Client commands (talk to the local agent):
   tenant     create, configure, suspend, archive, restore and purge tenants
   events     show the audit log: who changed what, and when
   access     the register of staff access to tenants' data: record, list
-  plugin     install plugins (OpenAI, HERE, your own), set their keys and tenants'
+  plugin     install plugins (OpenAI, HERE, GUS, your own), set their keys and tenants'
              limits, and show what tenants used of them
   reconcile  run one reconcile pass now and report its errors
   backup     save a copy of the agent's database to a directory (recorded

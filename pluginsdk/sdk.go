@@ -92,11 +92,14 @@ type ConfigUI struct {
 }
 
 // Key is where the key goes on a request: in a header, after a prefix, as
-// in Authorization: Bearer KEY, or in a parameter of the query.
+// in Authorization: Bearer KEY, in a parameter of the query, or in the
+// body the plugin writes (Forward.Body), where it writes the request's
+// KeyMark, for an API that takes the key there, as a login does.
 type Key struct {
 	Header string `json:"header,omitempty"`
 	Prefix string `json:"prefix,omitempty"`
 	Query  string `json:"query,omitempty"`
+	Body   bool   `json:"body,omitempty"`
 }
 
 // Request is a tenant's request to the plugin, as the edge shows it:
@@ -118,6 +121,11 @@ type Request struct {
 	Hosts []string `json:"hosts"`
 	// Config is the plugin's config, from its spec.
 	Config json.RawMessage `json:"config,omitempty"`
+	// KeyMark is, for a key in the body, what the plugin writes in
+	// Forward.Body where the key goes: the edge puts the key in its place,
+	// as it is. It is new for each request, and only a body the plugin
+	// writes gets the key.
+	KeyMark string `json:"keyMark,omitempty"`
 	// Body is the request's body, up to the manifest's RequestBody; nil
 	// for none, or when the manifest reads none or none of its type.
 	Body []byte `json:"-"`

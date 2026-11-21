@@ -5,7 +5,8 @@ or HERE's, with a key the tenant never sees. It counts what each tenant
 uses and can stop a tenant at a limit. A plugin is an image: a small
 program, run in a container on each node, that says where each request
 goes and what it used. Its spec names the image and the limits its tenants
-get. Murder's releases publish plugins for OpenAI and HERE
+get. Murder's releases publish plugins for OpenAI, HERE and GUS's REGON
+database
 ([Murder's plugins](#murders-plugins)); any other provider takes a plugin
 of your own ([Plugins of your own](#plugins-of-your-own)).
 
@@ -47,11 +48,10 @@ plugin an app lists.
 
 ## Murder's plugins
 
-Each release publishes two images, built from [plugins](../plugins) in
+Each release publishes three images, built from [plugins](../plugins) in
 Murder's repository for amd64 and arm64, tagged with the release's
-version and `latest`:
-`ghcr.io/powerpenguini/murder-openai` and
-`ghcr.io/powerpenguini/murder-here`. Applying a tag pins it, as any image
+version and `latest`: `ghcr.io/powerpenguini/murder-openai`,
+`ghcr.io/powerpenguini/murder-here` and `ghcr.io/powerpenguini/murder-gus`. Applying a tag pins it, as any image
 of a plugin: a node keeps running what was applied until it is applied
 again. Murder's plugins were kinds of their own before, `kind: openai` and
 `kind: here`; such a file is now refused with the image to name instead,
@@ -144,6 +144,33 @@ written.
   geocode; a larger one is answered `413`.
 - An async matrix's results are fetched from a host outside
   `hereapi.com`. Add it to `hosts` if your tenants use one.
+
+**gus** goes to GUS's REGON database, BIR1, at
+`https://wyszukiwarkaregon.stat.gov.pl/wsBIR/UslugaBIRzewnPubl.svc`:
+companies and their local units, found by NIP, REGON or KRS, and their
+reports.
+- A tenant's app uses a BIR1 client as it is, with its address set to
+  `{{plugin.gus.url}}/wsBIR/UslugaBIRzewnPubl.svc` and any key. The client
+  logs in (`Zaloguj`) and sends the session it gets in the `sid` header of
+  its next calls, as BIR1 has it.
+- BIR1 takes the key in the body of the login, not in a header. The
+  plugin writes the login itself, and the edge puts the operator's key in
+  it (see [the key in the body](#the-interface-for-other-languages)).
+- BIR1 answers only an envelope that names its own address in `wsa:To`.
+  The plugin therefore writes every call again, as SOAP 1.2, from what it
+  read of the tenant's, SOAP 1.2 or 1.1. Only BIR1's operations go on:
+  `Zaloguj`, `Wyloguj`, `GetValue`, `DaneSzukajPodmioty`,
+  `DanePobierzPelnyRaport` and `DanePobierzRaportZbiorczy`. Their
+  parameters are checked: a NIP or KRS is 10 digits, a REGON 9 or 14, a
+  report's name letters and digits. Anything else is answered `400`.
+- The service's description (`?wsdl`, `/wsBIR/wsdl/….wsdl`) passes too.
+  It names GUS's own address, so set the client's address by hand.
+- It counts `searches`, an entity for each number searched for, so a
+  search of 20 NIPs counts 20, kept by `nip`, `regon` or `krs`; and
+  `reports`, kept by the report's name. Both count only what BIR1 answered
+  with success, found or not.
+- `hosts: [wyszukiwarkaregontest.stat.gov.pl]` uses GUS's test service, with
+  its published key `abcde12345abcde12345`.
 
 ## Plugins of your own
 
@@ -327,6 +354,15 @@ What the edge does around a container:
 
 ### The interface, for other languages
 
+**The key in the body.** A manifest's key may go in the body,
+`"key": {"body": true}`, for an API that takes it there, as BIR1's login
+does. Each request then comes with a `keyMark`, new each time, that only
+the plugin is told. The plugin writes it where the key goes in a body of
+its own (`replaceBody`), and the edge puts the key in its place, as it
+is. The edge never does so in the tenant's body, which the tenant could
+have the provider say back to it. It takes the key out of the provider's
+errors, as for a key in the query.
+
 A plugin's container serves HTTP/1.1 on a unix socket at the path
 `MURDER_PLUGIN_SOCKET` says (`/run/murder-plugin/plugin.sock`), which it
 creates with mode `0666`. Each call is JSON, but a chunk of an answer's
@@ -350,13 +386,13 @@ The JSON, version 3:
 
 ```text
 manifest  {"abi": 3, "name": "x", "version": "1.0.0", "hosts": ["api.x.example"],
-           "key": {"header": "X-Key", "prefix": ""} | {"query": "key"},
+           "key": {"header": "X-Key", "prefix": ""} | {"query": "key"} | {"body": true},
            "metrics": ["tokens"], "requestBody": 1048576, "requestBodyTypes": ["application/json"],
            "ui": {"title", "description", "detail": "model",
                   "metrics": [{"name": "tokens", "label": "Tokens", "unit": "tokens"}],
                   "config": [{"name": "allow", "label": "More endpoints", "help": "..."}]}}
 request   {"tenant", "plugin", "method", "path", "query", "header": {"Name": ["value"]},
-           "hosts": ["api.x.example"], "config": {...}, "bodyFollows": true}
+           "hosts": ["api.x.example"], "config": {...}, "keyMark": "murder-key-…", "bodyFollows": true}
            \n<the body>
 forward   {"url", "header": {...}, "drop": [...], "replaceBody": false,
            "detail": "", "meter": false}
@@ -499,4 +535,4 @@ The key the app sends, if any, is taken off, along with `Cookie`,
 `OpenAI-Organization` and `OpenAI-Project`. The edge logs a provider's
 errors without the URL (HERE's holds the key). It also takes the key out
 of the headers of every answer, and out of the error bodies of a plugin
-whose key goes in the query, as HERE's.
+whose key goes in the query, as HERE's, or in the body, as GUS's.

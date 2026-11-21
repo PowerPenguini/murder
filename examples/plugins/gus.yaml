@@ -1,0 +1,8 @@
+# murder plugin apply examples/plugins/gus.yaml
+# murder plugin key gus -file /root/gus.key   # the key GUS gave for BIR1
+kind: container
+image: ghcr.io/powerpenguini/murder-gus:latest   # Murder's plugin, pinned by digest as it is installed
+# hosts: [wyszukiwarkaregontest.stat.gov.pl]   # GUS's test service, with its key abcde12345abcde12345
+limits:
+  - {metric: searches, per: day, amount: 10000}
+  - {metric: reports, per: day, amount: 2000, mode: soft}
