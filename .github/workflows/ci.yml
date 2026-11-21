@@ -18,7 +18,6 @@ jobs:
       - name: Format
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./... && go vet -tags docker ./integration && go vet -tags zfs ./internal/volume
-      # Plugins' modules, and the SDK they are written with, build for WebAssembly.
       # Every transaction also reads the whole state and fails if what it
       # read again in part differs (internal/store/reload.go).
       - run: go test -race ./...

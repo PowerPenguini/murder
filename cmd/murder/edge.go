@@ -149,6 +149,11 @@ func runEdge(args []string) error {
 	// agent runs, on their sockets.
 	containers := plugins.NewContainers(plugins.SocketRoot, log)
 	pluginProxy.WithContainers(containers)
+	// An edge of a build before them kept WebAssembly modules beside the
+	// routes, which nothing runs now.
+	if err := os.RemoveAll(filepath.Join(filepath.Dir(cfg.Edge.Routes), "edge-plugins")); err != nil {
+		log.Warn("remove the WebAssembly modules an earlier edge kept", "error", err)
+	}
 	go prepareContainers(following, table, containers)
 	go reportPlugins(following, api.NewClient(cfg.Socket), counter, log)
 	if credentials != nil {

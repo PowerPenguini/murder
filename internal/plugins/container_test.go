@@ -19,9 +19,19 @@ import (
 
 var (
 	buildOnce sync.Once
+	buildDir  string
 	built     map[string]string
 	buildErr  error
 )
+
+// TestMain removes the plugins testPlugin built, once every test ran.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if buildDir != "" {
+		os.RemoveAll(buildDir)
+	}
+	os.Exit(code)
+}
 
 // testPlugin builds a plugin of this repository's for the tests, as a
 // program: the test plugin, or the Anthropic example.
@@ -33,6 +43,7 @@ func testPlugin(t *testing.T, name string) string {
 			buildErr = err
 			return
 		}
+		buildDir = dir
 		built = map[string]string{}
 		for name, pkg := range map[string]string{"test": "./testdata/plugin", "anthropic": "../../examples/plugins/anthropic"} {
 			out := filepath.Join(dir, name)
