@@ -157,8 +157,8 @@ reports.
   plugin writes the login itself, and the edge puts the operator's key in
   it (see [the key in the body](#the-interface-for-other-languages)).
 - BIR1 answers only an envelope that names its own address in `wsa:To`.
-  The plugin therefore writes every call again, as SOAP 1.2, from what it
-  read of the tenant's, SOAP 1.2 or 1.1. Only BIR1's operations go on:
+  The plugin therefore writes every call again from what it read of the
+  tenant's, which is SOAP 1.2, as BIR1's answers are. Only BIR1's operations go on:
   `Zaloguj`, `Wyloguj`, `GetValue`, `DaneSzukajPodmioty`,
   `DanePobierzPelnyRaport` and `DanePobierzRaportZbiorczy`. Their
   parameters are checked: a NIP or KRS is 10 digits, a REGON 9 or 14, a
@@ -167,8 +167,9 @@ reports.
   It names GUS's own address, so set the client's address by hand.
 - It counts `searches`, an entity for each number searched for, so a
   search of 20 NIPs counts 20, kept by `nip`, `regon` or `krs`; and
-  `reports`, kept by the report's name. Both count only what BIR1 answered
-  with success, found or not.
+  `reports`, kept by the report's name, as `BIR11OsPrawna`, or `other` for
+  a name not BIR1's. Both count what BIR1 answered with success, found or
+  not: it answers even a report's name it does not know so.
 - `hosts: [wyszukiwarkaregontest.stat.gov.pl]` uses GUS's test service, with
   its published key `abcde12345abcde12345`.
 

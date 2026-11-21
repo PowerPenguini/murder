@@ -643,16 +643,23 @@ func TestGUSsTestServiceThroughTheEdge(t *testing.T) {
 		t.Fatalf("no session: %s", body)
 	}
 	sid := body[start+len("<ZalogujResult>") : end]
-	request, _ := http.NewRequest(http.MethodPost, w.server.URL+"/p"+svc, strings.NewReader(birCall("DaneSzukajPodmioty", `<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nip>5261040828</dat:Nip></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`)))
-	request.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
-	request.Header.Set("sid", sid)
-	response := w.as(t, "127.0.0.1", request)
-	found, _ := io.ReadAll(response.Body)
-	if response.StatusCode != 200 || !strings.Contains(string(found), "000331501") {
-		t.Fatalf("%d %s", response.StatusCode, found)
+	ask := func(operation, body, want string) {
+		t.Helper()
+		request, _ := http.NewRequest(http.MethodPost, w.server.URL+"/p"+svc, strings.NewReader(birCall(operation, body)))
+		request.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
+		request.Header.Set("sid", sid)
+		response := w.as(t, "127.0.0.1", request)
+		answer, _ := io.ReadAll(response.Body)
+		if response.StatusCode != 200 || !strings.Contains(string(answer), want) {
+			t.Fatalf("%s: %d %.600s", operation, response.StatusCode, answer)
+		}
 	}
-	if w.used("searches") != 1 {
-		t.Fatalf("searches %d", w.used("searches"))
+	ask("DaneSzukajPodmioty", `<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nip>5261040828</dat:Nip></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`, "000331501")
+	ask("DaneSzukajPodmioty", `<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nipy>5261040828,5250001009</dat:Nipy></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`, "000331501")
+	ask("DanePobierzPelnyRaport", `<ns:DanePobierzPelnyRaport><ns:pRegon>000331501</ns:pRegon><ns:pNazwaRaportu>BIR11OsPrawna</ns:pNazwaRaportu></ns:DanePobierzPelnyRaport>`, "praw_nip")
+	ask("GetValue", `<ns:GetValue xmlns:ns="http://CIS/BIR/2014/07"><ns:pNazwaParametru>StatusSesji</ns:pNazwaParametru></ns:GetValue>`, "<GetValueResult>1</GetValueResult>")
+	ask("Wyloguj", `<ns:Wyloguj><ns:pIdentyfikatorSesji>`+sid+`</ns:pIdentyfikatorSesji></ns:Wyloguj>`, "<WylogujResult>true</WylogujResult>")
+	if w.used("searches") != 3 || w.used("reports") != 1 {
+		t.Fatalf("searches %d, reports %d", w.used("searches"), w.used("reports"))
 	}
-	t.Logf("found: %.300s", found)
 }

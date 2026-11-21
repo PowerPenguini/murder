@@ -34,7 +34,7 @@ func TestALoginGetsTheKeysMarkAndTheServicesAddress(t *testing.T) {
 }
 
 // A search is counted by what it searches by, an entity for each number;
-// SOAP 1.1's envelope is taken too, and written as 1.2.
+// a report by its name, if it is one of BIR1's.
 func TestASearchIsCountedByWhatItSearchesFor(t *testing.T) {
 	for given, want := range map[string]struct {
 		kind  string
@@ -57,13 +57,14 @@ func TestASearchIsCountedByWhatItSearchesFor(t *testing.T) {
 			t.Errorf("%s: %+v", given, m)
 		}
 	}
-	soap11 := []byte(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><DanePobierzPelnyRaport xmlns="http://CIS/BIR/PUBL/2014/07"><pRegon>000331501</pRegon><pNazwaRaportu>BIR11OsPrawna</pNazwaRaportu></DanePobierzPelnyRaport></s:Body></s:Envelope>`)
-	to, err := forward(request(soap11))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m := to.Meter.(*meter); m.metric != metricReports || m.detail != "BIR11OsPrawna" || !strings.Contains(string(to.Body), "http://www.w3.org/2003/05/soap-envelope") {
-		t.Fatalf("%+v %s", m, to.Body)
+	for name, want := range map[string]string{"BIR11OsPrawna": "BIR11OsPrawna", "BIR12OsPrawnaPkd": "BIR12OsPrawnaPkd", "Wymyslony123": "other", "BIR13OsPrawna": "other"} {
+		to, err := forward(request(soap12(`<ns:DanePobierzPelnyRaport><ns:pRegon>000331501</ns:pRegon><ns:pNazwaRaportu>` + name + `</ns:pNazwaRaportu></ns:DanePobierzPelnyRaport>`)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := to.Meter.(*meter); m.metric != metricReports || m.detail != want {
+			t.Errorf("%s: %+v", name, m)
+		}
 	}
 }
 
@@ -73,6 +74,7 @@ func TestWhatIsNotACallOfBIR1sIsRefused(t *testing.T) {
 		"no envelope":           []byte(`{"nip":"5261040828"}`),
 		"another namespace":     soap12(`<x:DaneSzukajPodmioty xmlns:x="http://evil.example"><x:pParametryWyszukiwania><dat:Nip>5261040828</dat:Nip></x:pParametryWyszukiwania></x:DaneSzukajPodmioty>`),
 		"an operation unknown":  soap12(`<ns:UsunWszystko/>`),
+		"SOAP 1.1":              []byte(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><Zaloguj xmlns="http://CIS/BIR/PUBL/2014/07"/></s:Body></s:Envelope>`),
 		"a NIP not ten digits":  soap12(`<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nip>526104082</dat:Nip></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`),
 		"markup in a NIP":       soap12(`<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nip>5261040828&lt;/dat:Nip&gt;</dat:Nip></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`),
 		"two searches":          soap12(`<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nip>5261040828</dat:Nip><dat:Regon>000331501</dat:Regon></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`),

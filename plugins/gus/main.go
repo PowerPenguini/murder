@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/PowerPenguini/murder/pluginsdk"
@@ -95,6 +96,30 @@ type search struct {
 	Regony9zn  string `xml:"Regony9zn"`
 }
 
+// reports are BIR1's reports, after BIR11 or BIR12: a count of a report
+// is kept by its name when it is one of them, and as other when not, so
+// tenants cannot make up details without end (BIR1 answers a name it does
+// not know with success, and an error inside).
+var reports = []string{
+	"OsFizycznaDaneOgolne", "OsFizycznaDzialalnoscCeidg", "OsFizycznaDzialalnoscRolnicza", "OsFizycznaDzialalnoscPozostala",
+	"OsFizycznaDzialalnoscSkreslonaDo20141108", "OsFizycznaPkd", "OsFizycznaListaJednLokalnych", "JednLokalnaOsFizycznej",
+	"JednLokalnaOsFizycznejPkd", "OsPrawna", "OsPrawnaPkd", "OsPrawnaListaJednLokalnych", "JednLokalnaOsPrawnej",
+	"JednLokalnaOsPrawnejPkd", "OsPrawnaSpCywilnaWspolnicy", "TypPodmiotu",
+	"NowePodmiotyPrawneOrazDzialalnosciOsFizycznych", "AktualizowanePodmiotyPrawneOrazDzialalnosciOsFizycznych",
+	"SkreslonePodmiotyPrawneOrazDzialalnosciOsFizycznych", "NoweJednostkiLokalne", "AktualizowaneJednostkiLokalne",
+	"SkresloneJednostkiLokalne",
+}
+
+// reportDetail is what a report is counted by.
+func reportDetail(name string) string {
+	for _, prefix := range []string{"BIR11", "BIR12"} {
+		if rest, ok := strings.CutPrefix(name, prefix); ok && slices.Contains(reports, rest) {
+			return name
+		}
+	}
+	return "other"
+}
+
 var (
 	reportName = regexp.MustCompile(`^[A-Za-z0-9]{1,80}$`)
 	reportDate = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
@@ -148,8 +173,8 @@ func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
 	}, nil
 }
 
-// read reads a tenant's envelope, of SOAP 1.2 or 1.1: the operation its
-// body calls, and the call's parameters.
+// read reads a tenant's envelope, of SOAP 1.2, as BIR1 speaks: the
+// operation its body calls, and the call's parameters.
 func read(data []byte) (string, call, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	inBody := false
@@ -162,9 +187,10 @@ func read(data []byte) (string, call, error) {
 		if !ok {
 			continue
 		}
-		soap := start.Name.Space == nsSOAP12 || start.Name.Space == nsSOAP11
 		switch {
-		case !inBody && soap && start.Name.Local == "Body":
+		case start.Name.Space == nsSOAP11:
+			return "", call{}, errors.New("BIR1 speaks SOAP 1.2, of type application/soap+xml: its answers are of 1.2 too")
+		case !inBody && start.Name.Space == nsSOAP12 && start.Name.Local == "Body":
 			inBody = true
 		case !inBody:
 			continue
@@ -226,13 +252,13 @@ func write(operation string, c call, mark string) (string, pluginsdk.Meter, erro
 			return "", nil, errors.New("DanePobierzPelnyRaport takes a REGON of 9 or 14 digits, pRegon, and a report's name, pNazwaRaportu")
 		}
 		return "<ns:DanePobierzPelnyRaport>" + element("pRegon", c.Regon) + element("pNazwaRaportu", c.Report) + "</ns:DanePobierzPelnyRaport>",
-			&meter{metric: metricReports, detail: c.Report, amount: 1}, nil
+			&meter{metric: metricReports, detail: reportDetail(c.Report), amount: 1}, nil
 	case "DanePobierzRaportZbiorczy":
 		if !reportDate.MatchString(c.Date) || !reportName.MatchString(c.Report) {
 			return "", nil, errors.New("DanePobierzRaportZbiorczy takes a day, pDataRaportu, as 2026-11-20, and a report's name, pNazwaRaportu")
 		}
 		return "<ns:DanePobierzRaportZbiorczy>" + element("pDataRaportu", c.Date) + element("pNazwaRaportu", c.Report) + "</ns:DanePobierzRaportZbiorczy>",
-			&meter{metric: metricReports, detail: c.Report, amount: 1}, nil
+			&meter{metric: metricReports, detail: reportDetail(c.Report), amount: 1}, nil
 	}
 	return "", nil, fmt.Errorf("BIR1 has no operation %s that the plugin passes on: Zaloguj, Wyloguj, GetValue, DaneSzukajPodmioty, DanePobierzPelnyRaport, DanePobierzRaportZbiorczy", operation)
 }
