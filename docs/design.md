@@ -78,6 +78,10 @@ between servers, is not something they solve.
    tag, a newer image is offered, and every change is a revision to go back
    to; waves and canaries are next.
 6. Shared services: provider proxy with per-tenant metering, catalog
-   publishing.
+   publishing. Started: plugins pass tenants' requests on to OpenAI,
+   HERE, or any provider a WebAssembly module meters, with the operator's
+   key or a tenant's own, count what each tenant uses in the replicated
+   state, and hold limits ([plugins.md](plugins.md)); the panel shows
+   them, and sets their keys and tenants' limits.
 
 Stages 1 to 4 are done, as is the administration panel.

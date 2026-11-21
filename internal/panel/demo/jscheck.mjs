@@ -211,5 +211,13 @@ const raiseReview = await text("form.review-box");
 await clickAndWait("form.review-box button[value=save]");
 const raised = { path: await ev("location.pathname"), op: await text("#operation"), red: await ev(`!!document.querySelector(".notices [role=alert]")`), name: await ev(`Math.round(document.querySelector("#tenant-head h1").getBoundingClientRect().top)`) };
 check("the raise, saved by the browser: on its Overview, its name in view, it can write again", raiseReview.includes("It lets atlas write again") && raised.path === "/tenants/atlas" && raised.op.startsWith("Disk limit raised to 10 GB by you") && raised.op.includes("it can write again, nothing restarted") && !raised.red && raised.name >= 0, JSON.stringify(raised));
+// Round 14: a plugin's chart says the day under the pointer, as the
+// events' does, and its total when the pointer leaves.
+await go("/plugins/openai");
+const plot = JSON.parse(await ev(`JSON.stringify((() => { const r = document.querySelector("#use .plot").getBoundingClientRect(); return {x: r.left + r.width - 4, y: r.top + r.height / 2}; })())`));
+const rest = await ev(`document.querySelector("#use .readout").dataset.rest`);
+await mouse("mouseMoved", plot.x, plot.y); await sleep(200);
+const pointed = await text("#use .readout");
+check("a plugin's chart says the day under the pointer", pointed.includes("tokens") && pointed !== rest, `${pointed} (total ${rest})`);
 ws.close(); chrome.kill(); await sleep(500);
 process.exit(results.every(Boolean) ? 0 : 1);

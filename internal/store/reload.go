@@ -98,6 +98,11 @@ var partOf = map[string]string{
 	"acme_challenges":   "acme",
 	"acme_accounts":     "acme",
 	"acme_revocations":  "acme",
+	"plugins":           "plugins",
+	"plugin_modules":    "plugins",
+	"plugin_tenants":    "plugins",
+	"plugin_reports":    "plugins",
+	"plugin_usage":      "usage",
 	"images":            "images",
 	"panel_users":       "panel",
 	"panel_passkeys":    "panel",
@@ -115,9 +120,12 @@ var loaders = map[string]func(querier, *snapshot) error{
 	"devices":   loadDevices,
 	"domains":   loadDomains,
 	"acme":      loadACME,
-	"images":    loadImages,
-	"panel":     loadPanel,
-	"lease":     loadLease,
+	"plugins":   loadPlugins,
+	// What tenants used of plugins is read when asked for.
+	"usage":  func(querier, *snapshot) error { return nil },
+	"images": loadImages,
+	"panel":  loadPanel,
+	"lease":  loadLease,
 }
 
 func (c *changes) note(data sqlite.SQLitePreUpdateData) {
@@ -315,6 +323,10 @@ func snapshotDiff(whole, part *snapshot) string {
 	diff("challenges", whole.challenges, part.challenges)
 	diff("accounts", whole.accounts, part.accounts)
 	diff("revocations", whole.revocations, part.revocations)
+	diff("plugins", whole.plugins, part.plugins)
+	diff("pluginTenants", whole.pluginTenants, part.pluginTenants)
+	diff("pluginReports", whole.pluginReports, part.pluginReports)
+	diff("pluginManifests", whole.pluginManifests, part.pluginManifests)
 	diff("panel", whole.panel, part.panel)
 	if !reflect.DeepEqual(whole.images, part.images) {
 		out = append(out, fmt.Sprintf("images %v != %v", whole.images, part.images))

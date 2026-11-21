@@ -36,6 +36,8 @@ Client commands (talk to the local agent):
   tenant     create, configure, suspend, archive, restore and purge tenants
   events     show the audit log: who changed what, and when
   access     the register of staff access to tenants' data: record, list
+  plugin     install plugins (OpenAI, HERE), set their keys and tenants'
+             limits, and show what tenants used of them
   reconcile  run one reconcile pass now and report its errors
   backup     save a copy of the agent's database to a directory (recorded
              in the access register, but for -scheduled)
@@ -81,6 +83,8 @@ func run(args []string) error {
 		return runEvents(args[1:])
 	case "tenant":
 		return runTenant(args[1:])
+	case "plugin":
+		return runPlugin(args[1:])
 	case "reconcile":
 		return runReconcile(args[1:])
 	case "backup":

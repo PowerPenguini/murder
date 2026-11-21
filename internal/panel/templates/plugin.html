@@ -1,0 +1,137 @@
+{{define "content"}}{{$d := .Data}}{{$p := $d.Plugin}}{{$acts := .Acts}}
+<div class="head page-title">
+  <h1>{{$p.Name}} <span class="dim">{{$d.UI.Title}}</span></h1>
+  <a href="/plugins/{{$p.Name}}/usage.csv?from={{$d.From}}&amp;to={{$d.To}}" class="button" download>Export this month, CSV</a>
+</div>
+{{with $d.UI.Description}}<p class="lead">{{.}}</p>{{end}}
+
+<section class="near">
+  <table class="kv">
+    <tbody>
+      <tr><td>Kind</td><td class="mono">{{$d.Kind}}</td></tr>
+      {{with $p.Manifest}}<tr><td>Module</td><td class="mono dim" title="{{$p.Spec.Module}}">{{short $p.Spec.Module}}</td></tr>{{end}}
+      <tr><td>Goes to</td><td class="mono wraps">{{range $i, $h := $d.Hosts}}{{if $i}}, {{end}}{{$h}}{{end}}</td></tr>
+      <tr><td>Key</td><td>{{if $p.HasKey}}<span class="st ok">set</span>{{else}}<span class="st bad">none</span> <span class="small">its tenants without a key of their own are answered 503</span>{{end}}<div class="dim small">put in {{$d.KeyPlace}}</div></td></tr>
+      <tr><td>Limits</td><td>{{range $i, $l := $d.Limits}}{{if $i}}<br>{{end}}{{$l}}{{else}}<span class="faint">none: each tenant may have its own</span>{{end}}</td></tr>
+      {{range $d.Config}}<tr><td>{{.Label}}{{with .Help}}<div class="dim small">{{.}}</div>{{end}}</td><td class="mono wraps">{{.Value}}</td></tr>{{end}}
+    </tbody>
+  </table>
+  {{if $acts}}
+  <div class="row spaced">
+    <details class="drop" id="key">
+      <summary class="button{{if not $p.HasKey}} primary{{end}}">{{if $p.HasKey}}Replace the key{{else}}Set the key{{end}}</summary>
+      <div class="pop">
+        <form method="post" action="/plugins/{{$p.Name}}" class="stack"><input type="hidden" name="do" value="key">
+          <label class="field">The provider's key <input type="password" name="key" required autocomplete="off" spellcheck="false"></label>
+          <p class="hint">Sealed with the master key; no one sees it again, here or anywhere.</p>
+          <div><button type="submit" class="primary">Keep the key</button></div>
+        </form>
+      </div>
+    </details>
+    {{if $p.HasKey}}
+    <details class="drop">
+      <summary class="button">Remove the key…</summary>
+      <div class="pop">
+        <form method="post" action="/plugins/{{$p.Name}}" class="stack"><input type="hidden" name="do" value="key-remove">
+          <p class="hint">Its tenants without a key of their own are answered 503 until it has one again. Type {{$p.Name}} to confirm.</p>
+          <input type="text" name="confirm" placeholder="{{$p.Name}}" data-confirm="{{$p.Name}}" aria-label="type {{$p.Name}} to confirm" required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+          <div><button type="submit" class="danger">Remove the key</button></div>
+        </form>
+      </div>
+    </details>
+    {{end}}
+  </div>
+  {{end}}
+</section>
+
+<section id="use">
+  <div class="head"><h2>Last {{len $d.Chart.Columns}} days</h2>
+    <nav class="seg" aria-label="the metric">{{range $d.UI.Metrics}}<a href="?metric={{.Name}}#use"{{if eq .Name $d.Metric.Name}} class="on" aria-current="true"{{end}}>{{.Label}}</a>{{end}}</nav></div>
+  {{with $d.Chart}}
+  <figure class="chart bars" data-points="{{.Points}}">
+    <figcaption><span class="ctitle">{{.Title}}</span><span class="readout" aria-live="polite" data-rest="{{.TotalText}}">{{.TotalText}}</span></figcaption>
+    <p class="sr">{{.Summary}}</p>
+    <div class="plotwrap">
+      <div class="yaxis" aria-hidden="true"><span>{{.MaxText}}</span><span>0</span></div>
+      <div class="plot">
+        <svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
+          {{range .Columns}}{{if .N}}<rect x="{{.X}}" y="{{.Y}}" width="{{.W}}" height="{{.H}}" fill="{{if .Now}}#ececec{{else}}#7a7a7a{{end}}"/>{{end}}{{end}}
+          <line class="cursor" x1="0" x2="0" y1="0" y2="100" stroke="#ececec" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
+        </svg>
+      </div>
+      <div class="xaxis" aria-hidden="true"><span>{{.From}} UTC</span><span>{{.Mid}}</span><span>{{.To}}</span></div>
+    </div>
+  </figure>
+  {{end}}
+</section>
+
+{{with $d.Edit}}{{$e := .}}
+<section id="edit">
+  <div class="notices">
+    <div class="nrow" role="status">
+      <p class="nhead"><strong>{{$e.Tenant}}'s limits of {{$p.Name}}</strong>{{if $e.Use.OwnKey}} <span class="dim">it has a key of its own: the plugin's limits do not hold for it</span>{{end}}</p>
+      {{with $e.Problem}}<p class="flat red-text-inline" role="alert">{{.}}</p>{{end}}
+      <form method="post" action="/plugins/{{$p.Name}}" class="stack"><input type="hidden" name="do" value="limits"><input type="hidden" name="tenant" value="{{$e.Tenant}}">
+        <fieldset class="stack">
+          <label class="check"><input type="radio" name="mode" value="plugin"{{if eq $e.Mode "plugin"}} checked{{end}}> The plugin's: {{range $i, $l := $d.Limits}}{{if $i}}, {{end}}{{$l}}{{else}}none{{end}}{{if $e.Use.OwnKey}} (none, with its own key){{end}}</label>
+          <label class="check"><input type="radio" name="mode" value="own"{{if eq $e.Mode "own"}} checked{{end}}> Its own</label>
+          <label class="check"><input type="radio" name="mode" value="none"{{if eq $e.Mode "none"}} checked{{end}}> No limits at all</label>
+        </fieldset>
+        <label class="field"><span>Its own, one a line, as <code>tokens=5M/month</code> or <code>requests=1000/day:soft</code></span>
+          <textarea name="limits" rows="3" spellcheck="false" class="mono">{{$e.Text}}</textarea></label>
+        <p class="hint">Metrics: {{range $i, $m := $d.UI.Metrics}}{{if $i}}, {{end}}<span class="mono">{{$m.Name}}</span>{{end}}. Hard refuses its next requests once it used the amount; soft only says so, in the audit log.</p>
+        <div class="row"><button type="submit" class="primary">Keep its limits</button> <a href="/plugins/{{$p.Name}}#tenants">Cancel</a></div>
+      </form>
+    </div>
+  </div>
+</section>
+{{end}}
+
+<section id="tenants">
+  <div class="head"><h2>Tenants</h2><span class="dim">{{$d.Metric.Label}} this month, and their limits now</span></div>
+  <table class="list rows">
+    <thead><tr><th>Tenant</th><th>Key</th><th>Limits</th><th class="num">{{$d.Metric.Label}}</th>{{if $acts}}<th class="end"><span class="sr">Actions</span></th>{{end}}</tr></thead>
+    <tbody>
+    {{range $d.Tenants}}{{$t := .}}
+      <tr>
+        <td class="l-main"><a class="row-link" href="/tenants/{{.Tenant}}#plugins">{{.Tenant}}</a>{{if not .Granted}} <span class="dim small">its app does not list it</span>{{end}}</td>
+        <td class="l-sub" data-label="Key">{{if .OwnKey}}its own{{else}}<span class="dim">the plugin's</span>{{end}}</td>
+        <td class="barcell l-sub" data-label="Limits">{{range .Limits}}<div class="barline">{{template "bar" .Meter}}<span class="num said{{if .Reached}} red-text-inline{{end}}">{{.Used}} of {{.Said}}{{if not .Hard}}, soft{{end}}</span></div>{{else}}<span class="faint">{{if .OwnLimits}}none of its own{{else}}none{{end}}</span>{{end}}</td>
+        <td class="num l-sub" data-label="{{$d.Metric.Label}}">{{.Month}}</td>
+        {{if $acts}}<td class="end l-side">
+          <details class="menu">
+            <summary aria-label="what to do with {{.Tenant}}'s use of {{$p.Name}}">⋯</summary>
+            <div class="pop acts">
+              <details class="act" name="use-{{.Tenant}}"><summary><span class="act-name">Its limits…</span><span class="act-say">The plugin's, its own, or none</span></summary>
+              <form method="get" action="/plugins/{{$p.Name}}#edit" class="stack"><input type="hidden" name="tenant" value="{{.Tenant}}"><div><button type="submit">Change its limits</button></div></form></details>
+              <details class="act" name="use-{{.Tenant}}"><summary><span class="act-name">{{if .OwnKey}}Replace its own key…{{else}}A key of its own…{{end}}</span><span class="act-say">Its bill: only its own limits hold</span></summary>
+              <form method="post" action="/plugins/{{$p.Name}}" class="stack"><input type="hidden" name="do" value="key"><input type="hidden" name="tenant" value="{{.Tenant}}">
+                <label class="field">Its key <input type="password" name="key" required autocomplete="off" spellcheck="false"></label>
+                <div><button type="submit">Keep its key</button></div></form></details>
+              {{if .OwnKey}}<details class="act" name="use-{{.Tenant}}"><summary><span class="act-name">Use the plugin's key…</span><span class="act-say">Its own goes; the plugin's limits hold again</span></summary>
+              <form method="post" action="/plugins/{{$p.Name}}" class="stack"><input type="hidden" name="do" value="key-remove"><input type="hidden" name="tenant" value="{{.Tenant}}"><div><button type="submit">Use the plugin's key</button></div></form></details>{{end}}
+            </div>
+          </details>
+        </td>{{end}}
+      </tr>
+    {{else}}
+      <tr><td colspan="5" class="empty l-main">No tenant may use it yet: an app lists it under <span class="mono">plugins</span>, and points its tenants at <span class="mono">{{"{{"}}plugin.{{$p.Name}}.url{{"}}"}}</span>.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <div class="head"><h2>By {{$d.UI.Detail}}</h2><span class="dim">{{$d.Metric.Label}} this month</span></div>
+  <table class="list">
+    <thead><tr><th>{{$d.UI.Detail}}</th><th>{{$d.Metric.Label}}</th></tr></thead>
+    <tbody>
+    {{range $d.Details}}<tr><td class="l-main mono">{{.Detail}}</td><td class="barcell l-sub" data-label="{{$d.Metric.Label}}"><div class="barline">{{template "share" .Meter}}<span class="num">{{.Amount}}</span></div></td></tr>
+    {{else}}<tr><td colspan="2" class="empty l-main">Nothing used this month.</td></tr>{{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+
+{{/* A share of the most, in grey: no limit is near. */}}
+{{define "share"}}<svg class="bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="6" fill="#1d1d1d"/><rect width="{{.Width}}" height="6" fill="#b0b0b0"/></svg>{{end}}

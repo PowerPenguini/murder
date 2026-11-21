@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/plugins"
+	"github.com/PowerPenguini/murder/internal/runtime"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -36,7 +38,47 @@ func (r Routes) Table() edge.Table {
 			challenges[challenge.Token] = edge.ChallengeRoute{Domain: challenge.Domain, KeyAuth: challenge.KeyAuth}
 		}
 	}
-	return edge.NewTableWith(routes, domains, challenges)
+	return edge.NewTableWithPlugins(routes, domains, challenges, r.Plugins(routes))
+}
+
+// Plugins are what the edge serves of plugins: those installed, and the
+// tenants of this node that may use them (see routes).
+func (r Routes) Plugins(routes map[string]edge.Route) plugins.Config {
+	installed := r.Store.Plugins()
+	if len(installed) == 0 {
+		return plugins.Config{}
+	}
+	config := plugins.Config{Plugins: map[string]plugins.Plugin{}, Tenants: map[string]plugins.Tenant{}}
+	byName := map[string]store.Plugin{}
+	for _, plugin := range installed {
+		config.Plugins[plugin.Name] = plugins.Plugin{Spec: plugin.Spec, Key: plugin.Key, Manifest: plugin.Manifest}
+		byName[plugin.Name] = plugin
+	}
+	settings := map[[2]string]store.PluginTenant{}
+	for _, s := range r.Store.PluginTenants("", "") {
+		settings[[2]string{s.Tenant, s.Plugin}] = s
+	}
+	for _, record := range r.Store.List() {
+		route, ok := routes[record.Spec.Name]
+		if !ok || route.Backend == "" || len(record.Spec.Plugins) == 0 {
+			continue
+		}
+		_, address, err := runtime.Addresses(record.Subnet)
+		if err != nil {
+			continue
+		}
+		tenant := plugins.Tenant{Address: address.String(), Grants: map[string]plugins.Grant{}}
+		for _, name := range record.Spec.Plugins {
+			plugin, ok := byName[name]
+			if !ok {
+				continue
+			}
+			own := settings[[2]string{record.Spec.Name, name}]
+			tenant.Grants[name] = plugins.Grant{Key: own.Key, Limits: store.PluginLimits(plugin, own)}
+		}
+		config.Tenants[record.Spec.Name] = tenant
+	}
+	return config
 }
 
 // domainRoute is how the edges route a tenant's domain: once it was seen

@@ -40,6 +40,17 @@ through Murder's real components:
 - suspend and resume;
 - archive, restore with the data, purge.
 
+**Plugin modules.** The tests of `internal/plugins` and `internal/apiserver`
+build `internal/plugins/testdata/module` and `examples/plugins/anthropic`
+for `GOOS=wasip1 GOARCH=wasm` with the Go they run with. CI also vets them
+as such: `GOOS=wasip1 GOARCH=wasm go vet ./pluginsdk ./examples/plugins/...
+./internal/plugins/testdata/module`.
+
+**The plugin test** has a tenant's container reach a plugin at its
+network's gateway. A host firewall of its own, such as ufw, may drop that:
+the test then skips. Set `MURDER_IT_PLUGINS_PORT` to a port it lets in to
+run it.
+
 **What the Pebble test does:** it runs Pebble (Let's Encrypt's ACME test
 server) and pebble-challtestsrv (its DNS, every name at the loopback) in
 Docker on the host's network, and a tenant on Docker as above. It adds a

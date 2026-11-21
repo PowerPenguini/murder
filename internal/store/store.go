@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/PowerPenguini/murder/internal/plugins"
 	"github.com/PowerPenguini/murder/internal/spec"
 )
 
@@ -469,6 +470,20 @@ type Store interface {
 	SetCanonical(tenant, host, own, actor string) error
 	Revocations() []Revocation
 	Challenges() []Challenge
+	// Plugins (see plugins.go): installed with their spec and keys, and
+	// what tenants used of them, counted from each node's edge.
+	Plugins() []Plugin
+	Plugin(name string) (Plugin, error)
+	PluginTenants(tenant, plugin string) []PluginTenant
+	PutPlugin(name string, spec plugins.Spec, module *PluginModule, actor string) (Plugin, bool, error)
+	PluginModule(digest string) ([]byte, error)
+	DeletePlugin(name, actor string) error
+	SetPluginKey(plugin, tenant, sealed, actor string) error
+	SetPluginLimits(plugin, tenant string, limits []plugins.Limit, set bool, actor string) error
+	AddPluginUsage(node string, report plugins.Report) (bool, error)
+	PluginReported(node, edge string) int64
+	PluginTotals(tenants []string, now time.Time) ([]plugins.Total, error)
+	PluginUsage(query UsageQuery) ([]plugins.Count, error)
 	// Observe records the image that now owns a tenant's data; the one
 	// before becomes PreviousImage.
 	Observe(name, dataImage string) error

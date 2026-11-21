@@ -39,6 +39,7 @@ func main() {
 	server.Actions = cluster.As
 	server.Cluster = cluster.AsCluster
 	server.Apps = cluster.AsApps
+	server.Plugins = cluster.AsPlugins
 	url := "http://" + *listen
 	people := panel.NewMemoryAuth()
 	access := panel.NewDemoAccess(people)

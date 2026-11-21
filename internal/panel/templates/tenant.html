@@ -104,6 +104,25 @@
 
 {{with $d.Domains}}{{template "domains" .}}{{end}}
 
+{{with $d.Plugins}}
+<section id="plugins">
+  <div class="head"><h2>Plugins</h2><span class="dim">what it used this month, and its limits now</span></div>
+  <table class="list rows">
+    <thead><tr><th>Plugin</th><th>Limits</th><th class="hide-narrow">This month</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
+    <tbody>
+    {{range .}}{{$u := .Use}}
+      <tr>
+        <td class="l-main"><a class="row-link" href="/plugins/{{$u.Plugin}}">{{$u.Plugin}}</a> <span class="dim small nowrap">{{.UI.Title}}</span>{{if $u.OwnKey}} <span class="dim small nowrap">its own key</span>{{end}}{{if not $u.Granted}} <span class="dim small">its app does not list it</span>{{end}}</td>
+        <td class="barcell l-sub" data-label="Limits">{{range $u.Limits}}<div class="barline">{{template "bar" .Meter}}<span class="num said{{if .Reached}} red-text-inline{{end}}">{{.Used}} of {{.Said}}{{if not .Hard}}, soft{{end}}</span></div>{{if and .Reached .Hard}}<div class="small red-text-inline">refused until {{.Until.UTC.Format "2 Jan 15:04"}} UTC</div>{{end}}{{else}}<span class="faint">none</span>{{end}}</td>
+        <td class="hide-narrow small">{{range $i, $m := .Month}}{{if $i}}<br>{{end}}<span class="num">{{$m.Amount}}</span> <span class="dim">{{$m.Label}}</span>{{else}}<span class="faint">nothing yet</span>{{end}}</td>
+        <td class="end l-side"><a href="/plugins/{{$u.Plugin}}?tenant={{$u.Tenant}}#edit" class="dim small">Its limits</a></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+
 <section>
   <div class="head"><h2>Activity, last 14 days</h2>{{if $d.Activity.Partial}}<span class="dim">the oldest days not all read</span>{{end}}</div>
   {{template "activity" $d.Activity}}

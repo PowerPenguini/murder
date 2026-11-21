@@ -25,6 +25,19 @@ func TestParseFillsDefaults(t *testing.T) {
 	if ports, err := agent.EdgePorts(); agent.Firewall != FirewallNftables || err != nil || !slices.Equal(ports, []int{80}) {
 		t.Fatalf("firewall = %q, edge ports = %v, %v", agent.Firewall, ports, err)
 	}
+	// Tenants reach the plugins too, which the host's own rules do not
+	// open to the internet.
+	if ports, err := agent.TenantPorts(); err != nil || !slices.Equal(ports, []int{80, 4180}) || agent.PluginsAddress() != "0.0.0.0:4180" {
+		t.Fatalf("tenant ports = %v, %v, plugins at %q", ports, err, agent.PluginsAddress())
+	}
+	for _, bad := range []string{"edge: {pluginsPort: 80}\n", "edge: {pluginsPort: 70000}\n", "edge: {pluginsPort: 7402}\n"} {
+		if _, err := Parse([]byte("baseDomain: example.com\n" + bad)); err == nil || !strings.Contains(err.Error(), "pluginsPort") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	if off, err := Parse([]byte("baseDomain: example.com\nedge: {pluginsPort: 0}\n")); err != nil || off.PluginsAddress() != "" {
+		t.Fatalf("off: %q %v", off.PluginsAddress(), err)
+	}
 }
 
 func TestParseFullConfig(t *testing.T) {

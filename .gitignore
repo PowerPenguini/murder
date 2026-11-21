@@ -5,3 +5,4 @@
 /.vm/
 /test/hetzner/.state/
 /test/hetzner/.terraform/
+examples/plugins/*/*.wasm

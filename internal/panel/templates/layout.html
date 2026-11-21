@@ -50,11 +50,12 @@
     <a href="/" {{if eq .Section "overview"}}class="on" aria-current="page"{{end}}>Overview{{with .Alerts.Overview}}<span class="count" title="{{plural . "thing" "things"}} broken">{{.}}</span>{{end}}</a>
     <a href="/tenants" {{if eq .Section "tenants"}}class="on" aria-current="page"{{end}}>Tenants{{with .Alerts.Tenants}}<span class="count" title="{{plural . "tenant" "tenants"}} broken">{{.}}</span>{{end}}</a>
     {{if .Edits}}<a href="/apps" {{if eq .Section "apps"}}class="on" aria-current="page"{{end}}>Apps{{with .Alerts.Apps}}<span class="count" title="{{plural . "app" "apps"}} broken: a rollout blocked, or a limit that breaks a tenant">{{.}}</span>{{end}}</a>{{end}}
+    {{if .Plugs}}<a href="/plugins" {{if eq .Section "plugins"}}class="on" aria-current="page"{{end}}>Plugins</a>{{end}}
     <a href="/events" {{if eq .Section "events"}}class="on" aria-current="page"{{end}}>Events</a>
     <a href="/cluster" {{if eq .Section "cluster"}}class="on" aria-current="page"{{end}}>Cluster{{with .Alerts.Cluster}}<span class="count" title="{{.}} broken: nodes down or backups failing">{{.}}</span>{{end}}</a>
     <a href="/access" {{if eq .Section "access"}}class="on" aria-current="page"{{end}}>Access</a>
 {{end}}
-{{define "section"}}{{if eq .Section "overview"}}Overview{{else if eq .Section "tenants"}}Tenants{{else if eq .Section "apps"}}Apps{{else if eq .Section "events"}}Events{{else if eq .Section "cluster"}}Cluster{{else if eq .Section "access"}}Access{{else}}Menu{{end}}{{end}}
+{{define "section"}}{{if eq .Section "overview"}}Overview{{else if eq .Section "tenants"}}Tenants{{else if eq .Section "apps"}}Apps{{else if eq .Section "plugins"}}Plugins{{else if eq .Section "events"}}Events{{else if eq .Section "cluster"}}Cluster{{else if eq .Section "access"}}Access{{else}}Menu{{end}}{{end}}
 
 {{define "page-notices"}}{{with .Problem}}<div class="notice bad" role="alert">{{.}}</div>{{end}}
 {{with .Done}}<div class="notice" role="status">{{.}}</div>{{end}}{{end}}

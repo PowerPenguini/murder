@@ -2648,3 +2648,21 @@ func TestAHeldTenantThatNeverStartsIsServedAfterAWhileAnyway(t *testing.T) {
 		t.Fatalf("still held after %s, though it never started", heldMax)
 	}
 }
+
+// A tenant reaches a plugin its app lists at the edge, on its network's
+// gateway.
+func TestAPluginsURLIsTheEdgeAtTheTenantsGateway(t *testing.T) {
+	f := newFixture(t)
+	record := f.create(t, "acme")
+	record.Subnet = "10.240.0.32/28"
+	record.Spec.Plugins = []string{"openai"}
+	record.Spec.Env = map[string]string{"OPENAI_BASE_URL": "{{plugin.openai.url}}/v1"}
+	f.reconciler.config.PluginsPort = 4180
+	container, err := f.reconciler.containerSpec(record, "/srv/acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(container.Env, "OPENAI_BASE_URL=http://10.240.0.33:4180/openai/v1") {
+		t.Fatalf("env %v", container.Env)
+	}
+}

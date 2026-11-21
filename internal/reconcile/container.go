@@ -39,9 +39,26 @@ func (r *Reconciler) BaseDomain() string { return r.config.BaseDomain }
 
 func (r *Reconciler) URL(tenant string) string { return r.config.Scheme + "://" + r.Host(tenant) }
 
+// pluginURLs are where a tenant reaches the plugins its app lists: the
+// edge, at its network's gateway.
+func (r *Reconciler) pluginURLs(record store.Record) map[string]string {
+	if len(record.Spec.Plugins) == 0 || r.config.PluginsPort == 0 {
+		return nil
+	}
+	gateway, _, err := runtime.Addresses(record.Subnet)
+	if err != nil {
+		return nil
+	}
+	urls := map[string]string{}
+	for _, plugin := range record.Spec.Plugins {
+		urls[plugin] = "http://" + net.JoinHostPort(gateway.String(), strconv.Itoa(r.config.PluginsPort)) + "/" + plugin
+	}
+	return urls
+}
+
 func (r *Reconciler) containerSpec(record store.Record, dataPath string) (runtime.ContainerSpec, error) {
 	tenant := record.Spec
-	env := tenant.Render(spec.Values{Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Network: record.Subnet})
+	env := tenant.Render(spec.Values{Host: r.Host(tenant.Name), URL: r.URL(tenant.Name), Network: record.Subnet, Plugins: r.pluginURLs(record)})
 	digests := map[string]string{}
 	for name := range tenant.Secrets {
 		sealed, ok := record.Sealed[name]

@@ -68,6 +68,20 @@ func main() {
 		_ = conn.Close()
 		fmt.Fprint(w, "connected")
 	})
+	// fetch GETs the URL an environment variable names, with a path
+	// added, and says what came back: a plugin, reached as an app would.
+	mux.HandleFunc("GET /fetch", func(w http.ResponseWriter, r *http.Request) {
+		request, _ := http.NewRequest(http.MethodGet, os.Getenv(r.URL.Query().Get("env"))+r.URL.Query().Get("path"), nil)
+		request.Header.Set("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			fmt.Fprint(w, "failed: ", err)
+			return
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		fmt.Fprintf(w, "%d %s", response.StatusCode, body)
+	})
 	mux.HandleFunc("GET /root-writable", func(w http.ResponseWriter, _ *http.Request) {
 		err := os.WriteFile("/should-fail", []byte("x"), 0o600)
 		fmt.Fprint(w, err == nil)
