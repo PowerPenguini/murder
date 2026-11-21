@@ -38,7 +38,8 @@ const (
 )
 
 // Retire is how long a plugin's container is kept once its plugin went,
-// or runs another image: the edge's requests to it are done by then.
+// or runs another image, for the edge's requests to it to end: one still
+// under way then passes on without what was left to count.
 const Retire = 2 * time.Minute
 
 // Runtime is what the host needs of the container engine.

@@ -118,6 +118,15 @@ func TestAPluginsManifestIsReadFromWhatItPrints(t *testing.T) {
 	if anthropic := manifestOf(t, testPlugin(t, "anthropic")); anthropic.Name != "anthropic" || anthropic.Key.Header != "x-api-key" {
 		t.Fatalf("anthropic %+v", anthropic)
 	}
+	// A label written by hand, with empty lists, says the same as the
+	// container that leaves them out.
+	byHand, err := ParseManifest(`{"abi":2,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"metrics":[],"ui":{"metrics":[],"config":[]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if said := (Manifest{ABI: ABI, Name: "x", Hosts: []string{"a.example.com"}, Key: KeyPlace{Header: "X-Key"}, UI: &UI{}}); !SameManifest(byHand, said) || SameManifest(byHand, Manifest{ABI: ABI, Name: "y"}) {
+		t.Fatalf("%+v is not the same as what its container says", byHand)
+	}
 	for name, label := range map[string]string{
 		"not JSON":         "#!/bin/sh",
 		"an unknown field": `{"abi":2,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"run":"rm -rf /"}`,

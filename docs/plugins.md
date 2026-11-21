@@ -157,8 +157,8 @@ agent pulls the image and runs one container of it, which serves every
 tenant of the node. The edge uses a container only once it says, on its
 socket, the manifest its image's label said. A new image is applied like
 any other change to the spec: the agent starts its container at once, and
-stops the old one two minutes later, once the requests under way on it
-are done. An image that no longer counts a metric a tenant's own limit
+stops the old one two minutes later. A request still under way on it
+then, such as a long stream, passes on without what was left to count. An image that no longer counts a metric a tenant's own limit
 names is refused until that limit goes. A local image (`sha256:<id>`,
 with a note saying so) runs only where it is; push it to a registry for a
 cluster.

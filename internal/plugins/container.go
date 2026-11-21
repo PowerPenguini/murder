@@ -17,7 +17,6 @@ import (
 	"net/textproto"
 	"net/url"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -165,13 +164,21 @@ func (c *container) verify(want Manifest) error {
 		if err := json.Unmarshal(answer, &said); err != nil {
 			return fmt.Errorf("its container says no manifest: %w", err)
 		}
-		if !reflect.DeepEqual(said, want) {
+		if !SameManifest(said, want) {
 			return errors.New("its container says another manifest than its image's label, which it was installed with")
 		}
 		return nil
 	}()
 	c.verified.Store(c.err == nil)
 	return c.err
+}
+
+// SameManifest reports whether two manifests say the same, as JSON: an
+// empty list is none, as the label of an image written by hand may say.
+func SameManifest(a, b Manifest) bool {
+	encodedA, errA := json.Marshal(a)
+	encodedB, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(encodedA, encodedB)
 }
 
 // unreachable has the container's manifest asked again before its next
