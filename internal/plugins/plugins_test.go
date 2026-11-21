@@ -192,3 +192,46 @@ func TestOneTenantsBodiesLeaveRoomForTheOthers(t *testing.T) {
 }
 
 // A body is read in room taken as it comes, not as it says it is long.
+
+// A plugin's file is held to what a spec may say, whatever its image.
+func TestASpecIsHeldToWhatItMaySay(t *testing.T) {
+	spec, err := Parse([]byte("kind: container\nimage: " + testImage + "\nlimits:\n  - {metric: tokens, per: month, amount: 1000}\n"))
+	if err != nil || spec.Limits[0].Mode != ModeHard {
+		t.Fatalf("spec %+v, %v", spec, err)
+	}
+	for _, bad := range []string{
+		"kind: gemini\nimage: " + testImage + "\n",
+		"kind: container\nimage: " + testImage + "\nlimits:\n  - {metric: requests, per: week, amount: 1}\n",
+		"kind: container\nimage: " + testImage + "\nlimits:\n  - {metric: requests, per: day, amount: 1}\n  - {metric: requests, per: day, amount: 2}\n",
+		"kind: container\nimage: " + testImage + "\nlimits:\n  - {metric: requests, per: day, amount: -1}\n",
+		"kind: container\nimage: " + testImage + "\nlimits:\n  - {metric: requests, per: day, amount: 1, mode: maybe}\n",
+		"kind: container\nimage: " + testImage + "\nhosts: ['*.']\n",
+		"kind: container\nimage: " + testImage + "\nhosts: [Example.com]\n",
+		"kind: container\nimage: " + testImage + "\nupstream: https://x.example\n",
+		"kind: container\nimage: " + testImage + "\nkey: secret\n",
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("%q was taken", bad)
+		}
+	}
+}
+
+// The edge's hosts, which say where the key goes: a wildcard stands for
+// the names below its domain, and only those.
+func TestAHostRuleMatchesNamesBelowTheDomainOnly(t *testing.T) {
+	hosts := []string{"*.hereapi.com", "account.api.here.com"}
+	for host, want := range map[string]string{
+		"geocode.search.hereapi.com": "*.hereapi.com",
+		"hereapi.com":                "",
+		"evilhereapi.com":            "",
+		"x.hereapi.com.evil.com":     "",
+		"account.api.here.com":       "account.api.here.com",
+		"api.here.com":               "",
+		"a_b.hereapi.com":            "",
+		".hereapi.com":               "",
+	} {
+		if got := hostRuleIn(hosts, host); got != want {
+			t.Errorf("%s: %q, not %q", host, got, want)
+		}
+	}
+}

@@ -262,8 +262,9 @@ one, for Anthropic's Messages API, with its Dockerfile:
 - it passes on the messages, token counting and models endpoints, and
   no batches or files;
 - it reads no request's body: the answer says the model;
-- it reads the usage of a JSON answer of up to 8 MB, or of a stream's
-  `message_start` and `message_delta`;
+- it reads the usage of a JSON answer, whole or, past 64 KB, from its
+  head and its tail (`pluginsdk.Kept`), or of a stream's `message_start`
+  and `message_delta`;
 - it counts `tokens.input`, `tokens.output`, `tokens.cache_write`,
   `tokens.cache_read`, and their sum `tokens`, by the model.
 
@@ -306,9 +307,15 @@ What the edge does around a container:
 
   One container serves every tenant of its node, many requests at once:
   what it keeps between requests is shared by them, so keep what is a
-  tenant's by its name. The edge has at most three bodies of 16 MB under
-  way to it at once, two of one tenant's: others are answered `503` until
-  there is room. A plugin in Go has `GOMEMLIMIT` set below its memory. The engine starts it again when it stops, as at
+  tenant's by its name. Its memory is every tenant's: the edge has at
+  most three bodies of 16 MB under way to it at once, two of one
+  tenant's, chunks of answers and events counted with them, and waits up
+  to a second for room before a request is answered `503`
+  (`murder_plugin_busy`), or an answer passes without what was left to
+  count. A meter keeps what it reads in little memory: `pluginsdk.Kept`
+  keeps a short answer whole, and of a long one its head and its tail,
+  where JSON says its model and usage. A plugin in Go has `GOMEMLIMIT` set
+  below its memory. The engine starts it again when it stops, as at
   boot. `docker logs murder-plugin-…` shows what it wrote.
 - **Failures.** A container that fails, panics, runs out of time or does
   what it may not before the request goes on gets the request answered

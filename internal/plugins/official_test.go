@@ -323,6 +323,30 @@ func TestABodyOfAnotherTypePassesOnUnread(t *testing.T) {
 	}
 }
 
+// A streamed chat completion too long to be asked for its usage within
+// what the plugin reads goes on as it was, its use estimated.
+func TestAStreamTooLongToAskForItsUsageIsEstimated(t *testing.T) {
+	var asked bool
+	var got int
+	w := newPluginFixture(t, "openai", Grant{}, func(rw http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = len(body)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		chatStream(&asked)(rw, r)
+	}, nil)
+	head := `{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"`
+	body := head + strings.Repeat("x", MaxRequestBody-len(head)-len(`"}]}`)-8) + `"}]}`
+	if response, said := post(t, w, "/v1/chat/completions", "application/json", body); response.StatusCode != 200 || !strings.Contains(said, "[DONE]") {
+		t.Fatalf("%d %.200s", response.StatusCode, said)
+	}
+	if asked || got != len(body) {
+		t.Fatalf("asked %v; the upstream got %d of %d bytes", asked, got, len(body))
+	}
+	if w.used("tokens.estimated") == 0 {
+		t.Fatal("not estimated")
+	}
+}
+
 // A body is read in room taken as it comes, not as it says it is long,
 // and the room is given back.
 func TestABodyTakesRoomAsItComes(t *testing.T) {
@@ -462,7 +486,7 @@ func TestOneTenantsBodiesInAContainerLeaveRoomForTheOthers(t *testing.T) {
 	c := &container{byTenant: map[string]int64{}}
 	var releases []func()
 	for {
-		release, ok := c.hold("acme", maxRequestCall)
+		release, ok := c.hold("acme", maxRequestCall, 0)
 		if !ok {
 			break
 		}
@@ -471,14 +495,21 @@ func TestOneTenantsBodiesInAContainerLeaveRoomForTheOthers(t *testing.T) {
 	if c.byTenant["acme"] != ContainerBodiesPerTenant {
 		t.Fatalf("acme holds %d", c.byTenant["acme"])
 	}
-	release, ok := c.hold("beta", maxRequestCall)
+	release, ok := c.hold("beta", maxRequestCall, 0)
 	if !ok {
 		t.Fatal("beta finds no room while acme holds its share")
 	}
 	releases = append(releases, release)
-	if _, ok := c.hold("delta", 1); ok {
+	if _, ok := c.hold("delta", 1, 20*time.Millisecond); ok {
 		t.Fatal("room past what the container takes")
 	}
+	// One that waits gets the room given back while it waits.
+	go func() { time.Sleep(20 * time.Millisecond); releases[0]() }()
+	release, ok = c.hold("delta", 1, 5*time.Second)
+	if !ok {
+		t.Fatal("no room once some was given back")
+	}
+	releases[0] = release
 	for _, release := range releases {
 		release()
 	}

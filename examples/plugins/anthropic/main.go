@@ -139,19 +139,21 @@ func value(n *int64) int64 {
 	return *n
 }
 
-// meter reads an answer: JSON whole, a stream event by event.
+// meter reads an answer: JSON at its end, a stream line by line.
 type meter struct {
 	model  string
 	stream bool
 	usage  usage
 	said   bool
-	// kept is the JSON answer, or the stream's line not yet ended.
-	kept []byte
+	// answer keeps what a JSON answer needs to be read at its end; line is
+	// the stream's line not yet ended.
+	answer pluginsdk.Kept
+	line   []byte
 }
 
-// maxKept is the most of a JSON answer kept to read its usage from: an
-// answer that says its usage is far shorter.
-const maxKept = 8 << 20
+// maxLine is the longest line of a stream read: its events are short. One
+// container meters every tenant's requests in the memory it has.
+const maxLine = 1 << 20
 
 func (m *meter) Response(r *pluginsdk.Response, _ *pluginsdk.Counter) bool {
 	if r.Status < 200 || r.Status > 299 {
@@ -164,32 +166,27 @@ func (m *meter) Response(r *pluginsdk.Response, _ *pluginsdk.Counter) bool {
 
 func (m *meter) Body(chunk []byte, _ *pluginsdk.Counter) bool {
 	if !m.stream {
-		if len(m.kept)+len(chunk) > maxKept {
-			// Too long for an answer that says its usage: none.
-			m.kept = nil
-			return false
-		}
-		m.kept = append(m.kept, chunk...)
+		m.answer.Add(chunk)
 		return true
 	}
-	m.kept = append(m.kept, chunk...)
+	m.line = append(m.line, chunk...)
 	for {
-		end := bytes.IndexByte(m.kept, '\n')
+		end := bytes.IndexByte(m.line, '\n')
 		if end < 0 {
 			break
 		}
-		m.line(bytes.TrimRight(m.kept[:end], "\r"))
-		m.kept = m.kept[end+1:]
+		m.read(bytes.TrimRight(m.line[:end], "\r"))
+		m.line = m.line[end+1:]
 	}
-	if len(m.kept) > maxKept {
-		m.kept = nil
+	if len(m.line) > maxLine {
+		m.line = nil
 	}
 	return true
 }
 
-// line reads one line of a stream: message_start says the model and the
+// read reads one line of a stream: message_start says the model and the
 // input, message_delta the output so far.
-func (m *meter) line(line []byte) {
+func (m *meter) read(line []byte) {
 	data, ok := bytes.CutPrefix(line, []byte("data:"))
 	if !ok {
 		return
@@ -218,12 +215,24 @@ func (m *meter) line(line []byte) {
 
 func (m *meter) End(complete bool, c *pluginsdk.Counter) {
 	if !m.stream {
-		// count_tokens, which costs nothing, says no usage.
+		// count_tokens, which costs nothing, says no usage. A long answer
+		// says its model at its beginning, and its usage at its end.
 		var answer struct {
 			Model string `json:"model"`
 			Usage *usage `json:"usage"`
 		}
-		if json.Unmarshal(bytes.TrimSpace(m.kept), &answer) != nil || answer.Usage == nil {
+		if whole, ok := m.answer.Whole(); ok {
+			if json.Unmarshal(bytes.TrimSpace(whole), &answer) != nil {
+				return
+			}
+		} else {
+			answer.Usage = &usage{}
+			if !pluginsdk.LastField(m.answer.Tail(), "usage", answer.Usage) {
+				answer.Usage = nil
+			}
+			pluginsdk.LastField(m.answer.Head(), "model", &answer.Model)
+		}
+		if answer.Usage == nil {
 			return
 		}
 		if answer.Model != "" {
@@ -231,8 +240,8 @@ func (m *meter) End(complete bool, c *pluginsdk.Counter) {
 		}
 		m.usage.take(answer.Usage)
 		m.said = true
-	} else if len(m.kept) > 0 {
-		m.line(bytes.TrimRight(m.kept, "\r"))
+	} else if len(m.line) > 0 {
+		m.read(bytes.TrimRight(m.line, "\r"))
 	}
 	if !m.said {
 		return

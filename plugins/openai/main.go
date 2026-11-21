@@ -137,7 +137,9 @@ func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
 		// asked, and the chunk that says it taken out of what the tenant
 		// gets, as the tenant did not ask.
 		if request.Stream && strings.HasSuffix(path, "chat/completions") && !askedUsage(request.StreamOptions) {
-			if rewritten, ok := askUsage(r.Body, request.StreamOptions != nil); ok {
+			// A body the edge would not send, past what the plugin reads,
+			// is sent as it was: its use is estimated.
+			if rewritten, ok := askUsage(r.Body, request.StreamOptions != nil); ok && len(rewritten) <= int(manifest.RequestBody) {
 				to.Body, m.strip = rewritten, true
 			}
 		}
@@ -265,20 +267,10 @@ type meter struct {
 	text int64
 	// answered is the model the answer names.
 	answered string
-	// json is set for an answer of JSON: whole keeps it up to maxKept;
-	// past it, only its tail.
-	json  bool
-	whole []byte
-	tail  []byte
-	big   bool
+	// json is set for an answer of JSON, kept to be read at its end.
+	json bool
+	kept pluginsdk.Kept
 }
-
-// maxKept is how much of a JSON answer is kept to read its usage from;
-// past it, its last tailKept bytes, where the usage is.
-const (
-	maxKept  = 4 << 20
-	tailKept = 64 << 10
-)
 
 // Response reads only successful answers: a stream, or JSON. Audio and
 // files say nothing of what they used.
@@ -354,18 +346,7 @@ func (m *meter) Event(data []byte, _ *pluginsdk.Counter) bool {
 
 // Body keeps what a JSON answer needs to be read at its end.
 func (m *meter) Body(chunk []byte, _ *pluginsdk.Counter) bool {
-	if !m.big && len(m.whole)+len(chunk) <= maxKept {
-		m.whole = append(m.whole, chunk...)
-		return true
-	}
-	if !m.big {
-		m.big, m.tail = true, m.whole
-		m.whole = nil
-	}
-	m.tail = append(m.tail, chunk...)
-	if len(m.tail) > 2*tailKept {
-		m.tail = append(m.tail[:0], m.tail[len(m.tail)-tailKept:]...)
-	}
+	m.kept.Add(chunk)
 	return true
 }
 
@@ -373,16 +354,24 @@ func (m *meter) Body(chunk []byte, _ *pluginsdk.Counter) bool {
 // estimate: four bytes a token, of the request and of the text streamed.
 func (m *meter) End(_ bool, c *pluginsdk.Counter) {
 	if m.json {
-		var answer struct {
-			Model string `json:"model"`
-			Usage *usage `json:"usage"`
-		}
-		if !m.big {
-			if json.Unmarshal(m.whole, &answer) == nil {
+		if whole, ok := m.kept.Whole(); ok {
+			var answer struct {
+				Model string `json:"model"`
+				Usage *usage `json:"usage"`
+			}
+			if json.Unmarshal(whole, &answer) == nil {
 				m.answered, m.usage = answer.Model, answer.Usage
 			}
-		} else if u, ok := usageInTail(m.tail); ok {
-			m.usage = u
+		} else {
+			// A long answer, as embeddings of many inputs: its usage is at
+			// its end, and its model at its end or its beginning.
+			var u usage
+			if pluginsdk.LastField(m.kept.Tail(), "usage", &u) {
+				m.usage = &u
+			}
+			if !pluginsdk.LastField(m.kept.Tail(), "model", &m.answered) {
+				pluginsdk.LastField(m.kept.Head(), "model", &m.answered)
+			}
 		}
 	}
 	// The model that answered, or else the one asked for: the provider
@@ -407,23 +396,4 @@ func (m *meter) End(_ bool, c *pluginsdk.Counter) {
 	c.Count(metricOutputTokens, model, output)
 	c.Count(metricTokens, model, input+output)
 	c.Count(metricCachedTokens, model, m.usage.cached())
-}
-
-// usageInTail finds the last "usage" object in the tail of a large
-// answer, such as embeddings of many inputs.
-func usageInTail(tail []byte) (*usage, bool) {
-	at := bytes.LastIndex(tail, []byte(`"usage"`))
-	if at < 0 {
-		return nil, false
-	}
-	rest := bytes.TrimLeft(tail[at+len(`"usage"`):], " \t\r\n")
-	rest, ok := bytes.CutPrefix(rest, []byte(":"))
-	if !ok {
-		return nil, false
-	}
-	var u usage
-	if json.NewDecoder(bytes.NewReader(rest)).Decode(&u) != nil {
-		return nil, false
-	}
-	return &u, true
 }

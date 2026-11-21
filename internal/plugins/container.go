@@ -65,12 +65,12 @@ const (
 	maxCounts = 64
 	// maxCalls is how many calls the edge has under way to one container.
 	maxCalls = 256
-	// ContainerBodies is how many bytes of requests the edge has under
-	// way to one container at once, bodies and all, and
-	// ContainerBodiesPerTenant of one tenant's: the container holds each
-	// while it reads it, and one tenant cannot take its memory from the
-	// others. Three of the largest bodies, each read and written again,
-	// take Murder's openai plugin to 160 MB of its 256.
+	// ContainerBodies is how many bytes the edge has under way to one
+	// container at once, requests with their bodies, chunks of answers and
+	// events, and ContainerBodiesPerTenant of one tenant's: the container
+	// holds each while it reads it, and one tenant cannot take its memory
+	// from the others. Three of the largest bodies, each read and written
+	// again, take Murder's openai plugin to 160 MB of its 256.
 	maxRequestCall           = MaxRequestBody + 1<<20
 	ContainerBodies          = 3 * maxRequestCall
 	ContainerBodiesPerTenant = 2 * maxRequestCall
@@ -113,19 +113,20 @@ type container struct {
 	byTenant map[string]int64
 }
 
-// hold takes room for a tenant's request's body of size bytes in the
-// container, if it has room; release gives it back.
-func (c *container) hold(tenant string, size int64) (release func(), ok bool) {
+// hold takes room for size bytes of a tenant's in the container, once it
+// has room, waiting for at most wait; release gives it back.
+func (c *container) hold(tenant string, size int64, wait time.Duration) (release func(), ok bool) {
 	if size == 0 {
 		return func() {}, true
 	}
-	c.bodies.Lock()
-	defer c.bodies.Unlock()
-	if c.held+size > ContainerBodies || c.byTenant[tenant]+size > ContainerBodiesPerTenant {
-		return nil, false
+	for deadline := time.Now().Add(wait); ; time.Sleep(5 * time.Millisecond) {
+		if c.take(tenant, size) {
+			break
+		}
+		if time.Now().After(deadline) {
+			return nil, false
+		}
 	}
-	c.held += size
-	c.byTenant[tenant] += size
 	return func() {
 		c.bodies.Lock()
 		defer c.bodies.Unlock()
@@ -430,7 +431,7 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 	if read {
 		input = append(append(input, '\n'), body...)
 	}
-	release, ok := h.container.hold(h.x.tenant, int64(len(input)))
+	release, ok := h.container.hold(h.x.tenant, int64(len(input)), time.Second)
 	if !ok {
 		return nil, statusError{code: http.StatusServiceUnavailable, message: fmt.Sprintf("plugin %s's container reads too many requests' bodies at once; try again", h.x.plugin), kind: "murder_plugin_busy"}
 	}
@@ -482,6 +483,18 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 	h.x.detail = cleanDetail(forward.Detail)
 	h.meter = forward.Meter
 	return target, nil
+}
+
+// take takes room for size bytes of a tenant's, if there is room.
+func (c *container) take(tenant string, size int64) bool {
+	c.bodies.Lock()
+	defer c.bodies.Unlock()
+	if c.held+size > ContainerBodies || c.byTenant[tenant]+size > ContainerBodiesPerTenant {
+		return false
+	}
+	c.held += size
+	c.byTenant[tenant] += size
+	return true
 }
 
 // readsType reports whether the container reads a body of a content
@@ -635,7 +648,13 @@ func (h *containerHandler) event(data []byte) bool {
 	if h.failed || h.ended {
 		return true
 	}
+	release, ok := h.container.hold(h.x.tenant, int64(len(data)), callBody)
+	if !ok {
+		h.fail("event", errors.New("its container had no room for the event in time: the tenant has too many under way"))
+		return true
+	}
 	answer, err := h.container.call(callBody, http.MethodPost, "/event", h.session, data, maxAnswer)
+	release()
 	var said moduleEvent
 	if err == nil {
 		if err = json.Unmarshal(answer, &said); err != nil {
@@ -692,7 +711,13 @@ func (h *containerHandler) chunk(data []byte) bool {
 	if h.failed || h.ended {
 		return false
 	}
+	release, ok := h.container.hold(h.x.tenant, int64(len(data)), callBody)
+	if !ok {
+		h.fail("body", errors.New("its container had no room for the answer in time: the tenant has too many under way"))
+		return false
+	}
 	answer, err := h.container.call(callBody, http.MethodPost, "/body", h.session, data, maxAnswer)
+	release()
 	var said moduleChunk
 	if err == nil {
 		if err = json.Unmarshal(answer, &said); err != nil {

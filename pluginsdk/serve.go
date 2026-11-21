@@ -367,7 +367,7 @@ type evented struct {
 }
 
 func (p *plugin) event(w http.ResponseWriter, r *http.Request) {
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxEvent))
+	data, err := readCall(w, r, maxEvent)
 	if err != nil {
 		answer(w, evented{Keep: true, Error: "the edge's event: " + err.Error()})
 		return

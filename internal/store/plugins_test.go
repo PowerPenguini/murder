@@ -455,6 +455,60 @@ func TestOpenUpgradesSchemaVersion22(t *testing.T) {
 	}
 }
 
+// An app that lists a plugin of kind openai keeps it once the plugin went
+// in the upgrade: the store opens, and the plugin is applied again from
+// its image under its name.
+func TestAnAppListingAPluginTheUpgradeTookStaysUntilItIsAppliedAgain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "murder.db")
+	if err := Init(path, "n1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.PutPlugin("openai", openAISpec(), openAIManifest(), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	app := appSpec()
+	app.Plugins = []string{"openai"}
+	if _, err := st.PutApp(App{Name: "web", Spec: app}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", initDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`UPDATE plugins SET spec = '{"kind":"openai","upstream":"https://api.openai.com"}', manifest = NULL WHERE name = 'openai'`,
+		`PRAGMA user_version = 22`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(statement, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(path, options())
+	if err != nil {
+		t.Fatalf("open with an app listing a plugin gone: %v", err)
+	}
+	defer st.Close()
+	if len(st.Plugins()) != 0 {
+		t.Fatalf("plugins %+v", st.Plugins())
+	}
+	if _, _, err := st.PutPlugin("openai", openAISpec(), openAIManifest(), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Plugin writes are batches every node applies alike: checked as the
 // leader checks them, applied on a second node from the log, and carried
 // by a snapshot to a third.
