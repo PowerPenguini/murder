@@ -99,7 +99,6 @@ var partOf = map[string]string{
 	"acme_accounts":     "acme",
 	"acme_revocations":  "acme",
 	"plugins":           "plugins",
-	"plugin_modules":    "plugins",
 	"plugin_tenants":    "plugins",
 	"plugin_reports":    "plugins",
 	"plugin_usage":      "usage",
@@ -326,7 +325,6 @@ func snapshotDiff(whole, part *snapshot) string {
 	diff("plugins", whole.plugins, part.plugins)
 	diff("pluginTenants", whole.pluginTenants, part.pluginTenants)
 	diff("pluginReports", whole.pluginReports, part.pluginReports)
-	diff("pluginManifests", whole.pluginManifests, part.pluginManifests)
 	diff("panel", whole.panel, part.panel)
 	if !reflect.DeepEqual(whole.images, part.images) {
 		out = append(out, fmt.Sprintf("images %v != %v", whole.images, part.images))

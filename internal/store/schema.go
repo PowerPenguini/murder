@@ -12,7 +12,7 @@ import (
 // user_version. Versions 1 to 3 were development releases that never ran in
 // production; their databases are refused, not upgraded. Open upgrades
 // versions 4 to 20 in place.
-const schemaVersion = 21
+const schemaVersion = 22
 
 // IdentitySchema is the schema version that pins each node's identity
 // key in the state: a node registers its key only once every node runs a
@@ -568,12 +568,22 @@ func upgrade(db *sql.DB) error {
 		}
 		version = 20
 	}
-	// Version 21 keeps plugins, their modules, tenants' own settings of
-	// them, and what tenants used of them.
+	// Version 21 kept plugins, their modules, tenants' own settings of
+	// them, and what tenants used of them; version 22 keeps plugins of
+	// kind container, and their manifests, in place of modules.
 	if version == 20 {
 		if _, err := tx.Exec(pluginTables); err != nil {
 			return err
 		}
+		version = 22
+	}
+	if version == 21 {
+		for _, statement := range pluginsSchema22 {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
+		}
+		version = 22
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return err

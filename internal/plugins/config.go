@@ -21,7 +21,7 @@ type Config struct {
 
 // Plugin is a plugin as the edge serves it: its spec, the operator's key
 // sealed with the master key (see KeyContext), empty when it has none, and
-// for a module, its manifest.
+// for a container, its manifest.
 type Plugin struct {
 	Spec     Spec      `json:"spec"`
 	Key      string    `json:"key,omitempty"`
@@ -54,9 +54,9 @@ func TenantKeyContext(plugin, tenant string) string { return "plugin key " + plu
 func (c Config) Version(w io.Writer) {
 	for _, name := range slices.Sorted(maps.Keys(c.Plugins)) {
 		plugin := c.Plugins[name]
-		// The module's digest says its manifest too.
+		// The image, pinned, says its manifest too.
 		config, _ := json.Marshal(plugin.Spec.Config)
-		fmt.Fprintf(w, "plugin\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00", name, plugin.Spec.Kind, plugin.Spec.Upstream, strings.Join(plugin.Spec.Hosts, " "), strings.Join(plugin.Spec.Allow, " "), plugin.Key, plugin.Spec.Module, config)
+		fmt.Fprintf(w, "plugin\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00", name, plugin.Spec.Kind, plugin.Spec.Upstream, strings.Join(plugin.Spec.Hosts, " "), strings.Join(plugin.Spec.Allow, " "), plugin.Key, plugin.Spec.Image, config)
 		writeLimits(w, plugin.Spec.Limits)
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Tenants)) {
@@ -74,18 +74,6 @@ func writeLimits(w io.Writer, limits []Limit) {
 	for _, limit := range limits {
 		fmt.Fprintf(w, "limit\x00%s\x00", limit)
 	}
-}
-
-// Modules are the digests of the modules the config's plugins run.
-func (c Config) Modules() []string {
-	var digests []string
-	for _, plugin := range c.Plugins {
-		if plugin.Spec.Kind == KindWasm && !slices.Contains(digests, plugin.Spec.Module) {
-			digests = append(digests, plugin.Spec.Module)
-		}
-	}
-	slices.Sort(digests)
-	return digests
 }
 
 // Empty reports whether there is nothing to serve.

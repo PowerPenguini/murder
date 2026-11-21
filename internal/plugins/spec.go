@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
@@ -28,13 +29,14 @@ const (
 	// KindHERE is HERE's location services: a key in the query, requests
 	// and transactions counted by service.
 	KindHERE = "here"
-	// KindWasm is a WebAssembly module's: the module says where requests
-	// go and counts what they used (see Manifest and docs/plugins.md).
-	KindWasm = "wasm"
+	// KindContainer is a plugin of one's own, run in a container on each
+	// node: its code says where requests go and counts what they used
+	// (see Manifest and docs/plugins.md).
+	KindContainer = "container"
 )
 
 // Kinds are the kinds Murder meters.
-var Kinds = []string{KindOpenAI, KindHERE, KindWasm}
+var Kinds = []string{KindOpenAI, KindHERE, KindContainer}
 
 // Spec is a plugin as its file says it: what `murder plugin apply` reads.
 // The plugin is named after its file.
@@ -54,12 +56,13 @@ type Spec struct {
 	// What they use is counted as the kind reads it, which may be only
 	// requests; and every tenant reaches what they keep with the same key.
 	Allow []string `json:"allow,omitempty" yaml:"allow,omitempty"`
-	// Module is the module of a plugin of kind wasm: in a plugin's file,
-	// the path of its .wasm file, from the file's directory; installed,
-	// sha256: and the hex of its digest.
-	Module string `json:"module,omitempty" yaml:"module,omitempty"`
-	// Config is what a plugin of kind wasm tells its module with each
-	// request, as JSON: whatever the module takes.
+	// Image is the image of a plugin of kind container: in a plugin's
+	// file, a reference such as ghcr.io/acme/plugin:1.2; installed, pinned
+	// to its content, repository@sha256:<digest> (or a local sha256:<id>,
+	// which only a node that has it runs).
+	Image string `json:"image,omitempty" yaml:"image,omitempty"`
+	// Config is what a plugin of kind container is told with each request,
+	// as JSON: whatever its code takes.
 	Config map[string]any `json:"config,omitempty" yaml:"config,omitempty"`
 	// Limits are what each tenant may use, unless it has limits of its
 	// own, or a key of its own (then only its own limits hold).
@@ -183,8 +186,8 @@ func ValidName(plugin string) error {
 }
 
 // Parse reads a plugin's file, unknown fields refused, and checks it. A
-// file of kind wasm names its module by path: Decode reads it, to put the
-// module's digest in its place, and Validate checks it then.
+// file of kind container may name its image by tag: Decode reads it, the
+// agent pins it, and Validate checks it then.
 func Parse(data []byte) (Spec, error) {
 	spec, err := Decode(data)
 	if err != nil {
@@ -203,13 +206,15 @@ func Decode(data []byte) (Spec, error) {
 	return spec.WithDefaults(), nil
 }
 
-// moduleDigest is how an installed plugin names its module.
-var moduleDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+// pinnedImage is how an installed plugin names its image: by registry
+// digest, or by local image ID.
+var pinnedImage = regexp.MustCompile(`^([a-z0-9][a-z0-9._/:-]*@)?sha256:[0-9a-f]{64}$`)
 
-// ModuleDigest names a module by its digest, as an installed plugin does.
-func ModuleDigest(sum [32]byte) string { return fmt.Sprintf("sha256:%x", sum) }
+// PinnedImage reports whether image names exact content, as an installed
+// plugin's does.
+func PinnedImage(image string) bool { return pinnedImage.MatchString(image) && len(image) <= 512 }
 
-// maxConfig is the most a module's config takes, as JSON.
+// maxConfig is the most a plugin's config takes, as JSON.
 const maxConfig = 64 << 10
 
 // WithDefaults fills in the kind's upstream and hosts, and the limits'
@@ -234,21 +239,34 @@ func (s Spec) WithDefaults() Spec {
 }
 
 // Validate says what is wrong with a spec filled in by WithDefaults.
-func (s Spec) Validate() error {
+func (s Spec) Validate() error { return s.validate(true) }
+
+// ValidateUnpinned is Validate for a plugin's file, whose image may be a
+// tag the agent pins.
+func (s Spec) ValidateUnpinned() error { return s.validate(false) }
+
+func (s Spec) validate(pinned bool) error {
 	var problems []string
 	if !slices.Contains(Kinds, s.Kind) {
 		problems = append(problems, fmt.Sprintf("kind %q is not one of %s", s.Kind, strings.Join(Kinds, ", ")))
 	}
-	if s.Kind != KindWasm && (s.Module != "" || s.Config != nil) {
-		problems = append(problems, "module and config are for a plugin of kind wasm")
+	if s.Kind != KindContainer && (s.Image != "" || s.Config != nil) {
+		problems = append(problems, "image and config are for a plugin of kind container")
 	}
 	switch s.Kind {
-	case KindWasm:
-		if !moduleDigest.MatchString(s.Module) {
-			problems = append(problems, fmt.Sprintf("module %q must be sha256: and the hex of the module's digest; murder plugin apply puts it in place of the module's path", s.Module))
+	case KindContainer:
+		switch {
+		case s.Image == "":
+			problems = append(problems, "a plugin of kind container names its image")
+		case pinned && !PinnedImage(s.Image):
+			problems = append(problems, fmt.Sprintf("image %q must be pinned, repository@sha256:<digest>; murder plugin apply pins a tag", s.Image))
+		case !pinned:
+			if err := spec.ValidReference(s.Image); err != nil {
+				problems = append(problems, err.Error())
+			}
 		}
 		if s.Upstream != "" || len(s.Allow) > 0 {
-			problems = append(problems, "upstream and allow are for openai; a module says where its requests go, and hosts in the spec replaces its hosts")
+			problems = append(problems, "upstream and allow are for openai; a plugin's manifest says where its requests go, and hosts in the spec replaces its hosts")
 		}
 		for _, host := range s.Hosts {
 			if err := validHost(host); err != nil {
@@ -285,9 +303,10 @@ func (s Spec) Validate() error {
 			}
 		}
 	}
-	// A module's metrics are known once it is: ValidateWith checks them.
+	// A container's metrics are known from its manifest: ValidateWith
+	// checks them.
 	var metrics []string
-	if s.Kind != KindWasm {
+	if s.Kind != KindContainer {
 		metrics = MetricsOf(s, nil)
 	}
 	if err := ValidLimits(metrics, s.Limits); err != nil {
@@ -299,15 +318,15 @@ func (s Spec) Validate() error {
 	return nil
 }
 
-// ValidateWith checks a spec and, for a module, its limits against the
-// metrics the module's manifest says it counts.
+// ValidateWith checks a spec and, for a container, its limits against the
+// metrics its manifest says it counts.
 func (s Spec) ValidateWith(manifest *Manifest) error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
-	if s.Kind == KindWasm {
+	if s.Kind == KindContainer {
 		if manifest == nil {
-			return fmt.Errorf("module %s is not installed", s.Module)
+			return fmt.Errorf("image %s has no plugin's manifest", s.Image)
 		}
 		return ValidLimits(MetricsOf(s, manifest), s.Limits)
 	}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/csv"
 	"errors"
 	"flag"
@@ -24,9 +23,10 @@ const pluginUsage = `Usage: murder plugin <command> [arguments]
 
   apply FILE...                install plugins, or change them, from files such
                                as plugins/openai.yaml: each is named after its file;
-                               one of kind wasm sends the module its file names
+                               one of kind container has its image pinned, and
+                               its manifest read from the image's label
   list                         the plugins: kind, key, limits and the apps that list them
-  show NAME                    a plugin's spec, and its module's manifest
+  show NAME                    a plugin's spec, and its image's manifest
   delete NAME -yes             remove a plugin no app lists, with its keys and
                                tenants' limits; what tenants used is kept
   key NAME -file PATH          give a plugin the operator's key, read from a file
@@ -214,9 +214,8 @@ func runPlugin(args []string) error {
 // applyPlugins reads and checks every file before it installs any.
 func applyPlugins(ctx context.Context, client *api.Client, paths []string, asJSON bool) error {
 	type file struct {
-		name   string
-		spec   plugins.Spec
-		module []byte
+		name string
+		spec plugins.Spec
 	}
 	var files []file
 	for _, path := range paths {
@@ -232,28 +231,14 @@ func applyPlugins(ctx context.Context, client *api.Client, paths []string, asJSO
 		if err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
-		var module []byte
-		// A module named by its digest is one the cluster has already.
-		if spec.Kind == plugins.KindWasm && spec.Module != "" && !strings.HasPrefix(spec.Module, "sha256:") {
-			// The module, from the file's directory, goes with the spec,
-			// named by its digest.
-			modulePath := spec.Module
-			if !filepath.IsAbs(modulePath) {
-				modulePath = filepath.Join(filepath.Dir(path), modulePath)
-			}
-			if module, err = readModule(modulePath); err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			}
-			spec.Module = plugins.ModuleDigest(sha256.Sum256(module))
-		}
-		if err := spec.Validate(); err != nil {
+		if err := spec.ValidateUnpinned(); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
-		files = append(files, file{name, spec, module})
+		files = append(files, file{name, spec})
 	}
 	var changes []api.PluginChange
 	for _, f := range files {
-		change, err := client.PutPlugin(ctx, f.name, f.spec, f.module)
+		change, err := client.PutPlugin(ctx, f.name, f.spec)
 		if err != nil {
 			return fmt.Errorf("plugin %s: %w", f.name, err)
 		}
@@ -269,6 +254,9 @@ func applyPlugins(ctx context.Context, client *api.Client, paths []string, asJSO
 		default:
 			fmt.Fprintf(stdout, "plugin %s changed\n", f.name)
 		}
+		if change.Note != "" {
+			fmt.Fprintf(stdout, "  %s\n", change.Note)
+		}
 		if !change.Plugin.HasKey {
 			fmt.Fprintf(stdout, "  it has no key yet: murder plugin key %s -file PATH\n", f.name)
 		}
@@ -277,23 +265,6 @@ func applyPlugins(ctx context.Context, client *api.Client, paths []string, asJSO
 		return printJSON(changes)
 	}
 	return nil
-}
-
-// readModule reads a plugin's module, of at most plugins.MaxModule.
-func readModule(path string) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("the plugin's module: %w", err)
-	}
-	defer file.Close()
-	module, err := io.ReadAll(io.LimitReader(file, plugins.MaxModule+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(module) > plugins.MaxModule {
-		return nil, fmt.Errorf("the plugin's module %s is larger than %d MB", path, plugins.MaxModule>>20)
-	}
-	return module, nil
 }
 
 // readKey reads a key from a file, or standard input for -, without its

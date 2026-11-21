@@ -14,7 +14,7 @@ import (
 )
 
 // demoPlugins are the demo's plugins: OpenAI and HERE, and Anthropic's
-// API through a module, with a month of what the tenants used of them,
+// API through a container of its own, with a month of what the tenants used of them,
 // one tenant past a hard limit and two near one.
 type demoPlugins struct {
 	mu      sync.Mutex
@@ -48,7 +48,7 @@ func newDemoPlugins(now time.Time) *demoPlugins {
 	}
 	add("openai", plugins.Spec{Kind: plugins.KindOpenAI, Limits: []plugins.Limit{{Metric: "tokens", Per: plugins.PerMonth, Amount: 5_000_000}, {Metric: "requests", Per: plugins.PerDay, Amount: 20_000, Mode: plugins.ModeSoft}}}, nil, true, "web")
 	add("here", plugins.Spec{Kind: plugins.KindHERE, Limits: []plugins.Limit{{Metric: "transactions", Per: plugins.PerMonth, Amount: 250_000}}}, nil, true, "web")
-	add("anthropic", plugins.Spec{Kind: plugins.KindWasm, Module: "sha256:5f1e4c0a8d2b9e7f3a6c1d4b8e0f2a7c9d3b6e1f4a8c2d5b9e0f3a7c1d4b6e8f", Config: map[string]any{"allow": []any{"POST /v1/messages/batches"}},
+	add("anthropic", plugins.Spec{Kind: plugins.KindContainer, Image: "ghcr.io/acme/anthropic-plugin@sha256:5f1e4c0a8d2b9e7f3a6c1d4b8e0f2a7c9d3b6e1f4a8c2d5b9e0f3a7c1d4b6e8f", Config: map[string]any{"allow": []any{"POST /v1/messages/batches"}},
 		Limits: []plugins.Limit{{Metric: "tokens", Per: plugins.PerMonth, Amount: 2_000_000}}}, &demoAnthropic, false, "web")
 	p.own[[2]string{"acme-logistics", "openai"}] = demoOwn{hasLimits: true, limits: []plugins.Limit{{Metric: "tokens", Per: plugins.PerMonth, Amount: 1_000_000, Mode: plugins.ModeHard}}}
 	p.own[[2]string{"nordwind", "openai"}] = demoOwn{key: true}

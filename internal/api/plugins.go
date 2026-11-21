@@ -13,8 +13,8 @@ import (
 type Plugin struct {
 	Name string       `json:"name"`
 	Spec plugins.Spec `json:"spec"`
-	// Manifest is what the module of a plugin of kind wasm says of
-	// itself.
+	// Manifest is what a plugin of kind container says of itself: its
+	// image's label.
 	Manifest *plugins.Manifest `json:"manifest,omitempty"`
 	// HasKey says whether it has the operator's key; the key itself is
 	// never shown.
@@ -25,21 +25,18 @@ type Plugin struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// PluginRequest installs a plugin or changes its spec. A plugin of kind
-// wasm comes with its module, unless the cluster has it already.
+// PluginRequest installs a plugin or changes its spec. The image of a
+// plugin of kind container may be a tag: the agent pins it.
 type PluginRequest struct {
-	Spec   plugins.Spec `json:"spec"`
-	Module []byte       `json:"module,omitempty"`
+	Spec plugins.Spec `json:"spec"`
 }
 
-// MaxPluginRequest is the most a request installing a plugin holds: a
-// module of plugins.MaxModule, in base64, and its spec.
-const MaxPluginRequest = plugins.MaxModule*4/3 + 1<<20
-
-// PluginChange is what installing a plugin did.
+// PluginChange is what installing a plugin did; Note says how its image
+// was pinned, when it was not to a registry's digest.
 type PluginChange struct {
 	Plugin  Plugin `json:"plugin"`
 	Changed bool   `json:"changed"`
+	Note    string `json:"note,omitempty"`
 }
 
 // PluginKeyRequest gives a plugin the operator's key, or with Tenant a
@@ -110,11 +107,10 @@ func (c *Client) Plugin(ctx context.Context, name string) (Plugin, error) {
 	return plugin, c.do(ctx, http.MethodGet, pluginPath(name), nil, &plugin)
 }
 
-// PutPlugin installs a plugin or changes its spec; module is the module
-// of a plugin of kind wasm, or nil.
-func (c *Client) PutPlugin(ctx context.Context, name string, spec plugins.Spec, module []byte) (PluginChange, error) {
+// PutPlugin installs a plugin or changes its spec.
+func (c *Client) PutPlugin(ctx context.Context, name string, spec plugins.Spec) (PluginChange, error) {
 	var change PluginChange
-	return change, c.do(ctx, http.MethodPut, pluginPath(name), PluginRequest{Spec: spec, Module: module}, &change)
+	return change, c.do(ctx, http.MethodPut, pluginPath(name), PluginRequest{Spec: spec}, &change)
 }
 
 // DeletePlugin removes a plugin no app lists.
@@ -159,13 +155,6 @@ func (c *Client) PluginUsage(ctx context.Context, tenant, plugin, from, to strin
 func (c *Client) PluginUses(ctx context.Context) ([]PluginUse, error) {
 	var uses []PluginUse
 	return uses, c.do(ctx, http.MethodGet, "/v1/plugin-uses", nil, &uses)
-}
-
-// EdgePluginModule fetches a plugin's module by its digest, for the edge
-// to run.
-func (c *Client) EdgePluginModule(ctx context.Context, digest string) ([]byte, error) {
-	var wasm []byte
-	return wasm, c.do(ctx, http.MethodGet, "/v1/edge/plugin-modules/"+url.PathEscape(digest), nil, &wasm)
 }
 
 // EdgePluginUsage gives the agent a report of what the edge's tenants

@@ -42,7 +42,7 @@ func TestThePluginsPageSaysWhoIsAtALimit(t *testing.T) {
 	_, body := get(t, server.URL+"/plugins")
 	until := plugins.PeriodEnd(plugins.PerMonth, time.Now()).UTC().Format("2 Jan 15:04")
 	for _, want := range []string{
-		`href="/plugins/anthropic"`, "wasm · anthropic 1.0.0", "Anthropic",
+		`href="/plugins/anthropic"`, "container · anthropic 1.0.0", "Anthropic",
 		`href="/plugins/openai"`, "5M tokens a month", "20k requests a day, soft",
 		"acme-logistics</a> used all its 1M tokens a month of", "its requests to it are refused until " + until + " UTC",
 		"baltic-freight</a> used 214k of its 250k transactions a month",

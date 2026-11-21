@@ -1,9 +1,11 @@
-//go:build wasip1
-
-// Command anthropic is a plugin for Anthropic's Messages API, written as a
-// module: an example of a plugin of one's own (see docs/plugins.md).
+// Command anthropic is a plugin for Anthropic's Messages API: an example
+// of a plugin of one's own (see docs/plugins.md), shipped as an image
+// whose label holds its manifest (see the Dockerfile).
 //
-//	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o anthropic.wasm ./examples/plugins/anthropic
+//	docker build -f examples/plugins/anthropic/Dockerfile \
+//	  --label "io.murder.plugin.manifest=$(go run ./examples/plugins/anthropic -manifest)" \
+//	  -t ghcr.io/acme/anthropic-plugin:1.0.0 .
+//	docker push ghcr.io/acme/anthropic-plugin:1.0.0
 //	murder plugin apply examples/plugins/anthropic/anthropic.yaml
 //
 // It passes on the endpoints whose answers say what they used, and the
@@ -31,39 +33,40 @@ var endpoints = []string{
 	"GET /v1/models/*",
 }
 
-func init() {
-	pluginsdk.Register(pluginsdk.Manifest{
-		Name:    "anthropic",
-		Version: "1.0.0",
-		Hosts:   []string{"api.anthropic.com"},
-		Key:     pluginsdk.Key{Header: "x-api-key"},
-		Metrics: []string{"tokens", "tokens.input", "tokens.output", "tokens.cache_read", "tokens.cache_write"},
-		UI: &pluginsdk.UI{
-			Title:       "Anthropic",
-			Description: "Claude through Anthropic's Messages API: tokens read from each answer's usage, streamed or not, by the model that answered.",
-			Detail:      "model",
-			Metrics: []pluginsdk.MetricUI{
-				{Name: "tokens", Label: "Tokens", Unit: "tokens"},
-				{Name: "tokens.input", Label: "Input tokens", Unit: "tokens"},
-				{Name: "tokens.output", Label: "Output tokens", Unit: "tokens"},
-				{Name: "tokens.cache_read", Label: "Read from the cache", Unit: "tokens"},
-				{Name: "tokens.cache_write", Label: "Written to the cache", Unit: "tokens"},
-				{Name: "requests", Label: "Requests", Unit: "requests"},
-			},
-			Config: []pluginsdk.ConfigUI{
-				{Name: "allow", Label: "More endpoints", Help: "Endpoints passed on beyond messages, token counting and models, as POST /v1/messages/batches: what they keep, every tenant reaches under the one key."},
-			},
-		},
-		// The answer says the model: no body is read, and bodies of any
-		// size pass as they come.
-	}, forward)
+func main() {
+	pluginsdk.Register(manifest, forward)
+	pluginsdk.Run()
 }
 
-func main() {}
+var manifest = pluginsdk.Manifest{
+	Name:    "anthropic",
+	Version: "1.0.0",
+	Hosts:   []string{"api.anthropic.com"},
+	Key:     pluginsdk.Key{Header: "x-api-key"},
+	Metrics: []string{"tokens", "tokens.input", "tokens.output", "tokens.cache_read", "tokens.cache_write"},
+	UI: &pluginsdk.UI{
+		Title:       "Anthropic",
+		Description: "Claude through Anthropic's Messages API: tokens read from each answer's usage, streamed or not, by the model that answered.",
+		Detail:      "model",
+		Metrics: []pluginsdk.MetricUI{
+			{Name: "tokens", Label: "Tokens", Unit: "tokens"},
+			{Name: "tokens.input", Label: "Input tokens", Unit: "tokens"},
+			{Name: "tokens.output", Label: "Output tokens", Unit: "tokens"},
+			{Name: "tokens.cache_read", Label: "Read from the cache", Unit: "tokens"},
+			{Name: "tokens.cache_write", Label: "Written to the cache", Unit: "tokens"},
+			{Name: "requests", Label: "Requests", Unit: "requests"},
+		},
+		Config: []pluginsdk.ConfigUI{
+			{Name: "allow", Label: "More endpoints", Help: "Endpoints passed on beyond messages, token counting and models, as POST /v1/messages/batches: what they keep, every tenant reaches under the one key."},
+		},
+	},
+	// The answer says the model: no body is read, and bodies of any size
+	// pass as they come.
+}
 
 // config is what a plugin's spec may say under config.
 type config struct {
-	// Allow are endpoints passed on beyond the module's own.
+	// Allow are endpoints passed on beyond the plugin's own.
 	Allow []string `json:"allow"`
 }
 
@@ -146,11 +149,11 @@ type meter struct {
 	kept []byte
 }
 
-// maxKept is the most of a JSON answer kept to read its usage from: the
-// edge runs modules interpreted, and reads it in about a second.
-const maxKept = 1 << 20
+// maxKept is the most of a JSON answer kept to read its usage from: an
+// answer that says its usage is far shorter.
+const maxKept = 8 << 20
 
-func (m *meter) Response(r *pluginsdk.Response) bool {
+func (m *meter) Response(r *pluginsdk.Response, _ *pluginsdk.Counter) bool {
 	if r.Status < 200 || r.Status > 299 {
 		return false
 	}
@@ -159,7 +162,7 @@ func (m *meter) Response(r *pluginsdk.Response) bool {
 	return m.stream || media == "application/json"
 }
 
-func (m *meter) Body(chunk []byte) bool {
+func (m *meter) Body(chunk []byte, _ *pluginsdk.Counter) bool {
 	if !m.stream {
 		if len(m.kept)+len(chunk) > maxKept {
 			// Too long for an answer that says its usage: none.
@@ -213,7 +216,7 @@ func (m *meter) line(line []byte) {
 	m.said = m.said || event.Usage != nil
 }
 
-func (m *meter) End(complete bool) {
+func (m *meter) End(complete bool, c *pluginsdk.Counter) {
 	if !m.stream {
 		// count_tokens, which costs nothing, says no usage.
 		var answer struct {
@@ -236,9 +239,9 @@ func (m *meter) End(complete bool) {
 	}
 	input, output := value(m.usage.InputTokens), value(m.usage.OutputTokens)
 	written, read := value(m.usage.CacheCreationInputTokens), value(m.usage.CacheReadInputTokens)
-	pluginsdk.Count("tokens.input", m.model, input)
-	pluginsdk.Count("tokens.output", m.model, output)
-	pluginsdk.Count("tokens.cache_write", m.model, written)
-	pluginsdk.Count("tokens.cache_read", m.model, read)
-	pluginsdk.Count("tokens", m.model, input+output+written+read)
+	c.Count("tokens.input", m.model, input)
+	c.Count("tokens.output", m.model, output)
+	c.Count("tokens.cache_write", m.model, written)
+	c.Count("tokens.cache_read", m.model, read)
+	c.Count("tokens", m.model, input+output+written+read)
 }

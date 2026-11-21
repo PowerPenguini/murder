@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/textproto"
@@ -10,29 +11,46 @@ import (
 )
 
 // ABI is the version of the interface between the edge and a plugin's
-// module (see docs/plugins.md): what the module exports and the JSON it
-// takes and gives. A module says the version it was built for in its
-// manifest; an edge runs only versions it knows.
-const ABI = 1
+// container (see docs/plugins.md): the calls it answers on its socket and
+// the JSON they take and give. A plugin says the version it was built for
+// in its manifest; an edge runs only versions it knows.
+const ABI = 2
 
-// The bounds of a plugin's module: its size, the body of a request it
-// reads, and the memory an instance of it has.
-const (
-	MaxModule     = 16 << 20
-	MaxModuleBody = 4 << 20
-	// moduleMemory is the memory an instance may grow to, in pages of
-	// 64 KB: a body of 16 MB, read as JSON by a module built with Go,
-	// takes about 40 MB.
-	moduleMemory = 2048
-)
+// MaxRequestBody is the most of a request's body a plugin's container
+// reads.
+const MaxRequestBody = 16 << 20
 
-// Manifest is what a plugin's module says of itself: where its requests
-// go, where the key goes on them, and what it counts. The agent reads it
-// once, as the module is installed, and the edge holds the module to it.
+// ManifestLabel is the label of a plugin's image that holds its manifest,
+// as JSON: the agent reads it as the plugin is installed, without running
+// the image.
+const ManifestLabel = "io.murder.plugin.manifest"
+
+// ParseManifest reads a manifest as the label of an image holds it,
+// unknown fields refused, and checks it.
+func ParseManifest(text string) (Manifest, error) {
+	var manifest Manifest
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return Manifest{}, fmt.Errorf("the plugin's manifest: %w", err)
+	}
+	if decoder.More() {
+		return Manifest{}, errors.New("the plugin's manifest: more than one JSON value")
+	}
+	if err := manifest.Validate(); err != nil {
+		return Manifest{}, fmt.Errorf("the plugin's manifest: %w", err)
+	}
+	return manifest, nil
+}
+
+// Manifest is what a plugin says of itself: where its requests go, where
+// the key goes on them, and what it counts. The agent reads it from the
+// plugin's image as it is installed, and the edge holds the plugin to it:
+// a container that says another is not used.
 type Manifest struct {
-	// ABI is the interface the module was built for (see ABI).
+	// ABI is the interface the plugin was built for (see ABI).
 	ABI int `json:"abi"`
-	// Name and Version say what the module is, as anthropic 1.2.0.
+	// Name and Version say what the plugin is, as anthropic 1.2.0.
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`
 	// Hosts are the hosts its requests go to, over HTTPS: a name, or "*."
@@ -45,10 +63,10 @@ type Manifest struct {
 	// metrics a plugin's limits may name.
 	Metrics []string `json:"metrics,omitempty"`
 	// RequestBody is the most bytes of a request's body it reads, at most
-	// MaxModuleBody; 0 reads none, and bodies pass on as they come.
+	// MaxRequestBody; 0 reads none, and bodies pass on as they come.
 	RequestBody int64 `json:"requestBody,omitempty"`
 	// UI says how the panel shows the plugin: none says only the
-	// module's name and its metrics' names.
+	// plugin's name and its metrics' names.
 	UI *UI `json:"ui,omitempty"`
 }
 
@@ -75,7 +93,7 @@ var (
 	headerToken = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
 )
 
-// reservedHeaders are headers a module may neither set nor have the key
+// reservedHeaders are headers a plugin may neither set nor have the key
 // put in: they say how the request is carried, or whose it is.
 var reservedHeaders = []string{
 	"Host", "Content-Length", "Transfer-Encoding", "Connection", "Upgrade", "Te", "Trailer",
@@ -91,7 +109,7 @@ func reservedHeader(name string) bool {
 func (m Manifest) Validate() error {
 	var problems []string
 	if m.ABI != ABI {
-		problems = append(problems, fmt.Sprintf("the module was built for version %d of the plugin interface; this release runs version %d", m.ABI, ABI))
+		problems = append(problems, fmt.Sprintf("the plugin was built for version %d of the plugin interface; this release runs version %d", m.ABI, ABI))
 	}
 	if !moduleName.MatchString(m.Name) {
 		problems = append(problems, fmt.Sprintf("name %q must be 1 to 64 lowercase letters, digits and ._-", m.Name))
@@ -100,7 +118,7 @@ func (m Manifest) Validate() error {
 		problems = append(problems, "the version must be at most 64 printable characters")
 	}
 	if len(m.Hosts) == 0 || len(m.Hosts) > 64 {
-		problems = append(problems, "a module names from 1 to 64 hosts its requests go to")
+		problems = append(problems, "a plugin names from 1 to 64 hosts its requests go to")
 	}
 	for _, host := range m.Hosts {
 		if err := validHost(host); err != nil {
@@ -120,7 +138,7 @@ func (m Manifest) Validate() error {
 		problems = append(problems, "the key's prefix must be at most 32 printable characters")
 	}
 	if len(m.Metrics) > 32 {
-		problems = append(problems, "a module counts at most 32 metrics")
+		problems = append(problems, "a plugin counts at most 32 metrics")
 	}
 	for _, metric := range m.Metrics {
 		if len(metric) > 64 || !metricName.MatchString(metric) {
@@ -132,8 +150,8 @@ func (m Manifest) Validate() error {
 			problems = append(problems, err.Error())
 		}
 	}
-	if m.RequestBody < 0 || m.RequestBody > MaxModuleBody {
-		problems = append(problems, fmt.Sprintf("a module reads at most %d MB of a request's body", MaxModuleBody>>20))
+	if m.RequestBody < 0 || m.RequestBody > MaxRequestBody {
+		problems = append(problems, fmt.Sprintf("a plugin reads at most %d MB of a request's body", MaxRequestBody>>20))
 	}
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))
@@ -142,9 +160,9 @@ func (m Manifest) Validate() error {
 }
 
 // MetricsOf are the metrics a plugin counts, which its limits may name:
-// its kind's, or for a module, the requests and the module's.
+// its kind's, or for a container, the requests and the manifest's.
 func MetricsOf(spec Spec, manifest *Manifest) []string {
-	if spec.Kind != KindWasm {
+	if spec.Kind != KindContainer {
 		return Metrics[spec.Kind]
 	}
 	metrics := []string{MetricRequests}
@@ -158,8 +176,8 @@ func MetricsOf(spec Spec, manifest *Manifest) []string {
 	return metrics
 }
 
-// hostsOf are the hosts a module's requests may go to: the plugin's own,
-// or else the module's.
+// hostsOf are the hosts a container's requests may go to: the plugin's own,
+// or else its manifest's.
 func hostsOf(spec Spec, manifest Manifest) []string {
 	if len(spec.Hosts) > 0 {
 		return spec.Hosts

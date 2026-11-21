@@ -252,7 +252,7 @@ Each stage is one PR, reviewed and tested before the next.
    Removing needs the name typed; "Check its DNS now" has the leader look
    at once.
 9. **Plugins:** the Plugins page lists the plugins and the tenants at a
-   limit or near one; a plugin's page, shown as its kind or its module's
+   limit or near one; a plugin's page, shown as its kind or its image's
    manifest says (`ui`: title, metrics' labels and units, the first
    charted, what counts are kept by, its config's fields), charts its last
    30 days by day, lists its tenants against their limits and this month by

@@ -5,9 +5,9 @@ or HERE's, with a key the tenant never sees. It counts what each tenant
 uses and can stop a tenant at a limit. Like an app, a plugin is
 configuration: a kind Murder knows how to meter, and the limits its tenants
 get. Murder meters OpenAI and HERE itself. For any other provider, a
-plugin of kind `wasm` runs a WebAssembly module of your own, which says
-where each request goes and what it used ([Plugins of your
-own](#plugins-of-your-own)).
+plugin of kind `container` runs a program of your own in a small
+container on each node, which says where each request goes and what it
+used ([Plugins of your own](#plugins-of-your-own)).
 
 ```yaml
 # plugins/openai.yaml
@@ -121,51 +121,50 @@ written.
 - An async matrix's results are fetched from a host outside
   `hereapi.com`. Add it to `hosts` if your tenants use one.
 
-**wasm** runs a module: see below.
+**container** runs a program of your own: see below.
 
 ## Plugins of your own
 
-A plugin of kind `wasm` names a WebAssembly module, which says where each
-request goes and counts what it used. The edge runs the module in a
-sandbox and does the rest:
+A plugin of kind `container` names an image: a program that says where
+each request goes and counts what it used. The agent runs it in a
+container on each node, and the edge calls it there, on a unix socket.
+The edge does the rest:
 - it knows the tenant and holds its limits;
-- it puts the key on the request, which the module never sees;
-- it counts the requests and keeps the module's counts.
+- it puts the key on the request, which the container never sees;
+- it counts the requests and keeps the container's counts.
 
 ```yaml
 # plugins/anthropic.yaml
-kind: wasm
-module: anthropic.wasm        # from this file's directory
-config:                       # whatever the module takes, sent with each request
+kind: container
+image: ghcr.io/acme/anthropic-plugin:1.0.0   # pinned by digest as it is installed
+config:                       # whatever the plugin takes, sent with each request
   allow: ["POST /v1/messages/batches"]
 limits:
   - {metric: tokens, per: month, amount: 2000000}
 ```
 
-`murder plugin apply plugins/anthropic.yaml` sends the module with the
-spec, which names it by its digest from then on (`sha256:…`). The agent
-runs the module once, to read its manifest:
+`murder plugin apply plugins/anthropic.yaml` has the agent pin the image
+to its digest, pulling it as a tenant's image is pulled (with the same
+registry logins), and read its manifest from its label,
+`io.murder.plugin.manifest`, without running it:
 - the hosts its requests go to;
 - where the key goes on them;
 - the metrics it counts, which limits may name.
 
-The module, of at most 16 MB, is kept in the replicated state, with its
-backups, for as long as a plugin runs it. Each node's edge fetches it from
-its agent and checks its digest. The edge keeps it in `edge-plugins` next
-to `edge.routes`, a directory only root reads. An edge started while its
-agent is down runs it from there.
-
-The edge runs modules interpreted, never compiled to native code. Its unit
-denies it memory both written and run (`MemoryDenyWriteExecute`), and a
-module's code stays out of the process that holds every key. A call into
-a module built with Go takes about a millisecond, and a new instance about
-8. Reading a MB of JSON takes it about a second. A new
-module is applied like any other change to the spec. Requests under way
-finish on the old one. A module that no longer counts a metric a tenant's
-own limit names is refused until that limit goes.
+The spec keeps the image pinned (`ghcr.io/acme/anthropic-plugin@sha256:…`),
+and the manifest is kept with it in the replicated state. Every node's
+agent pulls the image and runs one container of it, which serves every
+tenant of the node. The edge uses a container only once it says, on its
+socket, the manifest its image's label said. A new image is applied like
+any other change to the spec: the agent starts its container at once, and
+stops the old one two minutes later, once the requests under way on it
+are done. An image that no longer counts a metric a tenant's own limit
+names is refused until that limit goes. A local image (`sha256:<id>`,
+with a note saying so) runs only where it is; push it to a registry for a
+cluster.
 
 `murder plugin show NAME` shows the manifest. `murder plugin list` names
-the module, as `wasm (anthropic 1.0.0)`.
+the plugin, as `container (anthropic 1.0.0)`.
 
 The manifest's `ui` says how the panel shows the plugin (see below):
 - a title and what the plugin does;
@@ -173,22 +172,21 @@ The manifest's `ui` says how the panel shows the plugin (see below):
 - what counts are kept by, as `model` or `service`;
 - the fields of its config, each with a label and what it is for.
 
-A module without `ui` shows its name, and its metrics by their names.
+A plugin without `ui` shows its name, and its metrics by their names.
 OpenAI and HERE say theirs in Murder.
 
 ### Writing one in Go
 
-[pluginsdk](../pluginsdk) writes a module in Go. The plugin registers its
-manifest, and a function that says where each request goes:
+[pluginsdk](../pluginsdk) writes a plugin in Go. The program registers
+its manifest, and a function that says where each request goes, and
+runs:
 
 ```go
-//go:build wasip1
-
 package main
 
 import "github.com/PowerPenguini/murder/pluginsdk"
 
-func init() {
+func main() {
 	pluginsdk.Register(pluginsdk.Manifest{
 		Name:    "weather",
 		Version: "1.0.0",
@@ -203,127 +201,147 @@ func init() {
 		}
 		return &pluginsdk.Forward{URL: "https://api.weather.example" + r.Path + "?" + r.Query, Meter: &meter{}}, nil
 	})
+	pluginsdk.Run()
 }
 
-func main() {}
-
-// meter counts a forecast answered.
+// meter counts a forecast answered; one is made for each request.
 type meter struct{}
 
-func (meter) Response(r *pluginsdk.Response) bool {
+func (meter) Response(r *pluginsdk.Response, c *pluginsdk.Counter) bool {
 	if r.Status == 200 {
-		pluginsdk.Count("calls.forecast", "", 1)
+		c.Count("calls.forecast", "", 1)
 	}
 	return false // no need to read the body
 }
-func (meter) Body([]byte) bool { return false }
-func (meter) End(bool)         {}
+func (meter) Body([]byte, *pluginsdk.Counter) bool { return false }
+func (meter) End(bool, *pluginsdk.Counter)         {}
+```
+
+The image holds the program, and its manifest as its label, which the
+program prints with `-manifest`:
+
+```dockerfile
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -o /plugin .
+
+FROM scratch
+COPY --from=build /plugin /plugin
+ENTRYPOINT ["/plugin"]
 ```
 
 ```bash
-GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o weather.wasm .
+docker build --label "io.murder.plugin.manifest=$(go run . -manifest)" -t ghcr.io/acme/weather-plugin:1.0.0 .
+docker push ghcr.io/acme/weather-plugin:1.0.0
 ```
 
 [examples/plugins/anthropic](../examples/plugins/anthropic) is a whole
-one, for Anthropic's Messages API:
+one, for Anthropic's Messages API, with its Dockerfile:
 - it passes on the messages, token counting and models endpoints, and
   no batches or files;
 - it reads no request's body: the answer says the model;
-- it reads the usage of a JSON answer of up to a MB, or of a stream's
+- it reads the usage of a JSON answer of up to 8 MB, or of a stream's
   `message_start` and `message_delta`;
 - it counts `tokens.input`, `tokens.output`, `tokens.cache_write`,
   `tokens.cache_read`, and their sum `tokens`, by the model.
 
-What the edge does around a module:
-- **The request.** The module sees the method, the path after the
+What the edge does around a container:
+- **The request.** The container sees the method, the path after the
   plugin's name, the query, the headers and the plugin's config. It sees
-  the body too, up to the manifest's `requestBody` (at most 4 MB; larger
-  bodies are answered `413`). A module that needs no body reads none, and
-  bodies of any size then pass as they come. It never sees the tenant's credentials
-  (`Authorization`, `X-Api-Key`, `Cookie` and the key's own header or
-  parameter).
-- **Where it goes.** The module answers a URL, which must be `https://`,
-  on port 443, to a host of the manifest's, or of the spec's `hosts`,
-  which replace them. It may set or drop headers, but not those that say
-  how the request is carried (`Host`, `Content-Length`, `Cookie`,
+  the body too, up to the manifest's `requestBody` (at most 16 MB; larger
+  bodies are answered `413`). A plugin that needs no body reads none, and
+  bodies of any size then pass as they come. It never sees the tenant's
+  credentials (`Authorization`, `X-Api-Key`, `Cookie` and the key's own
+  header or parameter).
+- **Where it goes.** The container answers a URL, which must be
+  `https://`, on port 443, to a host of the manifest's, or of the spec's
+  `hosts`, which replace them. It may set or drop headers, but not those
+  that say how the request is carried (`Host`, `Content-Length`, `Cookie`,
   `Accept-Encoding`…) or the key's. It may send a body of its own in place
   of the tenant's. The edge then puts the key where the manifest says.
-- **Refusing.** The module may refuse a request with a status from 400
+- **Refusing.** The container may refuse a request with a status from 400
   to 599, and a message.
-- **The answer.** For a module that meters it, the edge shows the status
+- **The answer.** For a plugin that meters it, the edge shows the status
   and headers, then the body as it passes, uncompressed, and says when it
   ended: read whole, or not, as when the tenant stopped reading. The
-  module's counts are kept by their detail, such as a model. Murder counts
+  plugin's counts are kept by their detail, such as a model. Murder counts
   `requests` itself, by the request's detail.
-- **The sandbox.** The module gets WASI's clock and randomness only:
-  - no files, environment or network;
-  - 128 MB of memory;
+- **The container.** It runs as nobody (65534), whatever its image says,
+  with:
+  - no network at all: what it is shown stays in it;
+  - no capability, and a root it cannot write, but a 64 MB `/tmp`;
+  - 256 MB of memory, one CPU and 128 processes;
+  - its socket in a tmpfs of 64 KB of its own, which only root reaches on
+    the host;
   - 10 seconds for a request, 1 for each chunk of an answer, 10 for its
-    end.
+    end, and at most 256 calls at once from the edge.
 
-  An instance serves one tenant, one request at a time, and serves it
-  again: what a module keeps between requests is that tenant's only. The
-  edge runs at most 256 instances at once.
-- **Failures.** A module that fails, panics, runs out of time or does
+  One container serves every tenant of its node, many requests at once:
+  what it keeps between requests is shared by them, so keep what is a
+  tenant's by its name. The engine starts it again when it stops, as at
+  boot. `docker logs murder-plugin-…` shows what it wrote.
+- **Failures.** A container that fails, panics, runs out of time or does
   what it may not before the request goes on gets the request answered
-  `502`. One that fails after it went on lets the answer pass, without
-  what was still to count. That is a way past a hard limit for as long as
-  the module fails. The edge logs each failure, with what the module
-  wrote to its standard error, and counts them in
-  `murder_plugin_module_failures_total`. The instance is then dropped.
+  `502`; one not running yet, or that says another manifest, `503`. One
+  that fails after it went on lets the answer pass, without what was still
+  to count. That is a way past a hard limit for as long as the plugin
+  fails. The edge logs each failure and counts them in
+  `murder_plugin_failures_total`.
 
 ### The interface, for other languages
 
-A module is WebAssembly for WASI preview 1, a reactor (`_initialize`, if
-it has one, is called once). It imports only `wasi_snapshot_preview1` and
-exports its `memory` and these functions. A pointer and length pair is
-two `i32`. An answer is one `i64`, the pointer in its high 32 bits and the
-length in its low ones, valid until the next call. The edge writes each
-input into memory from `murder_alloc`, which is the module's again once
-the call it was for returns.
+A plugin's container serves HTTP/1.1 on a unix socket at the path
+`MURDER_PLUGIN_SOCKET` says (`/run/murder-plugin/plugin.sock`), which it
+creates with mode `0666`. Each call is JSON, but a chunk of an answer's
+body, which comes as it is. A request the plugin meters is a session: the
+edge names it in the header `Murder-Session` of each of its calls, and
+ends each with `/end`, read or not; a session the edge left, as when it
+stopped, may be let go of after 10 minutes.
 
-| Export | Takes | Answers |
+| Call | Takes | Answers |
 |---|---|---|
-| `murder_alloc(size) → ptr` | | memory for an input |
-| `murder_manifest() → i64` | | the manifest |
-| `murder_request(json, body) → i64` | the request, and its body (0, 0 for none) | where it goes |
-| `murder_request_body() → i64` | | the body to send, when the answer said `body` |
-| `murder_response(json) → i64` | the answer's status and headers | counts, and whether to read the body |
-| `murder_body(chunk) → i32` | a chunk of the answer's body | 0 for more, 1 for enough, 2 for a failure |
-| `murder_end(json) → i64` | whether the body was read whole | counts |
+| `GET /manifest` | | the manifest |
+| `POST /request` | the request, its body in base64 | where it goes |
+| `POST /response` | the answer's status and headers | counts, and whether to read the body |
+| `POST /body` | a chunk of the answer's body | whether it wants more |
+| `POST /end` | whether the body was read whole | counts |
 
-The JSON, version 1:
+The JSON, version 2:
 
 ```text
-manifest  {"abi": 1, "name": "x", "version": "1.0.0", "hosts": ["api.x.example"],
+manifest  {"abi": 2, "name": "x", "version": "1.0.0", "hosts": ["api.x.example"],
            "key": {"header": "X-Key", "prefix": ""} | {"query": "key"},
            "metrics": ["tokens"], "requestBody": 1048576,
            "ui": {"title", "description", "detail": "model",
                   "metrics": [{"name": "tokens", "label": "Tokens", "unit": "tokens"}],
                   "config": [{"name": "allow", "label": "More endpoints", "help": "..."}]}}
-request   {"tenant", "plugin", "method", "path", "query", "header": {"Name": ["value"]}, "config": {...}}
-forward   {"url", "header": {...}, "drop": [...], "body": false, "detail": "", "meter": false}
+request   {"tenant", "plugin", "method", "path", "query", "header": {"Name": ["value"]},
+           "config": {...}, "body": "<base64>"}
+forward   {"url", "header": {...}, "drop": [...], "replaceBody": false, "body": "<base64>",
+           "detail": "", "meter": false}
           | {"refuse": {"status": 403, "message": "..."}} | {"error": "..."}
 response  {"status": 200, "header": {...}}
 metered   {"counts": [{"metric", "detail", "amount"}], "body": false} | {"error": "..."}
+body      {"more": true} | {"error": "..."}
 end       {"complete": true}
 ```
 
-An answer with `error` is a failure. An edge runs only modules of the
-interface version it knows, so a module keeps working across Murder's
+An answer with `error` is a failure. An edge runs only plugins of the
+interface version it knows, so a plugin keeps working across Murder's
 releases until the version changes.
 
 ## In the panel
 
-The panel's Plugins page lists the plugins: kind and module, whether each
+The panel's Plugins page lists the plugins: kind and image, whether each
 has its key, its limits, what its tenants used this month, and the tenants
 at a limit, or past four fifths of one. A plugin's page shows:
-- what it is, as its kind or module says;
+- what it is, as its kind or manifest says;
 - where its requests go, and where the key goes on them;
 - its config;
 - its last 30 days by day, of any metric it counts;
 - each tenant against its limits;
-- this month by model, service or whatever the module keeps its counts by;
+- this month by model, service or whatever the plugin keeps its counts by;
 - an export of this month as CSV.
 
 There a key is set, or removed with the plugin's name typed. A tenant gets
@@ -428,7 +446,7 @@ gets no answer back to complete a TCP connection. The app is given no
 token of its own: `OPENAI_API_KEY` may be anything.
 
 The edge reads only the bodies it meters: OpenAI's JSON, HERE's matrices
-and multi reverse geocodes, each at most 64 MB, and a module's, up to what
+and multi reverse geocodes, each at most 64 MB, and a container's, up to what
 its manifest says. It holds at most 512 MB of
 them at once, and 128 MB of one tenant's, taking room as the bytes come.
 A body that sends nothing for 30 seconds is given up on, as on the public

@@ -49,6 +49,9 @@ const (
 	LabelTenant  = "io.murder.tenant"
 	LabelHash    = "io.murder.spec-hash"
 	LabelImage   = "io.murder.image"
+	// LabelPlugin marks a plugin's container, with the plugin's name: no
+	// tenant's (see Docker.List).
+	LabelPlugin = "io.murder.plugin"
 )
 
 // Runtime is what the reconciler needs from a container engine.
@@ -174,4 +177,7 @@ type ContainerSpec struct {
 	PIDs         int64
 	ReadOnlyRoot bool
 	Tmpfs        map[string]string
+	// RestartPolicy is the engine's restart policy for the container;
+	// empty for tenants' (RestartPolicy).
+	RestartPolicy string
 }

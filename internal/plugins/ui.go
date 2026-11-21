@@ -9,7 +9,7 @@ import (
 
 // UI is how the panel shows a plugin: what it is, how its metrics read,
 // the first of them charted, what its counts are kept by, and what its
-// config takes. A module says it in its manifest; Murder says it for its
+// config takes. A plugin says it in its manifest; Murder says it for its
 // own kinds.
 type UI struct {
 	Title       string `json:"title,omitempty"`
@@ -65,11 +65,11 @@ var builtinUI = map[string]UI{
 	},
 }
 
-// UIOf is how the panel shows a plugin: its kind's, or its module's, every
-// metric it counts said, those the module left out by their names.
+// UIOf is how the panel shows a plugin: its kind's, or its manifest's, every
+// metric it counts said, those the manifest left out by their names.
 func UIOf(spec Spec, manifest *Manifest) UI {
 	ui := builtinUI[spec.Kind]
-	if spec.Kind == KindWasm && manifest != nil {
+	if spec.Kind == KindContainer && manifest != nil {
 		if manifest.UI != nil {
 			ui = *manifest.UI
 		}
@@ -123,7 +123,7 @@ func printable(text string, max int) bool {
 	return len([]rune(text)) <= max && !strings.ContainsFunc(text, func(r rune) bool { return r < ' ' || r == 0x7f })
 }
 
-// validate says what is wrong with a module's UI, of a module that counts
+// validate says what is wrong with a manifest's UI, of a plugin that counts
 // metrics (and requests).
 func (u UI) validate(metrics []string) error {
 	var problems []string
@@ -136,7 +136,7 @@ func (u UI) validate(metrics []string) error {
 	for _, m := range u.Metrics {
 		switch {
 		case m.Name != MetricRequests && !slices.Contains(metrics, m.Name):
-			problems = append(problems, fmt.Sprintf("ui: metric %q is not one the module counts", m.Name))
+			problems = append(problems, fmt.Sprintf("ui: metric %q is not one the plugin counts", m.Name))
 		case !printable(m.Label, 48) || !printable(m.Unit, 24):
 			problems = append(problems, fmt.Sprintf("ui: metric %s: a label is at most 48 characters and a unit 24", m.Name))
 		}

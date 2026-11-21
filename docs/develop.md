@@ -40,11 +40,12 @@ through Murder's real components:
 - suspend and resume;
 - archive, restore with the data, purge.
 
-**Plugin modules.** The tests of `internal/plugins` and `internal/apiserver`
-build `internal/plugins/testdata/module` and `examples/plugins/anthropic`
-for `GOOS=wasip1 GOARCH=wasm` with the Go they run with. CI also vets them
-as such: `GOOS=wasip1 GOARCH=wasm go vet ./pluginsdk ./examples/plugins/...
-./internal/plugins/testdata/module`.
+**Plugins of one's own.** The tests of `internal/plugins` build
+`internal/plugins/testdata/plugin` and `examples/plugins/anthropic` with
+the Go they run with, and run them as their containers would, on sockets
+below `/tmp` (a unix socket's path holds 108 bytes). The plugin test
+below builds the test plugin into an image, with its manifest as its
+label.
 
 **The plugin test** has a tenant's container reach a plugin at its
 network's gateway. A host firewall of its own, such as ufw, may drop that:

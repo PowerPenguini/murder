@@ -30,6 +30,8 @@ import (
 	"github.com/PowerPenguini/murder/internal/firewall"
 	"github.com/PowerPenguini/murder/internal/invite"
 	"github.com/PowerPenguini/murder/internal/move"
+	"github.com/PowerPenguini/murder/internal/pluginhost"
+	"github.com/PowerPenguini/murder/internal/plugins"
 	"github.com/PowerPenguini/murder/internal/reboot"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/records"
@@ -418,6 +420,12 @@ func runAgent(args []string) error {
 				log.Warn("mark this node back from a restart", "error", err)
 			}
 			go keepPublic(ctx, st, node, cfg.Cluster.PublicAddresses, log)
+		}
+		// The containers of plugins of kind container, for the edge to
+		// serve them from, as the cluster's plugins say once it caught up.
+		if cfg.PluginsAddress() != "" {
+			host := &pluginhost.Host{Runtime: docker, Plugins: st.Plugins, Root: plugins.SocketRoot, Tmpfs: true, Log: log}
+			go host.Run(ctx, 10*time.Second)
 		}
 		reconciler.Run(ctx, cfg.ReconcileInterval.Duration)
 	}()

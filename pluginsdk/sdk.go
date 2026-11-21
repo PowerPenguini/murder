@@ -1,37 +1,43 @@
-// Package pluginsdk writes plugins for Murder in Go: a WebAssembly module
-// that says where a tenant's request goes and counts what it used, built
-// with
+// Package pluginsdk writes plugins for Murder in Go: a small program that
+// says where a tenant's request goes and counts what it used, run in a
+// container on each node. It is built as any program is, and shipped as
+// an image whose label holds its manifest:
 //
-//	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
+//	CGO_ENABLED=0 go build -o plugin .
+//	docker build --label "io.murder.plugin.manifest=$(./plugin -manifest)" -t ghcr.io/acme/plugin:1.0 .
 //
-// A plugin's main package registers it, and has an empty main:
+// A plugin's main package registers it and runs it:
 //
-//	func init() { pluginsdk.Register(manifest, forward) }
-//	func main() {}
+//	func main() {
+//		pluginsdk.Register(manifest, forward)
+//		pluginsdk.Run()
+//	}
 //
-// The edge runs the module in a sandbox: it never sees the key, which the
-// edge puts on each request where the manifest says, and its requests go
-// only to the hosts the manifest names, over HTTPS. Each instance serves
-// one tenant, one request at a time, so what it keeps between requests is
-// only ever that tenant's. docs/plugins.md says the interface in full, for
-// a module written in another language.
+// The edge calls it on a unix socket: the container has no network, and
+// never sees the key, which the edge puts on each request where the
+// manifest says; its requests go only to the hosts the manifest names,
+// over HTTPS. One container serves every tenant of its node, many
+// requests at once: what it keeps between requests is shared, so keep
+// what is a tenant's by Request.Tenant. docs/plugins.md says the interface
+// in full, for a plugin written in another language.
 package pluginsdk
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/textproto"
 )
 
-// ABI is the version of the interface this package builds modules for.
-const ABI = 1
+// ABI is the version of the interface this package builds plugins for.
+const ABI = 2
 
-// Manifest is what the module says of itself: where its requests go,
+// Manifest is what the plugin says of itself: where its requests go,
 // where the key goes on them, and what it counts.
 type Manifest struct {
 	// ABI is filled in by Register.
 	ABI int `json:"abi"`
-	// Name and Version say what the module is, as anthropic 1.2.0: Name
+	// Name and Version say what the plugin is, as anthropic 1.2.0: Name
 	// of lowercase letters, digits and ._-.
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`
@@ -44,9 +50,7 @@ type Manifest struct {
 	// metrics a plugin's limits may name, as tokens or tokens.input.
 	Metrics []string `json:"metrics,omitempty"`
 	// RequestBody is the most bytes of a request's body it reads, at most
-	// 4 MB; 0 reads none, and bodies pass on as they come. The edge runs
-	// modules interpreted: one built with Go reads a MB of JSON in about a
-	// second.
+	// 16 MB; 0 reads none, and bodies pass on as they come.
 	RequestBody int64 `json:"requestBody,omitempty"`
 	// UI says how Murder's panel shows the plugin; nil shows its name and
 	// its metrics' names only.
@@ -90,9 +94,8 @@ type Key struct {
 	Query  string `json:"query,omitempty"`
 }
 
-// Request is a tenant's request to the plugin, as the edge shows it to
-// the module: without the tenant's credentials, or the key's header or
-// parameter.
+// Request is a tenant's request to the plugin, as the edge shows it:
+// without the tenant's credentials, or the key's header or parameter.
 type Request struct {
 	// Tenant and Plugin say whose request it is, and to which plugin.
 	Tenant string `json:"tenant"`
@@ -109,7 +112,17 @@ type Request struct {
 	Config json.RawMessage `json:"config,omitempty"`
 	// Body is the request's body, up to the manifest's RequestBody; nil
 	// for none, or when the manifest reads none.
-	Body []byte `json:"-"`
+	Body []byte `json:"body,omitempty"`
+
+	ctx context.Context
+}
+
+// Context ends when the edge stops waiting for the plugin's answer.
+func (r *Request) Context() context.Context {
+	if r.ctx == nil {
+		return context.Background()
+	}
+	return r.ctx
 }
 
 // Get returns the first value of a header of the request.
@@ -140,21 +153,21 @@ type Forward struct {
 }
 
 // Meter reads the provider's answer to one request, and counts what it
-// used with Count.
+// used on c. Its methods are called one at a time, in order.
 type Meter interface {
 	// Response is shown the answer's status and headers; it reports
 	// whether Body should be shown the answer's body.
-	Response(*Response) bool
+	Response(r *Response, c *Counter) bool
 	// Body is shown the answer's body, a chunk at a time, as it passes on
 	// to the tenant; it reports whether it wants more.
-	Body(chunk []byte) bool
+	Body(chunk []byte, c *Counter) bool
 	// End is told the body ended: read whole, or not, as when the tenant
 	// stopped reading it. It is called only for a body Response asked
 	// for.
-	End(complete bool)
+	End(complete bool, c *Counter)
 }
 
-// Response is the provider's answer, as the edge shows it to the module.
+// Response is the provider's answer, as the edge shows it.
 type Response struct {
 	Status int                 `json:"status"`
 	Header map[string][]string `json:"header"`
@@ -182,17 +195,25 @@ func Refuse(status int, format string, args ...any) error {
 	return &Refusal{Status: status, Message: fmt.Sprintf(format, args...)}
 }
 
-// count is one count, as the module answers it.
+// count is one count, as the plugin answers it.
 type count struct {
 	Metric string `json:"metric"`
 	Detail string `json:"detail"`
 	Amount int64  `json:"amount"`
 }
 
-var counted []count
+// Counter counts what one request used, for a Meter.
+type Counter struct{ counted []count }
 
 // Count counts an amount of one of the manifest's metrics, for a detail
-// such as a model; from a Meter's methods.
-func Count(metric, detail string, amount int64) {
-	counted = append(counted, count{Metric: metric, Detail: detail, Amount: amount})
+// such as a model.
+func (c *Counter) Count(metric, detail string, amount int64) {
+	c.counted = append(c.counted, count{Metric: metric, Detail: detail, Amount: amount})
+}
+
+// take gives what was counted since it was last taken.
+func (c *Counter) take() []count {
+	counted := c.counted
+	c.counted = nil
+	return counted
 }

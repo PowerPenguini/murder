@@ -35,8 +35,8 @@ type Proxy struct {
 	Transport http.RoundTripper
 	// now is the clock, for tests.
 	now func() time.Time
-	// modules runs plugins of kind wasm; none without.
-	modules *Modules
+	// containers serves plugins of kind container; none without.
+	containers *Containers
 
 	mu   sync.Mutex
 	keys map[string]string
@@ -46,7 +46,7 @@ type Proxy struct {
 	active   map[string]int
 	buffered int64
 	byTenant map[string]int64
-	// failures counts the failures of each plugin's module.
+	// failures counts the failures of each plugin's container.
 	failures map[string]int64
 }
 
@@ -275,8 +275,8 @@ func (p *Proxy) handlerFor(ctx context.Context, x *exchange, plugin Plugin) (han
 		return &openAIHandler{x: x}, nil
 	case KindHERE:
 		return &hereHandler{x: x}, nil
-	case KindWasm:
-		return p.wasmHandler(ctx, x, plugin)
+	case KindContainer:
+		return p.containerHandler(x, plugin)
 	}
 	return nil, statusError{code: http.StatusNotImplemented, message: fmt.Sprintf("this edge does not know plugins of kind %q: upgrade it", plugin.Spec.Kind)}
 }

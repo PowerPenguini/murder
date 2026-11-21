@@ -1,9 +1,7 @@
 package store
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +21,7 @@ import (
 // of this version, frozen or not, as an upgrade replaces the edge while
 // changes are frozen: a migration must keep plugin_usage, plugin_reports
 // and events as this version runs them.
-const PluginsSchema = 21
+const PluginsSchema = 22
 
 // Plugin is a plugin installed in the cluster (see internal/plugins): its
 // spec and the operator's key, sealed with the master key under
@@ -31,8 +29,8 @@ const PluginsSchema = 21
 type Plugin struct {
 	Name string       `json:"name"`
 	Spec plugins.Spec `json:"spec"`
-	// Manifest is what the module of a plugin of kind wasm says of
-	// itself.
+	// Manifest is what a plugin of kind container says of itself: its
+	// image's label, read as it was installed.
 	Manifest  *plugins.Manifest `json:"manifest,omitempty"`
 	Key       string            `json:"-"`
 	CreatedAt time.Time         `json:"createdAt"`
@@ -41,14 +39,6 @@ type Plugin struct {
 
 // Metrics are what the plugin counts, which its limits may name.
 func (p Plugin) Metrics() []string { return plugins.MetricsOf(p.Spec, p.Manifest) }
-
-// PluginModule is a plugin's module as it is installed: its digest, the
-// manifest read from it, and the module itself.
-type PluginModule struct {
-	Digest   string
-	Manifest plugins.Manifest
-	Wasm     []byte
-}
 
 // PluginTenant is a tenant's own settings of a plugin: a key of its own,
 // sealed under plugins.TenantKeyContext, and limits in place of the
@@ -73,26 +63,20 @@ type pluginReport struct {
 // edge sends one again within seconds, or never.
 const reportsKept = 48 * time.Hour
 
-// pluginTables are the tables schema 21 added, as one script.
-const pluginTables = `-- Plugins (see internal/plugins): their spec as JSON, and the operator's
--- key, sealed with the master key; empty for none.
+// pluginTables are the tables of plugins, as one script: schema 21 added
+// them, and schema 22 the manifests of plugins of kind container in place
+// of modules (pluginsSchema22).
+const pluginTables = `-- Plugins (see internal/plugins): their spec as JSON, the operator's
+-- key, sealed with the master key (empty for none), and for a plugin of
+-- kind container, the manifest its image's label said as it was
+-- installed, as JSON.
 CREATE TABLE plugins (
 	name       TEXT PRIMARY KEY,
 	spec       TEXT NOT NULL,
 	key        TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
-) STRICT;
-
--- The modules of plugins of kind wasm, by digest: the manifest read from
--- each as it was installed, as JSON, and the module, in base64. A module
--- goes with the last plugin that runs it.
-CREATE TABLE plugin_modules (
-	digest     TEXT PRIMARY KEY,
-	manifest   TEXT NOT NULL,
-	wasm       TEXT NOT NULL,
-	size       INTEGER NOT NULL,
-	created_at TEXT NOT NULL
+	updated_at TEXT NOT NULL,
+	manifest   TEXT
 ) STRICT;
 
 -- A tenant's own settings of a plugin: a key of its own, sealed, and
@@ -129,42 +113,32 @@ CREATE TABLE plugin_reports (
 	PRIMARY KEY (node, edge)
 ) STRICT;`
 
+// pluginsSchema22 has a database of schema 21 keep plugins as schema 22
+// does: plugins of kind container, with their manifests, in place of
+// WebAssembly modules, which no release ran; a plugin of kind wasm goes,
+// with tenants' own settings of it.
+var pluginsSchema22 = []string{
+	`ALTER TABLE plugins ADD COLUMN manifest TEXT`,
+	`DROP TABLE plugin_modules`,
+	`DELETE FROM plugin_tenants WHERE plugin IN (SELECT name FROM plugins WHERE json_extract(spec, '$.kind') = 'wasm')`,
+	`DELETE FROM plugins WHERE json_extract(spec, '$.kind') = 'wasm'`,
+}
+
 // loadPlugins reads the plugins, tenants' settings and the edges' last
 // reports. What tenants used is read when asked for, not kept in memory.
 func loadPlugins(q querier, state *snapshot) error {
 	state.plugins = map[string]Plugin{}
 	state.pluginTenants = map[[2]string]PluginTenant{}
 	state.pluginReports = map[[2]string]pluginReport{}
-	state.pluginManifests = map[string]plugins.Manifest{}
-	// The modules themselves are read when an edge asks for one.
-	rows, err := q.Query(`SELECT digest, manifest FROM plugin_modules`)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var digest, manifestText string
-		var manifest plugins.Manifest
-		if err := rows.Scan(&digest, &manifestText); err != nil {
-			rows.Close()
-			return err
-		}
-		if err := json.Unmarshal([]byte(manifestText), &manifest); err != nil {
-			rows.Close()
-			return fmt.Errorf("module %s: %w", digest, err)
-		}
-		state.pluginManifests[digest] = manifest
-	}
-	if err := closeRows(rows); err != nil {
-		return err
-	}
-	rows, err = q.Query(`SELECT name, spec, key, created_at, updated_at FROM plugins`)
+	rows, err := q.Query(`SELECT name, spec, key, created_at, updated_at, manifest FROM plugins`)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var p Plugin
 		var specText, created, updated string
-		if err := rows.Scan(&p.Name, &specText, &p.Key, &created, &updated); err != nil {
+		var manifestText sql.NullString
+		if err := rows.Scan(&p.Name, &specText, &p.Key, &created, &updated, &manifestText); err != nil {
 			rows.Close()
 			return err
 		}
@@ -172,10 +146,15 @@ func loadPlugins(q querier, state *snapshot) error {
 			rows.Close()
 			return fmt.Errorf("plugin %s: %w", p.Name, err)
 		}
-		p.CreatedAt, p.UpdatedAt = parseTime(created), parseTime(updated)
-		if manifest, ok := state.pluginManifests[p.Spec.Module]; ok && p.Spec.Kind == plugins.KindWasm {
+		if manifestText.Valid {
+			var manifest plugins.Manifest
+			if err := json.Unmarshal([]byte(manifestText.String), &manifest); err != nil {
+				rows.Close()
+				return fmt.Errorf("plugin %s's manifest: %w", p.Name, err)
+			}
 			p.Manifest = &manifest
 		}
+		p.CreatedAt, p.UpdatedAt = parseTime(created), parseTime(updated)
 		state.plugins[p.Name] = p
 	}
 	if err := closeRows(rows); err != nil {
@@ -255,37 +234,6 @@ func clonePlugin(p Plugin) Plugin {
 	return p
 }
 
-// PluginModule returns the module of a digest, as an edge fetches it.
-func (s *SQLite) PluginModule(digest string) ([]byte, error) {
-	var encoded string
-	err := s.db.QueryRow(`SELECT wasm FROM plugin_modules WHERE digest = ?`, digest).Scan(&encoded)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("module %s: %w", digest, ErrNotFound)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(encoded)
-}
-
-// dropModules removes the modules no plugin runs, but for keep.
-func dropModules(tx *recorder, current *snapshot, gone, keep string) error {
-	runs := map[string]bool{keep: true}
-	for name, plugin := range current.plugins {
-		if name != gone && plugin.Spec.Kind == plugins.KindWasm {
-			runs[plugin.Spec.Module] = true
-		}
-	}
-	for _, digest := range slices.Sorted(maps.Keys(current.pluginManifests)) {
-		if !runs[digest] {
-			if err := tx.Exec(`DELETE FROM plugin_modules WHERE digest = ?`, digest); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // PluginTenants lists tenants' own settings of plugins: of one tenant, of
 // one plugin, or (both empty) all, by tenant and plugin.
 func (s *SQLite) PluginTenants(tenant, plugin string) []PluginTenant {
@@ -329,10 +277,10 @@ func PluginLimits(plugin Plugin, settings PluginTenant) []plugins.Limit {
 }
 
 // PutPlugin installs a plugin, or changes its spec; changed is false for
-// the same spec. The spec is checked first. A plugin of kind wasm runs a
-// module installed already, or module, of the spec's digest, its manifest
-// read by the caller: a module is never run as it is written.
-func (s *SQLite) PutPlugin(name string, spec plugins.Spec, module *PluginModule, actor string) (Plugin, bool, error) {
+// the same spec. The spec is checked first. A plugin of kind container
+// takes the manifest its image's label says, read by the caller: an image
+// is never run as it is installed.
+func (s *SQLite) PutPlugin(name string, spec plugins.Spec, manifest *plugins.Manifest, actor string) (Plugin, bool, error) {
 	if err := plugins.ValidName(name); err != nil {
 		return Plugin{}, false, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
@@ -340,49 +288,35 @@ func (s *SQLite) PutPlugin(name string, spec plugins.Spec, module *PluginModule,
 	if err := spec.Validate(); err != nil {
 		return Plugin{}, false, fmt.Errorf("%w: plugin %s: %v", ErrInvalid, name, err)
 	}
-	if module != nil {
-		switch {
-		case spec.Kind != plugins.KindWasm || module.Digest != spec.Module:
-			return Plugin{}, false, fmt.Errorf("%w: plugin %s: the module sent is not the one its spec names", ErrInvalid, name)
-		case plugins.ModuleDigest(sha256.Sum256(module.Wasm)) != module.Digest:
-			return Plugin{}, false, fmt.Errorf("%w: plugin %s: the module sent is not of its digest", ErrInvalid, name)
-		case len(module.Wasm) > plugins.MaxModule:
-			return Plugin{}, false, fmt.Errorf("%w: plugin %s: a module is at most %d MB", ErrInvalid, name, plugins.MaxModule>>20)
-		}
-		if err := module.Manifest.Validate(); err != nil {
+	var manifestText any // NULL for a kind of Murder's own
+	switch {
+	case spec.Kind != plugins.KindContainer:
+		manifest = nil
+	case manifest == nil:
+		return Plugin{}, false, fmt.Errorf("%w: plugin %s: image %s has no plugin's manifest", ErrInvalid, name, spec.Image)
+	default:
+		if err := manifest.Validate(); err != nil {
 			return Plugin{}, false, fmt.Errorf("%w: plugin %s: %v", ErrInvalid, name, err)
 		}
+		if err := spec.ValidateWith(manifest); err != nil {
+			return Plugin{}, false, fmt.Errorf("%w: plugin %s: %v", ErrInvalid, name, err)
+		}
+		encoded, err := json.Marshal(manifest)
+		if err != nil {
+			return Plugin{}, false, err
+		}
+		manifestText = string(encoded)
 	}
 	encoded, err := json.Marshal(spec)
 	if err != nil {
 		return Plugin{}, false, err
 	}
 	next, err := s.write(false, func(tx *recorder, current *snapshot, now time.Time) error {
-		var manifest *plugins.Manifest
-		if spec.Kind == plugins.KindWasm {
-			if installed, ok := current.pluginManifests[spec.Module]; ok {
-				manifest = &installed
-			} else if module != nil {
-				manifest = &module.Manifest
-				manifestText, err := json.Marshal(module.Manifest)
-				if err != nil {
-					return err
-				}
-				if err := tx.Exec(`INSERT INTO plugin_modules (digest, manifest, wasm, size, created_at) VALUES (?, ?, ?, ?, ?)`,
-					module.Digest, string(manifestText), base64.StdEncoding.EncodeToString(module.Wasm), int64(len(module.Wasm)), formatTime(now)); err != nil {
-					return err
-				}
-			} else {
-				return fmt.Errorf("%w: plugin %s: module %s is not installed: murder plugin apply sends it", ErrInvalid, name, spec.Module)
-			}
-			if err := spec.ValidateWith(manifest); err != nil {
-				return fmt.Errorf("%w: plugin %s: %v", ErrInvalid, name, err)
-			}
-		}
 		existing, found := current.plugins[name]
 		if found {
 			previous, _ := json.Marshal(existing.Spec)
-			if string(previous) == string(encoded) {
+			// An image pinned says its manifest.
+			if string(previous) == string(encoded) && (existing.Manifest == nil) == (manifest == nil) {
 				return errUnchanged
 			}
 			if existing.Spec.Kind != spec.Kind {
@@ -398,12 +332,8 @@ func (s *SQLite) PutPlugin(name string, spec plugins.Spec, module *PluginModule,
 			}
 		}
 		stamp := formatTime(now)
-		if err := tx.Exec(`INSERT INTO plugins (name, spec, created_at, updated_at) VALUES (?, ?, ?, ?)
-			ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at`, name, string(encoded), stamp, stamp); err != nil {
-			return err
-		}
-		// The module the plugin ran before goes, unless another runs it.
-		if err := dropModules(tx, current, name, spec.Module); err != nil {
+		if err := tx.Exec(`INSERT INTO plugins (name, spec, created_at, updated_at, manifest) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at, manifest = excluded.manifest`, name, string(encoded), stamp, stamp, manifestText); err != nil {
 			return err
 		}
 		action := "plugin.installed"
@@ -433,9 +363,6 @@ func (s *SQLite) DeletePlugin(name, actor string) error {
 			return fmt.Errorf("%w: app %s lists plugin %s under plugins; take it out first", ErrConflict, strings.Join(apps, ", "), name)
 		}
 		if err := tx.Exec(`DELETE FROM plugins WHERE name = ?`, name); err != nil {
-			return err
-		}
-		if err := dropModules(tx, current, name, ""); err != nil {
 			return err
 		}
 		return event(tx, now, actor, "plugin.deleted", "", "", name)

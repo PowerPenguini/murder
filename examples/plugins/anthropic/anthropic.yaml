@@ -1,8 +1,11 @@
-# GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o examples/plugins/anthropic/anthropic.wasm ./examples/plugins/anthropic
+# docker build -f examples/plugins/anthropic/Dockerfile \
+#   --label "io.murder.plugin.manifest=$(go run ./examples/plugins/anthropic -manifest)" \
+#   -t ghcr.io/acme/anthropic-plugin:1.0.0 .
+# docker push ghcr.io/acme/anthropic-plugin:1.0.0
 # murder plugin apply examples/plugins/anthropic/anthropic.yaml
 # murder plugin key anthropic -file /root/anthropic.key
-kind: wasm
-module: anthropic.wasm                 # from this file's directory
+kind: container
+image: ghcr.io/acme/anthropic-plugin:1.0.0   # pinned by digest as it is installed
 # config:
 #   allow: ["POST /v1/messages/batches"]   # endpoints beyond those whose use is counted; shared by every tenant
 limits:

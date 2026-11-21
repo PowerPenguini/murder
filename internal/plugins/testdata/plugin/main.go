@@ -1,49 +1,49 @@
-//go:build wasip1
-
-// Command module is a plugin's module for the tests of the edge's: each
-// path of a request does one thing a module may, or may not.
+// Command plugin is a plugin for the tests of the edge's: each path of a
+// request does one thing a plugin may, or may not.
 package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/PowerPenguini/murder/pluginsdk"
 )
 
-func init() {
-	pluginsdk.Register(pluginsdk.Manifest{
-		Name:        "test",
-		Version:     "1",
-		Hosts:       []string{"api.example.com", "*.tiles.example.com"},
-		Key:         pluginsdk.Key{Header: "X-Key", Prefix: "Token "},
-		Metrics:     []string{"widgets", "bytes"},
-		RequestBody: 1 << 20,
-	}, forward)
+func main() {
+	pluginsdk.Register(manifest, forward)
+	pluginsdk.Run()
 }
 
-func main() {}
+var manifest = pluginsdk.Manifest{
+	Name:        "test",
+	Version:     "1",
+	Hosts:       []string{"api.example.com", "*.tiles.example.com"},
+	Key:         pluginsdk.Key{Header: "X-Key", Prefix: "Token "},
+	Metrics:     []string{"widgets", "bytes"},
+	RequestBody: 1 << 20,
+}
 
-// calls counts the requests this instance served.
-var calls int
+// calls counts the requests this container served.
+var calls atomic.Int64
 
 func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
-	calls++
+	calls := calls.Add(1)
 	to := &pluginsdk.Forward{URL: "https://api.example.com" + r.Path, Detail: "svc",
 		Header: map[string][]string{"X-Calls": {fmt.Sprint(calls)}, "X-Tenant": {r.Tenant}, "X-Saw-Key": {r.Get("X-Key") + r.Get("Authorization")}}}
 	if r.Query != "" {
 		to.URL += "?" + r.Query
 	}
 	switch strings.TrimPrefix(r.Path, "/") {
-	case "spin":
-		for {
-		}
 	case "panic":
 		panic("on purpose")
 	case "sleep":
-		time.Sleep(time.Hour)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Hour):
+		}
 	case "refuse":
 		return nil, pluginsdk.Refuse(418, "no tea for %s", r.Tenant)
 	case "elsewhere":
@@ -72,28 +72,28 @@ type meter struct {
 	body   []byte
 }
 
-func (m *meter) Response(r *pluginsdk.Response) bool {
+func (m *meter) Response(r *pluginsdk.Response, c *pluginsdk.Counter) bool {
 	if m.metric != "" {
-		pluginsdk.Count(m.metric, "", 1)
+		c.Count(m.metric, "", 1)
 	}
 	return r.Status == 200
 }
 
-func (m *meter) Body(chunk []byte) bool {
+func (m *meter) Body(chunk []byte, c *pluginsdk.Counter) bool {
 	m.body = append(m.body, chunk...)
 	return true
 }
 
-func (m *meter) End(complete bool) {
+func (m *meter) End(complete bool, c *pluginsdk.Counter) {
 	var answer struct {
 		Widgets int64 `json:"widgets"`
 	}
 	if json.Unmarshal(m.body, &answer) == nil {
-		pluginsdk.Count("widgets", "blue", answer.Widgets)
+		c.Count("widgets", "blue", answer.Widgets)
 	}
 	detail := "partial"
 	if complete {
 		detail = "whole"
 	}
-	pluginsdk.Count("bytes", detail, int64(len(m.body)))
+	c.Count("bytes", detail, int64(len(m.body)))
 }
