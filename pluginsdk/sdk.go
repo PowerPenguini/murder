@@ -193,6 +193,18 @@ type EventMeter interface {
 	Event(data []byte, c *Counter) (keep bool)
 }
 
+// Replacer is a Meter that replaces the answer whole: the tenant gets what
+// Replace returns, in place of what the provider answered, as when the
+// answer holds what the tenant must not have, such as a session opened
+// with the plugin's key. Every answer to the request is replaced: read
+// whole, up to 1 MB, after Response, and shown to Replace. An answer that
+// cannot be, longer, compressed, or one Replace fails on, is withheld: the
+// tenant is answered 502. Body and End are not called.
+type Replacer interface {
+	Meter
+	Replace(r *Response, body []byte, c *Counter) ([]byte, error)
+}
+
 // Response is the provider's answer, as the edge shows it.
 type Response struct {
 	Status int                 `json:"status"`

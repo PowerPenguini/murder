@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PowerPenguini/murder/pluginsdk"
 )
@@ -24,7 +25,10 @@ func TestALoginGetsTheKeysMarkAndTheServicesAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(to.Body)
-	if to.URL != "https://wyszukiwarkaregontest.stat.gov.pl/wsBIR/UslugaBIRzewnPubl.svc" || to.Detail != "Zaloguj" || to.Meter != nil ||
+	if _, replaces := to.Meter.(pluginsdk.Replacer); !replaces {
+		t.Fatal("a login's answer is not replaced")
+	}
+	if to.URL != "https://wyszukiwarkaregontest.stat.gov.pl/wsBIR/UslugaBIRzewnPubl.svc" || to.Detail != "Zaloguj" ||
 		!strings.Contains(body, "<ns:pKluczUzytkownika>murder-key-0123</ns:pKluczUzytkownika>") || strings.Contains(body, "tenants-own") ||
 		!strings.Contains(body, "<wsa:To>https://wyszukiwarkaregontest.stat.gov.pl/wsBIR/UslugaBIRzewnPubl.svc</wsa:To>") ||
 		!strings.Contains(body, "<wsa:Action>http://CIS/BIR/PUBL/2014/07/IUslugaBIRzewnPubl/Zaloguj</wsa:Action>") ||
@@ -115,5 +119,73 @@ func TestTheOtherCallsAreWrittenAgain(t *testing.T) {
 		if err != nil || !strings.Contains(string(to.Body), want) {
 			t.Errorf("%s: %v\n%s", given, err, to.Body)
 		}
+	}
+}
+
+// A tenant is given a session of the plugin's in place of BIR1's: BIR1's
+// goes on its calls, of that tenant only, and is gone once it logged out.
+func TestATenantHoldsNoSessionOfBIR1s(t *testing.T) {
+	answer := []byte(`<s:Envelope><s:Body><ZalogujResponse><ZalogujResult>ey6nu6e2428xp3b434gx</ZalogujResult></ZalogujResponse></s:Body></s:Envelope>`)
+	replaced, err := (&login{tenant: "acme"}).Replace(&pluginsdk.Response{Status: 200}, answer, nil)
+	if err != nil || strings.Contains(string(replaced), "ey6nu6e2428xp3b434gx") {
+		t.Fatalf("%s %v", replaced, err)
+	}
+	token := string(replaced[strings.Index(string(replaced), "<ZalogujResult>")+len("<ZalogujResult>") : strings.Index(string(replaced), "</ZalogujResult>")])
+	if len(token) != 20 || !sessionID.MatchString(token) {
+		t.Fatalf("token %q", token)
+	}
+	search := func(tenant, sid string) *pluginsdk.Forward {
+		r := request(soap12(`<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nip>5261040828</dat:Nip></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`))
+		r.Tenant, r.Header = tenant, map[string][]string{"Sid": {sid}}
+		to, err := forward(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return to
+	}
+	if to := search("acme", token); to.Header["Sid"][0] != "ey6nu6e2428xp3b434gx" {
+		t.Fatalf("acme's call: %+v", to.Header)
+	}
+	for tenant, sid := range map[string]string{"beta": token, "acme": "ey6nu6e2428xp3b434gx", "": ""} {
+		if to := search(tenant, sid); to.Header["Sid"] != nil || len(to.Drop) != 1 {
+			t.Errorf("%s with %q: %+v, drop %v", tenant, sid, to.Header, to.Drop)
+		}
+	}
+	logout := request(soap12(`<ns:Wyloguj><ns:pIdentyfikatorSesji>` + token + `</ns:pIdentyfikatorSesji></ns:Wyloguj>`))
+	logout.Tenant = "acme"
+	to, err := forward(logout)
+	if err != nil || !strings.Contains(string(to.Body), "<ns:pIdentyfikatorSesji>ey6nu6e2428xp3b434gx</ns:pIdentyfikatorSesji>") {
+		t.Fatalf("logout: %v %s", err, to.Body)
+	}
+	if to := search("acme", token); to.Header["Sid"] != nil {
+		t.Fatal("a session logged out is still known")
+	}
+	// A key BIR1 did not take has no session: its answer is as it was.
+	empty := []byte(`<ZalogujResponse><ZalogujResult/></ZalogujResponse>`)
+	if replaced, err := (&login{tenant: "acme"}).Replace(&pluginsdk.Response{Status: 200}, empty, nil); err != nil || string(replaced) != string(empty) {
+		t.Fatalf("%s %v", replaced, err)
+	}
+}
+
+// Sessions are kept for an hour without a call, and at most so many of
+// one tenant.
+func TestSessionsAreBounded(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	s := &sessions{byToken: map[string]*session{}, now: func() time.Time { now = now.Add(time.Second); return now }}
+	first := s.open("acme", "aaaa")
+	for range maxTenantSession {
+		s.open("acme", "bbbb")
+	}
+	if _, ok := s.find("acme", first); ok || len(s.byToken) != maxTenantSession {
+		t.Fatalf("acme keeps %d, its first %v", len(s.byToken), ok)
+	}
+	other := s.open("beta", "cccc")
+	now = now.Add(sessionIdle + time.Minute)
+	if _, ok := s.find("beta", other); ok {
+		t.Fatal("a session idle past an hour is known")
+	}
+	s.open("beta", "dddd")
+	if len(s.byToken) != 1 {
+		t.Fatalf("%d kept after an hour", len(s.byToken))
 	}
 }

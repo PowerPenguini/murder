@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -304,7 +305,10 @@ type (
 		ReplaceBody bool   `json:"replaceBody"`
 		Detail      string `json:"detail"`
 		Meter       bool   `json:"meter"`
-		Refuse      *struct {
+		// ReplaceAnswer has the answer read whole and replaced by the
+		// container's, or else withheld.
+		ReplaceAnswer bool `json:"replaceAnswer"`
+		Refuse        *struct {
 			Status  int    `json:"status"`
 			Message string `json:"message"`
 		} `json:"refuse"`
@@ -359,6 +363,7 @@ type containerHandler struct {
 	mu      sync.Mutex
 	failed  bool
 	meter   bool
+	replace bool
 	reading bool
 	ended   bool
 }
@@ -495,7 +500,11 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 		return nil, failure
 	}
 	h.x.detail = cleanDetail(forward.Detail)
-	h.meter = forward.Meter
+	h.meter, h.replace = forward.Meter, forward.ReplaceAnswer
+	if h.replace && !h.meter {
+		h.fail("request", errors.New("the container replaces an answer it does not meter"))
+		return nil, failure
+	}
 	return target, nil
 }
 
@@ -622,24 +631,41 @@ func (h *containerHandler) authorize(out *http.Request) {
 	}
 }
 
-func (h *containerHandler) response(response *http.Response) {
+// maxReplaced is the longest answer a container replaces.
+const maxReplaced = 1 << 20
+
+// withheld is what a request is answered when its answer was to be
+// replaced, and could not be: what it holds is not the tenant's to see.
+var withheld = statusError{code: http.StatusBadGateway, message: "the plugin's container could not write the answer it was to give; the edge's log says how", kind: "murder_plugin_failed"}
+
+func (h *containerHandler) response(response *http.Response) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.manifest.Key.Query != "" || h.manifest.Key.Body {
 		scrubErrorBody(response, h.x.key)
 	}
+	if h.replace {
+		if err := h.replaceAnswer(response); err != nil {
+			if !h.failed {
+				h.fail("replace", err)
+			}
+			_ = response.Body.Close()
+			return withheld
+		}
+		return nil
+	}
 	if !h.meter || h.failed {
-		return
+		return nil
 	}
 	input, err := json.Marshal(moduleResponse{Status: response.StatusCode, Header: response.Header})
 	if err != nil {
 		h.fail("response", err)
-		return
+		return nil
 	}
 	metered, err := h.metered("/response", callResponse, input)
 	if err != nil {
 		h.fail("response", err)
-		return
+		return nil
 	}
 	switch {
 	case metered.Events:
@@ -652,6 +678,62 @@ func (h *containerHandler) response(response *http.Response) {
 		h.reading = true
 		response.Body = &containerBody{h: h, body: response.Body}
 	}
+	return nil
+}
+
+// replaceAnswer has the container replace an answer: read whole, shown to
+// it, and passed on as it says. Anything amiss withholds the answer.
+func (h *containerHandler) replaceAnswer(response *http.Response) error {
+	if h.failed {
+		return errors.New("the container failed before the answer")
+	}
+	encodings := response.Header.Values("Content-Encoding")
+	if len(encodings) > 1 || len(encodings) == 1 && !strings.EqualFold(strings.TrimSpace(encodings[0]), "identity") {
+		return fmt.Errorf("the answer to replace came compressed (%s)", strings.Join(encodings, ", "))
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxReplaced+1))
+	_ = response.Body.Close()
+	if err != nil {
+		return fmt.Errorf("the answer to replace could not be read: %w", err)
+	}
+	if len(body) > maxReplaced {
+		return fmt.Errorf("the answer to replace is longer than %d bytes", maxReplaced)
+	}
+	input, err := json.Marshal(moduleResponse{Status: response.StatusCode, Header: response.Header})
+	if err != nil {
+		return err
+	}
+	if _, err := h.metered("/response", callResponse, input); err != nil {
+		return err
+	}
+	release, ok := h.container.hold(h.x.tenant, int64(len(body)), callBody)
+	if !ok {
+		return errors.New("its container had no room for the answer in time")
+	}
+	answer, err := h.container.call(callResponse, http.MethodPost, "/replace", h.session, body, maxReplaced+maxAnswer)
+	release()
+	if err != nil {
+		return err
+	}
+	var metered moduleMetered
+	replaced, err := splitJSON(answer, &metered)
+	if err != nil {
+		return fmt.Errorf("/replace answered no JSON of counts: %w", err)
+	}
+	if metered.Error != "" {
+		return errors.New(metered.Error)
+	}
+	if len(replaced) > maxReplaced {
+		return fmt.Errorf("/replace answered more than %d bytes", maxReplaced)
+	}
+	if err := h.count("/replace", metered); err != nil {
+		return err
+	}
+	response.Body = io.NopCloser(bytes.NewReader(replaced))
+	response.ContentLength = int64(len(replaced))
+	response.Header.Set("Content-Length", strconv.Itoa(len(replaced)))
+	response.Header.Del("Content-Encoding")
+	return nil
 }
 
 // event shows the container the data of one event of a stream; it
@@ -698,16 +780,22 @@ func (h *containerHandler) metered(name string, timeout time.Duration, input []b
 	if metered.Error != "" {
 		return moduleMetered{}, errors.New(metered.Error)
 	}
+	return metered, h.count(name, metered)
+}
+
+// count counts what a call of the container's answered it counted, once
+// every count is one it may make.
+func (h *containerHandler) count(name string, metered moduleMetered) error {
 	if len(metered.Counts) > maxCounts {
-		return moduleMetered{}, fmt.Errorf("%s answered %d counts, more than %d", name, len(metered.Counts), maxCounts)
+		return fmt.Errorf("%s answered %d counts, more than %d", name, len(metered.Counts), maxCounts)
 	}
 	metrics := MetricsOf(Spec{Kind: KindContainer}, &h.manifest)
 	for _, count := range metered.Counts {
 		switch {
 		case count.Metric == MetricRequests || !slices.Contains(metrics, count.Metric):
-			return metered, fmt.Errorf("%s counts %q, which is not one of the metrics its manifest says (%s)", name, count.Metric, strings.Join(h.manifest.Metrics, ", "))
+			return fmt.Errorf("%s counts %q, which is not one of the metrics its manifest says (%s)", name, count.Metric, strings.Join(h.manifest.Metrics, ", "))
 		case count.Amount < 0 || count.Amount > MaxCount:
-			return metered, fmt.Errorf("%s counts %d of %s, not an amount from 0 to 2^40", name, count.Amount, count.Metric)
+			return fmt.Errorf("%s counts %d of %s, not an amount from 0 to 2^40", name, count.Amount, count.Metric)
 		}
 	}
 	for _, count := range metered.Counts {
@@ -715,7 +803,7 @@ func (h *containerHandler) metered(name string, timeout time.Duration, input []b
 			h.x.count(count.Metric, cleanDetail(count.Detail), count.Amount)
 		}
 	}
-	return metered, nil
+	return nil
 }
 
 // chunk shows the container a chunk of the answer's body; it reports

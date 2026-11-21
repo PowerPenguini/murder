@@ -156,6 +156,16 @@ reports.
 - BIR1 takes the key in the body of the login, not in a header. The
   plugin writes the login itself, and the edge puts the operator's key in
   it (see [the key in the body](#the-interface-for-other-languages)).
+- A session BIR1 opens is the operator's key's: a tenant holding it could
+  call BIR1 itself, from the internet its network reaches, past what is
+  counted and its limits. The tenant is therefore never given one. The
+  plugin replaces the session in the login's answer with one of its own,
+  and puts BIR1's back on each call of the tenant's that names it, of that
+  tenant only. Its sessions are kept by its container, for an hour without
+  a call, as BIR1 keeps its own, at most 64 of a tenant. One it does not
+  know, as after its container was started again, a new image applied, or
+  the tenant moved to another node, is none: BIR1 answers as for a
+  session that ran out, and the client logs in again.
 - BIR1 answers only an envelope that names its own address in `wsa:To`.
   The plugin therefore writes every call again from what it read of the
   tenant's, which is SOAP 1.2, as BIR1's answers are. Only BIR1's operations go on:
@@ -314,14 +324,21 @@ What the edge does around a container:
   of the tenant's. The edge then puts the key where the manifest says.
 - **Refusing.** The container may refuse a request with a status from 400
   to 599, and a message.
+- **Replacing the answer.** A plugin that meters a request with a
+  `pluginsdk.Replacer` says so as the request goes. The edge then reads the
+  whole answer, up to 1 MB, and passes on what the plugin gives in its
+  place, as gus hides BIR1's sessions. An answer that cannot be replaced,
+  longer, compressed, or one the plugin fails on, is withheld: the tenant
+  is answered `502`, never what the provider said.
 - **The answer.** For a plugin that meters it, the edge shows the status
   and headers, then the body as it passes, uncompressed, and says when it
   ended: read whole, or not, as when the tenant stopped reading. A stream
   of server-sent events may be shown event by event instead
   (`pluginsdk.EventMeter`), and the plugin may take an event out of what
-  the tenant gets, as openai takes out the usage it asked for. It cannot
-  add to the answer, nor change it otherwise. The
-  plugin's counts are kept by their detail, such as a model. Murder counts
+  the tenant gets, as openai takes out the usage it asked for. A stream
+  it reads it cannot add to, nor change otherwise; only an answer it
+  replaces whole (below) is its own to write. The plugin's counts are kept
+  by their detail, such as a model. Murder counts
   `requests` itself, by the request's detail.
 - **The container.** It runs as nobody (65534), whatever its image says,
   with:
@@ -381,6 +398,7 @@ let go of after 10 minutes.
 | `POST /response` | the answer's status and headers | counts, whether to read the body, and whether event by event |
 | `POST /body` | a chunk of the answer's body | whether it wants more |
 | `POST /event` | the data of one event | whether the event stays in the answer |
+| `POST /replace` | the whole answer, for a request forwarded with `replaceAnswer` | counts, and the answer to give after them |
 | `POST /end` | whether the body was read whole | counts |
 
 The JSON, version 3:
@@ -396,13 +414,14 @@ request   {"tenant", "plugin", "method", "path", "query", "header": {"Name": ["v
            "hosts": ["api.x.example"], "config": {...}, "keyMark": "murder-key-…", "bodyFollows": true}
            \n<the body>
 forward   {"url", "header": {...}, "drop": [...], "replaceBody": false,
-           "detail": "", "meter": false}
+           "detail": "", "meter": false, "replaceAnswer": false}
            [\n<the body, with replaceBody>]
           | {"refuse": {"status": 403, "message": "..."}} | {"error": "..."}
 response  {"status": 200, "header": {...}}
 metered   {"counts": [{"metric", "detail", "amount"}], "body": false, "events": false} | {"error": "..."}
 body      {"more": true} | {"error": "..."}
 event     {"keep": true} | {"error": "..."}
+replace   {"counts": [...]} \n<the answer to give> | {"error": "..."}
 end       {"complete": true}
 ```
 

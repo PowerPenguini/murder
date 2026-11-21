@@ -120,8 +120,9 @@
   plugin wrote: a tenant cannot have its own body carry it; it uses a container only once the container says the
   manifest its image's label said as it was installed. The container does
   see what tenants send and what providers answer, and decides what is
-  passed on and counted, and may take an event out of a stream it meters,
-  though it can add nothing to an answer: install only images you trust
+  passed on and counted, may take an event out of a stream it meters, and
+  may replace a short answer whole, as gus hides the sessions GUS opens
+  with the operator's key (one it cannot replace is withheld): install only images you trust
   as you trust the edge with that traffic. Murder's own are built from its
   repository by its release workflow, and published with it. One container serves every tenant of its node:
   a plugin's code keeps tenants apart, not Murder. Its image is pinned by

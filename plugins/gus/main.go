@@ -7,7 +7,8 @@
 // BIR1 is SOAP 1.2: a client logs in with the key (Zaloguj), and sends the
 // session it is given in the sid header of its next calls. A tenant's
 // client logs in with any key: the plugin writes the login, and the edge
-// puts the operator's key in it. The plugin writes every call again, from
+// puts the operator's key in it. The tenant is given a session of the
+// plugin's in place of BIR1's (see sessions.go). The plugin writes every call again, from
 // what it read of the tenant's, with the service's own address in it, as
 // the service takes no other: only BIR1's operations, of parameters it
 // checked, go on.
@@ -156,21 +157,40 @@ func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
 	if err != nil {
 		return nil, pluginsdk.Refuse(400, "%v", err)
 	}
+	// The tenant's session is the plugin's: BIR1's goes in its place.
+	sid, session := known.find(r.Tenant, r.Get("sid"))
+	if operation == "Wyloguj" {
+		if real, ok := known.find(r.Tenant, c.Session); ok {
+			known.close(r.Tenant, c.Session)
+			c.Session = real
+		}
+	}
 	body, m, err := write(operation, c, r.KeyMark)
 	if err != nil {
 		return nil, pluginsdk.Refuse(400, "%v", err)
+	}
+	if operation == "Zaloguj" {
+		m = &login{tenant: r.Tenant}
 	}
 	action := actionBase + operation
 	if operation == "GetValue" {
 		action = getValue
 	}
-	return &pluginsdk.Forward{
+	to := &pluginsdk.Forward{
 		URL:    address,
 		Body:   envelope(address, action, body),
 		Header: map[string][]string{"Content-Type": {"application/soap+xml; charset=utf-8"}},
 		Detail: operation,
 		Meter:  m,
-	}, nil
+	}
+	if session {
+		to.Header["Sid"] = []string{sid}
+	} else {
+		// None, or one the plugin does not know: BIR1 answers as for a
+		// session that ran out.
+		to.Drop = []string{"Sid"}
+	}
+	return to, nil
 }
 
 // read reads a tenant's envelope, of SOAP 1.2, as BIR1 speaks: the

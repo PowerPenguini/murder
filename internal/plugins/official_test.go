@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -348,6 +349,38 @@ func TestAStreamTooLongToAskForItsUsageIsEstimated(t *testing.T) {
 	}
 }
 
+// A container may replace an answer whole; one it could not replace,
+// as one too long or one it failed on, is withheld, never passed as it
+// was.
+func TestAnAnswerToReplaceIsReplacedOrWithheld(t *testing.T) {
+	w := newContainerFixture(t, func(rw http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "long") {
+			io.WriteString(rw, strings.Repeat("secret ", (maxReplaced/7)+10))
+			return
+		}
+		io.WriteString(rw, "a secret of the provider's")
+	}, nil)
+	if response, body := w.get(t, "127.0.0.1", "/replace"); response.StatusCode != 200 || body != "A SECRET OF THE PROVIDER'S" {
+		t.Fatalf("replaced: %d %q", response.StatusCode, body)
+	}
+	w.upstream(t)
+	for _, path := range []string{"/replacefail", "/replacelong"} {
+		response, body := w.get(t, "127.0.0.1", path)
+		if response.StatusCode != http.StatusBadGateway || strings.Contains(strings.ToLower(body), "secret") {
+			t.Errorf("%s: %d %.100s", path, response.StatusCode, body)
+		}
+		w.upstream(t)
+	}
+	report, _ := w.counter.Next()
+	replaced := false
+	for _, count := range report.Counts {
+		replaced = replaced || count.Metric == "bytes" && count.Detail == "replaced" && count.Amount == int64(len("a secret of the provider's"))
+	}
+	if !replaced {
+		t.Fatalf("counts %+v", report.Counts)
+	}
+}
+
 // A body is read in room taken as it comes, not as it says it is long,
 // and the room is given back.
 func TestABodyTakesRoomAsItComes(t *testing.T) {
@@ -585,9 +618,13 @@ func TestGUSLogsInWithTheKeyInTheBodyAndCountsSearches(t *testing.T) {
 	}, nil)
 	const svc = "/wsBIR/UslugaBIRzewnPubl.svc"
 	response, body := post(t, w, svc, "application/soap+xml; charset=utf-8", birCall("Zaloguj", `<ns:Zaloguj><ns:pKluczUzytkownika>murder-key-guess</ns:pKluczUzytkownika></ns:Zaloguj>`))
-	if response.StatusCode != 200 || !strings.Contains(body, "<ZalogujResult>ey6nu6e2428xp3b434gx</ZalogujResult>") {
-		t.Fatalf("login: %d %s", response.StatusCode, body)
+	// The tenant gets a session of the plugin's, never BIR1's.
+	start, end := strings.Index(body, "<ZalogujResult>"), strings.Index(body, "</ZalogujResult>")
+	if response.StatusCode != 200 || start < 0 || end != start+len("<ZalogujResult>")+20 || strings.Contains(body, "ey6nu6e2428xp3b434gx") ||
+		response.Header.Get("Content-Length") != strconv.Itoa(len(body)) {
+		t.Fatalf("login: %d %v %s", response.StatusCode, response.Header, body)
 	}
+	token := body[start+len("<ZalogujResult>") : end]
 	login := w.upstream(t)
 	mu.Lock()
 	first := sent[0]
@@ -599,7 +636,7 @@ func TestGUSLogsInWithTheKeyInTheBodyAndCountsSearches(t *testing.T) {
 	}
 	request, _ := http.NewRequest(http.MethodPost, w.server.URL+"/p"+svc, strings.NewReader(birCall("DaneSzukajPodmioty", `<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nipy>5261040828,5261040829</dat:Nipy></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`)))
 	request.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
-	request.Header.Set("sid", "ey6nu6e2428xp3b434gx")
+	request.Header.Set("sid", token)
 	if response := w.as(t, "127.0.0.1", request); response.StatusCode != 200 {
 		t.Fatalf("search: %d", response.StatusCode)
 	}
@@ -613,7 +650,16 @@ func TestGUSLogsInWithTheKeyInTheBodyAndCountsSearches(t *testing.T) {
 		t.Fatalf("a fault: %d %s", response.StatusCode, body)
 	}
 	w.upstream(t)
-	if w.used("searches") != 2 || w.used("reports") != 0 || w.used(MetricRequests) != 3 {
+	// BIR1's session, were the tenant to know it, is no session of the
+	// plugin's: it goes no further.
+	request, _ = http.NewRequest(http.MethodPost, w.server.URL+"/p"+svc, strings.NewReader(birCall("GetValue", `<ns:GetValue xmlns:ns="http://CIS/BIR/2014/07"><ns:pNazwaParametru>StatusSesji</ns:pNazwaParametru></ns:GetValue>`)))
+	request.Header.Set("Content-Type", "application/soap+xml")
+	request.Header.Set("sid", "ey6nu6e2428xp3b434gx")
+	w.as(t, "127.0.0.1", request)
+	if sid := w.upstream(t).Header.Get("sid"); sid != "" {
+		t.Fatalf("BIR1's own session went on: %q", sid)
+	}
+	if w.used("searches") != 2 || w.used("reports") != 0 || w.used(MetricRequests) != 4 {
 		t.Fatalf("searches %d, reports %d, requests %d", w.used("searches"), w.used("reports"), w.used(MetricRequests))
 	}
 	// What is not a call of BIR1's is refused before it goes.
@@ -642,7 +688,7 @@ func TestGUSsTestServiceThroughTheEdge(t *testing.T) {
 	if start < 0 || end < start+len("<ZalogujResult>")+1 {
 		t.Fatalf("no session: %s", body)
 	}
-	sid := body[start+len("<ZalogujResult>") : end]
+	sid := body[start+len("<ZalogujResult>") : end] // the plugin's
 	ask := func(operation, body, want string) {
 		t.Helper()
 		request, _ := http.NewRequest(http.MethodPost, w.server.URL+"/p"+svc, strings.NewReader(birCall(operation, body)))

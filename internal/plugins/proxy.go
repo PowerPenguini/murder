@@ -258,8 +258,9 @@ type handler interface {
 	// credentials taken off it already.
 	authorize(out *http.Request)
 	// response meters the provider's answer as it passes, its headers
-	// cleared of the key already.
-	response(response *http.Response)
+	// cleared of the key already; an error withholds the answer, the
+	// request answered as a statusError says.
+	response(response *http.Response) error
 	// close lets go of what the handler holds, once the request was
 	// answered.
 	close()
@@ -360,7 +361,9 @@ func (x *exchange) authorize(out *http.Request) {
 func (x *exchange) response(response *http.Response) error {
 	// A redirect would say where with the key in it.
 	scrubHeaders(response.Header, x.key)
-	x.handler.response(response)
+	if err := x.handler.response(response); err != nil {
+		return err
+	}
 	// Trailers, which come after the body, are not passed on: the
 	// transport fills them in as the body ends, and the proxy passes on
 	// what is there once the body is closed.
@@ -384,6 +387,12 @@ func (b *withoutTrailers) Close() error {
 // failed answers a request the provider did not answer. The error is
 // logged without the URL: it holds HERE's key.
 func (x *exchange) failed(w http.ResponseWriter, r *http.Request, err error) {
+	// An answer the plugin withheld.
+	var status statusError
+	if errors.As(err, &status) {
+		refuse(w, status.code, status.kind, status.message)
+		return
+	}
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		err = fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)

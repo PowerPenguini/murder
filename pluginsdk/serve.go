@@ -133,11 +133,12 @@ type plugin struct {
 
 // session is a request the plugin meters, from its forward to its end.
 type session struct {
-	mu      sync.Mutex
-	meter   Meter
-	counter Counter
-	reading bool
-	events  EventMeter
+	mu       sync.Mutex
+	meter    Meter
+	counter  Counter
+	reading  bool
+	events   EventMeter
+	response Response
 	// used is when the edge last called, in Unix nanoseconds.
 	used atomic.Int64
 }
@@ -153,6 +154,7 @@ func (p *plugin) handler() http.Handler {
 	mux.HandleFunc("POST /response", p.response)
 	mux.HandleFunc("POST /body", p.body)
 	mux.HandleFunc("POST /event", p.event)
+	mux.HandleFunc("POST /replace", p.replace)
 	mux.HandleFunc("POST /end", p.end)
 	return mux
 }
@@ -186,8 +188,10 @@ type forwarded struct {
 	ReplaceBody bool                `json:"replaceBody,omitempty"`
 	Detail      string              `json:"detail,omitempty"`
 	Meter       bool                `json:"meter,omitempty"`
-	Refuse      *Refusal            `json:"refuse,omitempty"`
-	Error       string              `json:"error,omitempty"`
+	// ReplaceAnswer has the answer replaced (see Replacer).
+	ReplaceAnswer bool     `json:"replaceAnswer,omitempty"`
+	Refuse        *Refusal `json:"refuse,omitempty"`
+	Error         string   `json:"error,omitempty"`
 }
 
 // readCall reads a call of at most limit bytes, in one buffer of the
@@ -275,7 +279,8 @@ func (p *plugin) request(w http.ResponseWriter, r *http.Request) {
 		p.sessions[id] = s
 		p.mu.Unlock()
 	}
-	encoded, err := json.Marshal(forwarded{URL: to.URL, Header: to.Header, Drop: to.Drop, ReplaceBody: to.Body != nil, Detail: to.Detail, Meter: to.Meter != nil})
+	_, replaces := to.Meter.(Replacer)
+	encoded, err := json.Marshal(forwarded{URL: to.URL, Header: to.Header, Drop: to.Drop, ReplaceBody: to.Body != nil, Detail: to.Detail, Meter: to.Meter != nil, ReplaceAnswer: replaces})
 	if err != nil {
 		answer(w, forwarded{Error: err.Error()})
 		return
@@ -342,11 +347,16 @@ func (p *plugin) response(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.mu.Unlock()
+	s.response = response
 	err = func() (err error) {
 		defer guard(&err)
 		s.reading = s.meter.Response(&response, &s.counter)
 		return nil
 	}()
+	if _, ok := s.meter.(Replacer); ok {
+		// The answer comes whole to /replace.
+		s.reading = false
+	}
 	if err != nil {
 		answer(w, metered{Error: err.Error()})
 		return
@@ -359,6 +369,46 @@ func (p *plugin) response(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	answer(w, metered{Counts: s.counter.take(), Body: s.reading, Events: s.events != nil})
+}
+
+// replace shows a Replacer the whole answer, and answers its counts and,
+// after a line's end, the answer the tenant gets.
+func (p *plugin) replace(w http.ResponseWriter, r *http.Request) {
+	body, err := readCall(w, r, 1<<20)
+	if err != nil {
+		answer(w, metered{Error: "the edge's answer: " + err.Error()})
+		return
+	}
+	s, err := p.session(r)
+	if err != nil {
+		answer(w, metered{Error: err.Error()})
+		return
+	}
+	defer s.mu.Unlock()
+	replacer, ok := s.meter.(Replacer)
+	if !ok {
+		answer(w, metered{Error: "the request's meter replaces no answer"})
+		return
+	}
+	var replaced []byte
+	err = func() (err error) {
+		defer guard(&err)
+		replaced, err = replacer.Replace(&s.response, body, &s.counter)
+		return err
+	}()
+	if err != nil {
+		answer(w, metered{Error: err.Error()})
+		return
+	}
+	encoded, err := json.Marshal(metered{Counts: s.counter.take()})
+	if err != nil {
+		answer(w, metered{Error: err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)+1+len(replaced)))
+	_, _ = w.Write(append(encoded, '\n'))
+	_, _ = w.Write(replaced)
 }
 
 type evented struct {

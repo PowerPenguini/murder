@@ -62,8 +62,28 @@ func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
 		to.Meter = &meter{}
 	case "badcount":
 		to.Meter = &meter{metric: "requests"}
+	case "replace", "replacelong":
+		to.Meter = &replacer{}
+	case "replacefail":
+		to.Meter = &replacer{fail: true}
 	}
 	return to, nil
+}
+
+// replacer replaces an answer with what it said, in capitals, and
+// counts its bytes; or fails.
+type replacer struct{ fail bool }
+
+func (m *replacer) Response(*pluginsdk.Response, *pluginsdk.Counter) bool { return true }
+func (m *replacer) Body([]byte, *pluginsdk.Counter) bool                  { return true }
+func (m *replacer) End(bool, *pluginsdk.Counter)                          {}
+
+func (m *replacer) Replace(r *pluginsdk.Response, body []byte, c *pluginsdk.Counter) ([]byte, error) {
+	if m.fail {
+		return nil, fmt.Errorf("on purpose")
+	}
+	c.Count("bytes", "replaced", int64(len(body)))
+	return []byte(strings.ToUpper(string(body))), nil
 }
 
 // meter counts the widgets a JSON answer says, and its bytes.
