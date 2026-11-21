@@ -14,7 +14,7 @@ import (
 // container (see docs/plugins.md): the calls it answers on its socket and
 // the JSON they take and give. A plugin says the version it was built for
 // in its manifest; an edge runs only versions it knows.
-const ABI = 2
+const ABI = 3
 
 // MaxRequestBody is the most of a request's body a plugin's container
 // reads.
@@ -65,6 +65,10 @@ type Manifest struct {
 	// RequestBody is the most bytes of a request's body it reads, at most
 	// MaxRequestBody; 0 reads none, and bodies pass on as they come.
 	RequestBody int64 `json:"requestBody,omitempty"`
+	// RequestBodyTypes are the media types of the bodies it reads, as
+	// application/json; others pass on as they come, at any size. None
+	// reads a body of any type.
+	RequestBodyTypes []string `json:"requestBodyTypes,omitempty"`
 	// UI says how the panel shows the plugin: none says only the
 	// plugin's name and its metrics' names.
 	UI *UI `json:"ui,omitempty"`
@@ -91,6 +95,7 @@ var (
 	metricName  = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$`)
 	queryName   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 	headerToken = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
+	mediaType   = regexp.MustCompile(`^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$`)
 )
 
 // reservedHeaders are headers a plugin may neither set nor have the key
@@ -153,6 +158,14 @@ func (m Manifest) Validate() error {
 	if m.RequestBody < 0 || m.RequestBody > MaxRequestBody {
 		problems = append(problems, fmt.Sprintf("a plugin reads at most %d MB of a request's body", MaxRequestBody>>20))
 	}
+	if len(m.RequestBodyTypes) > 16 {
+		problems = append(problems, "a plugin names at most 16 media types of bodies it reads")
+	}
+	for _, media := range m.RequestBodyTypes {
+		if !mediaType.MatchString(media) {
+			problems = append(problems, fmt.Sprintf("%q is not a media type in lowercase, as application/json", media))
+		}
+	}
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))
 	}
@@ -160,11 +173,8 @@ func (m Manifest) Validate() error {
 }
 
 // MetricsOf are the metrics a plugin counts, which its limits may name:
-// its kind's, or for a container, the requests and the manifest's.
-func MetricsOf(spec Spec, manifest *Manifest) []string {
-	if spec.Kind != KindContainer {
-		return Metrics[spec.Kind]
-	}
+// the requests, and its manifest's.
+func MetricsOf(_ Spec, manifest *Manifest) []string {
 	metrics := []string{MetricRequests}
 	if manifest != nil {
 		for _, metric := range manifest.Metrics {

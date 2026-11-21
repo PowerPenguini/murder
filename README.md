@@ -51,8 +51,9 @@ between servers, to you; Murder does it with ZFS. An app is configuration
   reach each other, the host or private networks (nftables).
   [Security model](docs/security.md)
 - **Plugins.** Tenants reach providers' APIs through the edge, with a key
-  they never see: OpenAI and HERE built in, any other with a small
-  container of your own, written with [pluginsdk](pluginsdk). Murder counts
+  they never see, through a small container on each node: Murder's own
+  for OpenAI and HERE, or one of yours, written with
+  [pluginsdk](pluginsdk). Murder counts
   each tenant's tokens, requests and transactions, and stops a tenant at a
   hard limit or says when it passes a soft one. [Plugins](docs/plugins.md)
 - **Metrics** in the Prometheus format, and an audit log of who changed what.

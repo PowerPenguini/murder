@@ -1,11 +1,13 @@
 # Publishes a release for a tag v*: murder for Linux on amd64 and arm64,
-# install.sh, and SHA256SUMS of all three, which install.sh checks. Run by
-# hand, it only builds them and keeps them as the run's artifact.
+# install.sh, and SHA256SUMS of all three, which install.sh checks; and
+# the images of Murder's plugins, ghcr.io/<owner>/murder-openai and
+# murder-here, for amd64 and arm64, tagged with the release and latest.
+# Run by hand, it only builds them and keeps them as the run's artifacts.
 #
 # Building and testing runs the repository's code, so it only reads; only
-# the job that publishes may write, and it runs nothing of the repository:
-# it takes the built files and makes the release of them. Actions are
-# pinned to commits, not to tags that can move.
+# the jobs that publish may write, and they run nothing of the
+# repository: they take what was built and publish it. Actions are pinned
+# to commits, and images to their content, not to tags that can move.
 name: Release
 on:
   push:
@@ -46,6 +48,24 @@ jobs:
           done
           cp scripts/install.sh dist/install.sh
           (cd dist && sha256sum murder-linux-amd64 murder-linux-arm64 install.sh > SHA256SUMS && cat SHA256SUMS)
+      # Each plugin's program is built for each platform on this one; the
+      # image holds nothing else, and its label the manifest the program
+      # prints. BuildKit runs in a container of its pinned image.
+      - name: Build the plugins' images
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir images
+          docker buildx create --use --name plugins --driver docker-container \
+            --driver-opt image=moby/buildkit:buildx-stable-1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c
+          for plugin in openai here; do
+            docker buildx build --platform linux/amd64,linux/arm64 -f plugins/Dockerfile \
+              --build-arg PLUGIN="$plugin" \
+              --label "io.murder.plugin.manifest=$(go run "./plugins/$plugin" -manifest)" \
+              --label "org.opencontainers.image.source=https://github.com/$REPO" \
+              --output "type=oci,dest=images/murder-$plugin.tar" .
+          done
+          (cd images && sha256sum murder-openai.tar murder-here.tar > SHA256SUMS && cat SHA256SUMS)
       - name: Check install.sh against the build
         run: |
           python3 -m http.server --directory dist 8765 >/dev/null 2>&1 &
@@ -57,9 +77,42 @@ jobs:
           name: murder
           path: dist/
           if-no-files-found: error
-  publish:
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: plugin-images
+          path: images/
+          if-no-files-found: error
+  # The plugins' images go first: the release's notes and docs name them.
+  publish-images:
     if: github.ref_type == 'tag'
     needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: plugin-images
+          path: images
+      - name: Check the images against their sums
+        run: cd images && sha256sum -c SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io -u "$ACTOR" --password-stdin
+          for plugin in openai here; do
+            for tag in "$TAG" latest; do
+              skopeo copy --all "oci-archive:images/murder-$plugin.tar" "docker://ghcr.io/$owner/murder-$plugin:$tag"
+            done
+          done
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [build, publish-images]
     runs-on: ubuntu-latest
     permissions:
       contents: write

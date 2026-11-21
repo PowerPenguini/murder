@@ -1,9 +1,10 @@
 // Package plugins passes tenants' requests on to the APIs of providers
 // such as OpenAI and HERE, with a key the tenant never sees, and counts
-// and limits what each tenant uses of them. A plugin is configuration: a
-// kind Murder knows how to meter, the provider's address, and the limits
-// its tenants get. The edge serves it, on a port only tenants reach; the
-// agent keeps what was used in the replicated state.
+// and limits what each tenant uses of them. A plugin is an image, run in
+// a container on each node, that says where each request goes and counts
+// what it used; its spec names the image and the limits its tenants get.
+// The edge serves it, on a port only tenants reach, and holds it to its
+// manifest; the agent keeps what was used in the replicated state.
 package plugins
 
 import (
@@ -11,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -21,87 +21,35 @@ import (
 	"github.com/PowerPenguini/murder/internal/strictyaml"
 )
 
-// The kinds of plugin: how requests are passed on and what is counted.
-const (
-	// KindOpenAI is OpenAI's API, or one that speaks it: a bearer key,
-	// tokens counted from each response's usage.
-	KindOpenAI = "openai"
-	// KindHERE is HERE's location services: a key in the query, requests
-	// and transactions counted by service.
-	KindHERE = "here"
-	// KindContainer is a plugin of one's own, run in a container on each
-	// node: its code says where requests go and counts what they used
-	// (see Manifest and docs/plugins.md).
-	KindContainer = "container"
-)
+// KindContainer is the kind of every plugin: run in a container on each
+// node, its code says where requests go and counts what they used (see
+// Manifest and docs/plugins.md). Murder's own plugins for OpenAI and HERE
+// are images too, built from plugins/ in its repository.
+const KindContainer = "container"
 
-// Kinds are the kinds Murder meters.
-var Kinds = []string{KindOpenAI, KindHERE, KindContainer}
+// Kinds are the kinds this release runs.
+var Kinds = []string{KindContainer}
 
 // Spec is a plugin as its file says it: what `murder plugin apply` reads.
 // The plugin is named after its file.
 type Spec struct {
-	// Kind is how its requests are passed on and metered (see Kinds).
+	// Kind is container (see Kinds).
 	Kind string `json:"kind" yaml:"kind"`
-	// Upstream is the provider's address, scheme and host, for a kind
-	// that has one: OpenAI's is https://api.openai.com.
-	Upstream string `json:"upstream,omitempty" yaml:"upstream,omitempty"`
-	// Hosts are the host names requests may go to, for a kind whose
-	// services each have their own, such as HERE's: a name, or "*." and a
-	// domain for every name below it. HERE's are HEREHosts.
+	// Image is the plugin's image: in a plugin's file, a reference such
+	// as ghcr.io/acme/plugin:1.2; installed, pinned to its content,
+	// repository@sha256:<digest> (or a local sha256:<id>, which only a
+	// node that has it runs).
+	Image string `json:"image" yaml:"image"`
+	// Hosts are the host names requests may go to, in place of those the
+	// plugin's manifest names: a name, or "*." and a domain for every
+	// name below it.
 	Hosts []string `json:"hosts,omitempty" yaml:"hosts,omitempty"`
-	// Allow are endpoints requests may go to beyond the kind's own, for a
-	// kind that limits them, such as openai: a method and a path, such as
-	// "POST /v1/batches", the path ending in /* for any one segment more.
-	// What they use is counted as the kind reads it, which may be only
-	// requests; and every tenant reaches what they keep with the same key.
-	Allow []string `json:"allow,omitempty" yaml:"allow,omitempty"`
-	// Image is the image of a plugin of kind container: in a plugin's
-	// file, a reference such as ghcr.io/acme/plugin:1.2; installed, pinned
-	// to its content, repository@sha256:<digest> (or a local sha256:<id>,
-	// which only a node that has it runs).
-	Image string `json:"image,omitempty" yaml:"image,omitempty"`
-	// Config is what a plugin of kind container is told with each request,
-	// as JSON: whatever its code takes.
+	// Config is what the plugin is told with each request, as JSON:
+	// whatever its code takes.
 	Config map[string]any `json:"config,omitempty" yaml:"config,omitempty"`
 	// Limits are what each tenant may use, unless it has limits of its
 	// own, or a key of its own (then only its own limits hold).
 	Limits []Limit `json:"limits,omitempty" yaml:"limits,omitempty"`
-}
-
-// OpenAIEndpoints are the endpoints of OpenAI's API a tenant reaches: those
-// whose answers say what they used, and the models. Those that keep or
-// list what was sent (files, batches, stored responses and completions,
-// fine-tuning, vector stores) are left out: every tenant would reach every
-// other's, under the one key. So are those that spend without saying
-// what (speech, the Realtime API's WebSockets).
-var OpenAIEndpoints = []string{
-	"POST /v1/chat/completions",
-	"POST /v1/responses",
-	"POST /v1/completions",
-	"POST /v1/embeddings",
-	"POST /v1/moderations",
-	"POST /v1/images/generations",
-	"POST /v1/images/edits",
-	"POST /v1/images/variations",
-	"POST /v1/audio/transcriptions",
-	"POST /v1/audio/translations",
-	"GET /v1/models",
-	"GET /v1/models/*",
-}
-
-// HEREHosts are the HERE services a tenant reaches by default: search,
-// routing, matrices, isolines, waypoint sequencing, map tiles and traffic,
-// which keep nothing of a request. Those that keep data under the account
-// (batch geocoding, geofencing, fleet and tour planning, Data Hub) are
-// left out: every tenant would reach every other's.
-var HEREHosts = []string{
-	"geocode.search.hereapi.com", "revgeocode.search.hereapi.com", "multi-revgeocode.search.hereapi.com",
-	"autosuggest.search.hereapi.com", "autocomplete.search.hereapi.com", "discover.search.hereapi.com",
-	"browse.search.hereapi.com", "lookup.search.hereapi.com",
-	"router.hereapi.com", "matrix.router.hereapi.com", "isoline.router.hereapi.com", "intermodal.router.hereapi.com", "transit.router.hereapi.com",
-	"wps.hereapi.com",
-	"maps.hereapi.com", "traffic.maps.hereapi.com", "vector.hereapi.com", "traffic.vector.hereapi.com", "data.traffic.hereapi.com",
 }
 
 // Limit caps what a tenant uses of a plugin's metric in a day or a
@@ -141,37 +89,13 @@ func (l Limit) String() string {
 	return fmt.Sprintf("%s=%d/%s:%s", l.Metric, l.Amount, l.Per, mode)
 }
 
-// The metrics plugins count. A plugin's usage also says what each count
-// was for, its detail: the model for OpenAI, the service for HERE.
+// The metrics Murder counts of every plugin; the others are the
+// plugin's, which its manifest names. A count also says what it was for,
+// its detail, such as a model or a service.
 const (
 	// MetricRequests counts the requests passed on, answered or not.
 	MetricRequests = "requests"
-	// MetricTokens counts input and output tokens together.
-	MetricTokens       = "tokens"
-	MetricInputTokens  = "tokens.input"
-	MetricOutputTokens = "tokens.output"
-	// MetricCachedTokens counts the input tokens the provider read from
-	// its cache, among the input tokens.
-	MetricCachedTokens = "tokens.cached"
-	// MetricEstimatedTokens counts tokens estimated from the bytes of a
-	// response that ended without its usage, such as one the app stopped
-	// reading: they are among the tokens counted.
-	MetricEstimatedTokens = "tokens.estimated"
-	// MetricTransactions counts HERE's billing units.
-	MetricTransactions = "transactions"
 )
-
-// Metrics are the metrics each kind counts, which its limits may name.
-var Metrics = map[string][]string{
-	KindOpenAI: {MetricRequests, MetricTokens, MetricInputTokens, MetricOutputTokens, MetricCachedTokens, MetricEstimatedTokens},
-	KindHERE:   {MetricRequests, MetricTransactions},
-}
-
-// defaults are each kind's upstream and hosts.
-var defaults = map[string]Spec{
-	KindOpenAI: {Upstream: "https://api.openai.com"},
-	KindHERE:   {Hosts: HEREHosts},
-}
 
 // name is a plugin's name: a DNS label, as it is a path segment of its
 // address too.
@@ -217,17 +141,9 @@ func PinnedImage(image string) bool { return pinnedImage.MatchString(image) && l
 // maxConfig is the most a plugin's config takes, as JSON.
 const maxConfig = 64 << 10
 
-// WithDefaults fills in the kind's upstream and hosts, and the limits'
-// mode.
+// WithDefaults fills in the limits' mode.
 func (s Spec) WithDefaults() Spec {
-	d := defaults[s.Kind]
-	if s.Upstream == "" {
-		s.Upstream = d.Upstream
-	}
-	if len(s.Hosts) == 0 {
-		s.Hosts = slices.Clone(d.Hosts)
-	}
-	s.Allow = slices.Clone(s.Allow)
+	s.Hosts = slices.Clone(s.Hosts)
 	s.Config = maps.Clone(s.Config)
 	s.Limits = slices.Clone(s.Limits)
 	for i := range s.Limits {
@@ -247,69 +163,35 @@ func (s Spec) ValidateUnpinned() error { return s.validate(false) }
 
 func (s Spec) validate(pinned bool) error {
 	var problems []string
-	if !slices.Contains(Kinds, s.Kind) {
-		problems = append(problems, fmt.Sprintf("kind %q is not one of %s", s.Kind, strings.Join(Kinds, ", ")))
-	}
-	if s.Kind != KindContainer && (s.Image != "" || s.Config != nil) {
-		problems = append(problems, "image and config are for a plugin of kind container")
-	}
 	switch s.Kind {
 	case KindContainer:
-		switch {
-		case s.Image == "":
-			problems = append(problems, "a plugin of kind container names its image")
-		case pinned && !PinnedImage(s.Image):
-			problems = append(problems, fmt.Sprintf("image %q must be pinned, repository@sha256:<digest>; murder plugin apply pins a tag", s.Image))
-		case !pinned:
-			if err := spec.ValidReference(s.Image); err != nil {
-				problems = append(problems, err.Error())
-			}
-		}
-		if s.Upstream != "" || len(s.Allow) > 0 {
-			problems = append(problems, "upstream and allow are for openai; a plugin's manifest says where its requests go, and hosts in the spec replaces its hosts")
-		}
-		for _, host := range s.Hosts {
-			if err := validHost(host); err != nil {
-				problems = append(problems, err.Error())
-			}
-		}
-		if encoded, err := json.Marshal(s.Config); err != nil {
-			problems = append(problems, fmt.Sprintf("config cannot be said as JSON: %v", err))
-		} else if len(encoded) > maxConfig {
-			problems = append(problems, fmt.Sprintf("config is at most %d KB as JSON", maxConfig>>10))
-		}
-	case KindOpenAI:
-		if err := validUpstream(s.Upstream); err != nil {
+	case "openai", "here":
+		problems = append(problems, fmt.Sprintf("kind %s is now an image of Murder's: kind container, image ghcr.io/powerpenguini/murder-%s (docs/plugins.md)", s.Kind, s.Kind))
+	default:
+		problems = append(problems, fmt.Sprintf("kind %q is not one of %s", s.Kind, strings.Join(Kinds, ", ")))
+	}
+	switch {
+	case s.Image == "":
+		problems = append(problems, "a plugin names its image")
+	case pinned && !PinnedImage(s.Image):
+		problems = append(problems, fmt.Sprintf("image %q must be pinned, repository@sha256:<digest>; murder plugin apply pins a tag", s.Image))
+	case !pinned:
+		if err := spec.ValidReference(s.Image); err != nil {
 			problems = append(problems, err.Error())
 		}
-		if len(s.Hosts) > 0 {
-			problems = append(problems, "hosts are for a kind whose services have host names of their own, such as here; openai takes upstream")
-		}
-		for _, endpoint := range s.Allow {
-			if !validEndpoint(endpoint) {
-				problems = append(problems, fmt.Sprintf("allow %q must be a method and a path, such as \"POST /v1/batches\" or \"GET /v1/batches/*\"", endpoint))
-			}
-		}
-	case KindHERE:
-		if s.Upstream != "" {
-			problems = append(problems, "upstream is for a kind with one address, such as openai; here takes hosts")
-		}
-		if len(s.Allow) > 0 {
-			problems = append(problems, "allow is for openai; here takes hosts")
-		}
-		for _, host := range s.Hosts {
-			if err := validHost(host); err != nil {
-				problems = append(problems, err.Error())
-			}
+	}
+	for _, host := range s.Hosts {
+		if err := validHost(host); err != nil {
+			problems = append(problems, err.Error())
 		}
 	}
-	// A container's metrics are known from its manifest: ValidateWith
-	// checks them.
-	var metrics []string
-	if s.Kind != KindContainer {
-		metrics = MetricsOf(s, nil)
+	if encoded, err := json.Marshal(s.Config); err != nil {
+		problems = append(problems, fmt.Sprintf("config cannot be said as JSON: %v", err))
+	} else if len(encoded) > maxConfig {
+		problems = append(problems, fmt.Sprintf("config is at most %d KB as JSON", maxConfig>>10))
 	}
-	if err := ValidLimits(metrics, s.Limits); err != nil {
+	// The metrics are known from the manifest: ValidateWith checks them.
+	if err := ValidLimits(nil, s.Limits); err != nil {
 		problems = append(problems, err.Error())
 	}
 	if len(problems) > 0 {
@@ -318,19 +200,16 @@ func (s Spec) validate(pinned bool) error {
 	return nil
 }
 
-// ValidateWith checks a spec and, for a container, its limits against the
-// metrics its manifest says it counts.
+// ValidateWith checks a spec and its limits against the metrics its
+// manifest says it counts.
 func (s Spec) ValidateWith(manifest *Manifest) error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
-	if s.Kind == KindContainer {
-		if manifest == nil {
-			return fmt.Errorf("image %s has no plugin's manifest", s.Image)
-		}
-		return ValidLimits(MetricsOf(s, manifest), s.Limits)
+	if manifest == nil {
+		return fmt.Errorf("image %s has no plugin's manifest", s.Image)
 	}
-	return nil
+	return ValidLimits(MetricsOf(s, manifest), s.Limits)
 }
 
 // ValidLimits checks limits of a plugin that counts metrics: each of a
@@ -407,14 +286,6 @@ func parseAmount(text string) (int64, error) {
 	return value * multiplier, nil
 }
 
-func validUpstream(upstream string) error {
-	parsed, err := url.Parse(upstream)
-	if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Trim(parsed.Path, "/") != "" {
-		return fmt.Errorf("upstream %q must be a scheme and a host, such as https://api.openai.com", upstream)
-	}
-	return nil
-}
-
 var hostLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func validHost(host string) error {
@@ -428,34 +299,6 @@ func validHost(host string) error {
 	}
 	return nil
 }
-
-var endpoint = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) (/[A-Za-z0-9._~-]+)+(/\*)?$`)
-
-func validEndpoint(text string) bool { return endpoint.MatchString(text) }
-
-// AllowsEndpoint reports whether a request of method for path may go on:
-// one of the kind's endpoints, or of those the spec allows.
-func (s Spec) AllowsEndpoint(method, path string) bool {
-	for _, allowed := range append(slices.Clip(OpenAIEndpoints), s.Allow...) {
-		want, pattern, _ := strings.Cut(allowed, " ")
-		if want != method {
-			continue
-		}
-		if prefix, oneMore := strings.CutSuffix(pattern, "/*"); oneMore {
-			rest, ok := strings.CutPrefix(path, prefix+"/")
-			if ok && rest != "" && !strings.Contains(rest, "/") {
-				return true
-			}
-		} else if path == pattern {
-			return true
-		}
-	}
-	return false
-}
-
-// hostRule is the entry of the spec's hosts that allows host: the host
-// itself, or a wildcard; empty for none.
-func (s Spec) hostRule(host string) string { return hostRuleIn(s.Hosts, host) }
 
 // hostRuleIn is the entry of hosts that allows host: the host itself, or a
 // wildcard; empty for none.
@@ -471,9 +314,6 @@ func hostRuleIn(hosts []string, host string) string {
 	}
 	return ""
 }
-
-// AllowsHost reports whether a request may go to host.
-func (s Spec) AllowsHost(host string) bool { return s.hostRule(host) != "" }
 
 // SortLimits orders limits by metric and period, as they are shown.
 func SortLimits(limits []Limit) []Limit {

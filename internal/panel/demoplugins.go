@@ -13,9 +13,9 @@ import (
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
-// demoPlugins are the demo's plugins: OpenAI and HERE, and Anthropic's
-// API through a container of its own, with a month of what the tenants used of them,
-// one tenant past a hard limit and two near one.
+// demoPlugins are the demo's plugins: Murder's OpenAI and HERE, and
+// Anthropic's API through the example's image, with a month of what the
+// tenants used of them, one tenant past a hard limit and two near one.
 type demoPlugins struct {
 	mu      sync.Mutex
 	plugins map[string]api.Plugin
@@ -40,14 +40,39 @@ var demoAnthropic = plugins.Manifest{ABI: plugins.ABI, Name: "anthropic", Versio
 			{Name: "tokens.cache_read", Label: "Read from the cache", Unit: "tokens"}, {Name: "tokens.cache_write", Label: "Written to the cache", Unit: "tokens"}, {Name: "requests", Label: "Requests", Unit: "requests"}},
 		Config: []plugins.ConfigUI{{Name: "allow", Label: "More endpoints", Help: "Endpoints passed on beyond messages, token counting and models: what they keep, every tenant reaches under the one key."}}}}
 
+// demoOpenAI and demoHERE are the manifests of plugins/openai and
+// plugins/here.
+var (
+	demoOpenAI = plugins.Manifest{ABI: plugins.ABI, Name: "openai", Version: "1.0.0", Hosts: []string{"api.openai.com"},
+		Key: plugins.KeyPlace{Header: "Authorization", Prefix: "Bearer "}, Metrics: []string{"tokens", "tokens.input", "tokens.output", "tokens.cached", "tokens.estimated"},
+		RequestBody: plugins.MaxRequestBody, RequestBodyTypes: []string{"application/json"},
+		UI: &plugins.UI{Title: "OpenAI", Description: "OpenAI's API, or one that speaks it: tokens counted from each answer's usage, by the model that answered.", Detail: "model",
+			Metrics: []plugins.MetricUI{{Name: "tokens", Label: "Tokens", Unit: "tokens"}, {Name: "tokens.input", Label: "Input tokens", Unit: "tokens"}, {Name: "tokens.output", Label: "Output tokens", Unit: "tokens"},
+				{Name: "tokens.cached", Label: "Cached input tokens", Unit: "tokens"}, {Name: "tokens.estimated", Label: "Estimated tokens", Unit: "tokens"}, {Name: "requests", Label: "Requests", Unit: "requests"}},
+			Config: []plugins.ConfigUI{{Name: "upstream", Label: "Upstream", Help: "Where the API is, as https://api.groq.com/openai: one of the plugin's hosts, and a path. The first of its hosts if left out."},
+				{Name: "allow", Label: "More endpoints", Help: "Endpoints passed on beyond those whose use is counted, as POST /v1/batches: what they keep, every tenant reaches under the one key."}}}}
+	demoHERE = plugins.Manifest{ABI: plugins.ABI, Name: "here", Version: "1.0.0",
+		Hosts: []string{"geocode.search.hereapi.com", "revgeocode.search.hereapi.com", "multi-revgeocode.search.hereapi.com",
+			"autosuggest.search.hereapi.com", "autocomplete.search.hereapi.com", "discover.search.hereapi.com",
+			"browse.search.hereapi.com", "lookup.search.hereapi.com",
+			"router.hereapi.com", "matrix.router.hereapi.com", "isoline.router.hereapi.com", "intermodal.router.hereapi.com", "transit.router.hereapi.com",
+			"wps.hereapi.com",
+			"maps.hereapi.com", "traffic.maps.hereapi.com", "vector.hereapi.com", "traffic.vector.hereapi.com", "data.traffic.hereapi.com"},
+		Key: plugins.KeyPlace{Query: "apiKey"}, Metrics: []string{"transactions"}, RequestBody: plugins.MaxRequestBody,
+		UI: &plugins.UI{Title: "HERE", Description: "HERE's location services: requests, and transactions as HERE bills them, by service.", Detail: "service",
+			Metrics: []plugins.MetricUI{{Name: "transactions", Label: "Transactions", Unit: "transactions"}, {Name: "requests", Label: "Requests", Unit: "requests"}}}}
+)
+
 func newDemoPlugins(now time.Time) *demoPlugins {
 	created := now.Add(-25 * 24 * time.Hour)
 	p := &demoPlugins{plugins: map[string]api.Plugin{}, own: map[[2]string]demoOwn{}, grants: map[string][]string{}}
 	add := func(name string, spec plugins.Spec, manifest *plugins.Manifest, key bool, apps ...string) {
 		p.plugins[name] = api.Plugin{Name: name, Spec: spec.WithDefaults(), Manifest: manifest, HasKey: key, Apps: apps, CreatedAt: created, UpdatedAt: created.Add(3 * 24 * time.Hour)}
 	}
-	add("openai", plugins.Spec{Kind: plugins.KindOpenAI, Limits: []plugins.Limit{{Metric: "tokens", Per: plugins.PerMonth, Amount: 5_000_000}, {Metric: "requests", Per: plugins.PerDay, Amount: 20_000, Mode: plugins.ModeSoft}}}, nil, true, "web")
-	add("here", plugins.Spec{Kind: plugins.KindHERE, Limits: []plugins.Limit{{Metric: "transactions", Per: plugins.PerMonth, Amount: 250_000}}}, nil, true, "web")
+	add("openai", plugins.Spec{Kind: plugins.KindContainer, Image: "ghcr.io/powerpenguini/murder-openai@sha256:0c4a7e1f9b3d6a2c8e5f1b7d4a9c3e6f0b2d8a5c1e7f4b9d3a6c0e2f8b5d1a7c",
+		Limits: []plugins.Limit{{Metric: "tokens", Per: plugins.PerMonth, Amount: 5_000_000}, {Metric: "requests", Per: plugins.PerDay, Amount: 20_000, Mode: plugins.ModeSoft}}}, &demoOpenAI, true, "web")
+	add("here", plugins.Spec{Kind: plugins.KindContainer, Image: "ghcr.io/powerpenguini/murder-here@sha256:9e2b6d0a4c8f1e5b3d7a9c2e6f0b4d8a1c5e9f3b7d2a6c0e4f8b1d5a9c3e7f2b",
+		Limits: []plugins.Limit{{Metric: "transactions", Per: plugins.PerMonth, Amount: 250_000}}}, &demoHERE, true, "web")
 	add("anthropic", plugins.Spec{Kind: plugins.KindContainer, Image: "ghcr.io/acme/anthropic-plugin@sha256:5f1e4c0a8d2b9e7f3a6c1d4b8e0f2a7c9d3b6e1f4a8c2d5b9e0f3a7c1d4b6e8f", Config: map[string]any{"allow": []any{"POST /v1/messages/batches"}},
 		Limits: []plugins.Limit{{Metric: "tokens", Per: plugins.PerMonth, Amount: 2_000_000}}}, &demoAnthropic, false, "web")
 	p.own[[2]string{"acme-logistics", "openai"}] = demoOwn{hasLimits: true, limits: []plugins.Limit{{Metric: "tokens", Per: plugins.PerMonth, Amount: 1_000_000, Mode: plugins.ModeHard}}}

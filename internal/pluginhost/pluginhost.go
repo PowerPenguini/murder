@@ -37,6 +37,10 @@ const (
 	uid  = 65534
 )
 
+// GoMemoryLimit has a plugin written in Go collect its garbage harder
+// as it nears Memory, rather than be stopped past it.
+const GoMemoryLimit = "GOMEMLIMIT=224MiB"
+
 // Retire is how long a plugin's container is kept once its plugin went,
 // or runs another image, for the edge's requests to it to end: one still
 // under way then passes on without what was left to count.
@@ -214,7 +218,7 @@ func Spec(id, plugin, image, dir string) runtime.ContainerSpec {
 	return runtime.ContainerSpec{
 		Name:          "murder-plugin-" + id,
 		Image:         image,
-		Env:           []string{"MURDER_PLUGIN_SOCKET=" + plugins.SocketDir + "/" + plugins.SocketName},
+		Env:           []string{"MURDER_PLUGIN_SOCKET=" + plugins.SocketDir + "/" + plugins.SocketName, GoMemoryLimit},
 		User:          User,
 		Labels:        map[string]string{runtime.LabelPlugin: plugin, LabelID: id, runtime.LabelImage: image},
 		Network:       "none",

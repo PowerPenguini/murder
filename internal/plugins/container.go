@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"mime"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -64,6 +65,15 @@ const (
 	maxCounts = 64
 	// maxCalls is how many calls the edge has under way to one container.
 	maxCalls = 256
+	// ContainerBodies is how many bytes of requests the edge has under
+	// way to one container at once, bodies and all, and
+	// ContainerBodiesPerTenant of one tenant's: the container holds each
+	// while it reads it, and one tenant cannot take its memory from the
+	// others. Three of the largest bodies, each read and written again,
+	// take Murder's openai plugin to 160 MB of its 256.
+	maxRequestCall           = MaxRequestBody + 1<<20
+	ContainerBodies          = 3 * maxRequestCall
+	ContainerBodiesPerTenant = 2 * maxRequestCall
 )
 
 // Containers reaches the containers of plugins of kind container, each on
@@ -95,6 +105,35 @@ type container struct {
 	mu        sync.Mutex
 	checkedAt time.Time
 	err       error
+
+	// bodies are the bytes of requests' bodies under way to it, in all
+	// and by tenant.
+	bodies   sync.Mutex
+	held     int64
+	byTenant map[string]int64
+}
+
+// hold takes room for a tenant's request's body of size bytes in the
+// container, if it has room; release gives it back.
+func (c *container) hold(tenant string, size int64) (release func(), ok bool) {
+	if size == 0 {
+		return func() {}, true
+	}
+	c.bodies.Lock()
+	defer c.bodies.Unlock()
+	if c.held+size > ContainerBodies || c.byTenant[tenant]+size > ContainerBodiesPerTenant {
+		return nil, false
+	}
+	c.held += size
+	c.byTenant[tenant] += size
+	return func() {
+		c.bodies.Lock()
+		defer c.bodies.Unlock()
+		c.held -= size
+		if c.byTenant[tenant] -= size; c.byTenant[tenant] <= 0 {
+			delete(c.byTenant, tenant)
+		}
+	}, true
 }
 
 // Prepare lets go of the containers config's plugins no longer run.
@@ -133,7 +172,7 @@ func (c *Containers) of(name string, plugin Plugin) (*container, error) {
 			IdleConnTimeout:     time.Minute,
 			DisableCompression:  true,
 		}
-		reached = &container{id: id, client: &http.Client{Transport: transport}}
+		reached = &container{id: id, client: &http.Client{Transport: transport}, byTenant: map[string]int64{}}
 		c.reached[id] = reached
 	}
 	c.mu.Unlock()
@@ -235,7 +274,9 @@ func newSession() string {
 	return hex.EncodeToString(b[:])
 }
 
-// The JSON a container takes and gives (see docs/plugins.md).
+// The JSON a container takes and gives (see docs/plugins.md). A request,
+// and the answer to it, are JSON and, after a line's end, the body's
+// bytes, if it has one.
 type (
 	moduleRequest struct {
 		Tenant string              `json:"tenant"`
@@ -244,16 +285,18 @@ type (
 		Path   string              `json:"path"`
 		Query  string              `json:"query,omitempty"`
 		Header map[string][]string `json:"header"`
+		Hosts  []string            `json:"hosts"`
 		Config map[string]any      `json:"config,omitempty"`
-		Body   []byte              `json:"body,omitempty"`
+		// BodyFollows says the request's body follows the JSON.
+		BodyFollows bool `json:"bodyFollows,omitempty"`
 	}
 	moduleForward struct {
 		URL    string              `json:"url"`
 		Header map[string][]string `json:"header"`
 		Drop   []string            `json:"drop"`
-		// ReplaceBody sends Body in place of the request's body.
+		// ReplaceBody sends what follows the JSON in place of the
+		// request's body.
 		ReplaceBody bool   `json:"replaceBody"`
-		Body        []byte `json:"body"`
 		Detail      string `json:"detail"`
 		Meter       bool   `json:"meter"`
 		Refuse      *struct {
@@ -269,10 +312,17 @@ type (
 	moduleMetered struct {
 		Counts []moduleCount `json:"counts"`
 		Body   bool          `json:"body"`
-		Error  string        `json:"error"`
+		// Events has the body shown event by event, for a stream of
+		// server-sent events.
+		Events bool   `json:"events"`
+		Error  string `json:"error"`
 	}
 	moduleChunk struct {
 		More  bool   `json:"more"`
+		Error string `json:"error"`
+	}
+	moduleEvent struct {
+		Keep  bool   `json:"keep"`
 		Error string `json:"error"`
 	}
 	moduleCount struct {
@@ -311,6 +361,9 @@ type containerHandler struct {
 func (p *Proxy) containerHandler(x *exchange, plugin Plugin) (handler, error) {
 	if p.containers == nil || plugin.Manifest == nil {
 		return nil, statusError{code: http.StatusServiceUnavailable, message: fmt.Sprintf("this edge runs no containers for plugin %s", x.plugin), kind: "murder_plugin_unavailable"}
+	}
+	if plugin.Manifest.ABI != ABI {
+		return nil, statusError{code: http.StatusServiceUnavailable, message: fmt.Sprintf("plugin %s was installed from an image built for version %d of the plugin interface; this edge runs version %d: apply it again from an image built for it", x.plugin, plugin.Manifest.ABI, ABI), kind: "murder_plugin_unavailable"}
 	}
 	reached, err := p.containers.of(x.plugin, plugin)
 	if err != nil {
@@ -353,7 +406,8 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 		return nil, statusError{code: http.StatusBadRequest, message: "the path is not one to pass on"}
 	}
 	var body []byte
-	if h.manifest.RequestBody > 0 && r.Body != nil && r.Body != http.NoBody {
+	read := h.manifest.RequestBody > 0 && r.Body != nil && r.Body != http.NoBody && h.readsType(r.Header.Get("Content-Type"))
+	if read {
 		var err error
 		if body, err = h.x.readBodyUpTo(r, int(h.manifest.RequestBody)); err != nil {
 			return nil, err
@@ -369,17 +423,26 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 	if h.manifest.Key.Query != "" {
 		query = withoutKey(query, h.manifest.Key.Query)
 	}
-	input, err := json.Marshal(moduleRequest{Tenant: h.x.tenant, Plugin: h.x.plugin, Method: r.Method, Path: "/" + rest, Query: query, Header: header, Config: h.x.spec.Config, Body: body})
+	input, err := json.Marshal(moduleRequest{Tenant: h.x.tenant, Plugin: h.x.plugin, Method: r.Method, Path: "/" + rest, Query: query, Header: header, Hosts: h.hosts, Config: h.x.spec.Config, BodyFollows: read})
 	if err != nil {
 		return nil, err
 	}
-	answer, err := h.container.call(callRequest, http.MethodPost, "/request", h.session, input, MaxRequestBody*4/3+maxAnswer)
+	if read {
+		input = append(append(input, '\n'), body...)
+	}
+	release, ok := h.container.hold(h.x.tenant, int64(len(input)))
+	if !ok {
+		return nil, statusError{code: http.StatusServiceUnavailable, message: fmt.Sprintf("plugin %s's container reads too many requests' bodies at once; try again", h.x.plugin), kind: "murder_plugin_busy"}
+	}
+	answer, err := h.container.call(callRequest, http.MethodPost, "/request", h.session, input, MaxRequestBody+maxAnswer)
+	release()
 	if err != nil {
 		h.fail("request", err)
 		return nil, failure
 	}
 	var forward moduleForward
-	if err := json.Unmarshal(answer, &forward); err != nil {
+	replaced, err := splitJSON(answer, &forward)
+	if err != nil {
 		h.fail("request", fmt.Errorf("/request answered no JSON of a request: %w", err))
 		return nil, failure
 	}
@@ -403,10 +466,9 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 		err = h.headers(r.Header, forward)
 	}
 	if err == nil && forward.ReplaceBody {
-		if len(forward.Body) > MaxRequestBody {
-			err = fmt.Errorf("the container replaces the request's body with %d bytes, more than %d", len(forward.Body), MaxRequestBody)
+		if len(replaced) > MaxRequestBody {
+			err = fmt.Errorf("the container replaces the request's body with %d bytes, more than %d", len(replaced), MaxRequestBody)
 		} else {
-			replaced := forward.Body
 			r.Body = io.NopCloser(bytes.NewReader(replaced))
 			r.ContentLength = int64(len(replaced))
 			r.Header.Set("Content-Length", fmt.Sprint(len(replaced)))
@@ -420,6 +482,34 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 	h.x.detail = cleanDetail(forward.Detail)
 	h.meter = forward.Meter
 	return target, nil
+}
+
+// readsType reports whether the container reads a body of a content
+// type: one of its manifest's, or any when it names none.
+func (h *containerHandler) readsType(contentType string) bool {
+	if len(h.manifest.RequestBodyTypes) == 0 {
+		return true
+	}
+	media, _, err := mime.ParseMediaType(contentType)
+	return err == nil && slices.Contains(h.manifest.RequestBodyTypes, strings.ToLower(media))
+}
+
+// splitJSON reads the JSON a call begins with into value, and returns
+// what follows it after a line's end.
+func splitJSON(data []byte, value any) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(value); err != nil {
+		return nil, err
+	}
+	rest := data[decoder.InputOffset():]
+	rest = bytes.TrimLeft(rest, " \t\r")
+	if len(rest) == 0 {
+		return nil, nil
+	}
+	if rest[0] != '\n' {
+		return nil, errors.New("the JSON is followed by more than a line's end")
+	}
+	return rest[1:], nil
 }
 
 // target checks where a container sends a request: over HTTPS, to a host
@@ -523,10 +613,42 @@ func (h *containerHandler) response(response *http.Response) {
 		h.fail("response", err)
 		return
 	}
-	if metered.Body {
+	switch {
+	case metered.Events:
+		// Events may be taken out: the length is no longer known.
+		h.reading = true
+		response.Body = newEventStream(response.Body, h.event, h.end)
+		response.Header.Del("Content-Length")
+		response.ContentLength = -1
+	case metered.Body:
 		h.reading = true
 		response.Body = &containerBody{h: h, body: response.Body}
 	}
+}
+
+// event shows the container the data of one event of a stream; it
+// reports whether the event stays in the answer. Only the container's
+// answer takes it out: one that failed keeps every event.
+func (h *containerHandler) event(data []byte) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.failed || h.ended {
+		return true
+	}
+	answer, err := h.container.call(callBody, http.MethodPost, "/event", h.session, data, maxAnswer)
+	var said moduleEvent
+	if err == nil {
+		if err = json.Unmarshal(answer, &said); err != nil {
+			err = fmt.Errorf("/event answered no JSON: %w", err)
+		} else if said.Error != "" {
+			err = errors.New(said.Error)
+		}
+	}
+	if err != nil {
+		h.fail("event", err)
+		return true
+	}
+	return said.Keep
 }
 
 // metered makes a call that answers counts, and counts them.

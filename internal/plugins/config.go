@@ -56,7 +56,7 @@ func (c Config) Version(w io.Writer) {
 		plugin := c.Plugins[name]
 		// The image, pinned, says its manifest too.
 		config, _ := json.Marshal(plugin.Spec.Config)
-		fmt.Fprintf(w, "plugin\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00", name, plugin.Spec.Kind, plugin.Spec.Upstream, strings.Join(plugin.Spec.Hosts, " "), strings.Join(plugin.Spec.Allow, " "), plugin.Key, plugin.Spec.Image, config)
+		fmt.Fprintf(w, "plugin\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00", name, plugin.Spec.Kind, strings.Join(plugin.Spec.Hosts, " "), plugin.Key, plugin.Spec.Image, config)
 		writeLimits(w, plugin.Spec.Limits)
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Tenants)) {

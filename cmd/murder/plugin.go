@@ -22,9 +22,10 @@ import (
 const pluginUsage = `Usage: murder plugin <command> [arguments]
 
   apply FILE...                install plugins, or change them, from files such
-                               as plugins/openai.yaml: each is named after its file;
-                               one of kind container has its image pinned, and
-                               its manifest read from the image's label
+                               as plugins/openai.yaml: each is named after its file,
+                               has its image pinned, and its manifest read from
+                               the image's label (Murder's own are
+                               ghcr.io/powerpenguini/murder-openai and -here)
   list                         the plugins: kind, key, limits and the apps that list them
   show NAME                    a plugin's spec, and its image's manifest
   delete NAME -yes             remove a plugin no app lists, with its keys and

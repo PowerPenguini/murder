@@ -103,9 +103,9 @@
   what the others kept. With `hostFirewall`, the port is closed to everyone
   else as well. Reading or changing a plugin's key takes the API socket,
   as every other change does. See [Plugins](plugins.md).
-- **Plugins' containers.** A plugin of kind `container` runs an image the
-  operator installs, in a container on each node, out of the edge's
-  process:
+- **Plugins' containers.** A plugin runs an image the operator installs,
+  Murder's own for OpenAI and HERE or another, in a container on each
+  node, out of the edge's process:
   - no network at all: it reaches nothing, and what it is shown cannot
     leave but through the edge;
   - as nobody, with no capability and `no-new-privileges`, a root it
@@ -118,8 +118,10 @@
   over HTTPS; it uses a container only once the container says the
   manifest its image's label said as it was installed. The container does
   see what tenants send and what providers answer, and decides what is
-  passed on and counted: install only images you trust as you trust the
-  edge with that traffic. One container serves every tenant of its node:
+  passed on and counted, and may take an event out of a stream it meters,
+  though it can add nothing to an answer: install only images you trust
+  as you trust the edge with that traffic. Murder's own are built from its
+  repository by its release workflow, and published with it. One container serves every tenant of its node:
   a plugin's code keeps tenants apart, not Murder. Its image is pinned by
   digest, and never run as it is installed: the agent reads the manifest
   from its label.

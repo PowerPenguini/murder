@@ -34,7 +34,8 @@ func TestMain(m *testing.M) {
 }
 
 // testPlugin builds a plugin of this repository's for the tests, as a
-// program: the test plugin, or the Anthropic example.
+// program: the test plugin, Murder's openai and here, or the Anthropic
+// example.
 func testPlugin(t *testing.T, name string) string {
 	t.Helper()
 	buildOnce.Do(func() {
@@ -45,7 +46,7 @@ func testPlugin(t *testing.T, name string) string {
 		}
 		buildDir = dir
 		built = map[string]string{}
-		for name, pkg := range map[string]string{"test": "./testdata/plugin", "anthropic": "../../examples/plugins/anthropic"} {
+		for name, pkg := range map[string]string{"test": "./testdata/plugin", "anthropic": "../../examples/plugins/anthropic", "openai": "../../plugins/openai", "here": "../../plugins/here"} {
 			out := filepath.Join(dir, name)
 			command := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", out, pkg)
 			command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=")
@@ -131,7 +132,7 @@ func TestAPluginsManifestIsReadFromWhatItPrints(t *testing.T) {
 	}
 	// A label written by hand, with empty lists, says the same as the
 	// container that leaves them out.
-	byHand, err := ParseManifest(`{"abi":2,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"metrics":[],"ui":{"metrics":[],"config":[]}}`)
+	byHand, err := ParseManifest(`{"abi":3,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"metrics":[],"ui":{"metrics":[],"config":[]}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +141,8 @@ func TestAPluginsManifestIsReadFromWhatItPrints(t *testing.T) {
 	}
 	for name, label := range map[string]string{
 		"not JSON":         "#!/bin/sh",
-		"an unknown field": `{"abi":2,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"run":"rm -rf /"}`,
-		"two values":       `{"abi":2,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"}} {}`,
+		"an unknown field": `{"abi":3,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"run":"rm -rf /"}`,
+		"two values":       `{"abi":3,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"}} {}`,
 		"another ABI":      `{"abi":1,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"}}`,
 	} {
 		if _, err := ParseManifest(label); err == nil {
@@ -220,7 +221,19 @@ type containerFixture struct {
 
 func newContainerFixture(t *testing.T, upstream http.HandlerFunc, change func(*Spec)) *containerFixture {
 	t.Helper()
-	program := testPlugin(t, "test")
+	return newPluginFixture(t, "test", Grant{}, upstream, func(spec *Spec) {
+		spec.Config = map[string]any{"allow": []any{"a"}}
+		if change != nil {
+			change(spec)
+		}
+	})
+}
+
+// newPluginFixture serves a plugin p of one of this repository's plugins
+// (see testPlugin), run on its socket, granted to acme as grant says.
+func newPluginFixture(t *testing.T, name string, grant Grant, upstream http.HandlerFunc, change func(*Spec)) *containerFixture {
+	t.Helper()
+	program := testPlugin(t, name)
 	manifest := manifestOf(t, program)
 	w := &containerFixture{seen: make(chan *http.Request, 64), root: socketRoot(t)}
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -230,11 +243,11 @@ func newContainerFixture(t *testing.T, upstream http.HandlerFunc, change func(*S
 		upstream(rw, r)
 	}))
 	t.Cleanup(server.Close)
-	spec := Spec{Kind: KindContainer, Image: testImage, Config: map[string]any{"allow": []any{"a"}}}
+	spec := Spec{Kind: KindContainer, Image: testImage}
 	if change != nil {
 		change(&spec)
 	}
-	w.fixture = newFixture(t, spec, Grant{}, server)
+	w.fixture = newFixture(t, spec, grant, server)
 	plugin := w.config.Plugins["p"]
 	plugin.Manifest = &manifest
 	w.config.Plugins["p"] = plugin
@@ -630,7 +643,8 @@ func TestAManifestsUISaysHowThePanelShowsIt(t *testing.T) {
 	if ui := UIOf(Spec{Kind: KindContainer}, &bare); ui.Title != "bare" || len(ui.Metrics) != 2 || ui.Metrics[0].Name != "requests" || ui.Metrics[1].Label != "widgets" || ui.Detail != "detail" {
 		t.Fatalf("a plugin without a UI: %+v", ui)
 	}
-	if ui := UIOf(Spec{Kind: KindOpenAI}, nil); ui.Title != "OpenAI" || ui.Metrics[0].Name != MetricTokens || len(ui.Metrics) != len(Metrics[KindOpenAI]) {
+	openai := manifestOf(t, testPlugin(t, "openai"))
+	if ui := UIOf(Spec{Kind: KindContainer}, &openai); ui.Title != "OpenAI" || ui.Metrics[0].Name != "tokens" || len(ui.Metrics) != 6 || len(ui.Config) != 2 {
 		t.Fatalf("openai's: %+v", ui)
 	}
 	good := Manifest{ABI: ABI, Name: "x", Hosts: []string{"api.example.com"}, Key: KeyPlace{Header: "X-Key"}, Metrics: []string{"widgets"}}

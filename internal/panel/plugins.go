@@ -467,19 +467,14 @@ func (s *Server) pluginPageWith(w http.ResponseWriter, r *http.Request, edit *pl
 // whereTo says where a plugin's requests go, and where the key goes on
 // them.
 func whereTo(p api.Plugin) ([]string, string) {
-	switch {
-	case p.Spec.Kind == plugins.KindOpenAI:
-		return []string{p.Spec.Upstream}, plugins.KeyPlace{Header: "Authorization", Prefix: "Bearer "}.String()
-	case p.Spec.Kind == plugins.KindHERE:
-		return p.Spec.Hosts, plugins.KeyPlace{Query: "apiKey"}.String()
-	case p.Manifest != nil:
-		hosts := p.Spec.Hosts
-		if len(hosts) == 0 {
-			hosts = p.Manifest.Hosts
-		}
-		return hosts, p.Manifest.Key.String()
+	if p.Manifest == nil {
+		return nil, ""
 	}
-	return nil, ""
+	hosts := p.Spec.Hosts
+	if len(hosts) == 0 {
+		hosts = p.Manifest.Hosts
+	}
+	return hosts, p.Manifest.Key.String()
 }
 
 // configValue says a value of a config as JSON says it, strings without

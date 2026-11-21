@@ -199,7 +199,7 @@ func TestAmountsAndLimitsAreSaidShort(t *testing.T) {
 			t.Errorf("%d said %q, want %q", n, got, want)
 		}
 	}
-	ui := plugins.UIOf(plugins.Spec{Kind: plugins.KindOpenAI}, nil)
+	ui := plugins.UIOf(plugins.Spec{Kind: plugins.KindContainer}, &demoOpenAI)
 	l := limitViewOf(api.LimitUse{Limit: plugins.Limit{Metric: "tokens", Per: plugins.PerMonth, Amount: 1000}, Used: 850}, ui, time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
 	if l.Said != "1000 tokens a month" || !l.Near || l.Reached || l.Until != time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC) {
 		t.Fatalf("%+v", l)

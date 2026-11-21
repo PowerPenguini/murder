@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,12 +14,24 @@ import (
 	"github.com/PowerPenguini/murder/internal/plugins"
 )
 
+// openAISpec is a plugin of Murder's openai, its image pinned, with
+// limits.
+func openAISpec(limits ...plugins.Limit) plugins.Spec {
+	return plugins.Spec{Kind: plugins.KindContainer, Image: "ghcr.io/powerpenguini/murder-openai@sha256:" + strings.Repeat("0", 64), Limits: limits}
+}
+
+// openAIManifest is the manifest of Murder's openai, in short: the store
+// never runs it.
+func openAIManifest() *plugins.Manifest {
+	return &plugins.Manifest{ABI: plugins.ABI, Name: "openai", Hosts: []string{"api.openai.com"}, Key: plugins.KeyPlace{Header: "Authorization", Prefix: "Bearer "}, Metrics: []string{"tokens", "tokens.input", "tokens.output"}}
+}
+
 // withPlugin opens a store with plugin openai, a limit of 1000 tokens a
 // month, and app web listing it, with tenants of the names given.
 func withPlugin(t *testing.T, names ...string) *SQLite {
 	t.Helper()
 	st, _ := openNew(t, options())
-	if _, _, err := st.PutPlugin("openai", plugins.Spec{Kind: plugins.KindOpenAI, Limits: []plugins.Limit{{Metric: plugins.MetricTokens, Per: plugins.PerMonth, Amount: 1000}}}, nil, "alice"); err != nil {
+	if _, _, err := st.PutPlugin("openai", openAISpec(plugins.Limit{Metric: "tokens", Per: plugins.PerMonth, Amount: 1000}), openAIManifest(), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	app := appSpec()
@@ -41,19 +54,19 @@ func TestAPluginIsInstalledChangedAndDeletedOnceNoAppListsIt(t *testing.T) {
 	if _, err := st.PutApp(App{Name: "web", Spec: app}, "test"); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "not installed") {
 		t.Fatalf("an app listing a plugin not installed: %v", err)
 	}
-	plugin, changed, err := st.PutPlugin("openai", plugins.Spec{Kind: plugins.KindOpenAI}, nil, "alice")
-	if err != nil || !changed || plugin.Spec.Upstream != "https://api.openai.com" {
+	plugin, changed, err := st.PutPlugin("openai", openAISpec(), openAIManifest(), "alice")
+	if err != nil || !changed || plugin.Manifest.Name != "openai" {
 		t.Fatalf("install: %+v %v %v", plugin, changed, err)
 	}
 	version := st.state.Load().version
-	if _, changed, err := st.PutPlugin("openai", plugins.Spec{Kind: plugins.KindOpenAI}, nil, "alice"); err != nil || changed || st.state.Load().version != version {
+	if _, changed, err := st.PutPlugin("openai", openAISpec(), openAIManifest(), "alice"); err != nil || changed || st.state.Load().version != version {
 		t.Fatalf("the same again: changed %v, %v", changed, err)
 	}
-	if _, _, err := st.PutPlugin("openai", plugins.Spec{Kind: plugins.KindHERE}, nil, "alice"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("another kind: %v", err)
+	if _, _, err := st.PutPlugin("openai", plugins.Spec{Kind: "here"}, openAIManifest(), "alice"); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "murder-here") {
+		t.Fatalf("a kind of Murder's own, as before: %v", err)
 	}
 	for _, bad := range []string{"Open", "-x", strings.Repeat("a", 33)} {
-		if _, _, err := st.PutPlugin(bad, plugins.Spec{Kind: plugins.KindOpenAI}, nil, "alice"); !errors.Is(err, ErrInvalid) {
+		if _, _, err := st.PutPlugin(bad, openAISpec(), openAIManifest(), "alice"); !errors.Is(err, ErrInvalid) {
 			t.Errorf("name %q: %v", bad, err)
 		}
 	}
@@ -99,7 +112,7 @@ func TestATenantsOwnKeyLiftsThePluginsLimitsButNotItsOwn(t *testing.T) {
 	if limits := PluginLimits(plugin, own()); len(limits) != 1 || limits[0].Metric != plugins.MetricRequests || limits[0].Mode != plugins.ModeHard {
 		t.Fatalf("its own limits: %v", limits)
 	}
-	if err := st.SetPluginLimits("openai", "acme", []plugins.Limit{{Metric: plugins.MetricTransactions, Per: plugins.PerDay, Amount: 5}}, true, "alice"); !errors.Is(err, ErrInvalid) {
+	if err := st.SetPluginLimits("openai", "acme", []plugins.Limit{{Metric: "transactions", Per: plugins.PerDay, Amount: 5}}, true, "alice"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("a metric openai does not count: %v", err)
 	}
 	// Taking key and limits away drops the row.
@@ -127,7 +140,7 @@ func TestAReportIsCountedOnceAndSaysTheLimitsItCrosses(t *testing.T) {
 	day := plugins.Day(now)
 	report := func(seq, amount int64) plugins.Report {
 		return plugins.Report{Edge: "edge-1", Seq: seq, Counts: []plugins.Count{
-			{Tenant: "acme", Plugin: "openai", Day: day, Metric: plugins.MetricTokens, Detail: "gpt-5", Amount: amount},
+			{Tenant: "acme", Plugin: "openai", Day: day, Metric: "tokens", Detail: "gpt-5", Amount: amount},
 			{Tenant: "acme", Plugin: "openai", Day: day, Metric: plugins.MetricRequests, Amount: 1},
 			{Tenant: "gone", Plugin: "openai", Day: day, Metric: plugins.MetricRequests, Amount: 1},
 		}}
@@ -157,8 +170,8 @@ func TestAReportIsCountedOnceAndSaysTheLimitsItCrosses(t *testing.T) {
 		}
 		return 0
 	}
-	if used(plugins.MetricTokens, day) != 700 || used(plugins.MetricTokens, plugins.Month(now)) != 700 {
-		t.Fatalf("tokens %d today, %d this month", used(plugins.MetricTokens, day), used(plugins.MetricTokens, plugins.Month(now)))
+	if used("tokens", day) != 700 || used("tokens", plugins.Month(now)) != 700 {
+		t.Fatalf("tokens %d today, %d this month", used("tokens", day), used("tokens", plugins.Month(now)))
 	}
 	events, _ := st.Events(EventQuery{Tenant: "acme", Limit: 5})
 	if len(events) > 0 && strings.HasPrefix(events[0].Action, "plugin.limit") {
@@ -345,7 +358,7 @@ func TestOpenUpgradesSchemaVersion20(t *testing.T) {
 	if len(st.Plugins()) != 0 {
 		t.Fatal("plugins from nowhere")
 	}
-	if _, _, err := st.PutPlugin("here", plugins.Spec{Kind: plugins.KindHERE}, nil, "alice"); err != nil {
+	if _, _, err := st.PutPlugin("mine", containerSpec(), testManifest(), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	recorded := &recorder{}
@@ -387,7 +400,9 @@ func TestOpenUpgradesSchemaVersion21(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if list := st.Plugins(); len(list) != 1 || list[0].Name != "openai" {
+	// Neither the module's plugin nor openai, a kind of Murder's own then,
+	// stays (TestOpenUpgradesSchemaVersion22).
+	if list := st.Plugins(); len(list) != 0 {
 		t.Fatalf("plugins %+v", list)
 	}
 	if _, _, err := st.PutPlugin("mine", containerSpec(), testManifest(), "alice"); err != nil {
@@ -395,6 +410,48 @@ func TestOpenUpgradesSchemaVersion21(t *testing.T) {
 	}
 	if plugin, _ := st.Plugin("mine"); plugin.Manifest == nil || plugin.Manifest.Name != "widgets" {
 		t.Fatalf("mine %+v", plugin)
+	}
+}
+
+// A database of schema 22, which kept plugins of kind openai and here as
+// kinds of Murder's own, keeps only those of kind container, and tenants'
+// own settings of them.
+func TestOpenUpgradesSchemaVersion22(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "murder.db")
+	db, err := sql.Open("sqlite", initDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := json.Marshal(testManifest())
+	spec, _ := json.Marshal(containerSpec())
+	for _, statement := range []string{
+		schema,
+		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '3'), ('applied', '0')`,
+		// Tenant acme is of no use but to its settings.
+		`PRAGMA foreign_keys = OFF`,
+		`INSERT INTO plugins (name, spec, created_at, updated_at) VALUES ('openai', '{"kind":"openai","upstream":"https://api.openai.com"}', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')`,
+		`INSERT INTO plugins (name, spec, created_at, updated_at) VALUES ('here', '{"kind":"here","hosts":["router.hereapi.com"]}', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')`,
+		`INSERT INTO plugins (name, spec, created_at, updated_at, manifest) VALUES ('mine', '` + string(spec) + `', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', '` + string(manifest) + `')`,
+		`INSERT INTO plugin_tenants (tenant, plugin, key, limits, updated_at) VALUES ('acme', 'openai', 'sealed', NULL, '2026-11-01T00:00:00Z'), ('acme', 'mine', 'sealed', NULL, '2026-11-01T00:00:00Z')`,
+		`PRAGMA user_version = 22`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(statement, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if list := st.Plugins(); len(list) != 1 || list[0].Name != "mine" || list[0].Manifest == nil {
+		t.Fatalf("plugins %+v", list)
+	}
+	if settings := st.PluginTenants("acme", ""); len(settings) != 1 || settings[0].Plugin != "mine" {
+		t.Fatalf("tenants' settings %+v", settings)
 	}
 }
 
@@ -418,7 +475,7 @@ func TestPluginWritesReplicate(t *testing.T) {
 	if err := leader.PutNode(Node{Name: "node-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := leader.PutPlugin("openai", plugins.Spec{Kind: plugins.KindOpenAI, Limits: []plugins.Limit{{Metric: plugins.MetricTokens, Per: plugins.PerDay, Amount: 10}}}, nil, "alice"); err != nil {
+	if _, _, err := leader.PutPlugin("openai", openAISpec(plugins.Limit{Metric: "tokens", Per: plugins.PerDay, Amount: 10}), openAIManifest(), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	app := appSpec()
@@ -522,10 +579,6 @@ func TestAPluginOfKindContainerKeepsItsImagesManifest(t *testing.T) {
 	}
 	if _, changed, err := st.PutPlugin("a", spec, testManifest(), "alice"); err != nil || changed {
 		t.Fatalf("the same again: changed %v, %v", changed, err)
-	}
-	// A plugin of Murder's own kind keeps no manifest.
-	if openai, _, err := st.PutPlugin("o", plugins.Spec{Kind: plugins.KindOpenAI}, testManifest(), "alice"); err != nil || openai.Manifest != nil {
-		t.Fatalf("openai %+v %v", openai, err)
 	}
 	app := appSpec()
 	app.Plugins = []string{"a"}

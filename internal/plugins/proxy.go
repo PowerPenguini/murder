@@ -57,7 +57,7 @@ type Proxy struct {
 const (
 	MaxPerTenant         = 64
 	MaxBuffered          = 512 << 20
-	MaxBufferedPerTenant = 2 * MaxBody
+	MaxBufferedPerTenant = 4 * MaxRequestBody
 )
 
 // enter takes a place for a tenant's request, if it has one free.
@@ -106,7 +106,7 @@ func NewProxy(config func() Config, open Opener, counter *Counter, log *slog.Log
 }
 
 // NewTransport reaches providers: HTTP/2 where they speak it, bodies as
-// they come (the meters read them uncompressed: see the kinds).
+// they come (a plugin that meters an answer reads it uncompressed).
 func NewTransport() *http.Transport {
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -120,9 +120,6 @@ func NewTransport() *http.Transport {
 		DisableCompression:    true,
 	}
 }
-
-// MaxBody is the largest request body a meter reads before passing it on.
-const MaxBody = 64 << 20
 
 // refuse answers a request that does not go on, as the providers' APIs
 // answer errors: JSON with an error's message and type.
@@ -271,10 +268,6 @@ type handler interface {
 // handlerFor makes the handler of a request of plugin's kind.
 func (p *Proxy) handlerFor(ctx context.Context, x *exchange, plugin Plugin) (handler, error) {
 	switch plugin.Spec.Kind {
-	case KindOpenAI:
-		return &openAIHandler{x: x}, nil
-	case KindHERE:
-		return &hereHandler{x: x}, nil
 	case KindContainer:
 		return p.containerHandler(x, plugin)
 	}
@@ -299,9 +292,8 @@ type exchange struct {
 	spec    Spec
 	key     string
 	started time.Time
-	// detail is what the use is for: the service, for HERE. OpenAI's
-	// requests are counted with none, and their tokens by the model that
-	// answered: what a tenant sends is not trusted to name one.
+	// detail is what the request is counted for, as the plugin says:
+	// the service, for HERE.
 	detail string
 	// reserved is the room taken for the request's body.
 	reserved int64
@@ -312,10 +304,6 @@ type exchange struct {
 // bodyChunk is how much of a body is read at a time, each in room taken
 // as it comes: a body that says it is long takes no room it did not send.
 const bodyChunk = 256 << 10
-
-// readBody reads a request's body to pass it on, in the room the edge
-// has for bodies: at most MaxBody.
-func (x *exchange) readBody(r *http.Request) ([]byte, error) { return x.readBodyUpTo(r, MaxBody) }
 
 // readBodyUpTo reads a request's body of at most limit bytes.
 func (x *exchange) readBodyUpTo(r *http.Request, limit int) ([]byte, error) {
@@ -461,13 +449,14 @@ func scrubErrorBody(response *http.Response, key string) {
 }
 
 // cleanDetail keeps a detail such as a model's name if it is one: at most
-// 64 letters, digits and ._:/-; otherwise it is "other".
+// 64 letters, digits and ._:/-*, as in *.hereapi.com; otherwise it is
+// "other".
 func cleanDetail(detail string) string {
 	if len(detail) > 64 {
 		return "other"
 	}
 	for _, c := range detail {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._:/-", c)) {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._:/-*", c)) {
 			return "other"
 		}
 	}
@@ -488,29 +477,4 @@ func scrubHeaders(header http.Header, key string) {
 		}
 		header[name] = values
 	}
-}
-
-// meteredBody passes a response's body on, calls each with what it read,
-// and done once, at its end or when it is closed.
-type meteredBody struct {
-	body io.ReadCloser
-	each func([]byte)
-	done func()
-	once sync.Once
-}
-
-func (b *meteredBody) Read(buffer []byte) (int, error) {
-	n, err := b.body.Read(buffer)
-	if n > 0 && b.each != nil {
-		b.each(buffer[:n])
-	}
-	if err != nil {
-		b.once.Do(b.done)
-	}
-	return n, err
-}
-
-func (b *meteredBody) Close() error {
-	b.once.Do(b.done)
-	return b.body.Close()
 }

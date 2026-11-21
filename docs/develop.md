@@ -40,12 +40,14 @@ through Murder's real components:
 - suspend and resume;
 - archive, restore with the data, purge.
 
-**Plugins of one's own.** The tests of `internal/plugins` build
-`internal/plugins/testdata/plugin` and `examples/plugins/anthropic` with
-the Go they run with, and run them as their containers would, on sockets
-below `/tmp` (a unix socket's path holds 108 bytes). The plugin test
-below builds the test plugin into an image, with its manifest as its
-label. The test of the sockets' tmpfs mounts as root; CI runs it in a
+**Plugins.** The tests of `internal/plugins` build Murder's plugins
+(`plugins/openai`, `plugins/here`), `internal/plugins/testdata/plugin`
+and `examples/plugins/anthropic` with the Go they run with, and run them
+as their containers would, on sockets below `/tmp` (a unix socket's path
+holds 108 bytes), the edge between a tenant and a provider of the test's.
+The plugin test below builds the test plugin into an image, with its
+manifest as its label, and `plugins/openai` from `plugins/Dockerfile`, as
+a release does. The test of the sockets' tmpfs mounts as root; CI runs it in a
 privileged container:
 
 ```bash

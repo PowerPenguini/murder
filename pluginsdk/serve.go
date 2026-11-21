@@ -1,15 +1,18 @@
 package pluginsdk
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -106,10 +109,12 @@ func Serve(ctx context.Context, path string, handler http.Handler) error {
 func Log(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
 
 // The most a call from the edge brings: a request's, with a body of
-// 16 MB in base64; and a chunk of an answer's body.
+// 16 MB; and a chunk of an answer's body, or an event's data, as long as
+// the edge reads one.
 const (
-	maxRequestCall = 16<<20*4/3 + 1<<20
+	maxRequestCall = 16<<20 + 1<<20
 	maxCall        = 1 << 20
+	maxEvent       = 16<<20 + 1<<10
 )
 
 // sessionIdle is how long a request's meter is kept without a call from
@@ -132,6 +137,7 @@ type session struct {
 	meter   Meter
 	counter Counter
 	reading bool
+	events  EventMeter
 	// used is when the edge last called, in Unix nanoseconds.
 	used atomic.Int64
 }
@@ -146,6 +152,7 @@ func (p *plugin) handler() http.Handler {
 	mux.HandleFunc("POST /request", p.request)
 	mux.HandleFunc("POST /response", p.response)
 	mux.HandleFunc("POST /body", p.body)
+	mux.HandleFunc("POST /event", p.event)
 	mux.HandleFunc("POST /end", p.end)
 	return mux
 }
@@ -177,18 +184,63 @@ type forwarded struct {
 	Header      map[string][]string `json:"header,omitempty"`
 	Drop        []string            `json:"drop,omitempty"`
 	ReplaceBody bool                `json:"replaceBody,omitempty"`
-	Body        []byte              `json:"body,omitempty"`
 	Detail      string              `json:"detail,omitempty"`
 	Meter       bool                `json:"meter,omitempty"`
 	Refuse      *Refusal            `json:"refuse,omitempty"`
 	Error       string              `json:"error,omitempty"`
 }
 
+// readCall reads a call of at most limit bytes, in one buffer of the
+// length it says.
+func readCall(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
+	var buffer bytes.Buffer
+	if r.ContentLength > 0 && r.ContentLength <= limit {
+		// ReadFrom grows a buffer without MinRead bytes free.
+		buffer.Grow(int(r.ContentLength) + bytes.MinRead)
+	}
+	_, err := buffer.ReadFrom(http.MaxBytesReader(w, r.Body, limit))
+	return buffer.Bytes(), err
+}
+
+// splitCall reads the JSON a call begins with into value, and returns
+// what follows it after a line's end: a request's body.
+func splitCall(data []byte, value any) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(value); err != nil {
+		return nil, err
+	}
+	rest := bytes.TrimLeft(data[decoder.InputOffset():], " \t\r")
+	if len(rest) == 0 {
+		return nil, nil
+	}
+	if rest[0] != '\n' {
+		return nil, errors.New("the JSON is followed by more than a line's end")
+	}
+	return rest[1:], nil
+}
+
 func (p *plugin) request(w http.ResponseWriter, r *http.Request) {
 	var request Request
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestCall)).Decode(&request); err != nil {
+	data, err := readCall(w, r, maxRequestCall)
+	if err != nil {
+		answer(w, forwarded{Error: "the edge's request: " + err.Error()})
+		return
+	}
+	// The JSON says whether the request's body follows it.
+	wire := struct {
+		*Request
+		BodyFollows bool `json:"bodyFollows"`
+	}{Request: &request}
+	body, err := splitCall(data, &wire)
+	if err != nil {
 		answer(w, forwarded{Error: "the edge's request is not JSON: " + err.Error()})
 		return
+	}
+	if wire.BodyFollows {
+		request.Body = body
+		if request.Body == nil {
+			request.Body = []byte{}
+		}
 	}
 	request.ctx = r.Context()
 	to, err := func() (to *Forward, err error) {
@@ -223,7 +275,20 @@ func (p *plugin) request(w http.ResponseWriter, r *http.Request) {
 		p.sessions[id] = s
 		p.mu.Unlock()
 	}
-	answer(w, forwarded{URL: to.URL, Header: to.Header, Drop: to.Drop, ReplaceBody: to.Body != nil, Body: to.Body, Detail: to.Detail, Meter: to.Meter != nil})
+	encoded, err := json.Marshal(forwarded{URL: to.URL, Header: to.Header, Drop: to.Drop, ReplaceBody: to.Body != nil, Detail: to.Detail, Meter: to.Meter != nil})
+	if err != nil {
+		answer(w, forwarded{Error: err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if to.Body != nil {
+		encoded = append(encoded, '\n')
+		w.Header().Set("Content-Length", strconv.Itoa(len(encoded)+len(to.Body)))
+		_, _ = w.Write(encoded)
+		_, _ = w.Write(to.Body)
+		return
+	}
+	_, _ = w.Write(encoded)
 }
 
 // sweep lets go of sessions the edge left, once a minute; p.mu is held.
@@ -261,6 +326,7 @@ func (p *plugin) forget(r *http.Request) {
 type metered struct {
 	Counts []count `json:"counts,omitempty"`
 	Body   bool    `json:"body,omitempty"`
+	Events bool    `json:"events,omitempty"`
 	Error  string  `json:"error,omitempty"`
 }
 
@@ -285,7 +351,48 @@ func (p *plugin) response(w http.ResponseWriter, r *http.Request) {
 		answer(w, metered{Error: err.Error()})
 		return
 	}
-	answer(w, metered{Counts: s.counter.take(), Body: s.reading})
+	// A stream of events is read event by event, by a meter that reads
+	// them so.
+	if events, ok := s.meter.(EventMeter); ok && s.reading {
+		if media, _, _ := mime.ParseMediaType(response.Get("Content-Type")); media == "text/event-stream" {
+			s.events = events
+		}
+	}
+	answer(w, metered{Counts: s.counter.take(), Body: s.reading, Events: s.events != nil})
+}
+
+type evented struct {
+	Keep  bool   `json:"keep"`
+	Error string `json:"error,omitempty"`
+}
+
+func (p *plugin) event(w http.ResponseWriter, r *http.Request) {
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxEvent))
+	if err != nil {
+		answer(w, evented{Keep: true, Error: "the edge's event: " + err.Error()})
+		return
+	}
+	s, err := p.session(r)
+	if err != nil {
+		answer(w, evented{Keep: true, Error: err.Error()})
+		return
+	}
+	defer s.mu.Unlock()
+	if s.events == nil {
+		answer(w, evented{Keep: true})
+		return
+	}
+	keep := true
+	err = func() (err error) {
+		defer guard(&err)
+		keep = s.events.Event(data, &s.counter)
+		return nil
+	}()
+	if err != nil {
+		answer(w, evented{Keep: true, Error: err.Error()})
+		return
+	}
+	answer(w, evented{Keep: keep})
 }
 
 type chunked struct {

@@ -130,7 +130,6 @@ func newHost(t *testing.T) *hostFixture {
 func (f *hostFixture) install(image string) {
 	manifest := plugins.Manifest{ABI: plugins.ABI, Name: "mine"}
 	f.plugins = []store.Plugin{
-		{Name: "openai", Spec: plugins.Spec{Kind: plugins.KindOpenAI}},
 		{Name: "mine", Spec: plugins.Spec{Kind: plugins.KindContainer, Image: image}, Manifest: &manifest},
 	}
 }
@@ -142,10 +141,9 @@ func (f *hostFixture) sync(t *testing.T) {
 	}
 }
 
-// A plugin of kind container gets one container on the node: of its
-// image, pulled, with no network, as nobody, its socket's directory
-// mounted, and started again by the engine; a plugin of Murder's own
-// kind gets none.
+// A plugin gets one container on the node: of its image, pulled, with no
+// network, as nobody, its socket's directory mounted, and started again
+// by the engine.
 func TestAPluginGetsAContainerOfItsImage(t *testing.T) {
 	f := newHost(t)
 	f.install(imageV1)
@@ -161,7 +159,7 @@ func TestAPluginGetsAContainerOfItsImage(t *testing.T) {
 	if spec.Image != imageV1 || spec.Network != "none" || spec.User != User || !spec.ReadOnlyRoot || spec.RestartPolicy != "unless-stopped" ||
 		spec.Labels[runtime.LabelPlugin] != "mine" || spec.Labels[LabelID] != id || spec.MemoryBytes != Memory ||
 		len(spec.Mounts) != 1 || spec.Mounts[0].Source != dir || spec.Mounts[0].Target != plugins.SocketDir ||
-		spec.Env[0] != "MURDER_PLUGIN_SOCKET=/run/murder-plugin/plugin.sock" {
+		spec.Env[0] != "MURDER_PLUGIN_SOCKET=/run/murder-plugin/plugin.sock" || spec.Env[1] != GoMemoryLimit {
 		t.Fatalf("spec %+v", spec)
 	}
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {

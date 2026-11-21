@@ -2,16 +2,17 @@
 
 A plugin passes tenants' requests on to a provider's API, such as OpenAI's
 or HERE's, with a key the tenant never sees. It counts what each tenant
-uses and can stop a tenant at a limit. Like an app, a plugin is
-configuration: a kind Murder knows how to meter, and the limits its tenants
-get. Murder meters OpenAI and HERE itself. For any other provider, a
-plugin of kind `container` runs a program of your own in a small
-container on each node, which says where each request goes and what it
-used ([Plugins of your own](#plugins-of-your-own)).
+uses and can stop a tenant at a limit. A plugin is an image: a small
+program, run in a container on each node, that says where each request
+goes and what it used. Its spec names the image and the limits its tenants
+get. Murder's releases publish plugins for OpenAI and HERE
+([Murder's plugins](#murders-plugins)); any other provider takes a plugin
+of your own ([Plugins of your own](#plugins-of-your-own)).
 
 ```yaml
 # plugins/openai.yaml
-kind: openai
+kind: container
+image: ghcr.io/powerpenguini/murder-openai:latest   # pinned by digest as it is installed
 limits:
   - {metric: tokens, per: month, amount: 2000000}            # hard: 429 once used
   - {metric: requests, per: day, amount: 5000, mode: soft}   # soft: only said
@@ -44,11 +45,29 @@ any `apiKey` or none.
 An app that lists a plugin not installed is refused, as is deleting a
 plugin an app lists.
 
-## Kinds
+## Murder's plugins
 
-**openai** goes to `upstream` (`https://api.openai.com` by default, or
-another API that speaks OpenAI's), with `Authorization: Bearer` and the
-key.
+Each release publishes two images, built from [plugins](../plugins) in
+Murder's repository for amd64 and arm64, tagged with the release's
+version and `latest`:
+`ghcr.io/powerpenguini/murder-openai` and
+`ghcr.io/powerpenguini/murder-here`. Applying a tag pins it, as any image
+of a plugin: a node keeps running what was applied until it is applied
+again. Murder's plugins were kinds of their own before, `kind: openai` and
+`kind: here`; such a file is now refused with the image to name instead,
+and a plugin installed so goes as the database is upgraded, with tenants'
+keys and limits of it, and is applied again from its image.
+
+[examples/plugins](../examples/plugins) has their files.
+
+**openai** goes to OpenAI, or another API that speaks OpenAI's, with
+`Authorization: Bearer` and the key.
+- `hosts: [api.groq.com]` in the spec names another provider. Its API is
+  at the first host, or at `config.upstream`, a host of the plugin's and
+  a path, as `https://api.groq.com/openai`: a tenant's request for
+  `/v1/chat/completions` goes to `https://api.groq.com/openai/v1/chat/completions`.
+  Only `https://`, on port 443, carries the key: a server of your own
+  behind plain HTTP, such as vLLM or Ollama, needs TLS in front of it.
 - It passes on only these endpoints:
   - `POST /v1/chat/completions`, `/v1/responses` and `/v1/completions`;
   - `POST /v1/embeddings` and `/v1/moderations`;
@@ -63,7 +82,7 @@ key.
   and completions, fine-tuning and vector stores are such endpoints.
 - Speech and the Realtime API (WebSockets) spend without saying what. No
   protocol switch passes.
-- `allow: ["POST /v1/batches", "GET /v1/batches/*"]` in the spec adds
+- `config: {allow: ["POST /v1/batches", "GET /v1/batches/*"]}` adds
   endpoints, `*` standing for one more path segment. What they use is
   counted only as far as their answers say it, and what they keep is
   shared by every tenant.
@@ -73,7 +92,7 @@ key.
 - Tokens are read from the `usage` of the answer: Chat Completions,
   Responses, Embeddings, images and transcriptions.
 - A streamed chat completion says what it used only if asked
-  (`stream_options.include_usage`). The edge asks for it, and takes the
+  (`stream_options.include_usage`). The plugin asks for it, and takes the
   usage chunk out again for an app that did not ask.
 - The Responses API's `response.completed`, `.incomplete` and `.failed`
   events carry the usage.
@@ -84,14 +103,17 @@ key.
 - Requests are counted without a model, since a tenant may name any.
   Tokens are counted by the model that answered, or else the one asked
   for once the provider took it. A name of more than 64 characters, or
-  with others than letters, digits and `._:/-`, is counted as `other`.
-- Answers come uncompressed, so the edge can read them; they stream to
+  with others than letters, digits and `._:/-*`, is counted as `other`.
+- It reads a JSON body of up to 16 MB, for its model and whether it
+  streams; a larger one is answered `413`. Audio and images to edit pass
+  as they come, at any size.
+- Answers come uncompressed, so the plugin can read them; they stream to
   the app as they come.
 
-**here** goes to `https://<host>/<path>` for a host in `hosts`, with the
+**here** goes to `https://<host>/<path>` for a host of its own, with the
 key as the `apiKey` query parameter. The rest of the query passes as it was
 written.
-- The default hosts are the services that keep nothing of a request:
+- Its hosts are the services that keep nothing of a request:
   - search: `geocode`, `revgeocode`, `multi-revgeocode`, `autosuggest`,
     `autocomplete`, `discover`, `browse` and `lookup`, all
     `.search.hereapi.com`;
@@ -103,8 +125,8 @@ written.
 - Services that keep data under the account are left out: batch
   geocoding, geofencing, fleet and tour planning, and Data Hub. Every
   tenant would reach every other's data there.
-- `hosts` in the spec replaces the defaults. `*.example.com` stands for
-  every name below the domain.
+- `hosts` in the spec replaces them. `*.example.com` stands for every name
+  below the domain.
 - It counts `requests`, and `transactions` as HERE bills them (its
   supplemental pricing, April 2026). A request is one transaction, with
   these exceptions:
@@ -118,15 +140,15 @@ written.
 - Only answers with success count transactions. Each count is kept by
   service, such as `geocode.search` or `matrix.router`. Hosts a wildcard
   allows are kept under the wildcard.
+- It reads a body of up to 16 MB, to count a matrix or a multi reverse
+  geocode; a larger one is answered `413`.
 - An async matrix's results are fetched from a host outside
   `hereapi.com`. Add it to `hosts` if your tenants use one.
 
-**container** runs a program of your own: see below.
-
 ## Plugins of your own
 
-A plugin of kind `container` names an image: a program that says where
-each request goes and counts what it used. The agent runs it in a
+A plugin of your own is an image too: a program that says where each
+request goes and counts what it used. The agent runs it in a
 container on each node, and the edge calls it there, on a unix socket.
 The edge does the rest:
 - it knows the tenant and holds its limits;
@@ -173,7 +195,6 @@ The manifest's `ui` says how the panel shows the plugin (see below):
 - the fields of its config, each with a label and what it is for.
 
 A plugin without `ui` shows its name, and its metrics by their names.
-OpenAI and HERE say theirs in Murder.
 
 ### Writing one in Go
 
@@ -248,10 +269,12 @@ one, for Anthropic's Messages API, with its Dockerfile:
 
 What the edge does around a container:
 - **The request.** The container sees the method, the path after the
-  plugin's name, the query, the headers and the plugin's config. It sees
-  the body too, up to the manifest's `requestBody` (at most 16 MB; larger
-  bodies are answered `413`). A plugin that needs no body reads none, and
-  bodies of any size then pass as they come. It never sees the tenant's
+  plugin's name, the query, the headers, the hosts it may send it to and
+  the plugin's config. It sees the body too, up to the manifest's
+  `requestBody` (at most 16 MB; larger bodies are answered `413`), of the
+  media types `requestBodyTypes` names, or of any. A plugin that needs no
+  body reads none, and bodies of any size, or of another type, then pass as
+  they come. It never sees the tenant's
   credentials (`Authorization`, `X-Api-Key`, `Cookie` and the key's own
   header or parameter).
 - **Where it goes.** The container answers a URL, which must be
@@ -264,7 +287,11 @@ What the edge does around a container:
   to 599, and a message.
 - **The answer.** For a plugin that meters it, the edge shows the status
   and headers, then the body as it passes, uncompressed, and says when it
-  ended: read whole, or not, as when the tenant stopped reading. The
+  ended: read whole, or not, as when the tenant stopped reading. A stream
+  of server-sent events may be shown event by event instead
+  (`pluginsdk.EventMeter`), and the plugin may take an event out of what
+  the tenant gets, as openai takes out the usage it asked for. It cannot
+  add to the answer, nor change it otherwise. The
   plugin's counts are kept by their detail, such as a model. Murder counts
   `requests` itself, by the request's detail.
 - **The container.** It runs as nobody (65534), whatever its image says,
@@ -279,7 +306,9 @@ What the edge does around a container:
 
   One container serves every tenant of its node, many requests at once:
   what it keeps between requests is shared by them, so keep what is a
-  tenant's by its name. The engine starts it again when it stops, as at
+  tenant's by its name. The edge has at most three bodies of 16 MB under
+  way to it at once, two of one tenant's: others are answered `503` until
+  there is room. A plugin in Go has `GOMEMLIMIT` set below its memory. The engine starts it again when it stops, as at
   boot. `docker logs murder-plugin-…` shows what it wrote.
 - **Failures.** A container that fails, panics, runs out of time or does
   what it may not before the request goes on gets the request answered
@@ -294,49 +323,57 @@ What the edge does around a container:
 A plugin's container serves HTTP/1.1 on a unix socket at the path
 `MURDER_PLUGIN_SOCKET` says (`/run/murder-plugin/plugin.sock`), which it
 creates with mode `0666`. Each call is JSON, but a chunk of an answer's
-body, which comes as it is. A request the plugin meters is a session: the
-edge names it in the header `Murder-Session` of each of its calls, and
-ends each with `/end`, read or not; a session the edge left, as when it
-stopped, may be let go of after 10 minutes.
+body or an event's data, which come as they are. A request, and the
+answer to it, are JSON and, after a line's end (`\n`), the body's bytes,
+when it has one. A request the plugin meters is a session: the edge names
+it in the header `Murder-Session` of each of its calls, and ends each with
+`/end`, read or not; a session the edge left, as when it stopped, may be
+let go of after 10 minutes.
 
 | Call | Takes | Answers |
 |---|---|---|
 | `GET /manifest` | | the manifest |
-| `POST /request` | the request, its body in base64 | where it goes |
-| `POST /response` | the answer's status and headers | counts, and whether to read the body |
+| `POST /request` | the request, and its body after it | where it goes, and the body to send in place of the tenant's after it |
+| `POST /response` | the answer's status and headers | counts, whether to read the body, and whether event by event |
 | `POST /body` | a chunk of the answer's body | whether it wants more |
+| `POST /event` | the data of one event | whether the event stays in the answer |
 | `POST /end` | whether the body was read whole | counts |
 
-The JSON, version 2:
+The JSON, version 3:
 
 ```text
-manifest  {"abi": 2, "name": "x", "version": "1.0.0", "hosts": ["api.x.example"],
+manifest  {"abi": 3, "name": "x", "version": "1.0.0", "hosts": ["api.x.example"],
            "key": {"header": "X-Key", "prefix": ""} | {"query": "key"},
-           "metrics": ["tokens"], "requestBody": 1048576,
+           "metrics": ["tokens"], "requestBody": 1048576, "requestBodyTypes": ["application/json"],
            "ui": {"title", "description", "detail": "model",
                   "metrics": [{"name": "tokens", "label": "Tokens", "unit": "tokens"}],
                   "config": [{"name": "allow", "label": "More endpoints", "help": "..."}]}}
 request   {"tenant", "plugin", "method", "path", "query", "header": {"Name": ["value"]},
-           "config": {...}, "body": "<base64>"}
-forward   {"url", "header": {...}, "drop": [...], "replaceBody": false, "body": "<base64>",
+           "hosts": ["api.x.example"], "config": {...}, "bodyFollows": true}
+           \n<the body>
+forward   {"url", "header": {...}, "drop": [...], "replaceBody": false,
            "detail": "", "meter": false}
+           [\n<the body, with replaceBody>]
           | {"refuse": {"status": 403, "message": "..."}} | {"error": "..."}
 response  {"status": 200, "header": {...}}
-metered   {"counts": [{"metric", "detail", "amount"}], "body": false} | {"error": "..."}
+metered   {"counts": [{"metric", "detail", "amount"}], "body": false, "events": false} | {"error": "..."}
 body      {"more": true} | {"error": "..."}
+event     {"keep": true} | {"error": "..."}
 end       {"complete": true}
 ```
 
 An answer with `error` is a failure. An edge runs only plugins of the
 interface version it knows, so a plugin keeps working across Murder's
-releases until the version changes.
+releases until the version changes; a plugin installed from an image of
+another version is answered `503` until it is applied again from one of
+this.
 
 ## In the panel
 
 The panel's Plugins page lists the plugins: kind and image, whether each
 has its key, its limits, what its tenants used this month, and the tenants
 at a limit, or past four fifths of one. A plugin's page shows:
-- what it is, as its kind or manifest says;
+- what it is, as its manifest says;
 - where its requests go, and where the key goes on them;
 - its config;
 - its last 30 days by day, of any metric it counts;
@@ -445,14 +482,14 @@ translation. Tenants drop every capability, and a made-up source address
 gets no answer back to complete a TCP connection. The app is given no
 token of its own: `OPENAI_API_KEY` may be anything.
 
-The edge reads only the bodies it meters: OpenAI's JSON, HERE's matrices
-and multi reverse geocodes, each at most 64 MB, and a container's, up to what
-its manifest says. It holds at most 512 MB of
-them at once, and 128 MB of one tenant's, taking room as the bytes come.
+The edge reads only the bodies a plugin reads, up to what its manifest
+says: at most 16 MB each. It holds at most 512 MB of them at once, and
+64 MB of one tenant's, taking room as the bytes come.
 A body that sends nothing for 30 seconds is given up on, as on the public
 ports. A port taken by something else stops only the plugins: the edge
 logs it and serves the rest.
 The key the app sends, if any, is taken off, along with `Cookie`,
 `OpenAI-Organization` and `OpenAI-Project`. The edge logs a provider's
 errors without the URL (HERE's holds the key). It also takes the key out
-of the headers of every answer, and out of HERE's error bodies.
+of the headers of every answer, and out of the error bodies of a plugin
+whose key goes in the query, as HERE's.

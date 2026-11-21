@@ -9,8 +9,7 @@ import (
 
 // UI is how the panel shows a plugin: what it is, how its metrics read,
 // the first of them charted, what its counts are kept by, and what its
-// config takes. A plugin says it in its manifest; Murder says it for its
-// own kinds.
+// config takes, as the plugin's manifest says it.
 type UI struct {
 	Title       string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
@@ -39,37 +38,11 @@ type ConfigUI struct {
 	Help  string `json:"help,omitempty"`
 }
 
-// builtinUI is how Murder shows its own kinds.
-var builtinUI = map[string]UI{
-	KindOpenAI: {
-		Title:       "OpenAI",
-		Description: "OpenAI's API, or one that speaks it: tokens counted from each answer's usage, by the model that answered.",
-		Detail:      "model",
-		Metrics: []MetricUI{
-			{Name: MetricTokens, Label: "Tokens", Unit: "tokens"},
-			{Name: MetricInputTokens, Label: "Input tokens", Unit: "tokens"},
-			{Name: MetricOutputTokens, Label: "Output tokens", Unit: "tokens"},
-			{Name: MetricCachedTokens, Label: "Cached input tokens", Unit: "tokens"},
-			{Name: MetricEstimatedTokens, Label: "Estimated tokens", Unit: "tokens"},
-			{Name: MetricRequests, Label: "Requests", Unit: "requests"},
-		},
-	},
-	KindHERE: {
-		Title:       "HERE",
-		Description: "HERE's location services: requests, and transactions as HERE bills them, by service.",
-		Detail:      "service",
-		Metrics: []MetricUI{
-			{Name: MetricTransactions, Label: "Transactions", Unit: "transactions"},
-			{Name: MetricRequests, Label: "Requests", Unit: "requests"},
-		},
-	},
-}
-
-// UIOf is how the panel shows a plugin: its kind's, or its manifest's, every
+// UIOf is how the panel shows a plugin: as its manifest says, every
 // metric it counts said, those the manifest left out by their names.
 func UIOf(spec Spec, manifest *Manifest) UI {
-	ui := builtinUI[spec.Kind]
-	if spec.Kind == KindContainer && manifest != nil {
+	var ui UI
+	if manifest != nil {
 		if manifest.UI != nil {
 			ui = *manifest.UI
 		}
