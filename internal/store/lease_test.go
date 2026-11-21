@@ -204,6 +204,7 @@ func TestOpenUpgradesSchemaVersion19(t *testing.T) {
 	for _, statement := range []string{
 		schema,
 		`DROP TABLE operation_lease`,
+		`DROP TABLE plugin_modules`, `DROP TABLE plugin_reports`, `DROP TABLE plugin_usage`, `DROP TABLE plugin_tenants`, `DROP TABLE plugins`,
 		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '3'), ('applied', '0')`,
 		`PRAGMA user_version = 19`,
 	} {

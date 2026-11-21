@@ -83,6 +83,9 @@ type Server struct {
 	Cluster func(actor string) ClusterAgent
 	// Apps, when set, edits apps and tenants' settings.
 	Apps func(actor string) AppAgent
+	// Plugins, when set, shows the plugins and what tenants use of them,
+	// and sets their keys and tenants' limits.
+	Plugins func(actor string) PluginAgent
 	// Jobs are the panel's background work; panels of one process share
 	// them.
 	Jobs *Jobs
@@ -100,7 +103,7 @@ type Server struct {
 // New returns a panel asking backend.
 func New(backend Backend, log *slog.Logger) (*Server, error) {
 	s := &Server{backend: backend, log: log, now: time.Now, pages: map[string]*template.Template{}, Jobs: &Jobs{}}
-	for _, page := range []string{"overview", "tenants", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job", "apps", "app", "settings", "node", "review"} {
+	for _, page := range []string{"overview", "tenants", "tenant", "events", "error", "login", "enroll", "access", "logs", "cluster", "job", "apps", "app", "settings", "node", "review", "plugins", "plugin"} {
 		t, err := template.New("layout.html").Funcs(s.funcs()).ParseFS(templateFiles, "templates/layout.html", "templates/partials.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("panel template %s: %w", page, err)
@@ -140,6 +143,12 @@ func (s *Server) Handler() http.Handler {
 		pages.HandleFunc("GET /apps/{name}/review", s.appReview)
 		pages.HandleFunc("GET /tenants/{name}/settings", s.settings)
 		pages.HandleFunc("POST /tenants/{name}/settings", s.settingsAction)
+	}
+	if s.Plugins != nil {
+		pages.HandleFunc("GET /plugins", s.pluginsPage)
+		pages.HandleFunc("GET /plugins/{name}", s.pluginPage)
+		pages.HandleFunc("POST /plugins/{name}", s.pluginAction)
+		pages.HandleFunc("GET /plugins/{name}/usage.csv", s.pluginUsageCSV)
 	}
 	if s.Cluster != nil {
 		pages.HandleFunc("GET /cluster", s.cluster)
@@ -385,8 +394,9 @@ type page struct {
 	// what their last action did.
 	Acts          bool
 	Done, Problem string
-	// Edits says apps and tenants' settings may be edited.
-	Edits bool
+	// Edits says apps and tenants' settings may be edited; Plugs that
+	// the plugins are shown.
+	Edits, Plugs bool
 	// Alerts count what is broken, for the side bar.
 	Alerts navAlerts
 	Data   any
@@ -423,7 +433,7 @@ func (s *Server) renderWith(w http.ResponseWriter, r *http.Request, name, title,
 // pageFor is a page's layout data: who looks, whether they may act, and
 // what their last action did.
 func (s *Server) pageFor(w http.ResponseWriter, r *http.Request, title, section string, nodes api.Nodes, data any) page {
-	p := page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Edits: s.Apps != nil, Data: data}
+	p := page{Title: title, Section: section, Cluster: nodes, Now: s.now(), User: userOf(r), Acts: s.Actions != nil, Edits: s.Apps != nil, Plugs: s.Plugins != nil, Data: data}
 	p.Alerts = s.alertsFor(r, nodes, data)
 	// A page following the cluster leaves what an action did to the page
 	// it was meant for.
@@ -459,6 +469,7 @@ func (s *Server) alertsFor(r *http.Request, nodes api.Nodes, data any) navAlerts
 		func() error { events, _ = s.backend.Events(ctx, store.EventQuery{Limit: activityEvents}); return nil },
 	)
 	notices, failing, badApps := s.triage(nodes, tenants, use, apps, events)
+	notices = append(notices, s.pluginsNotices(ctx, s.actor(userOf(r)))...)
 	a := alertsOf(notices, failing)
 	a.Apps = badApps
 	return a

@@ -1,0 +1,38 @@
+{{define "content"}}{{$d := .Data}}
+<div class="head page-title">
+  <h1>Plugins</h1>
+</div>
+<p class="lead">Providers' APIs tenants reach through the edge, with a key they never see. Each counts what its tenants use, and holds them to their limits.</p>
+
+{{with $d.Attention}}
+<section class="near" id="limits" aria-labelledby="limits-h">
+  <h2 id="limits-h" class="sr">Tenants at a limit</h2>
+  <ul class="attention">
+    {{range .}}<li{{if and .Limit.Reached .Limit.Hard}} class="broken"{{end}}><span class="st {{if and .Limit.Reached .Limit.Hard}}bad{{else}}warn{{end}}" aria-label="{{if .Limit.Reached}}limit reached{{else}}limit near{{end}}"></span><div>
+      <p class="nhead"><a href="/tenants/{{.Tenant}}#plugins" class="subject">{{.Tenant}}</a>{{if .Limit.Reached}} used all its {{.Limit.Said}} of <a href="/plugins/{{.Plugin}}">{{.Plugin}}</a>{{if .Limit.Hard}}: its requests to it are refused until {{.Limit.Until.UTC.Format "2 Jan 15:04"}} UTC{{else}}, a soft limit: its requests still pass{{end}}{{else}} used {{.Limit.Used}} of its {{.Limit.Said}} of <a href="/plugins/{{.Plugin}}">{{.Plugin}}</a>{{end}}.</p>
+      <div class="nacts"><a href="/plugins/{{.Plugin}}?tenant={{.Tenant}}#edit">Its limits of {{.Plugin}}</a></div>
+    </div></li>{{end}}
+  </ul>
+</section>
+{{end}}
+
+<section class="near">
+  <table class="list rows">
+    <thead><tr><th>Plugin</th><th>Kind</th><th>Key</th><th class="hide-narrow">Limits</th><th class="num">This month</th><th class="num">Tenants</th></tr></thead>
+    <tbody>
+    {{range $d.Plugins}}
+      <tr>
+        <td class="l-main"><a class="row-link" href="/plugins/{{.Name}}">{{.Name}}</a> <span class="dim small nowrap">{{.UI.Title}}</span></td>
+        <td class="l-sub mono dim" data-label="Kind">{{.Kind}}</td>
+        <td class="l-side">{{if .HasKey}}<span class="st ok">set</span>{{else}}<span class="st bad">none</span>{{end}}</td>
+        <td class="hide-narrow small">{{range $i, $l := .Limits}}{{if $i}}<br>{{end}}{{$l}}{{else}}<span class="faint">none</span>{{end}}</td>
+        <td class="num l-sub" data-label="This month">{{.MonthText}} <span class="dim">{{if .Main.Unit}}{{.Main.Unit}}{{else}}{{.Main.Label}}{{end}}</span></td>
+        <td class="num l-sub" data-label="Tenants">{{.Tenants}}{{if .Reached}} <span class="st bad" title="{{plural .Reached "tenant" "tenants"}} at a limit">{{.Reached}}</span>{{end}}{{if .Near}} <span class="st warn" title="{{plural .Near "tenant" "tenants"}} near a limit">{{.Near}}</span>{{end}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="6" class="empty l-main">No plugin yet. Install one from a node: <span class="mono">murder plugin apply plugins/openai.yaml</span>.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}

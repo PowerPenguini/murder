@@ -138,9 +138,12 @@ it; `murder tenant rotate` gives it a new value.
 - a read-only root with a 256 MB `/tmp` tmpfs (`writableRoot: true` and `tmpfs` change that);
 - the agent's default limits.
 
-**Env placeholders:** values may use `{{name}}`, `{{host}}`, `{{url}}` and
-`{{network}}`. `{{network}}` is the tenant network's CIDR; the edge proxy
-connects from it, so trust it for proxy headers.
+**Env placeholders:** values may use `{{name}}`, `{{host}}`, `{{url}}`,
+`{{network}}` and `{{plugin.NAME.url}}`. `{{network}}` is the tenant
+network's CIDR; the edge proxy connects from it, so trust it for proxy
+headers. `{{plugin.NAME.url}}` is where the tenant reaches a plugin its app
+lists under `plugins`, such as `plugins: [openai]`: see
+[Plugins](plugins.md).
 
 **Images:**
 - Tags are pinned to the digest the registry names for them when stored, so

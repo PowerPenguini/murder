@@ -37,6 +37,9 @@ type DemoCluster struct {
 	// data is its data's size, when not demoData (FillDisk).
 	diskKept map[string]int
 	data     map[string]int64
+	// pluginState is the demo's plugins, made as they are first asked
+	// for.
+	pluginState *demoPlugins
 }
 
 // diskOf is a tenant's data's size and the disk limit its volume has, in

@@ -151,7 +151,8 @@ func runAgent(args []string) error {
 	reconciler := reconcile.New(st, docker, volumes, key, reconcile.Config{BaseDomain: cfg.BaseDomain, Scheme: cfg.Scheme(), DefaultLimits: cfg.Defaults,
 		// The last lines of each tenant's previous container, beside the
 		// database: this node's own, never the cluster's.
-		PreviousDir: filepath.Join(filepath.Dir(cfg.Database), "previous-logs")}, log)
+		PreviousDir: filepath.Join(filepath.Dir(cfg.Database), "previous-logs"),
+		PluginsPort: cfg.Edge.PluginsPort}, log)
 	// What the node's tenants use, measured here and kept for a day.
 	recorder := measure.NewRecorder(node)
 	// The agent's part in an upgrade: the new binary replaces this one, and
@@ -326,6 +327,9 @@ func runAgent(args []string) error {
 		apiHandler.WithRelayPort(cfg.Edge.RelayPort)
 		apiHandler.WithCluster(member)
 		apiHandler.WithInvites(invites)
+		// What the edge counted of plugins is written once every node
+		// applies it.
+		apiHandler.WithPluginsReady(func(ctx context.Context) error { return member.EveryNodeRuns(ctx, store.PluginsSchema) })
 	}
 	apiServer := &http.Server{Handler: apiHandler.Handler(), ReadHeaderTimeout: 10 * time.Second, ConnContext: apiserver.ConnContext}
 	go serve("api", apiServer, apiListener)
@@ -771,7 +775,8 @@ func keepFirewall(ctx context.Context, cfg config.Agent, st store.Store, log *sl
 // and the tenant subnets (some may lie outside the pool after it changed),
 // with the host's DNS servers as they are now.
 func loadFirewall(ctx context.Context, cfg config.Agent, subnets []netip.Prefix) error {
-	edgePorts, err := cfg.EdgePorts()
+	// Tenants reach the edge's public ports, and its plugins.
+	edgePorts, err := cfg.TenantPorts()
 	if err != nil {
 		return err
 	}

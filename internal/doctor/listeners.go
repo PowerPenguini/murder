@@ -112,7 +112,9 @@ func checkListeners(cfg config.Agent, h Host, sshPorts []int, hostRules bool) []
 	if len(sshPorts) == 0 {
 		expected["tcp"] = []int{22}
 	}
-	if ports, err := cfg.EdgePorts(); err == nil {
+	// The edge's public ports, and its plugins' port, which answers
+	// only the node's tenant networks.
+	if ports, err := cfg.TenantPorts(); err == nil {
 		expected["tcp"] = append(expected["tcp"], ports...)
 	}
 	if t := cfg.Panel.Tunnel; t != nil {

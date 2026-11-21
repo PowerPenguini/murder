@@ -193,6 +193,9 @@ td.barcell { min-width: 170px; }
 .barline { display: flex; align-items: center; gap: var(--s3); }
 svg.bar { display: block; width: 96px; height: 6px; flex: none; }
 .barline .num { white-space: nowrap; }
+/* A limit said in words wraps on a phone; its figures stay together. */
+.barline .num.said { white-space: normal; }
+.kv .wraps { overflow-wrap: anywhere; }
 
 /* ── pairs: a label and its value ─────────────────── */
 dl.pairs { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px var(--s4); margin: 0; font-size: 13px; }

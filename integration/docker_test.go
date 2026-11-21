@@ -7,18 +7,22 @@ package integration
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,6 +32,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/plugins"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/rollout"
 	"github.com/PowerPenguini/murder/internal/runtime"
@@ -78,6 +83,9 @@ type node struct {
 	reconciler *reconcile.Reconciler
 	client     *api.Client
 	edgeURL    string
+	// pluginsPort is where TestATenantReachesAPluginOnDocker serves
+	// plugins; 0 for none.
+	pluginsPort int
 }
 
 func newNode(t *testing.T, name string) *node {
@@ -115,7 +123,7 @@ func newNode(t *testing.T, name string) *node {
 }
 
 func (n *node) newReconciler() *reconcile.Reconciler {
-	return reconcile.New(n.store, n.docker, n.volumes, n.key, reconcile.Config{BaseDomain: baseDomain, Scheme: "http", StopTimeout: 5 * time.Second, HealthTimeout: time.Second}, n.log)
+	return reconcile.New(n.store, n.docker, n.volumes, n.key, reconcile.Config{BaseDomain: baseDomain, Scheme: "http", StopTimeout: 5 * time.Second, HealthTimeout: time.Second, PluginsPort: n.pluginsPort}, n.log)
 }
 
 // rollOut drives app's rollout to its end, reconciling as it goes, with
@@ -506,4 +514,120 @@ func TestOutOfMemoryIsReportedOnDocker(t *testing.T) {
 		t.Logf("docker %s: %s %v", args[0], out, err)
 	}
 	t.Fatalf("status = %+v, want it serving again after one restart, killed for its memory", status)
+}
+
+// A tenant's container reaches a plugin its app lists at its network's
+// gateway, as {{plugin.NAME.url}} says, from its own address: the edge
+// knows it by that, passes the request on with the operator's key, and
+// counts it.
+func TestATenantReachesAPluginOnDocker(t *testing.T) {
+	if _, err := os.Stat(dockerSocket()); err != nil {
+		t.Skipf("no Docker socket: %v", err)
+	}
+	suffix := make([]byte, 3)
+	_, _ = rand.Read(suffix)
+	name := "plug-" + hex.EncodeToString(suffix)
+	repository := "murder-it/" + name
+	buildTestImage(t, "v1", repository+":v1")
+	cleanupTenant(t, name)
+	var auth, moduleKey, moduleHost string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host == "api.example.com" {
+			moduleKey, moduleHost = r.Header.Get("X-Key"), r.Host
+		} else {
+			auth = r.Header.Get("Authorization")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"object":"list","data":[]}`)
+	}))
+	defer upstream.Close()
+	// A plugin of one's own: the test module, built for WebAssembly.
+	modulePath := filepath.Join(t.TempDir(), "module.wasm")
+	build := exec.Command(filepath.Join(goruntime.GOROOT(), "bin", "go"), "build", "-buildmode=c-shared", "-o", modulePath, "../internal/plugins/testdata/module")
+	build.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0", "GOFLAGS=")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the test module: %v\n%s", err, output)
+	}
+	wasm, err := os.ReadFile(modulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Plugins on every address, as the edge serves them: on a port the
+	// host's own firewall, if any, lets containers reach.
+	port := os.Getenv("MURDER_IT_PLUGINS_PORT")
+	if port == "" {
+		port = "0"
+	}
+	listener, err := net.Listen("tcp4", "0.0.0.0:"+port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := newNode(t, name)
+	n.pluginsPort = listener.Addr().(*net.TCPAddr).Port
+	n.reconciler = n.newReconciler()
+	counter := plugins.NewCounter("edge-it")
+	proxy := plugins.NewProxy(func() plugins.Config { return apiserver.Routes{Store: n.store}.Table().Plugins }, n.key.Open, counter, n.log)
+	// The edge fetches modules from its agent, as murder edge does.
+	modules, err := plugins.NewModules(context.Background(), t.TempDir(), n.client.EdgePluginModule, n.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer modules.Close(context.Background())
+	proxy.WithModules(modules)
+	// The module's host, over HTTPS, is the test's upstream.
+	upstreamURL, _ := url.Parse(upstream.URL)
+	proxy.Transport = toTestUpstream{host: upstreamURL.Host}
+	server := &http.Server{Handler: proxy, ReadHeaderTimeout: 10 * time.Second}
+	go server.Serve(listener)
+	defer server.Close()
+	ctx := context.Background()
+	if _, err := n.client.PutPlugin(ctx, "openai", plugins.Spec{Kind: plugins.KindOpenAI, Upstream: upstream.URL}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.client.SetPluginKey(ctx, "openai", "", "sk-operator"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.client.PutPlugin(ctx, "mine", plugins.Spec{Kind: plugins.KindWasm, Module: plugins.ModuleDigest(sha256.Sum256(wasm))}, wasm); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.client.SetPluginKey(ctx, "mine", "", "mine-key"); err != nil {
+		t.Fatal(err)
+	}
+	app := spec.Tenant{Image: repository + ":v1", HealthPath: "/health", User: strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()), Plugins: []string{"openai", "mine"},
+		Env: map[string]string{"DATA_DIR": "/data", "OPENAI_BASE_URL": "{{plugin.openai.url}}/v1", "OPENAI_API_KEY": "murder", "MINE_URL": "{{plugin.mine.url}}"}}
+	if _, err := n.client.PutApp(ctx, "plug", app); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.client.Create(ctx, api.TenantRequest{Name: name, App: "plug"}); err != nil {
+		t.Fatal(err)
+	}
+	n.waitHealthy(t, n.reconciler, name)
+	_, body := n.request(t, http.MethodGet, name, "/fetch?env=OPENAI_BASE_URL&path=/models", "")
+	if strings.Contains(body, "i/o timeout") && port == "0" {
+		t.Skipf("the host's own firewall drops containers' connections to it (%s): set MURDER_IT_PLUGINS_PORT to a port it lets in", body)
+	}
+	if !strings.HasPrefix(body, "200 ") || auth != "Bearer sk-operator" {
+		t.Fatalf("the tenant got %q; the provider saw %q", body, auth)
+	}
+	if used := counter.Used(name, "openai", plugins.MetricRequests, plugins.PerDay, time.Now()); used != 1 {
+		t.Fatalf("%d requests counted", used)
+	}
+	// The module's plugin: the edge fetched the module from the agent,
+	// and put the key where its manifest says.
+	if _, body := n.request(t, http.MethodGet, name, "/fetch?env=MINE_URL&path=/v1/things", ""); !strings.HasPrefix(body, "200 ") || moduleKey != "Token mine-key" || moduleHost != "api.example.com" {
+		t.Fatalf("the tenant got %q; the module's provider saw %q at %q", body, moduleKey, moduleHost)
+	}
+	if used := counter.Used(name, "mine", plugins.MetricRequests, plugins.PerDay, time.Now()); used != 1 {
+		t.Fatalf("%d requests of the module's plugin counted", used)
+	}
+}
+
+// toTestUpstream sends every request to the test's upstream, over plain
+// HTTP, with the host it was for.
+type toTestUpstream struct{ host string }
+
+func (u toTestUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Host, r.URL.Scheme, r.URL.Host = r.URL.Host, "http", u.host
+	return http.DefaultTransport.RoundTrip(r)
 }

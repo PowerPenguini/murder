@@ -458,6 +458,31 @@ type Edge struct {
 	// nodes' edges pass on to the tenants this node runs: on the node's
 	// cluster address. The same on every node.
 	RelayPort int `yaml:"relayPort"`
+	// PluginsPort is where the edge serves plugins to the tenants of its
+	// node, which reach it at their network's gateway: on every address,
+	// answering only addresses of tenant networks. 0 serves none.
+	PluginsPort int `yaml:"pluginsPort"`
+}
+
+// PluginsAddress is where the edge serves plugins; empty for nowhere.
+func (a Agent) PluginsAddress() string {
+	if a.Edge.PluginsPort == 0 {
+		return ""
+	}
+	return net.JoinHostPort("0.0.0.0", strconv.Itoa(a.Edge.PluginsPort))
+}
+
+// TenantPorts are the ports of the host tenants may reach: the edge's
+// public ones, and the one it serves plugins on.
+func (a Agent) TenantPorts() ([]int, error) {
+	ports, err := a.EdgePorts()
+	if err != nil {
+		return nil, err
+	}
+	if a.Edge.PluginsPort != 0 {
+		ports = append(ports, a.Edge.PluginsPort)
+	}
+	return ports, nil
 }
 
 // RelayAddress is where the edge takes requests other nodes pass on; empty
@@ -497,7 +522,7 @@ func Parse(data []byte) (Agent, error) {
 		Firewall:      FirewallNftables,
 		Edge: Edge{
 			HTTP: ":80", HTTPS: ":443", TLS: edge.TLSConfig{Mode: edge.TLSOff, Storage: "/var/lib/murder/certs"},
-			Routes: "/var/lib/murder/edge-routes.json", PIDFile: "/run/murder-edge/edge.pid", Drain: Duration{30 * time.Second}, RoutesHold: Duration{15 * time.Second}, RelayPort: 7402,
+			Routes: "/var/lib/murder/edge-routes.json", PIDFile: "/run/murder-edge/edge.pid", Drain: Duration{30 * time.Second}, RoutesHold: Duration{15 * time.Second}, RelayPort: 7402, PluginsPort: 4180,
 		},
 		Defaults:          spec.Limits{MemoryMB: 512, CPUs: 1, PIDs: 512},
 		ReconcileInterval: Duration{10 * time.Second},
@@ -703,6 +728,11 @@ func (a Agent) validate(shared bool) error {
 		problems = append(problems, "edge.relayPort must be a port")
 	} else if a.Cluster != nil && a.Cluster.Port() == a.Edge.RelayPort {
 		problems = append(problems, "edge.relayPort must differ from the cluster address's port")
+	}
+	if a.Edge.PluginsPort < 0 || a.Edge.PluginsPort > 65535 {
+		problems = append(problems, fmt.Sprintf("edge.pluginsPort %d is not a port (0 serves no plugins)", a.Edge.PluginsPort))
+	} else if ports, err := a.EdgePorts(); err == nil && slices.Contains(ports, a.Edge.PluginsPort) || a.Edge.PluginsPort != 0 && a.Edge.PluginsPort == a.Edge.RelayPort {
+		problems = append(problems, fmt.Sprintf("edge.pluginsPort %d is taken by another of the edge's ports", a.Edge.PluginsPort))
 	}
 	if a.Edge.Drain.Duration < 0 {
 		problems = append(problems, "edge.drain must not be negative")

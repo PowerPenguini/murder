@@ -39,13 +39,18 @@ type Tenant struct {
 	// as root, and neither id may be 0.
 	User string `json:"user" yaml:"user"`
 	// Env holds plain environment values. Values may use the placeholders
-	// {{name}}, {{host}}, {{url}} and {{network}}; see Render.
+	// {{name}}, {{host}}, {{url}}, {{network}} and {{plugin.NAME.url}};
+	// see Render.
 	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 	// Secrets names environment variables whose values Murder generates once
 	// and stores encrypted. In YAML a list of names gives 32-byte hex values;
 	// a mapping may give a kind ("password") or a full {kind, bytes}.
 	Secrets Secrets `json:"secrets,omitempty" yaml:"secrets,omitempty"`
-	Limits  Limits  `json:"limits,omitzero" yaml:"limits,omitempty"`
+	// Plugins names the plugins the app's tenants may use (see
+	// internal/plugins): each is reached at {{plugin.NAME.url}}, with
+	// Murder's key, not the app's.
+	Plugins []string `json:"plugins,omitempty" yaml:"plugins,omitempty"`
+	Limits  Limits   `json:"limits,omitzero" yaml:"limits,omitempty"`
 	// The image's filesystem is read-only unless WritableRoot is set; Tmpfs
 	// adds writable scratch mounts (path → mount options), by default /tmp.
 	WritableRoot bool              `json:"writableRoot,omitempty" yaml:"writableRoot,omitempty"`
@@ -347,6 +352,12 @@ func (t Tenant) validate(checkImage func(string) error) error {
 			problems = append(problems, fmt.Sprintf("env name %q is invalid", key))
 		}
 		for _, holder := range placeholder.FindAllString(value, -1) {
+			if plugin, ok := pluginHolder(holder); ok {
+				if !slices.Contains(t.Plugins, plugin) {
+					problems = append(problems, fmt.Sprintf("env %s uses %s, but plugins does not list %s", key, holder, plugin))
+				}
+				continue
+			}
 			if !knownHolder[holder] {
 				problems = append(problems, fmt.Sprintf("env %s uses unknown placeholder %s", key, holder))
 			}
@@ -364,6 +375,14 @@ func (t Tenant) validate(checkImage func(string) error) error {
 		}
 		if secret.Bytes < 16 || secret.Bytes > 128 {
 			problems = append(problems, fmt.Sprintf("secret %s needs 16-128 bytes, got %d", key, secret.Bytes))
+		}
+	}
+	for i, plugin := range t.Plugins {
+		if err := ValidLabel(plugin); err != nil || len(plugin) > 32 {
+			problems = append(problems, fmt.Sprintf("plugin name %q is invalid", plugin))
+		}
+		if slices.Contains(t.Plugins[:i], plugin) {
+			problems = append(problems, fmt.Sprintf("plugin %s is listed twice", plugin))
 		}
 	}
 	for mount := range t.Tmpfs {
@@ -416,11 +435,28 @@ type Values struct {
 	// Network the CIDR of its container network (the edge proxy connects from
 	// it, so an app that trusts proxy headers should trust this range).
 	Host, URL, Network string
+	// Plugins are the addresses of the plugins the tenant reaches, by
+	// name.
+	Plugins map[string]string
+}
+
+// pluginHolder reads a plugin's placeholder, {{plugin.NAME.url}}.
+func pluginHolder(holder string) (string, bool) {
+	inner, ok := strings.CutPrefix(holder, "{{plugin.")
+	if !ok {
+		return "", false
+	}
+	name, ok := strings.CutSuffix(inner, ".url}}")
+	return name, ok && name != ""
 }
 
 // Render returns the tenant's plain environment with placeholders replaced.
 func (t Tenant) Render(values Values) map[string]string {
-	replacer := strings.NewReplacer("{{name}}", t.Name, "{{host}}", values.Host, "{{url}}", values.URL, "{{network}}", values.Network)
+	pairs := []string{"{{name}}", t.Name, "{{host}}", values.Host, "{{url}}", values.URL, "{{network}}", values.Network}
+	for _, plugin := range t.Plugins {
+		pairs = append(pairs, "{{plugin."+plugin+".url}}", values.Plugins[plugin])
+	}
+	replacer := strings.NewReplacer(pairs...)
 	rendered := make(map[string]string, len(t.Env))
 	for key, value := range t.Env {
 		rendered[key] = replacer.Replace(value)

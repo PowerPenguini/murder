@@ -272,15 +272,41 @@ func (s *Server) overviewOf(ctx context.Context, r *http.Request) (api.Nodes, ov
 			data.Attention, data.Rollouts, data.AppStates = joinApps(data.Attention, apps, tenants, events, now, s.actor(userOf(r)))
 		}
 	}
+	// A tenant at a hard limit of a plugin is refused its requests.
+	for _, n := range s.pluginsNotices(ctx, s.actor(userOf(r))) {
+		data.Attention = append(data.Attention, n)
+		if n.Bad {
+			data.Broken++
+		}
+	}
+	// The broken first, as they came.
+	slices.SortStableFunc(data.Attention, func(a, b notice) int {
+		if a.Bad == b.Bad {
+			return 0
+		}
+		if a.Bad {
+			return -1
+		}
+		return 1
+	})
 	data.Show, data.Query, data.ByName = tenantFilter(r)
 	attention := map[string]int{}
 	for _, n := range data.Attention {
 		if n.Node || n.App {
 			continue
 		}
-		attention[n.Subject] = map[bool]int{true: 0, false: 1}[n.Bad]
+		// A tenant may have notices of its own and of plugins: the worst
+		// says how it is, and every reason is shown.
+		if prev, ok := attention[n.Subject]; !ok || n.Bad || prev != 0 {
+			attention[n.Subject] = map[bool]int{true: 0, false: 1}[n.Bad]
+		}
 		for i := range data.Tenants {
 			if data.Tenants[i].Spec.Name != n.Subject {
+				continue
+			}
+			if data.Tenants[i].Attention {
+				data.Tenants[i].Reason = strings.Join(append([]string{data.Tenants[i].Reason}, n.Reasons...), "; ")
+				data.Tenants[i].ReasonBad = data.Tenants[i].ReasonBad || n.Bad
 				continue
 			}
 			reasons := slices.Clone(n.Reasons)
@@ -709,6 +735,8 @@ type tenantData struct {
 	AppMemory *appMemory
 	// Domains is its own host names' box.
 	Domains *domainsView
+	// Plugins is its use of the plugins, against its limits.
+	Plugins []tenantPluginView
 	// Operation is what a person did to it lately, and how it went; Me is
 	// who looks, as the audit log names them.
 	Operation *operation
@@ -727,7 +755,9 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 	var nodes api.Nodes
 	var use *tenantUsage
 	var cluster clusterUse
+	var plugged []tenantPluginView
 	if err := all(
+		func() error { plugged = s.tenantPlugins(ctx, s.actor(userOf(r)), name); return nil },
 		// An archived tenant is measured no more: it has no day to show.
 		func() error { use = s.tenantUsage(ctx, name, r.URL.Query().Get("range")); return nil },
 		func() error { cluster = s.usageNow(ctx); return nil },
@@ -745,6 +775,7 @@ func (s *Server) tenant(w http.ResponseWriter, r *http.Request) {
 		Activity: activityOf(events, s.now(), 14*24*time.Hour, 24*time.Hour, len(events) < activityEvents, dayLabel), Usage: use}
 	data.Row = tenantRow{Tenant: t, State: data.State, Replica: data.Replica}
 	data.Domains = s.domainsOf(r, t, nodes)
+	data.Plugins = plugged
 	if b, ok := cluster.Backups[name]; ok {
 		b.Stale = b.Stale && !t.Archived()
 		data.Row.Backup = &b

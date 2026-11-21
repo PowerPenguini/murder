@@ -68,6 +68,9 @@ Every server runs the same processes: `murder agent`, `murder edge` and, if want
   requests at once before passing them on, waiting for a moving tenant or
   for a small body to keep for another node's edge; past that, a request
   for a moving tenant is answered 503 at once, and a body streams through.
+  It also serves [plugins](plugins.md) to the node's own tenants on
+  `edge.pluginsPort` (4180), counting what each uses and telling the
+  agent every 15 seconds.
   `murder_edge_routes_timestamp_seconds`
   in its metrics (`edge.metrics`) says when the agent last answered.
 - **Local API.** A unix socket the `murder` CLI (and, later, the panel) talks to.

@@ -27,6 +27,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/config"
 	"github.com/PowerPenguini/murder/internal/edge"
 	"github.com/PowerPenguini/murder/internal/metrics"
+	"github.com/PowerPenguini/murder/internal/plugins"
 	"github.com/PowerPenguini/murder/internal/secrets"
 	"github.com/PowerPenguini/murder/internal/store"
 	"github.com/PowerPenguini/murder/internal/upgrade"
@@ -133,7 +134,30 @@ func runEdge(args []string) error {
 	following, stopFollowing := context.WithCancel(context.Background())
 	defer stopFollowing()
 	go followRoutes(following, api.NewClient(cfg.Socket), table, cfg.Edge.Routes, log)
-	go reportServed(following, api.NewClient(cfg.Socket), edgeInstance(), proxy.Served(), table, log)
+	self := edgeInstance()
+	go reportServed(following, api.NewClient(cfg.Socket), self, proxy.Served(), table, log)
+	// Plugins count what each tenant uses; the agent keeps it, cluster
+	// wide, and says what they used before.
+	counter := plugins.NewCounter(self.ID)
+	pluginProxy := plugins.NewProxy(table.Plugins, func(sealedFor, sealed string) (string, error) {
+		if key == nil {
+			return "", errors.New("the edge has no master key to open it with")
+		}
+		return key.Open(sealedFor, sealed)
+	}, counter, log)
+	// Plugins of kind wasm run their modules: fetched from the agent by
+	// digest, and kept, compiled too, beside the routes, for an edge that
+	// starts while the agent is down.
+	modulesClient := api.NewClient(cfg.Socket)
+	modules, err := plugins.NewModules(ctx, filepath.Join(filepath.Dir(cfg.Edge.Routes), "edge-plugins"), modulesClient.EdgePluginModule, log)
+	if err != nil {
+		log.Error("plugins of kind wasm are not served: their modules cannot be run", "error", err)
+	} else {
+		defer modules.Close(context.Background())
+		pluginProxy.WithModules(modules)
+		go prepareModules(following, table, modules)
+	}
+	go reportPlugins(following, api.NewClient(cfg.Socket), counter, log)
 	if credentials != nil {
 		go keepWarm(following, proxy, table)
 	}
@@ -196,7 +220,8 @@ func runEdge(args []string) error {
 				return listener, nil
 			}
 			// The socket holds no metrics: a scrape missed is no loss.
-			if fromSystemd && name != "edge metrics" {
+			// Nor plugins: a tenant's client tries again.
+			if fromSystemd && name != "edge metrics" && name != "edge plugins" {
 				log.Warn("murder-edge.socket does not hold this address, so it refuses connections while the edge restarts; the agent rewrites the socket to match, and `systemctl stop murder-edge.socket murder-edge.service; systemctl start murder-edge` applies that", "listener", name, "address", address)
 			}
 			return net.Listen(network, address)
@@ -261,6 +286,17 @@ func runEdge(args []string) error {
 		}
 		serve("edge relay", publicServer(proxy.Relay()), tls.NewListener(relayListener, credentials.RelayServer()))
 	}
+	if address := cfg.PluginsAddress(); address != "" {
+		// Plugins answer only the node's tenants, whom the firewall lets
+		// reach the port; responses stream, and a body must keep coming.
+		// A port taken by something else costs the plugins, not the
+		// public edge.
+		if pluginsListener, err := listen("edge plugins", address); err != nil {
+			log.Error("plugins are not served: their port is taken; set edge.pluginsPort to a free one, or 0", "error", err)
+		} else {
+			serve("edge plugins", &http.Server{Handler: edge.UploadDeadline(pluginProxy, uploadIdle), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}, pluginsListener)
+		}
+	}
 	if cfg.Edge.Metrics != "" {
 		metricsListener, err := listen("edge metrics", cfg.Edge.Metrics)
 		if err != nil {
@@ -269,7 +305,7 @@ func runEdge(args []string) error {
 		if host, _, _ := net.SplitHostPort(cfg.Edge.Metrics); !privateHost(host) {
 			log.Warn("edge metrics are served on a public address, without authentication: firewall the port", "metrics", cfg.Edge.Metrics)
 		}
-		observed := &edgeMetrics{edge: proxy.Stats(), table: table}
+		observed := &edgeMetrics{edge: proxy.Stats(), table: table, plugins: counter, pluginProxy: pluginProxy}
 		observed.certificates.Store(certificates)
 		serve("edge metrics", &http.Server{Handler: observed, ReadHeaderTimeout: 10 * time.Second}, metricsListener)
 	}
@@ -314,6 +350,10 @@ func runEdge(args []string) error {
 	// Connections taken over for a protocol switch (WebSockets) are not
 	// the servers' to wait for: they get the rest of the drain too.
 	proxy.WaitUpgraded(drain)
+	// What the requests just finished used is told before the edge goes.
+	flush, stopFlushing := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopFlushing()
+	flushPlugins(flush, api.NewClient(cfg.Socket), counter)
 	log.Info("murder edge stopped")
 	return runErr
 }
@@ -419,6 +459,81 @@ func reportServed(ctx context.Context, client *api.Client, self measure.EdgeInst
 	}
 }
 
+// prepareModules loads the modules of the plugins the routes name, as
+// they change, ahead of their requests.
+func prepareModules(ctx context.Context, table *edge.LiveTable, modules *plugins.Modules) {
+	for {
+		changed := table.Watch()
+		modules.Prepare(table.Plugins())
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// reportPlugins tells the agent, every so often, what the node's tenants
+// used of plugins, and takes from its answer what they used, cluster wide,
+// to hold their limits by. A report the agent did not take is sent again,
+// the same, until it does; meanwhile the edge holds limits by what it
+// counted.
+func reportPlugins(ctx context.Context, client *api.Client, counter *plugins.Counter, log *slog.Logger) {
+	ticker := time.NewTicker(servedEvery)
+	defer ticker.Stop()
+	quiet := false
+	for {
+		err := sendPlugins(ctx, client, counter)
+		switch {
+		case err != nil && !quiet && ctx.Err() == nil:
+			log.Info("the agent takes no plugin usage for now; the edge keeps it", "error", err)
+			quiet = true
+		case err == nil && quiet:
+			log.Info("the agent takes plugin usage again")
+			quiet = false
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// sendPlugins sends the counter's next report, or, with nothing to report,
+// asks only for the totals.
+func sendPlugins(ctx context.Context, client *api.Client, counter *plugins.Counter) error {
+	report, ok := counter.Next()
+	if !ok {
+		report = plugins.Report{Edge: counter.Edge()}
+	}
+	request, cancel := context.WithTimeout(ctx, servedEvery)
+	defer cancel()
+	totals, err := client.EdgePluginUsage(request, report)
+	var refused *api.Error
+	if errors.As(err, &refused) && refused.Status == http.StatusBadRequest && report.Seq > 0 {
+		// Refused as it is, it would be refused for good: what it holds
+		// is lost, not what comes after.
+		counter.Drop(report.Seq)
+		return fmt.Errorf("the agent refused report %d, which is dropped: %w", report.Seq, err)
+	}
+	if err != nil {
+		return err
+	}
+	counter.Took(totals)
+	return nil
+}
+
+// flushPlugins tells the agent what is left to tell, as the edge stops:
+// the report in flight, then what was counted since.
+func flushPlugins(ctx context.Context, client *api.Client, counter *plugins.Counter) {
+	for range 3 {
+		if _, ok := counter.Next(); !ok || sendPlugins(ctx, client, counter) != nil {
+			return
+		}
+	}
+}
+
 // servedEvery is how often the edge tells the agent its counts.
 const servedEvery = 15 * time.Second
 
@@ -444,6 +559,8 @@ const routesPoll = 25 * time.Second
 type edgeMetrics struct {
 	edge         *metrics.Edge
 	table        *edge.LiveTable
+	plugins      *plugins.Counter
+	pluginProxy  *plugins.Proxy
 	certificates atomic.Pointer[edge.Certificates]
 }
 
@@ -458,6 +575,12 @@ func (m *edgeMetrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A tenant no longer routed loses its counts.
 	m.edge.Keep(func(tenant string) bool { _, ok := table.Routes[tenant]; return ok })
 	m.edge.Write(out)
+	if m.plugins != nil {
+		m.plugins.WriteLimits(out, table.Plugins, time.Now())
+	}
+	if m.pluginProxy != nil {
+		m.pluginProxy.WriteMetrics(out)
+	}
 	out.Family("murder_edge_routes", "gauge", "Tenants the edge routes.")
 	out.Sample("murder_edge_routes", float64(len(table.Routes)))
 	if at := m.table.Updated(); !at.IsZero() {

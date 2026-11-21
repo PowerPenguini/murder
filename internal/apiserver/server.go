@@ -76,6 +76,9 @@ type Server struct {
 	clock func() time.Time
 	// backupDir keeps the scheduled copies of the database.
 	backupDir string
+	// pluginGate holds back the edge's reports of plugin usage until
+	// every node applies them; nil holds none back.
+	pluginGate *pluginGate
 }
 
 // NewServer returns the API server.
@@ -114,6 +117,7 @@ func (s *Server) Handler() http.Handler {
 	s.rebootRoutes(mux)
 	s.usageRoutes(mux)
 	s.domainRoutes(mux)
+	s.pluginRoutes(mux)
 	s.accessRoutes(mux)
 	// Routes carry tenants' domains' private keys, sealed: for the edge,
 	// which runs as root, not for the socket's group.
@@ -1001,6 +1005,10 @@ type RouteState interface {
 	// challenges the edges answer for them.
 	Domains() []store.Domain
 	Challenges() []store.Challenge
+	// Plugins are the plugins installed, PluginTenants tenants' own
+	// settings of them.
+	Plugins() []store.Plugin
+	PluginTenants(tenant, plugin string) []store.PluginTenant
 }
 
 var _ RouteState = (*store.SQLite)(nil)
@@ -1119,7 +1127,13 @@ func writeError(w http.ResponseWriter, err error) {
 
 // readJSON reads one JSON value of at most 1 MiB, and nothing after it.
 func readJSON(w http.ResponseWriter, r *http.Request, out any) bool {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	return readJSONUpTo(w, r, out, 1<<20)
+}
+
+// readJSONUpTo reads one JSON value of at most limit bytes, and nothing
+// after it.
+func readJSONUpTo(w http.ResponseWriter, r *http.Request, out any, limit int64) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
 		writeError(w, badRequest(fmt.Errorf("request body: %w", err)))

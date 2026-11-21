@@ -50,6 +50,11 @@ between servers, to you; Murder does it with ZFS. An app is configuration
 - **Isolation.** Tenants never run as root, drop every capability, cannot
   reach each other, the host or private networks (nftables).
   [Security model](docs/security.md)
+- **Plugins.** Tenants reach providers' APIs through the edge, with a key
+  they never see: OpenAI and HERE built in, any other with a WebAssembly
+  module of your own, written with [pluginsdk](pluginsdk). Murder counts
+  each tenant's tokens, requests and transactions, and stops a tenant at a
+  hard limit or says when it passes a soft one. [Plugins](docs/plugins.md)
 - **Metrics** in the Prometheus format, and an audit log of who changed what.
 - **An access register.** Reading a tenant's secrets, logs or backups takes
   a purpose and a ticket, and is recorded before any data goes out: the
@@ -135,6 +140,7 @@ What setup does, and how to do it by hand, is in
 | [docs/operations.md](docs/operations.md) | install, upgrade Murder, back up and restore |
 | [docs/cluster.md](docs/cluster.md) | join nodes, move tenants, copies, a dead node, DNS |
 | [docs/failover.md](docs/failover.md) | how failover decides, and what was tested |
+| [docs/plugins.md](docs/plugins.md) | plugins: OpenAI, HERE and modules of your own for tenants, their keys, usage and limits |
 | [docs/panel.md](docs/panel.md) | the administration panel |
 | [docs/security.md](docs/security.md) | what tenants can and cannot reach |
 | [docs/design.md](docs/design.md) | the design and why |

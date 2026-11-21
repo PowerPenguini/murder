@@ -1,0 +1,8 @@
+# murder plugin apply examples/plugins/openai.yaml
+# murder plugin key openai -file /root/openai.key
+kind: openai
+# upstream: https://api.openai.com   # or another API that speaks OpenAI's
+# allow: ["POST /v1/batches"]        # endpoints beyond those whose use is counted; shared by every tenant
+limits:
+  - {metric: tokens, per: month, amount: 2000000}              # hard: 429 once used
+  - {metric: requests, per: day, amount: 5000, mode: soft}     # soft: said in the audit log

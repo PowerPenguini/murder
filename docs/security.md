@@ -90,6 +90,32 @@
   public by design and expire within 15 minutes. Removing a domain, or
   purging its tenant, deletes its certificate and key from the state;
   certificates are not revoked.
+- **Plugins' keys.** A plugin's key, and a tenant's own, is sealed with
+  the master key, bound to the plugin (and the tenant), in the
+  replicated state, its backups and the edge's saved routes. It is
+  sealed again in a master key rotation. The edge opens it in memory and
+  puts it on the requests it passes on; no tenant sees it. The edge serves
+  plugins only to its own node's tenants, each known by its container's
+  fixed address, which its requests come from. Tenants drop every
+  capability, and an address made up gets no answer back to complete a
+  TCP connection. By default a plugin passes on only endpoints that keep
+  nothing of what is sent: under the one key, every tenant would reach
+  what the others kept. With `hostFirewall`, the port is closed to everyone
+  else as well. Reading or changing a plugin's key takes the API socket,
+  as every other change does. See [Plugins](plugins.md).
+- **Plugins' modules.** A plugin of kind `wasm` runs WebAssembly the
+  operator installs, in the edge, in a sandbox:
+  - no files, environment, network or other imports than WASI's;
+  - 128 MB of memory, and a deadline on every call;
+  - an instance serves one tenant only.
+  The module never sees a key. The edge puts the key on the request
+  itself, and only for a request to one of the hosts the module's manifest
+  names, over HTTPS. The module does see what tenants send and what
+  providers answer, and decides what is passed on and counted: install
+  only modules you trust as you trust the edge with that traffic. A module
+  is kept in the replicated state and its backups. The edge keeps it in a
+  directory only root reads, and runs it interpreted: no native code of a
+  module's runs, and the edge keeps `MemoryDenyWriteExecute`.
 - **Docker's `userns-remap` is not supported.** The data owner is the
   container user's numeric id on the host, which remapping would change.
 - **Nodes prove who they are with keys of their own.** Nodes talk over

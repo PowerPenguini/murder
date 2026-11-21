@@ -1,0 +1,10 @@
+# GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o examples/plugins/anthropic/anthropic.wasm ./examples/plugins/anthropic
+# murder plugin apply examples/plugins/anthropic/anthropic.yaml
+# murder plugin key anthropic -file /root/anthropic.key
+kind: wasm
+module: anthropic.wasm                 # from this file's directory
+# config:
+#   allow: ["POST /v1/messages/batches"]   # endpoints beyond those whose use is counted; shared by every tenant
+limits:
+  - {metric: tokens, per: month, amount: 2000000}
+  - {metric: requests, per: day, amount: 5000, mode: soft}

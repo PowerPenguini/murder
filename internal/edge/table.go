@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/PowerPenguini/murder/internal/plugins"
 )
 
 // Table is a set of routes with a version that changes with them. The agent
@@ -24,6 +26,9 @@ type Table struct {
 	// challenges every edge answers, HTTP-01 and TLS-ALPN-01, by token.
 	Domains    map[string]DomainRoute    `json:"domains,omitempty"`
 	Challenges map[string]ChallengeRoute `json:"challenges,omitempty"`
+	// Plugins are the plugins the edge serves this node's tenants, with
+	// their keys sealed.
+	Plugins plugins.Config `json:"plugins,omitzero"`
 }
 
 // DomainRoute is a tenant's own host name: the tenant it leads to, and
@@ -51,6 +56,12 @@ func NewTable(routes map[string]Route) Table {
 
 // NewTableWith versions routes, domains and challenges by their content.
 func NewTableWith(routes map[string]Route, domains map[string]DomainRoute, challenges map[string]ChallengeRoute) Table {
+	return NewTableWithPlugins(routes, domains, challenges, plugins.Config{})
+}
+
+// NewTableWithPlugins versions routes, domains, challenges and plugins by
+// their content.
+func NewTableWithPlugins(routes map[string]Route, domains map[string]DomainRoute, challenges map[string]ChallengeRoute, served plugins.Config) Table {
 	if routes == nil {
 		routes = map[string]Route{}
 	}
@@ -73,13 +84,17 @@ func NewTableWith(routes map[string]Route, domains map[string]DomainRoute, chall
 		challenge := challenges[token]
 		fmt.Fprintf(sum, "challenge\x00%s\x00%s\x00%s\x00", token, challenge.Domain, challenge.KeyAuth)
 	}
+	// A table without plugins keeps the version it had before them.
+	if !served.Empty() {
+		served.Version(sum)
+	}
 	if len(domains) == 0 {
 		domains = nil
 	}
 	if len(challenges) == 0 {
 		challenges = nil
 	}
-	return Table{Version: hex.EncodeToString(sum.Sum(nil))[:16], Routes: routes, Domains: domains, Challenges: challenges}
+	return Table{Version: hex.EncodeToString(sum.Sum(nil))[:16], Routes: routes, Domains: domains, Challenges: challenges, Plugins: served}
 }
 
 // LiveTable is the table the edge serves from, replaced whole.
@@ -117,6 +132,14 @@ func (l *LiveTable) replaced() {
 		close(l.changed)
 		l.changed = nil
 	}
+}
+
+// Plugins are the plugins the table serves.
+func (l *LiveTable) Plugins() plugins.Config {
+	if table := l.table.Load(); table != nil {
+		return table.Plugins
+	}
+	return plugins.Config{}
 }
 
 // Route implements Routes.

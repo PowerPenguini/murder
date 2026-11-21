@@ -25,6 +25,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/PowerPenguini/murder/internal/plugins"
 	"github.com/PowerPenguini/murder/internal/spec"
 )
 
@@ -58,6 +59,9 @@ type SQLite struct {
 	// published is closed, and replaced, whenever a new state is published.
 	publishMu sync.Mutex
 	published chan struct{}
+	// usagePruned is the day plugin usage was last pruned on (see
+	// AddPluginUsage).
+	usagePruned atomic.Value
 }
 
 type snapshot struct {
@@ -92,8 +96,17 @@ type snapshot struct {
 	// revocations are the certificates of removed domains the leader
 	// revokes, by fingerprint.
 	revocations map[string]Revocation
-	panel       panelState
-	images      map[string]bool
+	// plugins are the plugins installed, by name; pluginTenants tenants'
+	// own settings of them, by tenant and plugin; pluginReports the last
+	// report of each edge process counted, by node and edge.
+	plugins       map[string]Plugin
+	pluginTenants map[[2]string]PluginTenant
+	pluginReports map[[2]string]pluginReport
+	// pluginManifests are the manifests of the modules installed, by
+	// digest.
+	pluginManifests map[string]plugins.Manifest
+	panel           panelState
+	images          map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
 	lastEvent int64
@@ -367,7 +380,7 @@ type querier interface {
 // load reads the whole state. It is small: one row per app and tenant.
 func load(q querier) (*snapshot, error) {
 	state := &snapshot{}
-	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadRevisions, loadRollouts, loadAllTenants, loadNodes, loadDevices, loadDomains, loadACME, loadPanel, loadLease, loadImages} {
+	for _, part := range []func(querier, *snapshot) error{loadMeta, loadApps, loadRevisions, loadRollouts, loadAllTenants, loadNodes, loadDevices, loadDomains, loadACME, loadPlugins, loadPanel, loadLease, loadImages} {
 		if err := part(q, state); err != nil {
 			return nil, err
 		}
@@ -977,6 +990,11 @@ func (s *SQLite) putApp(app App, cond AppIf, from int64, actor string) (AppChang
 		if err := checkTenants(current, app.Name, app.Spec, spec.Tenant.Validate); err != nil {
 			return err
 		}
+		for _, plugin := range app.Spec.Plugins {
+			if _, ok := current.plugins[plugin]; !ok {
+				return fmt.Errorf("%w: app %s lists plugin %s, which is not installed: murder plugin apply", ErrInvalid, app.Name, plugin)
+			}
+		}
 		stamp := formatTime(now)
 		revision := existing.Revision + 1
 		// An app stored before revisions keeps the spec it had as its
@@ -1577,6 +1595,40 @@ func (s *SQLite) ResealSecrets(reseal Resealer, actor string) (int, error) {
 			}
 			count++
 		}
+		// Plugins' keys, the operator's and tenants' own.
+		for _, name := range slices.Sorted(maps.Keys(current.plugins)) {
+			sealed := current.plugins[name].Key
+			if sealed == "" {
+				continue
+			}
+			resealed, changed, err := reseal(plugins.KeyContext(name), sealed)
+			if err != nil {
+				return fmt.Errorf("plugin %s, its key: %w", name, err)
+			}
+			if !changed {
+				continue
+			}
+			if err := tx.Exec(`UPDATE plugins SET key = ? WHERE name = ? AND key = ?`, resealed, name, sealed); err != nil {
+				return err
+			}
+			count++
+		}
+		for _, settings := range s.pluginTenantsOf(current) {
+			if settings.Key == "" {
+				continue
+			}
+			resealed, changed, err := reseal(plugins.TenantKeyContext(settings.Plugin, settings.Tenant), settings.Key)
+			if err != nil {
+				return fmt.Errorf("tenant %s, its key of plugin %s: %w", settings.Tenant, settings.Plugin, err)
+			}
+			if !changed {
+				continue
+			}
+			if err := tx.Exec(`UPDATE plugin_tenants SET key = ? WHERE tenant = ? AND plugin = ? AND key = ?`, resealed, settings.Tenant, settings.Plugin, settings.Key); err != nil {
+				return err
+			}
+			count++
+		}
 		return event(tx, now, actor, "secrets.resealed", "", "", fmt.Sprintf("%d secrets sealed with the master key in use", count))
 	})
 	return count, err
@@ -1721,6 +1773,11 @@ func (s *SQLite) Forget(name, actor string) error {
 				}
 			}
 			if err := tx.Exec(`DELETE FROM tenants WHERE name = ?`, name); err != nil {
+				return err
+			}
+			// What it used of plugins goes with it: a new tenant of its
+			// name starts at nothing.
+			if err := tx.Exec(`DELETE FROM plugin_usage WHERE tenant = ?`, name); err != nil {
 				return err
 			}
 		}

@@ -253,3 +253,26 @@ func TestLimitsAreBounded(t *testing.T) {
 		t.Fatalf("the largest limits = %v", err)
 	}
 }
+
+func TestAPluginsPlaceholderNeedsThePluginListed(t *testing.T) {
+	app := Tenant{Name: "acme", Image: "sha256:" + strings.Repeat("a", 64), User: "1000:1000", Port: 8080, HealthPath: "/", DataPath: "/data",
+		Env: map[string]string{"OPENAI_BASE_URL": "{{plugin.openai.url}}/v1", "HERE": "{{plugin.here.url}}"}}
+	err := app.Validate()
+	if err == nil || !strings.Contains(err.Error(), "plugins does not list openai") || !strings.Contains(err.Error(), "plugins does not list here") {
+		t.Fatalf("unlisted plugins: %v", err)
+	}
+	app.Plugins = []string{"openai", "here"}
+	if err := app.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	env := app.Render(Values{Plugins: map[string]string{"openai": "http://10.240.0.1:4180/openai", "here": "http://10.240.0.1:4180/here"}})
+	if env["OPENAI_BASE_URL"] != "http://10.240.0.1:4180/openai/v1" || env["HERE"] != "http://10.240.0.1:4180/here" {
+		t.Fatalf("rendered %v", env)
+	}
+	for _, bad := range [][]string{{"openai", "openai"}, {"Open"}, {""}} {
+		app.Plugins = bad
+		if err := app.Validate(); err == nil {
+			t.Errorf("plugins %q were taken", bad)
+		}
+	}
+}

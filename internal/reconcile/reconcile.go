@@ -106,6 +106,9 @@ type Config struct {
 	// PreviousDir keeps the last lines of each tenant's previous container
 	// (previous.go); empty keeps none.
 	PreviousDir string
+	// PluginsPort is where the edge serves plugins, at each tenant
+	// network's gateway; 0 serves none.
+	PluginsPort int
 }
 
 // Reconciler drives the runtime towards the store's desired state.

@@ -43,6 +43,7 @@ edge:                              # served by "murder edge"
   # drain: 30s                      # how long a replaced edge finishes its requests
   # routesHold: 15s                 # after a reboot, how long requests wait for the agent's routes before the saved ones serve
   # relayPort: 7402                 # in a cluster: where other nodes pass requests on; the same on every node
+  # pluginsPort: 4180               # where tenants reach plugins, at their network's gateway; 0 serves none
   tls:
     mode: acme                     # off | internal | acme
     storage: /var/lib/murder/certs
