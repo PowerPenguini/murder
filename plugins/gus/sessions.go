@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/xml"
 	"errors"
-	"regexp"
+	"fmt"
+	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +45,13 @@ var known = &sessions{byToken: map[string]*session{}, now: time.Now}
 // open keeps BIR1's session sid of a tenant, and gives the session the
 // tenant gets in its place.
 func (s *sessions) open(tenant, sid string) string {
+	token := newToken()
+	s.keep(token, tenant, sid)
+	return token
+}
+
+// keep keeps BIR1's session sid of a tenant, as the session token.
+func (s *sessions) keep(token, tenant, sid string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -67,9 +77,7 @@ func (s *sessions) open(tenant, sid string) string {
 	} else if len(s.byToken) >= maxSessions {
 		delete(s.byToken, oldest)
 	}
-	token := newToken()
 	s.byToken[token] = &session{sid: sid, tenant: tenant, used: now}
-	return token
 }
 
 // find is BIR1's session of a tenant's token.
@@ -116,18 +124,19 @@ func (l *login) End(bool, *pluginsdk.Counter)                          {}
 func (l *login) Replace(r *pluginsdk.Response, body []byte, _ *pluginsdk.Counter) ([]byte, error) {
 	// Anything the plugin cannot read for sure withholds the answer: it
 	// may hold BIR1's session.
-	opened := resultOpen.FindAllIndex(body, -1)
-	found := result.FindAllSubmatch(body, -1)
+	results, err := loginResults(r.Get("Content-Type"), body)
 	switch {
-	case len(found) != len(opened) || len(found) > 1:
-		return nil, errors.New("BIR1's login answered a result the plugin cannot read")
-	case len(found) == 0 && r.Status == 200:
+	case err != nil:
+		return nil, fmt.Errorf("BIR1's login answered what the plugin cannot read: %w", err)
+	case len(results) > 1:
+		return nil, errors.New("BIR1's login answered more than one result")
+	case len(results) == 0 && r.Status == 200:
 		return nil, errors.New("BIR1's login answered success, and no result")
-	case len(found) == 0:
+	case len(results) == 0:
 		// A fault: no session to hide.
 		return body, nil
 	}
-	sid := string(bytes.TrimSpace(found[0][1]))
+	sid := strings.TrimSpace(results[0])
 	if sid == "" {
 		// A key BIR1 did not take: an empty result.
 		return body, nil
@@ -135,13 +144,54 @@ func (l *login) Replace(r *pluginsdk.Response, body []byte, _ *pluginsdk.Counter
 	if !sessionID.MatchString(sid) {
 		return nil, errors.New("BIR1's login answered a session the plugin cannot read")
 	}
-	return bytes.ReplaceAll(body, []byte(sid), []byte(known.open(l.tenant, sid))), nil
+	// The session as written goes: one written otherwise, as of escapes,
+	// would stay, and the answer is withheld.
+	token := newToken()
+	replaced := bytes.ReplaceAll(body, []byte(sid), []byte(token))
+	if again, err := loginResults(r.Get("Content-Type"), replaced); err != nil || len(again) != 1 || strings.TrimSpace(again[0]) != token {
+		return nil, errors.New("BIR1's login answered its session written in a way the plugin cannot replace")
+	}
+	known.keep(token, l.tenant, sid)
+	return replaced, nil
 }
 
-// A login's result, its element of any prefix and attributes: resultOpen
-// finds each that begins, result each the plugin reads, empty or holding
-// text alone.
-var (
-	resultOpen = regexp.MustCompile(`<(?:[^\s<>/:]+:)?ZalogujResult\b`)
-	result     = regexp.MustCompile(`<(?:[^\s<>/:]+:)?ZalogujResult\b[^<>]*?(?:/>|>([^<]*)</(?:[^\s<>/:]+:)?ZalogujResult\s*>)`)
-)
+// loginResults reads what each ZalogujResult of a login's answer holds,
+// its element of any prefix: the answer is XML, or the XOP package BIR1
+// answers in, its envelope the package's root part.
+func loginResults(contentType string, body []byte) ([]string, error) {
+	envelope, err := envelopeOf(contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	decoder := xml.NewDecoder(bytes.NewReader(envelope))
+	var results []string
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return results, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "ZalogujResult" {
+			continue
+		}
+		var text strings.Builder
+		for depth := 1; depth > 0; {
+			token, err := decoder.Token()
+			if err != nil {
+				return nil, fmt.Errorf("a result that does not end: %w", err)
+			}
+			switch token := token.(type) {
+			case xml.StartElement:
+				return nil, errors.New("a result that holds an element")
+			case xml.EndElement:
+				depth--
+			case xml.CharData:
+				text.Write(token)
+			}
+		}
+		results = append(results, text.String())
+	}
+}

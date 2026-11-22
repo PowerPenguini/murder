@@ -201,6 +201,8 @@ func TestALoginsResultIsReadHoweverItIsWritten(t *testing.T) {
 		`<ZalogujResult xmlns="http://CIS/BIR/PUBL/2014/07">` + sid + `</ZalogujResult>`,
 		`<b:ZalogujResult xmlns:b="x"> ` + sid + "\n</b:ZalogujResult >",
 		`<ß:ZalogujResult xmlns:ß="x">` + sid + `</ß:ZalogujResult>`,
+		`<ZalogujResult><![CDATA[` + sid + `]]></ZalogujResult>`,
+		`<ZalogujResult a="/>">` + sid + `</ZalogujResult>`,
 	} {
 		body := []byte(`<s:Envelope><s:Body><ZalogujResponse>` + answer + `</ZalogujResponse></s:Body></s:Envelope>`)
 		replaced, err := (&login{tenant: "acme"}).Replace(&pluginsdk.Response{Status: 200}, body, nil)
@@ -210,10 +212,10 @@ func TestALoginsResultIsReadHoweverItIsWritten(t *testing.T) {
 	}
 	for status, answers := range map[int][]string{
 		200: {
-			`<ZalogujResult><![CDATA[` + sid + `]]></ZalogujResult>`,
 			`<ZalogujResult>` + sid + `</ZalogujResult><ZalogujResult>` + sid + `</ZalogujResult>`,
 			`<ZalogujResult>&#101;y6nu6e2428xp3b434gx</ZalogujResult>`,
 			`<ZalogujResult>` + sid,
+			`<ZalogujResult><b>` + sid + `</b></ZalogujResult>`,
 			`<ZalogujResponse>` + sid + `</ZalogujResponse>`,
 		},
 		500: {`<ZalogujResult>` + sid + `!</ZalogujResult>`},
