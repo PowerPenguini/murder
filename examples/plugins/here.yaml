@@ -1,6 +1,7 @@
 # murder plugin apply examples/plugins/here.yaml
 # murder plugin key here -file /root/here.key
-kind: here
+kind: container
+image: ghcr.io/powerpenguini/murder-here:latest   # Murder's plugin, pinned by digest as it is installed
 # hosts: [geocode.search.hereapi.com, router.hereapi.com]   # in place of the default services
 limits:
   - {metric: transactions, per: month, amount: 30000}

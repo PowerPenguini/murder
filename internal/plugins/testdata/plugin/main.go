@@ -62,9 +62,55 @@ func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
 		to.Meter = &meter{}
 	case "badcount":
 		to.Meter = &meter{metric: "requests"}
+	case "replace", "replacelong":
+		to.Meter = &replacer{}
+	case "replacefail":
+		to.Meter = &replacer{fail: true}
+	case "failbody", "failevent":
+		to.Meter = &failing{}
 	}
 	return to, nil
 }
+
+// replacer replaces an answer with what it said, in capitals, and
+// counts its bytes; or fails.
+type replacer struct{ fail bool }
+
+func (m *replacer) Response(*pluginsdk.Response, *pluginsdk.Counter) bool { return true }
+func (m *replacer) Body([]byte, *pluginsdk.Counter) bool                  { return true }
+func (m *replacer) End(bool, *pluginsdk.Counter)                          {}
+
+func (m *replacer) Replace(r *pluginsdk.Response, body []byte, c *pluginsdk.Counter) ([]byte, error) {
+	if m.fail {
+		return nil, fmt.Errorf("on purpose")
+	}
+	c.Count("bytes", "replaced", int64(len(body)))
+	return []byte(strings.ToUpper(string(body))), nil
+}
+
+// failing fails on a chunk or an event that says boom, and counts at its
+// end the bytes it was shown before.
+type failing struct{ seen int64 }
+
+func (m *failing) Response(*pluginsdk.Response, *pluginsdk.Counter) bool { return true }
+
+func (m *failing) Body(chunk []byte, _ *pluginsdk.Counter) bool {
+	if strings.Contains(string(chunk), "boom") {
+		panic("on purpose")
+	}
+	m.seen += int64(len(chunk))
+	return true
+}
+
+func (m *failing) Event(data []byte, _ *pluginsdk.Counter) bool {
+	if strings.Contains(string(data), "boom") {
+		panic("on purpose")
+	}
+	m.seen += int64(len(data))
+	return true
+}
+
+func (m *failing) End(_ bool, c *pluginsdk.Counter) { c.Count("bytes", "seen", m.seen) }
 
 // meter counts the widgets a JSON answer says, and its bytes.
 type meter struct {

@@ -21,7 +21,7 @@ import (
 // of this version, frozen or not, as an upgrade replaces the edge while
 // changes are frozen: a migration must keep plugin_usage, plugin_reports
 // and events as this version runs them.
-const PluginsSchema = 22
+const PluginsSchema = 23
 
 // Plugin is a plugin installed in the cluster (see internal/plugins): its
 // spec and the operator's key, sealed with the master key under
@@ -64,8 +64,9 @@ type pluginReport struct {
 const reportsKept = 48 * time.Hour
 
 // pluginTables are the tables of plugins, as one script: schema 21 added
-// them, and schema 22 the manifests of plugins of kind container in place
-// of modules (pluginsSchema22).
+// them, schema 22 the manifests of plugins of kind container in place of
+// modules (pluginsSchema22), and schema 23 has every plugin of kind
+// container (pluginsSchema23).
 const pluginTables = `-- Plugins (see internal/plugins): their spec as JSON, the operator's
 -- key, sealed with the master key (empty for none), and for a plugin of
 -- kind container, the manifest its image's label said as it was
@@ -122,6 +123,16 @@ var pluginsSchema22 = []string{
 	`DROP TABLE plugin_modules`,
 	`DELETE FROM plugin_tenants WHERE plugin IN (SELECT name FROM plugins WHERE json_extract(spec, '$.kind') = 'wasm')`,
 	`DELETE FROM plugins WHERE json_extract(spec, '$.kind') = 'wasm'`,
+}
+
+// pluginsSchema23 has a database of schema 22 keep plugins as schema 23
+// does: Murder's plugins for OpenAI and HERE are images now, of kind
+// container, in place of kinds of their own, which no release ran; a
+// plugin of kind openai or here goes, with tenants' own settings of it,
+// and is applied again from its image (docs/plugins.md).
+var pluginsSchema23 = []string{
+	`DELETE FROM plugin_tenants WHERE plugin IN (SELECT name FROM plugins WHERE json_extract(spec, '$.kind') IN ('openai', 'here'))`,
+	`DELETE FROM plugins WHERE json_extract(spec, '$.kind') IN ('openai', 'here')`,
 }
 
 // loadPlugins reads the plugins, tenants' settings and the edges' last
@@ -222,13 +233,19 @@ func (s *SQLite) Plugin(name string) (Plugin, error) {
 
 func clonePlugin(p Plugin) Plugin {
 	p.Spec.Hosts = slices.Clone(p.Spec.Hosts)
-	p.Spec.Allow = slices.Clone(p.Spec.Allow)
 	p.Spec.Limits = slices.Clone(p.Spec.Limits)
 	p.Spec.Config = maps.Clone(p.Spec.Config)
 	if p.Manifest != nil {
 		manifest := *p.Manifest
 		manifest.Hosts = slices.Clone(manifest.Hosts)
 		manifest.Metrics = slices.Clone(manifest.Metrics)
+		manifest.RequestBodyTypes = slices.Clone(manifest.RequestBodyTypes)
+		if manifest.UI != nil {
+			ui := *manifest.UI
+			ui.Metrics = slices.Clone(ui.Metrics)
+			ui.Config = slices.Clone(ui.Config)
+			manifest.UI = &ui
+		}
 		p.Manifest = &manifest
 	}
 	return p
@@ -288,24 +305,18 @@ func (s *SQLite) PutPlugin(name string, spec plugins.Spec, manifest *plugins.Man
 	if err := spec.Validate(); err != nil {
 		return Plugin{}, false, fmt.Errorf("%w: plugin %s: %v", ErrInvalid, name, err)
 	}
-	var manifestText any // NULL for a kind of Murder's own
-	switch {
-	case spec.Kind != plugins.KindContainer:
-		manifest = nil
-	case manifest == nil:
+	if manifest == nil {
 		return Plugin{}, false, fmt.Errorf("%w: plugin %s: image %s has no plugin's manifest", ErrInvalid, name, spec.Image)
-	default:
-		if err := manifest.Validate(); err != nil {
-			return Plugin{}, false, fmt.Errorf("%w: plugin %s: %v", ErrInvalid, name, err)
-		}
-		if err := spec.ValidateWith(manifest); err != nil {
-			return Plugin{}, false, fmt.Errorf("%w: plugin %s: %v", ErrInvalid, name, err)
-		}
-		encoded, err := json.Marshal(manifest)
-		if err != nil {
-			return Plugin{}, false, err
-		}
-		manifestText = string(encoded)
+	}
+	if err := manifest.Validate(); err != nil {
+		return Plugin{}, false, fmt.Errorf("%w: plugin %s: %v", ErrInvalid, name, err)
+	}
+	if err := spec.ValidateWith(manifest); err != nil {
+		return Plugin{}, false, fmt.Errorf("%w: plugin %s: %v", ErrInvalid, name, err)
+	}
+	manifestText, err := json.Marshal(manifest)
+	if err != nil {
+		return Plugin{}, false, err
 	}
 	encoded, err := json.Marshal(spec)
 	if err != nil {
@@ -316,11 +327,8 @@ func (s *SQLite) PutPlugin(name string, spec plugins.Spec, manifest *plugins.Man
 		if found {
 			previous, _ := json.Marshal(existing.Spec)
 			// An image pinned says its manifest.
-			if string(previous) == string(encoded) && (existing.Manifest == nil) == (manifest == nil) {
+			if string(previous) == string(encoded) && existing.Manifest != nil {
 				return errUnchanged
-			}
-			if existing.Spec.Kind != spec.Kind {
-				return fmt.Errorf("%w: plugin %s is of kind %s; delete it to install one of kind %s", ErrConflict, name, existing.Spec.Kind, spec.Kind)
 			}
 		}
 		// Tenants' own limits must still be of metrics the plugin counts.
@@ -333,7 +341,7 @@ func (s *SQLite) PutPlugin(name string, spec plugins.Spec, manifest *plugins.Man
 		}
 		stamp := formatTime(now)
 		if err := tx.Exec(`INSERT INTO plugins (name, spec, created_at, updated_at, manifest) VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at, manifest = excluded.manifest`, name, string(encoded), stamp, stamp, manifestText); err != nil {
+			ON CONFLICT (name) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at, manifest = excluded.manifest`, name, string(encoded), stamp, stamp, string(manifestText)); err != nil {
 			return err
 		}
 		action := "plugin.installed"

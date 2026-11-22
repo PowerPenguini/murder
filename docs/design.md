@@ -79,7 +79,8 @@ between servers, is not something they solve.
    to; waves and canaries are next.
 6. Shared services: provider proxy with per-tenant metering, catalog
    publishing. Started: plugins pass tenants' requests on to OpenAI,
-   HERE, or any provider a plugin's own container meters, with the operator's
+   HERE, or any other provider, each metered by a container of its
+   plugin's image on each node, with the operator's
    key or a tenant's own, count what each tenant uses in the replicated
    state, and hold limits ([plugins.md](plugins.md)); the panel shows
    them, and sets their keys and tenants' limits.

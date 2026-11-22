@@ -2,7 +2,7 @@ package pluginsdk
 
 import (
 	"context"
-	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -30,6 +30,18 @@ func (m *tokens) End(complete bool, c *Counter) {
 	}
 }
 
+// events reads a stream event by event, and takes out those of usage.
+type events struct {
+	tokens
+	seen int
+}
+
+func (m *events) Event(data []byte, c *Counter) bool {
+	m.seen++
+	c.Count("events", "", 1)
+	return !strings.Contains(string(data), "usage")
+}
+
 func testPlugin() *plugin {
 	return newPlugin(Manifest{ABI: ABI, Name: "t"}, func(r *Request) (*Forward, error) {
 		switch r.Path {
@@ -39,6 +51,8 @@ func testPlugin() *plugin {
 			panic("on purpose")
 		case "/plain":
 			return &Forward{URL: "https://api.example.com/plain"}, nil
+		case "/stream":
+			return &Forward{URL: "https://api.example.com/stream", Meter: &events{}}, nil
 		}
 		return &Forward{URL: "https://api.example.com" + r.Path, Body: r.Body, Meter: &tokens{}}, nil
 	})
@@ -84,9 +98,17 @@ func serve(t *testing.T, p *plugin) func(path, session string, body string) map[
 			t.Fatal(err)
 		}
 		defer response.Body.Close()
-		var answer map[string]any
-		if err := json.NewDecoder(response.Body).Decode(&answer); err != nil {
+		data, err := io.ReadAll(response.Body)
+		if err != nil {
 			t.Fatal(err)
+		}
+		var answer map[string]any
+		rest, err := splitCall(data, &answer)
+		if err != nil {
+			t.Fatalf("%v: %q", err, data)
+		}
+		if rest != nil {
+			answer["rest"] = string(rest)
 		}
 		return answer
 	}
@@ -100,10 +122,17 @@ func TestAMeteredRequestIsASessionUntilItEnds(t *testing.T) {
 	if manifest := call("/manifest", "", ""); manifest["name"] != "t" || manifest["abi"] != float64(ABI) {
 		t.Fatalf("manifest %v", manifest)
 	}
-	forward := call("/request", "a", `{"tenant":"acme","path":"/v1/x","body":"aGVsbG8="}`)
-	if forward["url"] != "https://api.example.com/v1/x" || forward["meter"] != true || forward["replaceBody"] != true || forward["body"] != "aGVsbG8=" {
+	// The body follows the JSON, as it is, and so does the one that
+	// replaces it.
+	forward := call("/request", "a", "{\"tenant\":\"acme\",\"path\":\"/v1/x\",\"bodyFollows\":true}\nhello\n")
+	if forward["url"] != "https://api.example.com/v1/x" || forward["meter"] != true || forward["replaceBody"] != true || forward["rest"] != "hello\n" {
 		t.Fatalf("forward %v", forward)
 	}
+	// A body that does not follow is none: nothing replaces it.
+	if none := call("/request", "c", `{"path":"/v1/x"}`); none["replaceBody"] != nil || none["rest"] != nil {
+		t.Fatalf("no body: %v", none)
+	}
+	call("/end", "c", `{"complete":false}`)
 	call("/request", "b", `{"tenant":"beta","path":"/v1/y"}`)
 	if response := call("/response", "a", `{"status":200}`); response["body"] != true || len(response["counts"].([]any)) != 1 {
 		t.Fatalf("response %v", response)
@@ -146,6 +175,37 @@ func TestARefusalAndAPanicAreToldApart(t *testing.T) {
 	}
 	if metered := call("/request", "", `{"path":"/x"}`); !strings.Contains(metered["error"].(string), "no session") {
 		t.Fatalf("metered without a session: %v", metered)
+	}
+}
+
+// A meter that reads events is shown a stream event by event, and says
+// which stay; an answer of another type it reads as a body.
+func TestAStreamIsReadEventByEvent(t *testing.T) {
+	call := serve(t, testPlugin())
+	call("/request", "s", `{"path":"/stream"}`)
+	response := call("/response", "s", `{"status":200,"header":{"Content-Type":["text/event-stream; charset=utf-8"]}}`)
+	if response["body"] != true || response["events"] != true {
+		t.Fatalf("response %v", response)
+	}
+	if kept := call("/event", "s", `{"choices":[]}`); kept["keep"] != true {
+		t.Fatalf("an event of text: %v", kept)
+	}
+	if dropped := call("/event", "s", `{"usage":{}}`); dropped["keep"] != false {
+		t.Fatalf("an event of usage: %v", dropped)
+	}
+	// Two events counted, and the end.
+	if end := call("/end", "s", `{"complete":true}`); len(end["counts"].([]any)) != 3 {
+		t.Fatalf("end %v", end)
+	}
+	call("/request", "j", `{"path":"/stream"}`)
+	if response := call("/response", "j", `{"status":200,"header":{"Content-Type":["application/json"]}}`); response["body"] != true || response["events"] != nil {
+		t.Fatalf("a JSON answer: %v", response)
+	}
+	// Of a meter that reads no events, an event stays.
+	call("/request", "t", `{"path":"/v1/t"}`)
+	call("/response", "t", `{"status":200,"header":{"Content-Type":["text/event-stream"]}}`)
+	if kept := call("/event", "t", `{"usage":{}}`); kept["keep"] != true {
+		t.Fatalf("an event of a meter of bodies: %v", kept)
 	}
 }
 

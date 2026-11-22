@@ -34,7 +34,8 @@ func TestMain(m *testing.M) {
 }
 
 // testPlugin builds a plugin of this repository's for the tests, as a
-// program: the test plugin, or the Anthropic example.
+// program: the test plugin, Murder's openai, here and gus, or the
+// Anthropic example.
 func testPlugin(t *testing.T, name string) string {
 	t.Helper()
 	buildOnce.Do(func() {
@@ -45,7 +46,7 @@ func testPlugin(t *testing.T, name string) string {
 		}
 		buildDir = dir
 		built = map[string]string{}
-		for name, pkg := range map[string]string{"test": "./testdata/plugin", "anthropic": "../../examples/plugins/anthropic"} {
+		for name, pkg := range map[string]string{"test": "./testdata/plugin", "anthropic": "../../examples/plugins/anthropic", "openai": "../../plugins/openai", "here": "../../plugins/here", "gus": "../../plugins/gus"} {
 			out := filepath.Join(dir, name)
 			command := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", out, pkg)
 			command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=")
@@ -131,7 +132,7 @@ func TestAPluginsManifestIsReadFromWhatItPrints(t *testing.T) {
 	}
 	// A label written by hand, with empty lists, says the same as the
 	// container that leaves them out.
-	byHand, err := ParseManifest(`{"abi":2,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"metrics":[],"ui":{"metrics":[],"config":[]}}`)
+	byHand, err := ParseManifest(`{"abi":3,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"metrics":[],"ui":{"metrics":[],"config":[]}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +141,8 @@ func TestAPluginsManifestIsReadFromWhatItPrints(t *testing.T) {
 	}
 	for name, label := range map[string]string{
 		"not JSON":         "#!/bin/sh",
-		"an unknown field": `{"abi":2,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"run":"rm -rf /"}`,
-		"two values":       `{"abi":2,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"}} {}`,
+		"an unknown field": `{"abi":3,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"},"run":"rm -rf /"}`,
+		"two values":       `{"abi":3,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"}} {}`,
 		"another ABI":      `{"abi":1,"name":"x","hosts":["a.example.com"],"key":{"header":"X-Key"}}`,
 	} {
 		if _, err := ParseManifest(label); err == nil {
@@ -155,6 +156,11 @@ func TestAManifestIsHeldToWhatAPluginMay(t *testing.T) {
 	if err := good.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	inBody := good
+	inBody.Key = KeyPlace{Body: true}
+	if err := inBody.Validate(); err != nil || inBody.Key.String() != "the body the plugin writes" {
+		t.Fatalf("a key in the body: %v", err)
+	}
 	for name, change := range map[string]func(*Manifest){
 		"another ABI":       func(m *Manifest) { m.ABI = 1 },
 		"no hosts":          func(m *Manifest) { m.Hosts = nil },
@@ -164,6 +170,9 @@ func TestAManifestIsHeldToWhatAPluginMay(t *testing.T) {
 		"the key in Host":   func(m *Manifest) { m.Key = KeyPlace{Header: "Host"} },
 		"the key in Cookie": func(m *Manifest) { m.Key = KeyPlace{Header: "cookie"} },
 		"a prefix in query": func(m *Manifest) { m.Key = KeyPlace{Query: "key", Prefix: "x"} },
+		"a prefix in body":  func(m *Manifest) { m.Key = KeyPlace{Body: true, Prefix: "x"} },
+		"body and a header": func(m *Manifest) { m.Key.Body = true },
+		"a media type":      func(m *Manifest) { m.RequestBodyTypes = []string{"JSON"} },
 		"a bad metric":      func(m *Manifest) { m.Metrics = []string{"Tokens!"} },
 		"a body too large":  func(m *Manifest) { m.RequestBody = MaxRequestBody + 1 },
 		"a bad name":        func(m *Manifest) { m.Name = "My Plugin" },
@@ -220,7 +229,19 @@ type containerFixture struct {
 
 func newContainerFixture(t *testing.T, upstream http.HandlerFunc, change func(*Spec)) *containerFixture {
 	t.Helper()
-	program := testPlugin(t, "test")
+	return newPluginFixture(t, "test", Grant{}, upstream, func(spec *Spec) {
+		spec.Config = map[string]any{"allow": []any{"a"}}
+		if change != nil {
+			change(spec)
+		}
+	})
+}
+
+// newPluginFixture serves a plugin p of one of this repository's plugins
+// (see testPlugin), run on its socket, granted to acme as grant says.
+func newPluginFixture(t *testing.T, name string, grant Grant, upstream http.HandlerFunc, change func(*Spec)) *containerFixture {
+	t.Helper()
+	program := testPlugin(t, name)
 	manifest := manifestOf(t, program)
 	w := &containerFixture{seen: make(chan *http.Request, 64), root: socketRoot(t)}
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -230,11 +251,11 @@ func newContainerFixture(t *testing.T, upstream http.HandlerFunc, change func(*S
 		upstream(rw, r)
 	}))
 	t.Cleanup(server.Close)
-	spec := Spec{Kind: KindContainer, Image: testImage, Config: map[string]any{"allow": []any{"a"}}}
+	spec := Spec{Kind: KindContainer, Image: testImage}
 	if change != nil {
 		change(&spec)
 	}
-	w.fixture = newFixture(t, spec, Grant{}, server)
+	w.fixture = newFixture(t, spec, grant, server)
 	plugin := w.config.Plugins["p"]
 	plugin.Manifest = &manifest
 	w.config.Plugins["p"] = plugin
@@ -345,6 +366,80 @@ func TestAContainerCountsWhatItReadsInTheAnswer(t *testing.T) {
 	}
 	if details["widgets"] != "blue" || details["bytes"] != "whole" {
 		t.Fatalf("details %v", details)
+	}
+}
+
+// An answer whose metering fails on its way is cut, as the rest would
+// pass uncounted; the container is still told it ended, and counts what
+// it was shown.
+func TestAnAnswerWhoseMeteringFailsIsCutAndStillEnded(t *testing.T) {
+	for _, path := range []string{"/failbody", "/failevent"} {
+		w := newContainerFixture(t, func(rw http.ResponseWriter, r *http.Request) {
+			first, rest := "first", "boom, and what follows"
+			if r.URL.Path == "/failevent" {
+				rw.Header().Set("Content-Type", "text/event-stream")
+				first, rest = "data: first\n\n", "data: boom\n\ndata: what follows\n\n"
+			}
+			io.WriteString(rw, first)
+			rw.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+			io.WriteString(rw, rest)
+		}, nil)
+		response, body := w.get(t, "127.0.0.1", path)
+		w.upstream(t)
+		if response.StatusCode != http.StatusOK || !strings.Contains(body, "first") || strings.Contains(body, "follows") {
+			t.Errorf("%s: %d %q", path, response.StatusCode, body)
+		}
+		if got := w.used("bytes"); got != 5 {
+			t.Errorf("%s: %d bytes counted at the end, not the 5 shown", path, got)
+		}
+	}
+}
+
+// A config is checked, as a plugin is applied, against the fields its
+// manifest names: no other, each of its type, and of its pattern.
+func TestAConfigIsCheckedAgainstTheFieldsTheManifestNames(t *testing.T) {
+	manifest := Manifest{UI: &UI{Config: []ConfigUI{
+		{Name: "upstream", Pattern: `^https://`},
+		{Name: "allow", Type: ConfigList, Pattern: `^(GET|POST) /`},
+	}}}
+	spec := Spec{Kind: KindContainer, Image: testImage, Config: map[string]any{"upstream": "https://x.example", "allow": []any{"POST /v1/batches"}}}
+	if err := spec.ValidateWith(&manifest); err != nil {
+		t.Fatal(err)
+	}
+	for name, config := range map[string]map[string]any{
+		"a field it does not name": {"alow": []any{"POST /v1/batches"}},
+		"text for a list":          {"allow": "POST /v1/batches"},
+		"not of its pattern":       {"allow": []any{"POST/v1/batches"}},
+		"a list for text":          {"upstream": []any{"https://x.example"}},
+		"a number for text":        {"upstream": 1},
+	} {
+		spec.Config = config
+		if err := spec.ValidateWith(&manifest); err == nil {
+			t.Errorf("%s was taken", name)
+		}
+	}
+	// A manifest that names no fields takes any config.
+	if err := spec.ValidateWith(&Manifest{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []ConfigUI{{Name: "a", Type: "number"}, {Name: "a", Pattern: "("}} {
+		if (Manifest{ABI: ABI, Name: "x", Hosts: []string{"x.example"}, Key: KeyPlace{Header: "X-Key"}, UI: &UI{Config: []ConfigUI{bad}}}).Validate() == nil {
+			t.Errorf("%+v was taken", bad)
+		}
+	}
+}
+
+// A file of a kind Murder once ran itself, of the fields it took, is told
+// what to write in its place.
+func TestAFileOfAFormerKindSaysWhatItIsNow(t *testing.T) {
+	for file, want := range map[string]string{
+		"kind: openai\nupstream: https://api.groq.com/openai\nallow: [POST /v1/batches]\n": "image ghcr.io/powerpenguini/murder-openai, its upstream and allow under config",
+		"kind: here\nhosts: [geocode.search.hereapi.com]\n":                                "image ghcr.io/powerpenguini/murder-here",
+	} {
+		if _, err := Parse([]byte(file)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v", file, err)
+		}
 	}
 }
 
@@ -630,7 +725,8 @@ func TestAManifestsUISaysHowThePanelShowsIt(t *testing.T) {
 	if ui := UIOf(Spec{Kind: KindContainer}, &bare); ui.Title != "bare" || len(ui.Metrics) != 2 || ui.Metrics[0].Name != "requests" || ui.Metrics[1].Label != "widgets" || ui.Detail != "detail" {
 		t.Fatalf("a plugin without a UI: %+v", ui)
 	}
-	if ui := UIOf(Spec{Kind: KindOpenAI}, nil); ui.Title != "OpenAI" || ui.Metrics[0].Name != MetricTokens || len(ui.Metrics) != len(Metrics[KindOpenAI]) {
+	openai := manifestOf(t, testPlugin(t, "openai"))
+	if ui := UIOf(Spec{Kind: KindContainer}, &openai); ui.Title != "OpenAI" || ui.Metrics[0].Name != "tokens" || len(ui.Metrics) != 6 || len(ui.Config) != 2 {
 		t.Fatalf("openai's: %+v", ui)
 	}
 	good := Manifest{ABI: ABI, Name: "x", Hosts: []string{"api.example.com"}, Key: KeyPlace{Header: "X-Key"}, Metrics: []string{"widgets"}}

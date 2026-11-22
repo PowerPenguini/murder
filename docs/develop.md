@@ -40,12 +40,14 @@ through Murder's real components:
 - suspend and resume;
 - archive, restore with the data, purge.
 
-**Plugins of one's own.** The tests of `internal/plugins` build
-`internal/plugins/testdata/plugin` and `examples/plugins/anthropic` with
-the Go they run with, and run them as their containers would, on sockets
-below `/tmp` (a unix socket's path holds 108 bytes). The plugin test
-below builds the test plugin into an image, with its manifest as its
-label. The test of the sockets' tmpfs mounts as root; CI runs it in a
+**Plugins.** The tests of `internal/plugins` build Murder's plugins
+(`plugins/openai`, `plugins/here`, `plugins/gus`), `internal/plugins/testdata/plugin`
+and `examples/plugins/anthropic` with the Go they run with, and run them
+as their containers would, on sockets below `/tmp` (a unix socket's path
+holds 108 bytes), the edge between a tenant and a provider of the test's.
+The plugin test below builds the test plugin into an image, with its
+manifest as its label, and `plugins/openai` from `plugins/Dockerfile`, as
+a release does. The test of the sockets' tmpfs mounts as root; CI runs it in a
 privileged container:
 
 ```bash
@@ -53,6 +55,9 @@ CGO_ENABLED=0 go test -c -o pluginhost.test ./internal/pluginhost
 docker run --rm --privileged --tmpfs /run -e MURDER_TEST_MOUNTS=1 -e TMPDIR=/run \
   -v "$PWD/pluginhost.test:/pluginhost.test:ro" busybox /pluginhost.test -test.run Tmpfs -test.v
 ```
+
+With `MURDER_TEST_GUS=1`, a test of `internal/plugins` logs in to GUS's
+own test service and finds GUS by its NIP, through the edge.
 
 **The plugin test** has a tenant's container reach a plugin at its
 network's gateway. A host firewall of its own, such as ufw, may drop that:

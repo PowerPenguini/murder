@@ -14,7 +14,7 @@ import (
 // container (see docs/plugins.md): the calls it answers on its socket and
 // the JSON they take and give. A plugin says the version it was built for
 // in its manifest; an edge runs only versions it knows.
-const ABI = 2
+const ABI = 3
 
 // MaxRequestBody is the most of a request's body a plugin's container
 // reads.
@@ -63,24 +63,39 @@ type Manifest struct {
 	// metrics a plugin's limits may name.
 	Metrics []string `json:"metrics,omitempty"`
 	// RequestBody is the most bytes of a request's body it reads, at most
-	// MaxRequestBody; 0 reads none, and bodies pass on as they come.
+	// MaxRequestBody; 0 reads none, and bodies pass on as they come. A
+	// longer body is refused (413), unless PassLongBodies.
 	RequestBody int64 `json:"requestBody,omitempty"`
+	// PassLongBodies has a body longer than RequestBody pass on unread, in
+	// place of refused: the plugin is told so (BodyTooLong).
+	PassLongBodies bool `json:"passLongBodies,omitempty"`
+	// RequestBodyTypes are the media types of the bodies it reads, as
+	// application/json; others pass on as they come, at any size. None
+	// reads a body of any type.
+	RequestBodyTypes []string `json:"requestBodyTypes,omitempty"`
 	// UI says how the panel shows the plugin: none says only the
 	// plugin's name and its metrics' names.
 	UI *UI `json:"ui,omitempty"`
 }
 
 // KeyPlace is where a key goes on a request: in a header, after a prefix,
-// as in Authorization: Bearer KEY, or in a parameter of the query.
+// as in Authorization: Bearer KEY, in a parameter of the query, or in the
+// body the plugin writes, for an API that takes it there, as a login
+// does: the plugin writes the request's key mark where the key goes, and
+// the edge puts the key in its place.
 type KeyPlace struct {
 	Header string `json:"header,omitempty"`
 	Prefix string `json:"prefix,omitempty"`
 	Query  string `json:"query,omitempty"`
+	Body   bool   `json:"body,omitempty"`
 }
 
 // String says where the key goes, as plugin show says it.
 func (k KeyPlace) String() string {
-	if k.Query != "" {
+	switch {
+	case k.Body:
+		return "the body the plugin writes"
+	case k.Query != "":
 		return "query " + k.Query
 	}
 	return "header " + textproto.CanonicalMIMEHeaderKey(k.Header) + ": " + k.Prefix + "KEY"
@@ -91,6 +106,7 @@ var (
 	metricName  = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$`)
 	queryName   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 	headerToken = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
+	mediaType   = regexp.MustCompile(`^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$`)
 )
 
 // reservedHeaders are headers a plugin may neither set nor have the key
@@ -125,9 +141,17 @@ func (m Manifest) Validate() error {
 			problems = append(problems, err.Error())
 		}
 	}
+	places := 0
+	for _, place := range []bool{m.Key.Header != "", m.Key.Query != "", m.Key.Body} {
+		if place {
+			places++
+		}
+	}
 	switch key := m.Key; {
-	case key.Header != "" && key.Query != "", key.Header == "" && key.Query == "":
-		problems = append(problems, "the key goes either in a header or in the query")
+	case places != 1:
+		problems = append(problems, "the key goes in a header, in the query or in the body, one of them")
+	case key.Body && key.Prefix != "":
+		problems = append(problems, "a prefix is for a key in a header")
 	case key.Header != "" && (!headerToken.MatchString(key.Header) || reservedHeader(key.Header)):
 		problems = append(problems, fmt.Sprintf("header %q cannot carry the key", key.Header))
 	case key.Query != "" && !queryName.MatchString(key.Query):
@@ -153,6 +177,14 @@ func (m Manifest) Validate() error {
 	if m.RequestBody < 0 || m.RequestBody > MaxRequestBody {
 		problems = append(problems, fmt.Sprintf("a plugin reads at most %d MB of a request's body", MaxRequestBody>>20))
 	}
+	if len(m.RequestBodyTypes) > 16 {
+		problems = append(problems, "a plugin names at most 16 media types of bodies it reads")
+	}
+	for _, media := range m.RequestBodyTypes {
+		if !mediaType.MatchString(media) {
+			problems = append(problems, fmt.Sprintf("%q is not a media type in lowercase, as application/json", media))
+		}
+	}
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))
 	}
@@ -160,11 +192,8 @@ func (m Manifest) Validate() error {
 }
 
 // MetricsOf are the metrics a plugin counts, which its limits may name:
-// its kind's, or for a container, the requests and the manifest's.
-func MetricsOf(spec Spec, manifest *Manifest) []string {
-	if spec.Kind != KindContainer {
-		return Metrics[spec.Kind]
-	}
+// the requests, and its manifest's.
+func MetricsOf(_ Spec, manifest *Manifest) []string {
 	metrics := []string{MetricRequests}
 	if manifest != nil {
 		for _, metric := range manifest.Metrics {
