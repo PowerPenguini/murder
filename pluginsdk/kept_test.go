@@ -59,3 +59,15 @@ func TestAFieldCutAtTheEndOfTheHeadIsReadInTheTail(t *testing.T) {
 		t.Fatalf("usage %+v", usage)
 	}
 }
+
+// A chunk is kept whole in the tail, however long the tail was.
+func TestAChunkIsKeptWholeInTheTail(t *testing.T) {
+	var kept Kept
+	kept.Add([]byte(strings.Repeat("h", keptWhole)))
+	chunk := `"usage":{"n":3}` + strings.Repeat(" ", keptTail)
+	kept.Add([]byte(chunk))
+	var usage struct{ N int }
+	if !LastField(kept.Tail(), "usage", &usage) || usage.N != 3 {
+		t.Fatalf("usage %+v", usage)
+	}
+}

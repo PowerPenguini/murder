@@ -158,7 +158,7 @@ func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
 		if m.stream && strings.HasSuffix(path, "chat/completions") && !asked {
 			// A body the edge would not send, past what the plugin reads,
 			// is sent as it was: its use is estimated.
-			if rewritten := askUsage(r.Body, options, named); len(rewritten) <= int(manifest.RequestBody) {
+			if rewritten := askUsage(r.Body, options, named); rewritten != nil && len(rewritten) <= int(manifest.RequestBody) {
 				to.Body, m.strip = rewritten, true
 			}
 		}
@@ -211,6 +211,8 @@ func askedUsage(options []byte) (bool, error) {
 
 // askUsage sets stream_options.include_usage in a request's body, keeping
 // the rest as it was written: a long body is not read and written again.
+// Options that are no object, nor null, are left for the provider to
+// refuse: nil.
 func askUsage(body []byte, options field, named bool) []byte {
 	if !named {
 		open := bytes.IndexByte(body, '{') + 1
@@ -223,8 +225,11 @@ func askUsage(body []byte, options field, named bool) []byte {
 	}
 	inner, isObject, _ := fieldsOf(options.value, "include_usage")
 	switch {
-	case !isObject:
+	case string(options.value) == "null":
 		return splice(body, options.start, options.start+len(options.value), `{"include_usage":true}`)
+	case !isObject:
+		// Options the provider refuses, left as they are.
+		return nil
 	case inner["include_usage"].value != nil:
 		at := options.start + inner["include_usage"].start
 		return splice(body, at, at+len(inner["include_usage"].value), "true")

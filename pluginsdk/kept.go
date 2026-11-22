@@ -35,10 +35,10 @@ func (k *Kept) Add(chunk []byte) {
 		k.long = true
 		k.tail = append(make([]byte, 0, 2*keptTail), k.head[max(len(k.head)-keptTail, 0):]...)
 	}
-	k.tail = append(k.tail, chunk...)
-	if len(k.tail) > 2*keptTail {
-		k.tail = append(make([]byte, 0, 2*keptTail), k.tail[len(k.tail)-keptTail:]...)
+	if len(k.tail)+len(chunk) > 2*keptTail {
+		k.tail = append(make([]byte, 0, 2*keptTail), k.tail[max(len(k.tail)-keptTail, 0):]...)
 	}
+	k.tail = append(k.tail, chunk...)
 }
 
 // Whole is the body, when it was short enough to be kept whole.

@@ -142,6 +142,6 @@ func (l *login) Replace(r *pluginsdk.Response, body []byte, _ *pluginsdk.Counter
 // finds each that begins, result each the plugin reads, empty or holding
 // text alone.
 var (
-	resultOpen = regexp.MustCompile(`<(?:[A-Za-z_][\w.-]*:)?ZalogujResult\b`)
-	result     = regexp.MustCompile(`<(?:[A-Za-z_][\w.-]*:)?ZalogujResult\b[^<>]*?(?:/>|>([^<]*)</(?:[A-Za-z_][\w.-]*:)?ZalogujResult\s*>)`)
+	resultOpen = regexp.MustCompile(`<(?:[^\s<>/:]+:)?ZalogujResult\b`)
+	result     = regexp.MustCompile(`<(?:[^\s<>/:]+:)?ZalogujResult\b[^<>]*?(?:/>|>([^<]*)</(?:[^\s<>/:]+:)?ZalogujResult\s*>)`)
 )
