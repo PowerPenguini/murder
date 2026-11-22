@@ -1,7 +1,7 @@
 package panel
 
 // The Plugins pages show what tenants use of the plugins (see
-// docs/plugins.md): the plugins, each with what its module says of
+// docs/plugins.md): the plugins, each with what its manifest says of
 // itself, its tenants against their limits, and its last 30 days by day.
 // A plugin's page sets its key, and a tenant's own limits or key of it; a
 // key is never shown, only whether there is one. A tenant's page has a
@@ -125,7 +125,7 @@ func pluginUseViewOf(use api.PluginUse, ui plugins.UI, main string, now time.Tim
 type pluginRow struct {
 	api.Plugin
 	UI plugins.UI
-	// Kind says the kind, and for a module its name and version.
+	// Kind says the kind, and for a container its name and version.
 	Kind   string
 	Limits []string
 	// Main is the metric charted, MonthText what its tenants used of it
@@ -300,7 +300,7 @@ type pluginData struct {
 	// them.
 	Hosts    []string
 	KeyPlace string
-	// Config is its config, field by field, as the module's UI says them.
+	// Config is its config, field by field, as its manifest's UI says them.
 	Config []configView
 	// Metric is the metric shown; Main the first, charted by default.
 	Metric plugins.MetricUI
@@ -390,7 +390,7 @@ func (s *Server) pluginPageWith(w http.ResponseWriter, r *http.Request, edit *pl
 		}
 		data.Config = append(data.Config, configView{Name: field.Name, Label: field.Label, Help: field.Help, Value: value})
 	}
-	// Fields the module's UI does not say, as they are.
+	// Fields its manifest's UI does not say, as they are.
 	for _, key := range slices.Sorted(maps.Keys(p.Spec.Config)) {
 		if !slices.ContainsFunc(ui.Config, func(c plugins.ConfigUI) bool { return c.Name == key }) {
 			data.Config = append(data.Config, configView{Name: key, Label: key, Value: configValue(p.Spec.Config[key])})
@@ -467,19 +467,14 @@ func (s *Server) pluginPageWith(w http.ResponseWriter, r *http.Request, edit *pl
 // whereTo says where a plugin's requests go, and where the key goes on
 // them.
 func whereTo(p api.Plugin) ([]string, string) {
-	switch {
-	case p.Spec.Kind == plugins.KindOpenAI:
-		return []string{p.Spec.Upstream}, plugins.KeyPlace{Header: "Authorization", Prefix: "Bearer "}.String()
-	case p.Spec.Kind == plugins.KindHERE:
-		return p.Spec.Hosts, plugins.KeyPlace{Query: "apiKey"}.String()
-	case p.Manifest != nil:
-		hosts := p.Spec.Hosts
-		if len(hosts) == 0 {
-			hosts = p.Manifest.Hosts
-		}
-		return hosts, p.Manifest.Key.String()
+	if p.Manifest == nil {
+		return nil, ""
 	}
-	return nil, ""
+	hosts := p.Spec.Hosts
+	if len(hosts) == 0 {
+		hosts = p.Manifest.Hosts
+	}
+	return hosts, p.Manifest.Key.String()
 }
 
 // configValue says a value of a config as JSON says it, strings without

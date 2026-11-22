@@ -35,8 +35,8 @@ type Proxy struct {
 	Transport http.RoundTripper
 	// now is the clock, for tests.
 	now func() time.Time
-	// modules runs plugins of kind wasm; none without.
-	modules *Modules
+	// containers serves plugins of kind container; none without.
+	containers *Containers
 
 	mu   sync.Mutex
 	keys map[string]string
@@ -46,7 +46,7 @@ type Proxy struct {
 	active   map[string]int
 	buffered int64
 	byTenant map[string]int64
-	// failures counts the failures of each plugin's module.
+	// failures counts the failures of each plugin's container.
 	failures map[string]int64
 }
 
@@ -57,7 +57,7 @@ type Proxy struct {
 const (
 	MaxPerTenant         = 64
 	MaxBuffered          = 512 << 20
-	MaxBufferedPerTenant = 2 * MaxBody
+	MaxBufferedPerTenant = 4 * MaxRequestBody
 )
 
 // enter takes a place for a tenant's request, if it has one free.
@@ -106,7 +106,7 @@ func NewProxy(config func() Config, open Opener, counter *Counter, log *slog.Log
 }
 
 // NewTransport reaches providers: HTTP/2 where they speak it, bodies as
-// they come (the meters read them uncompressed: see the kinds).
+// they come (a plugin that meters an answer reads it uncompressed).
 func NewTransport() *http.Transport {
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -120,9 +120,6 @@ func NewTransport() *http.Transport {
 		DisableCompression:    true,
 	}
 }
-
-// MaxBody is the largest request body a meter reads before passing it on.
-const MaxBody = 64 << 20
 
 // refuse answers a request that does not go on, as the providers' APIs
 // answer errors: JSON with an error's message and type.
@@ -261,8 +258,9 @@ type handler interface {
 	// credentials taken off it already.
 	authorize(out *http.Request)
 	// response meters the provider's answer as it passes, its headers
-	// cleared of the key already.
-	response(response *http.Response)
+	// cleared of the key already; an error withholds the answer, the
+	// request answered as a statusError says.
+	response(response *http.Response) error
 	// close lets go of what the handler holds, once the request was
 	// answered.
 	close()
@@ -271,12 +269,8 @@ type handler interface {
 // handlerFor makes the handler of a request of plugin's kind.
 func (p *Proxy) handlerFor(ctx context.Context, x *exchange, plugin Plugin) (handler, error) {
 	switch plugin.Spec.Kind {
-	case KindOpenAI:
-		return &openAIHandler{x: x}, nil
-	case KindHERE:
-		return &hereHandler{x: x}, nil
-	case KindWasm:
-		return p.wasmHandler(ctx, x, plugin)
+	case KindContainer:
+		return p.containerHandler(x, plugin)
 	}
 	return nil, statusError{code: http.StatusNotImplemented, message: fmt.Sprintf("this edge does not know plugins of kind %q: upgrade it", plugin.Spec.Kind)}
 }
@@ -299,9 +293,8 @@ type exchange struct {
 	spec    Spec
 	key     string
 	started time.Time
-	// detail is what the use is for: the service, for HERE. OpenAI's
-	// requests are counted with none, and their tokens by the model that
-	// answered: what a tenant sends is not trusted to name one.
+	// detail is what the request is counted for, as the plugin says:
+	// the service, for HERE.
 	detail string
 	// reserved is the room taken for the request's body.
 	reserved int64
@@ -313,36 +306,44 @@ type exchange struct {
 // as it comes: a body that says it is long takes no room it did not send.
 const bodyChunk = 256 << 10
 
-// readBody reads a request's body to pass it on, in the room the edge
-// has for bodies: at most MaxBody.
-func (x *exchange) readBody(r *http.Request) ([]byte, error) { return x.readBodyUpTo(r, MaxBody) }
-
-// readBodyUpTo reads a request's body of at most limit bytes.
-func (x *exchange) readBodyUpTo(r *http.Request, limit int) ([]byte, error) {
-	var body []byte
+// readBodyUpTo reads a request's body of at most limit bytes. A longer
+// one is refused, or, passLong, passed on unread: what was read of it
+// goes first, the rest as it comes, and tooLong says so.
+func (x *exchange) readBodyUpTo(r *http.Request, limit int, passLong bool) (body []byte, tooLong bool, err error) {
 	chunk := make([]byte, bodyChunk)
 	for {
 		if !x.proxy.reserve(x.tenant, bodyChunk) {
-			return nil, statusError{code: http.StatusServiceUnavailable, message: "the edge holds too many request bodies at once; try again"}
+			return nil, false, statusError{code: http.StatusServiceUnavailable, message: "the edge holds too many request bodies at once; try again"}
 		}
 		x.reserved += bodyChunk
 		n, err := io.ReadFull(r.Body, chunk)
 		body = append(body, chunk[:n]...)
 		if len(body) > limit {
-			return nil, statusError{code: http.StatusRequestEntityTooLarge, message: fmt.Sprintf("a body is at most %d MB", limit>>20)}
+			if !passLong {
+				return nil, false, statusError{code: http.StatusRequestEntityTooLarge, message: fmt.Sprintf("a body is at most %d MB", limit>>20)}
+			}
+			r.Body = readCloser{io.MultiReader(bytes.NewReader(body), r.Body), r.Body}
+			r.GetBody = nil
+			return nil, true, nil
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
-			return nil, statusError{code: http.StatusBadRequest, message: "the request's body could not be read"}
+			return nil, false, statusError{code: http.StatusBadRequest, message: "the request's body could not be read"}
 		}
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
-	return body, nil
+	return body, false, nil
+}
+
+// readCloser reads from one reader, and closes another.
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 // releaseBody gives the room for the request's body back.
@@ -372,7 +373,9 @@ func (x *exchange) authorize(out *http.Request) {
 func (x *exchange) response(response *http.Response) error {
 	// A redirect would say where with the key in it.
 	scrubHeaders(response.Header, x.key)
-	x.handler.response(response)
+	if err := x.handler.response(response); err != nil {
+		return err
+	}
 	// Trailers, which come after the body, are not passed on: the
 	// transport fills them in as the body ends, and the proxy passes on
 	// what is there once the body is closed.
@@ -396,6 +399,12 @@ func (b *withoutTrailers) Close() error {
 // failed answers a request the provider did not answer. The error is
 // logged without the URL: it holds HERE's key.
 func (x *exchange) failed(w http.ResponseWriter, r *http.Request, err error) {
+	// An answer the plugin withheld.
+	var status statusError
+	if errors.As(err, &status) {
+		refuse(w, status.code, status.kind, status.message)
+		return
+	}
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		err = fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
@@ -461,13 +470,14 @@ func scrubErrorBody(response *http.Response, key string) {
 }
 
 // cleanDetail keeps a detail such as a model's name if it is one: at most
-// 64 letters, digits and ._:/-; otherwise it is "other".
+// 64 letters, digits and ._:/-*, as in *.hereapi.com; otherwise it is
+// "other".
 func cleanDetail(detail string) string {
 	if len(detail) > 64 {
 		return "other"
 	}
 	for _, c := range detail {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._:/-", c)) {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._:/-*", c)) {
 			return "other"
 		}
 	}
@@ -488,29 +498,4 @@ func scrubHeaders(header http.Header, key string) {
 		}
 		header[name] = values
 	}
-}
-
-// meteredBody passes a response's body on, calls each with what it read,
-// and done once, at its end or when it is closed.
-type meteredBody struct {
-	body io.ReadCloser
-	each func([]byte)
-	done func()
-	once sync.Once
-}
-
-func (b *meteredBody) Read(buffer []byte) (int, error) {
-	n, err := b.body.Read(buffer)
-	if n > 0 && b.each != nil {
-		b.each(buffer[:n])
-	}
-	if err != nil {
-		b.once.Do(b.done)
-	}
-	return n, err
-}
-
-func (b *meteredBody) Close() error {
-	b.once.Do(b.done)
-	return b.body.Close()
 }

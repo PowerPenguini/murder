@@ -475,8 +475,7 @@ type Store interface {
 	Plugins() []Plugin
 	Plugin(name string) (Plugin, error)
 	PluginTenants(tenant, plugin string) []PluginTenant
-	PutPlugin(name string, spec plugins.Spec, module *PluginModule, actor string) (Plugin, bool, error)
-	PluginModule(digest string) ([]byte, error)
+	PutPlugin(name string, spec plugins.Spec, manifest *plugins.Manifest, actor string) (Plugin, bool, error)
 	DeletePlugin(name, actor string) error
 	SetPluginKey(plugin, tenant, sealed, actor string) error
 	SetPluginLimits(plugin, tenant string, limits []plugins.Limit, set bool, actor string) error

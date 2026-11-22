@@ -44,6 +44,23 @@ type memoryRuntime struct {
 	// latest is what the registry holds under each tag, if not what
 	// Resolve pins it to.
 	latest map[string]string
+	// labels are the labels of images, by their pinned reference.
+	labels map[string]map[string]string
+}
+
+func (m *memoryRuntime) ImageLabels(_ context.Context, ref string) (map[string]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.labels[ref], nil
+}
+
+func (m *memoryRuntime) setLabels(ref string, labels map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.labels == nil {
+		m.labels = map[string]map[string]string{}
+	}
+	m.labels[ref] = labels
 }
 
 func (m *memoryRuntime) HasImage(context.Context, string) (bool, error) { return true, nil }

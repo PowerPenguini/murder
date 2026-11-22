@@ -2,17 +2,16 @@ package apiserver
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/plugins"
+	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/store"
 )
 
@@ -30,7 +29,6 @@ func (s *Server) pluginRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/plugin-usage", s.pluginUsage)
 	// What the edge counted: only the edge, as root, reports it.
 	mux.HandleFunc("POST /v1/edge/plugin-usage", rootOnly(s.edgePluginUsage))
-	mux.HandleFunc("GET /v1/edge/plugin-modules/{digest}", rootOnly(s.edgePluginModule))
 }
 
 // pluginGate says whether every node of the cluster applies the writes of
@@ -95,57 +93,73 @@ func (s *Server) getPlugin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putPlugin(w http.ResponseWriter, r *http.Request) {
 	var request api.PluginRequest
-	if !readJSONUpTo(w, r, &request, api.MaxPluginRequest) {
+	if !readJSON(w, r, &request) {
 		return
 	}
-	module, err := s.pluginModule(r.Context(), request)
+	name := r.PathValue("name")
+	pluginSpec, manifest, note, err := s.pluginImage(r.Context(), request.Spec)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	plugin, changed, err := s.store.PutPlugin(r.PathValue("name"), request.Spec, module, actor(r))
+	plugin, changed, err := s.store.PutPlugin(name, pluginSpec, manifest, actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, api.PluginChange{Plugin: s.pluginView(plugin), Changed: changed})
+	writeJSON(w, http.StatusOK, api.PluginChange{Plugin: s.pluginView(plugin), Changed: changed, Note: note})
 }
 
-// pluginModule reads the manifest of a module sent to install, running it
-// once, here, in a sandbox; never as the change is applied, on each node.
-// A module the cluster has already is not read again.
-func (s *Server) pluginModule(ctx context.Context, request api.PluginRequest) (*store.PluginModule, error) {
-	if request.Module == nil {
-		return nil, nil
+// labeledRuntime reads images' labels.
+type labeledRuntime interface {
+	ImageLabels(ctx context.Context, ref string) (map[string]string, error)
+}
+
+// pluginImage pins the image of a plugin of kind container, and reads its
+// manifest from its label (plugins.ManifestLabel): the image is pulled
+// here, never run. An image a plugin runs already is not read again.
+func (s *Server) pluginImage(ctx context.Context, pluginSpec plugins.Spec) (plugins.Spec, *plugins.Manifest, string, error) {
+	if pluginSpec.Kind != plugins.KindContainer || pluginSpec.Image == "" {
+		return pluginSpec, nil, "", nil
 	}
-	digest := plugins.ModuleDigest(sha256.Sum256(request.Module))
-	if digest != request.Spec.Module {
-		return nil, badRequest(fmt.Errorf("the module sent is %s, not %s, which the spec names", digest, request.Spec.Module))
+	if err := spec.ValidReference(pluginSpec.Image); err != nil {
+		return pluginSpec, nil, "", badRequest(err)
 	}
 	for _, plugin := range s.store.Plugins() {
-		if plugin.Spec.Module == digest && plugin.Manifest != nil {
-			return nil, nil
+		if plugin.Spec.Kind == plugins.KindContainer && plugin.Spec.Image == pluginSpec.Image && plugin.Manifest != nil {
+			return pluginSpec, plugin.Manifest, "", nil
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	manifest, err := plugins.Inspect(ctx, request.Module)
+	pinned, note, err := s.resolve(ctx, pluginSpec.Image)
 	if err != nil {
-		return nil, badRequest(err)
+		return pluginSpec, nil, "", err
 	}
-	return &store.PluginModule{Digest: digest, Manifest: manifest, Wasm: request.Module}, nil
-}
-
-// edgePluginModule sends the edge a plugin's module, by its digest.
-func (s *Server) edgePluginModule(w http.ResponseWriter, r *http.Request) {
-	wasm, err := s.store.PluginModule(r.PathValue("digest"))
+	// A reference pinned already is not pulled to be pinned.
+	present, err := s.runtime.HasImage(ctx, pinned)
+	if err == nil && !present {
+		err = s.runtime.PullImage(ctx, pinned)
+	}
 	if err != nil {
-		writeError(w, err)
-		return
+		return pluginSpec, nil, "", statusError{http.StatusUnprocessableEntity, fmt.Errorf("pull image %s: %w", pinned, err)}
 	}
-	w.Header().Set("Content-Type", "application/wasm")
-	w.Header().Set("Content-Length", strconv.Itoa(len(wasm)))
-	_, _ = w.Write(wasm)
+	labeled, ok := s.runtime.(labeledRuntime)
+	if !ok {
+		return pluginSpec, nil, "", errors.New("this agent's container engine reads no image's labels")
+	}
+	labels, err := labeled.ImageLabels(ctx, pinned)
+	if err != nil {
+		return pluginSpec, nil, "", err
+	}
+	text, ok := labels[plugins.ManifestLabel]
+	if !ok {
+		return pluginSpec, nil, "", badRequest(fmt.Errorf("image %s has no label %s: it is not a plugin's, or was built without its manifest (docs/plugins.md)", pluginSpec.Image, plugins.ManifestLabel))
+	}
+	manifest, err := plugins.ParseManifest(text)
+	if err != nil {
+		return pluginSpec, nil, "", badRequest(fmt.Errorf("image %s: %w", pluginSpec.Image, err))
+	}
+	pluginSpec.Image = pinned
+	return pluginSpec, &manifest, note, nil
 }
 
 func (s *Server) deletePlugin(w http.ResponseWriter, r *http.Request) {

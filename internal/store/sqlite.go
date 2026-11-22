@@ -102,11 +102,8 @@ type snapshot struct {
 	plugins       map[string]Plugin
 	pluginTenants map[[2]string]PluginTenant
 	pluginReports map[[2]string]pluginReport
-	// pluginManifests are the manifests of the modules installed, by
-	// digest.
-	pluginManifests map[string]plugins.Manifest
-	panel           panelState
-	images          map[string]bool
+	panel         panelState
+	images        map[string]bool
 	// lastEvent is the newest event the snapshot includes; readers of the
 	// audit log see nothing newer, so no event shows before its change.
 	lastEvent int64

@@ -145,18 +145,16 @@ func runEdge(args []string) error {
 		}
 		return key.Open(sealedFor, sealed)
 	}, counter, log)
-	// Plugins of kind wasm run their modules: fetched from the agent by
-	// digest, and kept, compiled too, beside the routes, for an edge that
-	// starts while the agent is down.
-	modulesClient := api.NewClient(cfg.Socket)
-	modules, err := plugins.NewModules(ctx, filepath.Join(filepath.Dir(cfg.Edge.Routes), "edge-plugins"), modulesClient.EdgePluginModule, log)
-	if err != nil {
-		log.Error("plugins of kind wasm are not served: their modules cannot be run", "error", err)
-	} else {
-		defer modules.Close(context.Background())
-		pluginProxy.WithModules(modules)
-		go prepareModules(following, table, modules)
+	// Plugins of kind container are served by their containers, which the
+	// agent runs, on their sockets.
+	containers := plugins.NewContainers(plugins.SocketRoot, log)
+	pluginProxy.WithContainers(containers)
+	// An edge of a build before them kept WebAssembly modules beside the
+	// routes, which nothing runs now.
+	if err := os.RemoveAll(filepath.Join(filepath.Dir(cfg.Edge.Routes), "edge-plugins")); err != nil {
+		log.Warn("remove the WebAssembly modules an earlier edge kept", "error", err)
 	}
+	go prepareContainers(following, table, containers)
 	go reportPlugins(following, api.NewClient(cfg.Socket), counter, log)
 	if credentials != nil {
 		go keepWarm(following, proxy, table)
@@ -459,12 +457,12 @@ func reportServed(ctx context.Context, client *api.Client, self measure.EdgeInst
 	}
 }
 
-// prepareModules loads the modules of the plugins the routes name, as
-// they change, ahead of their requests.
-func prepareModules(ctx context.Context, table *edge.LiveTable, modules *plugins.Modules) {
+// prepareContainers lets go of the containers of plugins the routes no
+// longer name, as they change.
+func prepareContainers(ctx context.Context, table *edge.LiveTable, containers *plugins.Containers) {
 	for {
 		changed := table.Watch()
-		modules.Prepare(table.Plugins())
+		containers.Prepare(table.Plugins())
 		select {
 		case <-changed:
 		case <-ctx.Done():

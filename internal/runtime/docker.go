@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -232,6 +233,19 @@ func (d *Docker) ImageVolumes(ctx context.Context, ref string) ([]string, error)
 		return nil, fmt.Errorf("image %s: %w", ref, err)
 	}
 	return slices.Sorted(maps.Keys(image.Config.Volumes)), nil
+}
+
+// ImageLabels reads the labels of a present image.
+func (d *Docker) ImageLabels(ctx context.Context, ref string) (map[string]string, error) {
+	var image struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := d.do(ctx, request{method: http.MethodGet, path: "/images/" + url.PathEscape(ref) + "/json"}, &image); err != nil {
+		return nil, fmt.Errorf("image %s: %w", ref, err)
+	}
+	return image.Config.Labels, nil
 }
 
 // RemoveImage removes the image by its ID, so its tags in the repository go
@@ -605,7 +619,20 @@ func (d *Docker) ListNetworks(ctx context.Context) ([]Network, error) {
 	return networks, nil
 }
 
+// List returns this node's tenants' containers: not plugins' (see
+// ListPlugins), which no tenant's reconciling touches.
 func (d *Docker) List(ctx context.Context) ([]Container, error) {
+	containers, err := d.list(ctx)
+	return slices.DeleteFunc(containers, func(c Container) bool { return c.Labels[LabelPlugin] != "" }), err
+}
+
+// ListPlugins returns this node's plugins' containers.
+func (d *Docker) ListPlugins(ctx context.Context) ([]Container, error) {
+	containers, err := d.list(ctx)
+	return slices.DeleteFunc(containers, func(c Container) bool { return c.Labels[LabelPlugin] == "" }), err
+}
+
+func (d *Docker) list(ctx context.Context) ([]Container, error) {
 	var listed []struct {
 		ID     string            `json:"Id"`
 		Names  []string          `json:"Names"`
@@ -653,7 +680,7 @@ func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error)
 		"PidsLimit":      spec.PIDs,
 		"ReadonlyRootfs": spec.ReadOnlyRoot,
 		"Tmpfs":          spec.Tmpfs,
-		"RestartPolicy":  map[string]any{"Name": RestartPolicy},
+		"RestartPolicy":  map[string]any{"Name": cmp.Or(spec.RestartPolicy, RestartPolicy)},
 		"SecurityOpt":    []string{"no-new-privileges"},
 		"CapDrop":        []string{"ALL"},
 		"NetworkMode":    spec.Network,
@@ -666,12 +693,16 @@ func (d *Docker) Create(ctx context.Context, spec ContainerSpec) (string, error)
 		host["MemorySwap"] = spec.MemoryBytes
 	}
 	body := map[string]any{
-		"Image":            spec.Image,
-		"Env":              spec.Env,
-		"User":             spec.User,
-		"Labels":           d.ownLabels(spec.Labels),
-		"HostConfig":       host,
-		"NetworkingConfig": map[string]any{"EndpointsConfig": map[string]any{spec.Network: map[string]any{"IPAMConfig": map[string]string{"IPv4Address": spec.Address}}}},
+		"Image":      spec.Image,
+		"Env":        spec.Env,
+		"User":       spec.User,
+		"Labels":     d.ownLabels(spec.Labels),
+		"HostConfig": host,
+	}
+	// A container with no network of its own (none) has no address in
+	// it.
+	if spec.Address != "" {
+		body["NetworkingConfig"] = map[string]any{"EndpointsConfig": map[string]any{spec.Network: map[string]any{"IPAMConfig": map[string]string{"IPv4Address": spec.Address}}}}
 	}
 	var created struct {
 		ID string `json:"Id"`

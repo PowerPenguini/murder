@@ -7,7 +7,6 @@ package integration
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,7 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	goruntime "runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,6 +31,7 @@ import (
 	"github.com/PowerPenguini/murder/internal/api"
 	"github.com/PowerPenguini/murder/internal/apiserver"
 	"github.com/PowerPenguini/murder/internal/edge"
+	"github.com/PowerPenguini/murder/internal/pluginhost"
 	"github.com/PowerPenguini/murder/internal/plugins"
 	"github.com/PowerPenguini/murder/internal/reconcile"
 	"github.com/PowerPenguini/murder/internal/rollout"
@@ -66,6 +66,54 @@ func buildTestImage(t *testing.T, variant, tag string) string {
 		t.Fatal(err)
 	}
 	output, err := exec.Command("docker", "build", "-q", "-t", tag, dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker build: %v\n%s", err, output)
+	}
+	id := strings.TrimSpace(string(output))
+	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", tag, id).Run() })
+	return id
+}
+
+// buildMurdersPlugin builds one of Murder's plugins into an image as its
+// release does, from plugins/Dockerfile, with its manifest as its label,
+// and returns its ID.
+func buildMurdersPlugin(t *testing.T, plugin, tag string) string {
+	t.Helper()
+	manifest, err := exec.Command("go", "run", "../plugins/"+plugin, "-manifest").Output()
+	if err != nil {
+		t.Fatalf("%s's manifest: %v", plugin, err)
+	}
+	build := exec.Command("docker", "build", "-q", "-f", "../plugins/Dockerfile", "--build-arg", "PLUGIN="+plugin,
+		"--label", plugins.ManifestLabel+"="+strings.TrimSpace(string(manifest)), "-t", tag, "..")
+	build.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
+	output, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker build %s: %v\n%s", plugin, err, output)
+	}
+	id := strings.TrimSpace(string(output))
+	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", tag, id).Run() })
+	return id
+}
+
+// buildPluginImage builds the test plugin into an image with its
+// manifest as its label, and returns its ID.
+func buildPluginImage(t *testing.T, tag string) string {
+	t.Helper()
+	dir := t.TempDir()
+	build := exec.Command("go", "build", "-o", filepath.Join(dir, "plugin"), "../internal/plugins/testdata/plugin")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the test plugin: %v\n%s", err, output)
+	}
+	manifest, err := exec.Command(filepath.Join(dir, "plugin"), "-manifest").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := "FROM scratch\nCOPY plugin /plugin\nENTRYPOINT [\"/plugin\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("docker", "build", "-q", "--label", plugins.ManifestLabel+"="+strings.TrimSpace(string(manifest)), "-t", tag, dir).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker build: %v\n%s", err, output)
 	}
@@ -532,26 +580,21 @@ func TestATenantReachesAPluginOnDocker(t *testing.T) {
 	cleanupTenant(t, name)
 	var auth, moduleKey, moduleHost string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host == "api.example.com" {
+		switch r.Host {
+		case "api.example.com":
 			moduleKey, moduleHost = r.Header.Get("X-Key"), r.Host
-		} else {
+		case "api.openai.com":
 			auth = r.Header.Get("Authorization")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"object":"list","data":[]}`)
 	}))
 	defer upstream.Close()
-	// A plugin of one's own: the test module, built for WebAssembly.
-	modulePath := filepath.Join(t.TempDir(), "module.wasm")
-	build := exec.Command(filepath.Join(goruntime.GOROOT(), "bin", "go"), "build", "-buildmode=c-shared", "-o", modulePath, "../internal/plugins/testdata/module")
-	build.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0", "GOFLAGS=")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the test module: %v\n%s", err, output)
-	}
-	wasm, err := os.ReadFile(modulePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A plugin of one's own: the test plugin, in an image whose label
+	// holds its manifest, as it prints it.
+	pluginImage := buildPluginImage(t, repository+"-plugin:v1")
+	// Murder's openai, as its release builds it.
+	buildMurdersPlugin(t, "openai", repository+"-openai:v1")
 	// Plugins on every address, as the edge serves them: on a port the
 	// host's own firewall, if any, lets containers reach.
 	port := os.Getenv("MURDER_IT_PLUGINS_PORT")
@@ -567,27 +610,43 @@ func TestATenantReachesAPluginOnDocker(t *testing.T) {
 	n.reconciler = n.newReconciler()
 	counter := plugins.NewCounter("edge-it")
 	proxy := plugins.NewProxy(func() plugins.Config { return apiserver.Routes{Store: n.store}.Table().Plugins }, n.key.Open, counter, n.log)
-	// The edge fetches modules from its agent, as murder edge does.
-	modules, err := plugins.NewModules(context.Background(), t.TempDir(), n.client.EdgePluginModule, n.log)
+	// The agent runs the plugin's container, its socket below a root of
+	// the test's, and the edge reaches it there, as murder edge does.
+	root, err := os.MkdirTemp("/tmp", "mp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer modules.Close(context.Background())
-	proxy.WithModules(modules)
-	// The module's host, over HTTPS, is the test's upstream.
+	defer os.RemoveAll(root)
+	host := &pluginhost.Host{Runtime: n.docker, Plugins: n.store.Plugins, Root: root, Log: n.log}
+	defer func() {
+		containers, _ := n.docker.ListPlugins(context.Background())
+		for _, container := range containers {
+			_ = n.docker.Stop(context.Background(), container.ID, time.Second)
+			_ = n.docker.Remove(context.Background(), container.ID)
+		}
+	}()
+	proxy.WithContainers(plugins.NewContainers(root, n.log))
+	// The plugin's host, over HTTPS, is the test's upstream.
 	upstreamURL, _ := url.Parse(upstream.URL)
 	proxy.Transport = toTestUpstream{host: upstreamURL.Host}
 	server := &http.Server{Handler: proxy, ReadHeaderTimeout: 10 * time.Second}
 	go server.Serve(listener)
 	defer server.Close()
 	ctx := context.Background()
-	if _, err := n.client.PutPlugin(ctx, "openai", plugins.Spec{Kind: plugins.KindOpenAI, Upstream: upstream.URL}, nil); err != nil {
+	if _, err := n.client.PutPlugin(ctx, "openai", plugins.Spec{Kind: plugins.KindContainer, Image: repository + "-openai:v1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := n.client.SetPluginKey(ctx, "openai", "", "sk-operator"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := n.client.PutPlugin(ctx, "mine", plugins.Spec{Kind: plugins.KindWasm, Module: plugins.ModuleDigest(sha256.Sum256(wasm))}, wasm); err != nil {
+	installed, err := n.client.PutPlugin(ctx, "mine", plugins.Spec{Kind: plugins.KindContainer, Image: repository + "-plugin:v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.Plugin.Manifest == nil || installed.Plugin.Manifest.Name != "test" || installed.Plugin.Spec.Image != pluginImage {
+		t.Fatalf("installed %+v", installed)
+	}
+	if err := host.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := n.client.SetPluginKey(ctx, "mine", "", "mine-key"); err != nil {
@@ -602,23 +661,66 @@ func TestATenantReachesAPluginOnDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	n.waitHealthy(t, n.reconciler, name)
-	_, body := n.request(t, http.MethodGet, name, "/fetch?env=OPENAI_BASE_URL&path=/models", "")
+	// The tenants' reconciling leaves the plugin's container alone: still
+	// there, still started again by the engine.
+	if err := n.reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.reconciler.SetRestartPolicies(ctx); err != nil {
+		t.Fatal(err)
+	}
+	containers, err := n.docker.ListPlugins(ctx)
+	if err != nil || len(containers) != 2 || !containers[0].Running || !containers[1].Running {
+		t.Fatalf("the plugins' containers after a pass: %+v %v", containers, err)
+	}
+	for _, container := range containers {
+		if state, err := n.docker.Inspect(ctx, container.ID); err != nil || state.RestartPolicy != "unless-stopped" {
+			t.Fatalf("its restart policy: %+v %v", state, err)
+		}
+	}
+	logsOf := func(plugin string) string {
+		for _, container := range containers {
+			if container.Labels[runtime.LabelPlugin] == plugin {
+				logs, _ := n.docker.Logs(ctx, container.ID, 50)
+				return string(logs)
+			}
+		}
+		return ""
+	}
+	if tenants, _ := n.docker.List(ctx); slices.ContainsFunc(tenants, func(c runtime.Container) bool { return c.Labels[runtime.LabelPlugin] != "" }) {
+		t.Fatal("the plugin's container is listed as a tenant's")
+	}
+
+	// Murder's openai: its container may still be starting.
+	var body string
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		if _, body = n.request(t, http.MethodGet, name, "/fetch?env=OPENAI_BASE_URL&path=/models", ""); !strings.HasPrefix(body, "503 ") {
+			break
+		}
+	}
 	if strings.Contains(body, "i/o timeout") && port == "0" {
 		t.Skipf("the host's own firewall drops containers' connections to it (%s): set MURDER_IT_PLUGINS_PORT to a port it lets in", body)
 	}
 	if !strings.HasPrefix(body, "200 ") || auth != "Bearer sk-operator" {
-		t.Fatalf("the tenant got %q; the provider saw %q", body, auth)
+		t.Fatalf("the tenant got %q; the provider saw %q; the container said:\n%s", body, auth, logsOf("openai"))
 	}
 	if used := counter.Used(name, "openai", plugins.MetricRequests, plugins.PerDay, time.Now()); used != 1 {
 		t.Fatalf("%d requests counted", used)
 	}
-	// The module's plugin: the edge fetched the module from the agent,
-	// and put the key where its manifest says.
-	if _, body := n.request(t, http.MethodGet, name, "/fetch?env=MINE_URL&path=/v1/things", ""); !strings.HasPrefix(body, "200 ") || moduleKey != "Token mine-key" || moduleHost != "api.example.com" {
-		t.Fatalf("the tenant got %q; the module's provider saw %q at %q", body, moduleKey, moduleHost)
+	// The container's plugin: the edge asked its container on its socket,
+	// and put the key where its manifest says. The container may still be
+	// starting.
+	var mine string
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		if _, mine = n.request(t, http.MethodGet, name, "/fetch?env=MINE_URL&path=/v1/things", ""); !strings.HasPrefix(mine, "503 ") {
+			break
+		}
+	}
+	if !strings.HasPrefix(mine, "200 ") || moduleKey != "Token mine-key" || moduleHost != "api.example.com" {
+		t.Fatalf("the tenant got %q; the plugin's provider saw %q at %q; the container said:\n%s", mine, moduleKey, moduleHost, logsOf("mine"))
 	}
 	if used := counter.Used(name, "mine", plugins.MetricRequests, plugins.PerDay, time.Now()); used != 1 {
-		t.Fatalf("%d requests of the module's plugin counted", used)
+		t.Fatalf("%d requests of the container's plugin counted", used)
 	}
 }
 

@@ -103,19 +103,31 @@
   what the others kept. With `hostFirewall`, the port is closed to everyone
   else as well. Reading or changing a plugin's key takes the API socket,
   as every other change does. See [Plugins](plugins.md).
-- **Plugins' modules.** A plugin of kind `wasm` runs WebAssembly the
-  operator installs, in the edge, in a sandbox:
-  - no files, environment, network or other imports than WASI's;
-  - 128 MB of memory, and a deadline on every call;
-  - an instance serves one tenant only.
-  The module never sees a key. The edge puts the key on the request
-  itself, and only for a request to one of the hosts the module's manifest
-  names, over HTTPS. The module does see what tenants send and what
-  providers answer, and decides what is passed on and counted: install
-  only modules you trust as you trust the edge with that traffic. A module
-  is kept in the replicated state and its backups. The edge keeps it in a
-  directory only root reads, and runs it interpreted: no native code of a
-  module's runs, and the edge keeps `MemoryDenyWriteExecute`.
+- **Plugins' containers.** A plugin runs an image the operator installs,
+  Murder's own for OpenAI, HERE and GUS or another, in a container on each
+  node, out of the edge's process:
+  - no network at all: it reaches nothing, and what it is shown cannot
+    leave but through the edge;
+  - as nobody, with no capability and `no-new-privileges`, a root it
+    cannot write, 256 MB of memory, one CPU and 128 processes;
+  - its socket on a tmpfs of 64 KB of its own, in a directory only root
+    reaches on the host; the edge calls it there, with a deadline on
+    every call, as root without overriding permissions.
+  The container never sees a key. The edge puts the key on the request
+  itself, and only for a request to one of the hosts the manifest names,
+  over HTTPS. A key that goes in the body goes only where the plugin put a
+  mark, new for each request and never shown to the tenant, in a body the
+  plugin wrote: a tenant cannot have its own body carry it; it uses a container only once the container says the
+  manifest its image's label said as it was installed. The container does
+  see what tenants send and what providers answer, and decides what is
+  passed on and counted, may take an event out of a stream it meters, and
+  may replace a short answer whole, as gus hides the sessions GUS opens
+  with the operator's key (one it cannot replace is withheld): install only images you trust
+  as you trust the edge with that traffic. Murder's own are built from its
+  repository by its release workflow, and published with it. One container serves every tenant of its node:
+  a plugin's code keeps tenants apart, not Murder. Its image is pinned by
+  digest, and never run as it is installed: the agent reads the manifest
+  from its label.
 - **Docker's `userns-remap` is not supported.** The data owner is the
   container user's numeric id on the host, which remapping would change.
 - **Nodes prove who they are with keys of their own.** Nodes talk over

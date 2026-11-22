@@ -1,9 +1,8 @@
 package store
 
 import (
-	"bytes"
-	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,12 +14,24 @@ import (
 	"github.com/PowerPenguini/murder/internal/plugins"
 )
 
+// openAISpec is a plugin of Murder's openai, its image pinned, with
+// limits.
+func openAISpec(limits ...plugins.Limit) plugins.Spec {
+	return plugins.Spec{Kind: plugins.KindContainer, Image: "ghcr.io/powerpenguini/murder-openai@sha256:" + strings.Repeat("0", 64), Limits: limits}
+}
+
+// openAIManifest is the manifest of Murder's openai, in short: the store
+// never runs it.
+func openAIManifest() *plugins.Manifest {
+	return &plugins.Manifest{ABI: plugins.ABI, Name: "openai", Hosts: []string{"api.openai.com"}, Key: plugins.KeyPlace{Header: "Authorization", Prefix: "Bearer "}, Metrics: []string{"tokens", "tokens.input", "tokens.output"}}
+}
+
 // withPlugin opens a store with plugin openai, a limit of 1000 tokens a
 // month, and app web listing it, with tenants of the names given.
 func withPlugin(t *testing.T, names ...string) *SQLite {
 	t.Helper()
 	st, _ := openNew(t, options())
-	if _, _, err := st.PutPlugin("openai", plugins.Spec{Kind: plugins.KindOpenAI, Limits: []plugins.Limit{{Metric: plugins.MetricTokens, Per: plugins.PerMonth, Amount: 1000}}}, nil, "alice"); err != nil {
+	if _, _, err := st.PutPlugin("openai", openAISpec(plugins.Limit{Metric: "tokens", Per: plugins.PerMonth, Amount: 1000}), openAIManifest(), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	app := appSpec()
@@ -43,19 +54,19 @@ func TestAPluginIsInstalledChangedAndDeletedOnceNoAppListsIt(t *testing.T) {
 	if _, err := st.PutApp(App{Name: "web", Spec: app}, "test"); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "not installed") {
 		t.Fatalf("an app listing a plugin not installed: %v", err)
 	}
-	plugin, changed, err := st.PutPlugin("openai", plugins.Spec{Kind: plugins.KindOpenAI}, nil, "alice")
-	if err != nil || !changed || plugin.Spec.Upstream != "https://api.openai.com" {
+	plugin, changed, err := st.PutPlugin("openai", openAISpec(), openAIManifest(), "alice")
+	if err != nil || !changed || plugin.Manifest.Name != "openai" {
 		t.Fatalf("install: %+v %v %v", plugin, changed, err)
 	}
 	version := st.state.Load().version
-	if _, changed, err := st.PutPlugin("openai", plugins.Spec{Kind: plugins.KindOpenAI}, nil, "alice"); err != nil || changed || st.state.Load().version != version {
+	if _, changed, err := st.PutPlugin("openai", openAISpec(), openAIManifest(), "alice"); err != nil || changed || st.state.Load().version != version {
 		t.Fatalf("the same again: changed %v, %v", changed, err)
 	}
-	if _, _, err := st.PutPlugin("openai", plugins.Spec{Kind: plugins.KindHERE}, nil, "alice"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("another kind: %v", err)
+	if _, _, err := st.PutPlugin("openai", plugins.Spec{Kind: "here"}, openAIManifest(), "alice"); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "murder-here") {
+		t.Fatalf("a kind of Murder's own, as before: %v", err)
 	}
 	for _, bad := range []string{"Open", "-x", strings.Repeat("a", 33)} {
-		if _, _, err := st.PutPlugin(bad, plugins.Spec{Kind: plugins.KindOpenAI}, nil, "alice"); !errors.Is(err, ErrInvalid) {
+		if _, _, err := st.PutPlugin(bad, openAISpec(), openAIManifest(), "alice"); !errors.Is(err, ErrInvalid) {
 			t.Errorf("name %q: %v", bad, err)
 		}
 	}
@@ -101,7 +112,7 @@ func TestATenantsOwnKeyLiftsThePluginsLimitsButNotItsOwn(t *testing.T) {
 	if limits := PluginLimits(plugin, own()); len(limits) != 1 || limits[0].Metric != plugins.MetricRequests || limits[0].Mode != plugins.ModeHard {
 		t.Fatalf("its own limits: %v", limits)
 	}
-	if err := st.SetPluginLimits("openai", "acme", []plugins.Limit{{Metric: plugins.MetricTransactions, Per: plugins.PerDay, Amount: 5}}, true, "alice"); !errors.Is(err, ErrInvalid) {
+	if err := st.SetPluginLimits("openai", "acme", []plugins.Limit{{Metric: "transactions", Per: plugins.PerDay, Amount: 5}}, true, "alice"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("a metric openai does not count: %v", err)
 	}
 	// Taking key and limits away drops the row.
@@ -129,7 +140,7 @@ func TestAReportIsCountedOnceAndSaysTheLimitsItCrosses(t *testing.T) {
 	day := plugins.Day(now)
 	report := func(seq, amount int64) plugins.Report {
 		return plugins.Report{Edge: "edge-1", Seq: seq, Counts: []plugins.Count{
-			{Tenant: "acme", Plugin: "openai", Day: day, Metric: plugins.MetricTokens, Detail: "gpt-5", Amount: amount},
+			{Tenant: "acme", Plugin: "openai", Day: day, Metric: "tokens", Detail: "gpt-5", Amount: amount},
 			{Tenant: "acme", Plugin: "openai", Day: day, Metric: plugins.MetricRequests, Amount: 1},
 			{Tenant: "gone", Plugin: "openai", Day: day, Metric: plugins.MetricRequests, Amount: 1},
 		}}
@@ -159,8 +170,8 @@ func TestAReportIsCountedOnceAndSaysTheLimitsItCrosses(t *testing.T) {
 		}
 		return 0
 	}
-	if used(plugins.MetricTokens, day) != 700 || used(plugins.MetricTokens, plugins.Month(now)) != 700 {
-		t.Fatalf("tokens %d today, %d this month", used(plugins.MetricTokens, day), used(plugins.MetricTokens, plugins.Month(now)))
+	if used("tokens", day) != 700 || used("tokens", plugins.Month(now)) != 700 {
+		t.Fatalf("tokens %d today, %d this month", used("tokens", day), used("tokens", plugins.Month(now)))
 	}
 	events, _ := st.Events(EventQuery{Tenant: "acme", Limit: 5})
 	if len(events) > 0 && strings.HasPrefix(events[0].Action, "plugin.limit") {
@@ -327,7 +338,7 @@ func TestOpenUpgradesSchemaVersion20(t *testing.T) {
 	}
 	for _, statement := range []string{
 		schema,
-		`DROP TABLE plugin_modules`, `DROP TABLE plugin_reports`, `DROP TABLE plugin_usage`, `DROP TABLE plugin_tenants`, `DROP TABLE plugins`,
+		`DROP TABLE plugin_reports`, `DROP TABLE plugin_usage`, `DROP TABLE plugin_tenants`, `DROP TABLE plugins`,
 		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '3'), ('applied', '0')`,
 		`INSERT INTO apps (name, spec, created_at, updated_at, revision) VALUES ('web', '` + marshal(normalizeApp(appSpec())) + `', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 1)`,
 		`PRAGMA user_version = 20`,
@@ -347,7 +358,7 @@ func TestOpenUpgradesSchemaVersion20(t *testing.T) {
 	if len(st.Plugins()) != 0 {
 		t.Fatal("plugins from nowhere")
 	}
-	if _, _, err := st.PutPlugin("here", plugins.Spec{Kind: plugins.KindHERE}, nil, "alice"); err != nil {
+	if _, _, err := st.PutPlugin("mine", containerSpec(), testManifest(), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	recorded := &recorder{}
@@ -355,6 +366,145 @@ func TestOpenUpgradesSchemaVersion20(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.Apply(Batch{Schema: 20, Version: st.state.Load().version, Statements: recorded.statements}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A database of schema 21, which kept WebAssembly modules, keeps plugins
+// of kind container instead: a plugin of kind wasm goes, the others stay.
+func TestOpenUpgradesSchemaVersion21(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "murder.db")
+	db, err := sql.Open("sqlite", initDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		schema,
+		`ALTER TABLE plugins DROP COLUMN manifest`,
+		`CREATE TABLE plugin_modules (digest TEXT PRIMARY KEY, manifest TEXT NOT NULL, wasm TEXT NOT NULL, size INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT`,
+		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '3'), ('applied', '0')`,
+		`INSERT INTO plugins (name, spec, created_at, updated_at) VALUES ('openai', '{"kind":"openai","upstream":"https://api.openai.com"}', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')`,
+		`INSERT INTO plugins (name, spec, created_at, updated_at) VALUES ('mine', '{"kind":"wasm","module":"sha256:` + strings.Repeat("a", 64) + `"}', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')`,
+		`INSERT INTO plugin_modules VALUES ('sha256:` + strings.Repeat("a", 64) + `', '{}', 'AAAA', 3, '2026-11-01T00:00:00Z')`,
+		`PRAGMA user_version = 21`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(statement, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// Neither the module's plugin nor openai, a kind of Murder's own then,
+	// stays (TestOpenUpgradesSchemaVersion22).
+	if list := st.Plugins(); len(list) != 0 {
+		t.Fatalf("plugins %+v", list)
+	}
+	if _, _, err := st.PutPlugin("mine", containerSpec(), testManifest(), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if plugin, _ := st.Plugin("mine"); plugin.Manifest == nil || plugin.Manifest.Name != "widgets" {
+		t.Fatalf("mine %+v", plugin)
+	}
+}
+
+// A database of schema 22, which kept plugins of kind openai and here as
+// kinds of Murder's own, keeps only those of kind container, and tenants'
+// own settings of them.
+func TestOpenUpgradesSchemaVersion22(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "murder.db")
+	db, err := sql.Open("sqlite", initDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := json.Marshal(testManifest())
+	spec, _ := json.Marshal(containerSpec())
+	for _, statement := range []string{
+		schema,
+		`INSERT INTO meta (key, value) VALUES ('node', 'n1'), ('version', '3'), ('applied', '0')`,
+		// Tenant acme is of no use but to its settings.
+		`PRAGMA foreign_keys = OFF`,
+		`INSERT INTO plugins (name, spec, created_at, updated_at) VALUES ('openai', '{"kind":"openai","upstream":"https://api.openai.com"}', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')`,
+		`INSERT INTO plugins (name, spec, created_at, updated_at) VALUES ('here', '{"kind":"here","hosts":["router.hereapi.com"]}', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')`,
+		`INSERT INTO plugins (name, spec, created_at, updated_at, manifest) VALUES ('mine', '` + string(spec) + `', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', '` + string(manifest) + `')`,
+		`INSERT INTO plugin_tenants (tenant, plugin, key, limits, updated_at) VALUES ('acme', 'openai', 'sealed', NULL, '2026-11-01T00:00:00Z'), ('acme', 'mine', 'sealed', NULL, '2026-11-01T00:00:00Z')`,
+		`PRAGMA user_version = 22`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(statement, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if list := st.Plugins(); len(list) != 1 || list[0].Name != "mine" || list[0].Manifest == nil {
+		t.Fatalf("plugins %+v", list)
+	}
+	if settings := st.PluginTenants("acme", ""); len(settings) != 1 || settings[0].Plugin != "mine" {
+		t.Fatalf("tenants' settings %+v", settings)
+	}
+}
+
+// An app that lists a plugin of kind openai keeps it once the plugin went
+// in the upgrade: the store opens, and the plugin is applied again from
+// its image under its name.
+func TestAnAppListingAPluginTheUpgradeTookStaysUntilItIsAppliedAgain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "murder.db")
+	if err := Init(path, "n1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path, options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.PutPlugin("openai", openAISpec(), openAIManifest(), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	app := appSpec()
+	app.Plugins = []string{"openai"}
+	if _, err := st.PutApp(App{Name: "web", Spec: app}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", initDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`UPDATE plugins SET spec = '{"kind":"openai","upstream":"https://api.openai.com"}', manifest = NULL WHERE name = 'openai'`,
+		`PRAGMA user_version = 22`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(statement, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(path, options())
+	if err != nil {
+		t.Fatalf("open with an app listing a plugin gone: %v", err)
+	}
+	defer st.Close()
+	if len(st.Plugins()) != 0 {
+		t.Fatalf("plugins %+v", st.Plugins())
+	}
+	if _, _, err := st.PutPlugin("openai", openAISpec(), openAIManifest(), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(NewTenant{Name: "acme", App: "web"}, "test"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -379,7 +529,7 @@ func TestPluginWritesReplicate(t *testing.T) {
 	if err := leader.PutNode(Node{Name: "node-1", Address: "10.0.0.1:7400"}, "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := leader.PutPlugin("openai", plugins.Spec{Kind: plugins.KindOpenAI, Limits: []plugins.Limit{{Metric: plugins.MetricTokens, Per: plugins.PerDay, Amount: 10}}}, nil, "alice"); err != nil {
+	if _, _, err := leader.PutPlugin("openai", openAISpec(plugins.Limit{Metric: "tokens", Per: plugins.PerDay, Amount: 10}), openAIManifest(), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	app := appSpec()
@@ -405,15 +555,14 @@ func TestPluginWritesReplicate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A module of the largest size goes through the log and the snapshot.
-	module := wasmModule(plugins.MaxModule)
-	if _, _, err := leader.PutPlugin("mine", plugins.Spec{Kind: plugins.KindWasm, Module: module.Digest}, module, "alice"); err != nil {
+	// A plugin of kind container goes with its manifest.
+	if _, _, err := leader.PutPlugin("mine", containerSpec(), testManifest(), "alice"); err != nil {
 		t.Fatal(err)
 	}
 	same := func(st *SQLite) {
 		t.Helper()
-		if wasm, err := st.PluginModule(module.Digest); err != nil || !bytes.Equal(wasm, module.Wasm) {
-			t.Fatalf("%s's module: %d bytes, %v", st.Node(), len(wasm), err)
+		if mine, err := st.Plugin("mine"); err != nil || mine.Manifest == nil || mine.Manifest.Name != "widgets" {
+			t.Fatalf("%s's plugin of kind container: %+v, %v", st.Node(), mine, err)
 		}
 		if !reflect.DeepEqual(st.Plugins(), leader.Plugins()) || !reflect.DeepEqual(st.PluginTenants("", ""), leader.PluginTenants("", "")) || st.PluginReported("node-1", "e") != 2 {
 			t.Fatalf("%s differs: %+v %+v", st.Node(), st.Plugins(), st.PluginTenants("", ""))
@@ -446,50 +595,44 @@ func TestPluginWritesReplicate(t *testing.T) {
 	same(third)
 }
 
-// wasmModule is a module of size bytes, with a manifest that counts
-// widgets: the store never runs it.
-func wasmModule(size int) *PluginModule {
-	wasm := bytes.Repeat([]byte{0x2a}, size)
-	return &PluginModule{
-		Digest:   plugins.ModuleDigest(sha256.Sum256(wasm)),
-		Manifest: plugins.Manifest{ABI: plugins.ABI, Name: "widgets", Hosts: []string{"api.example.com"}, Key: plugins.KeyPlace{Header: "X-Key"}, Metrics: []string{"widgets"}},
-		Wasm:     wasm,
-	}
+// testManifest is the manifest of an image that counts widgets: the
+// store never runs it.
+func testManifest() *plugins.Manifest {
+	return &plugins.Manifest{ABI: plugins.ABI, Name: "widgets", Hosts: []string{"api.example.com"}, Key: plugins.KeyPlace{Header: "X-Key"}, Metrics: []string{"widgets"}}
 }
 
-func TestAPluginRunsAModuleOfItsDigestKeptAsLongAsOneRunsIt(t *testing.T) {
+func containerSpec() plugins.Spec {
+	return plugins.Spec{Kind: plugins.KindContainer, Image: "ghcr.io/acme/widgets@sha256:" + strings.Repeat("1", 64)}
+}
+
+func TestAPluginOfKindContainerKeepsItsImagesManifest(t *testing.T) {
 	st, _ := openNew(t, options())
-	module := wasmModule(1024)
-	spec := plugins.Spec{Kind: plugins.KindWasm, Module: module.Digest, Limits: []plugins.Limit{{Metric: "widgets", Per: plugins.PerDay, Amount: 5}}}
-	// Without its module, or with another, it is not installed.
+	spec := containerSpec()
+	spec.Limits = []plugins.Limit{{Metric: "widgets", Per: plugins.PerDay, Amount: 5}}
+	// Without its manifest, or its image pinned, it is not installed.
 	if _, _, err := st.PutPlugin("a", spec, nil, "alice"); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("without its module: %v", err)
+		t.Fatalf("without its manifest: %v", err)
 	}
-	other := wasmModule(10)
-	if _, _, err := st.PutPlugin("a", spec, other, "alice"); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("with another module: %v", err)
+	tagged := spec
+	tagged.Image = "ghcr.io/acme/widgets:1"
+	if _, _, err := st.PutPlugin("a", tagged, testManifest(), "alice"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a tag: %v", err)
 	}
-	forged := *module
-	forged.Wasm = []byte("forged")
-	if _, _, err := st.PutPlugin("a", spec, &forged, "alice"); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("with a module not of its digest: %v", err)
-	}
-	// A limit of a metric the module does not count is refused.
+	// A limit of a metric the manifest does not count is refused.
 	wrong := spec
 	wrong.Limits = []plugins.Limit{{Metric: "tokens", Per: plugins.PerDay, Amount: 5}}
-	if _, _, err := st.PutPlugin("a", wrong, module, "alice"); !errors.Is(err, ErrInvalid) {
+	if _, _, err := st.PutPlugin("a", wrong, testManifest(), "alice"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("a limit of tokens: %v", err)
 	}
-	plugin, changed, err := st.PutPlugin("a", spec, module, "alice")
+	plugin, changed, err := st.PutPlugin("a", spec, testManifest(), "alice")
 	if err != nil || !changed || plugin.Manifest == nil || plugin.Manifest.Name != "widgets" {
 		t.Fatalf("%+v %v %v", plugin, changed, err)
 	}
 	if metrics := plugin.Metrics(); strings.Join(metrics, " ") != "requests widgets" {
 		t.Fatalf("metrics %v", metrics)
 	}
-	// Another plugin runs the same module without sending it again.
-	if _, _, err := st.PutPlugin("b", plugins.Spec{Kind: plugins.KindWasm, Module: module.Digest}, nil, "alice"); err != nil {
-		t.Fatal(err)
+	if _, changed, err := st.PutPlugin("a", spec, testManifest(), "alice"); err != nil || changed {
+		t.Fatalf("the same again: changed %v, %v", changed, err)
 	}
 	app := appSpec()
 	app.Plugins = []string{"a"}
@@ -505,39 +648,31 @@ func TestAPluginRunsAModuleOfItsDigestKeptAsLongAsOneRunsIt(t *testing.T) {
 	if err := st.SetPluginLimits("a", "acme", []plugins.Limit{{Metric: "widgets", Per: plugins.PerDay, Amount: 1}}, true, "alice"); err != nil {
 		t.Fatal(err)
 	}
-	// A module that does not count what a tenant's limit names is refused.
-	other.Manifest.Metrics = []string{"gadgets"}
-	if _, _, err := st.PutPlugin("a", plugins.Spec{Kind: plugins.KindWasm, Module: other.Digest}, other, "alice"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("a module without the tenant's metric: %v", err)
+	// An image that does not count what a tenant's limit names is refused.
+	other := containerSpec()
+	other.Image = "ghcr.io/acme/widgets@sha256:" + strings.Repeat("2", 64)
+	gadgets := testManifest()
+	gadgets.Metrics = []string{"gadgets"}
+	if _, _, err := st.PutPlugin("a", other, gadgets, "alice"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("an image without the tenant's metric: %v", err)
 	}
 	if err := st.SetPluginLimits("a", "acme", nil, false, "alice"); err != nil {
 		t.Fatal(err)
 	}
-	// Plugin a moves to the other module: b still runs the first.
-	if _, _, err := st.PutPlugin("a", plugins.Spec{Kind: plugins.KindWasm, Module: other.Digest}, other, "alice"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.PluginModule(module.Digest); err != nil {
-		t.Fatalf("the module b runs went: %v", err)
-	}
-	if err := st.DeletePlugin("b", "alice"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.PluginModule(module.Digest); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("a module no plugin runs is kept: %v", err)
-	}
-	if wasm, err := st.PluginModule(other.Digest); err != nil || !bytes.Equal(wasm, other.Wasm) {
-		t.Fatalf("a's module: %v", err)
+	if plugin, changed, err := st.PutPlugin("a", other, gadgets, "alice"); err != nil || !changed || plugin.Manifest.Metrics[0] != "gadgets" || plugin.Spec.Image != other.Image {
+		t.Fatalf("another image: %+v %v %v", plugin, changed, err)
 	}
 }
 
-// What a module counts is kept, totalled and held to limits as any other
+// What a container counts is kept, totalled and held to limits as any other
 // metric is.
-func TestAModulesMetricsAreCountedAndHeld(t *testing.T) {
+func TestAContainersMetricsAreCountedAndHeld(t *testing.T) {
 	st, _ := openNew(t, options())
-	module := wasmModule(64)
-	module.Manifest.Metrics = []string{"tokens.cache_read"}
-	if _, _, err := st.PutPlugin("m", plugins.Spec{Kind: plugins.KindWasm, Module: module.Digest, Limits: []plugins.Limit{{Metric: "tokens.cache_read", Per: plugins.PerDay, Amount: 10, Mode: plugins.ModeHard}}}, module, "alice"); err != nil {
+	manifest := testManifest()
+	manifest.Metrics = []string{"tokens.cache_read"}
+	spec := containerSpec()
+	spec.Limits = []plugins.Limit{{Metric: "tokens.cache_read", Per: plugins.PerDay, Amount: 10, Mode: plugins.ModeHard}}
+	if _, _, err := st.PutPlugin("m", spec, manifest, "alice"); err != nil {
 		t.Fatal(err)
 	}
 	app := appSpec()
@@ -560,5 +695,26 @@ func TestAModulesMetricsAreCountedAndHeld(t *testing.T) {
 	events, _ := st.Events(EventQuery{Tenant: "acme", Limit: 1})
 	if len(events) == 0 || events[0].Action != "plugin.limit-reached" {
 		t.Fatalf("events %+v", events)
+	}
+}
+
+// A plugin read is a copy: what is done to its manifest is not done to the
+// state.
+func TestAPluginReadIsACopyOfItsManifest(t *testing.T) {
+	st, _ := openNew(t, options())
+	manifest := openAIManifest()
+	manifest.RequestBodyTypes = []string{"application/json"}
+	manifest.UI = &plugins.UI{Title: "OpenAI", Metrics: []plugins.MetricUI{{Name: "tokens"}}, Config: []plugins.ConfigUI{{Name: "allow"}}}
+	if _, _, err := st.PutPlugin("openai", openAISpec(), manifest, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	read, _ := st.Plugin("openai")
+	read.Manifest.RequestBodyTypes[0] = "text/plain"
+	read.Manifest.UI.Title = "changed"
+	read.Manifest.UI.Metrics[0].Name = "changed"
+	read.Manifest.UI.Config[0].Name = "changed"
+	again, _ := st.Plugin("openai")
+	if again.Manifest.RequestBodyTypes[0] != "application/json" || again.Manifest.UI.Title != "OpenAI" || again.Manifest.UI.Metrics[0].Name != "tokens" || again.Manifest.UI.Config[0].Name != "allow" {
+		t.Fatalf("the state changed: %+v %+v", again.Manifest.RequestBodyTypes, *again.Manifest.UI)
 	}
 }

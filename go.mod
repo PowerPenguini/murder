@@ -17,7 +17,6 @@ require (
 	github.com/libdns/namecheap v1.0.0
 	github.com/mholt/acmez/v3 v3.1.7
 	github.com/minio/minio-go/v7 v7.4.1
-	github.com/tetratelabs/wazero v1.12.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.60.0

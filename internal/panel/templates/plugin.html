@@ -9,7 +9,7 @@
   <table class="kv">
     <tbody>
       <tr><td>Kind</td><td class="mono">{{$d.Kind}}</td></tr>
-      {{with $p.Manifest}}<tr><td>Module</td><td class="mono dim" title="{{$p.Spec.Module}}">{{short $p.Spec.Module}}</td></tr>{{end}}
+      {{with $p.Manifest}}<tr><td>Image</td><td class="mono dim wraps" title="{{$p.Spec.Image}}">{{short $p.Spec.Image}}</td></tr>{{end}}
       <tr><td>Goes to</td><td class="mono wraps">{{range $i, $h := $d.Hosts}}{{if $i}}, {{end}}{{$h}}{{end}}</td></tr>
       <tr><td>Key</td><td>{{if $p.HasKey}}<span class="st ok">set</span>{{else}}<span class="st bad">none</span> <span class="small">its tenants without a key of their own are answered 503</span>{{end}}<div class="dim small">put in {{$d.KeyPlace}}</div></td></tr>
       <tr><td>Limits</td><td>{{range $i, $l := $d.Limits}}{{if $i}}<br>{{end}}{{$l}}{{else}}<span class="faint">none: each tenant may have its own</span>{{end}}</td></tr>

@@ -18,8 +18,6 @@ jobs:
       - name: Format
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./... && go vet -tags docker ./integration && go vet -tags zfs ./internal/volume
-      # Plugins' modules, and the SDK they are written with, build for WebAssembly.
-      - run: GOOS=wasip1 GOARCH=wasm go vet ./pluginsdk ./examples/plugins/... ./internal/plugins/testdata/module
       # Every transaction also reads the whole state and fails if what it
       # read again in part differs (internal/store/reload.go).
       - run: go test -race ./...
@@ -27,4 +25,11 @@ jobs:
           MURDER_VERIFY_RELOADS: "1"
       # GitHub-hosted runners ship Docker, so the full tenant lifecycle runs too.
       - run: go test -tags docker -count=1 ./integration
+      # Each plugin's socket gets a tmpfs of its own, mounted as root: the
+      # test runs where it may mount, on a /run that is a tmpfs, as a node's.
+      - run: |
+          CGO_ENABLED=0 go test -c -o pluginhost.test ./internal/pluginhost
+          docker run --rm --privileged --tmpfs /run -e MURDER_TEST_MOUNTS=1 -e TMPDIR=/run -v "$PWD/pluginhost.test:/pluginhost.test:ro" busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec /pluginhost.test -test.run Tmpfs -test.v
       - run: go build -o murder ./cmd/murder
+      # Murder's plugins run on arm64 nodes too (the release builds both).
+      - run: GOARCH=arm64 go build -o /dev/null ./plugins/...
