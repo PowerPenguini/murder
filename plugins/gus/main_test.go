@@ -266,8 +266,8 @@ func TestAnMTOMCallIsReadFromItsRootPart(t *testing.T) {
 	}
 }
 
-// A login's XOP package is read from its one part; one with another part
-// beside it, which could hold the session, is withheld.
+// A login's XOP package is read from its one part; one with anything that
+// reads as a session where the plugin does not replace it is withheld.
 func TestALoginsPackageIsOfOnePart(t *testing.T) {
 	const kind = `multipart/related; type="application/xop+xml"; start="<root>"; boundary="b"`
 	part := func(id, text string) string { return "--b\r\nContent-ID: <" + id + ">\r\n\r\n" + text + "\r\n" }
@@ -277,8 +277,17 @@ func TestALoginsPackageIsOfOnePart(t *testing.T) {
 	if replaced, err := (&login{tenant: "acme"}).Replace(response, []byte(one), nil); err != nil || string(replaced) != one {
 		t.Fatalf("%s %v", replaced, err)
 	}
-	two := part("root", empty) + part("other", "ey6nu6e2428xp3b434gx") + "--b--\r\n"
-	if replaced, err := (&login{tenant: "acme"}).Replace(response, []byte(two), nil); err == nil {
-		t.Fatalf("passed as %s", replaced)
+	for _, bad := range []string{
+		part("root", empty) + part("other", "ey6nu6e2428xp3b434gx") + "--b--\r\n",
+		part("root", empty) + "--b--\r\nthe epilogue: ey6nu6e2428xp3b434gx\r\n",
+		"the preamble: ey6nu6e2428xp3b434gx\r\n" + one,
+		"--b\r\nContent-ID: <root>\r\nX-Sid: ey6nu6e2428xp3b434gx\r\n\r\n" + empty + "\r\n--b--\r\n",
+		part("root", `<s:Envelope a="ey6nu6e2428xp3b434gx"><ZalogujResult/></s:Envelope>`) + "--b--\r\n",
+		part("root", `<s:Envelope><x>&#101;y6nu6e2428xp3b434gx</x><ZalogujResult/></s:Envelope>`) + "--b--\r\n",
+		part("root", `<s:Envelope><x>&#101;y6nu6e2428xp3b434gx</x><ZalogujResult>ey6nu6e2428xp3b434gx</ZalogujResult></s:Envelope>`) + "--b--\r\n",
+	} {
+		if replaced, err := (&login{tenant: "acme"}).Replace(response, []byte(bad), nil); err == nil {
+			t.Errorf("%q passed as %s", bad, replaced)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -136,12 +137,12 @@ func (l *login) Replace(r *pluginsdk.Response, body []byte, _ *pluginsdk.Counter
 		return nil, errors.New("BIR1's login answered success, and no result")
 	case len(results) == 0:
 		// A fault: no session to hide.
-		return body, nil
+		return withNoSession(r, body, "")
 	}
 	sid := strings.TrimSpace(results[0])
 	if sid == "" {
 		// A key BIR1 did not take: an empty result.
-		return body, nil
+		return withNoSession(r, body, "")
 	}
 	if !sessionID.MatchString(sid) {
 		return nil, errors.New("BIR1's login answered a session the plugin cannot read")
@@ -153,8 +154,47 @@ func (l *login) Replace(r *pluginsdk.Response, body []byte, _ *pluginsdk.Counter
 	if again, err := loginResults(r.Get("Content-Type"), replaced); err != nil || len(again) != 1 || strings.TrimSpace(again[0]) != token {
 		return nil, errors.New("BIR1's login answered its session written in a way the plugin cannot replace")
 	}
+	if _, err := withNoSession(r, replaced, token); err != nil {
+		return nil, err
+	}
 	known.keep(token, l.tenant, sid)
 	return replaced, nil
+}
+
+// sessionShape is what a session of BIR1's reads as: 20 letters and
+// digits. Its answers hold no other word as long.
+var sessionShape = regexp.MustCompile(`[A-Za-z0-9]{20,}`)
+
+// withNoSession is an answer to pass on, once nothing in it reads as a
+// session but the plugin's own, token: neither its bytes, wherever in
+// the package, nor the text and attributes of its envelope, escapes read.
+func withNoSession(r *pluginsdk.Response, body []byte, token string) ([]byte, error) {
+	texts := [][]byte{body}
+	if envelope, err := envelopeOf(r.Get("Content-Type"), body); err == nil {
+		decoder := xml.NewDecoder(bytes.NewReader(envelope))
+		for {
+			read, err := decoder.Token()
+			if err != nil {
+				break
+			}
+			switch read := read.(type) {
+			case xml.CharData:
+				texts = append(texts, bytes.Clone(read))
+			case xml.StartElement:
+				for _, attr := range read.Attr {
+					texts = append(texts, []byte(attr.Value))
+				}
+			}
+		}
+	}
+	for _, text := range texts {
+		for _, word := range sessionShape.FindAll(text, -1) {
+			if string(word) != token {
+				return nil, errors.New("BIR1's login answered what reads as a session, where the plugin does not replace it")
+			}
+		}
+	}
+	return body, nil
 }
 
 // loginResults reads what each ZalogujResult of a login's answer holds,
