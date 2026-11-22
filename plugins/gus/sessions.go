@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"strings"
 	"sync"
 	"time"
@@ -163,8 +165,24 @@ func loginResults(contentType string, body []byte) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A login's package holds the envelope alone: a part beside it is
+	// not read, and could hold the session.
+	if media, params, _ := mime.ParseMediaType(contentType); strings.EqualFold(media, "multipart/related") {
+		parts := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+		for count := 0; ; count++ {
+			_, err := parts.NextRawPart()
+			if err == io.EOF && count == 1 {
+				break
+			}
+			if err != nil || count > 0 {
+				return nil, errors.New("a package of other than one part")
+			}
+		}
+	}
 	decoder := xml.NewDecoder(bytes.NewReader(envelope))
+	// One document: a root, and nothing but space outside it.
 	var results []string
+	depth, roots := 0, 0
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
@@ -173,12 +191,30 @@ func loginResults(contentType string, body []byte) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		start, ok := token.(xml.StartElement)
-		if !ok || start.Name.Local != "ZalogujResult" {
+		switch token := token.(type) {
+		case xml.CharData:
+			if depth == 0 && len(bytes.TrimSpace(token)) > 0 {
+				return nil, errors.New("text outside the envelope")
+			}
+			continue
+		case xml.EndElement:
+			depth--
+			continue
+		case xml.StartElement:
+			if depth == 0 {
+				if roots++; roots > 1 {
+					return nil, errors.New("more than one envelope")
+				}
+			}
+			if token.Name.Local != "ZalogujResult" {
+				depth++
+				continue
+			}
+		default:
 			continue
 		}
 		var text strings.Builder
-		for depth := 1; depth > 0; {
+		for ended := false; !ended; {
 			token, err := decoder.Token()
 			if err != nil {
 				return nil, fmt.Errorf("a result that does not end: %w", err)
@@ -187,7 +223,7 @@ func loginResults(contentType string, body []byte) ([]string, error) {
 			case xml.StartElement:
 				return nil, errors.New("a result that holds an element")
 			case xml.EndElement:
-				depth--
+				ended = true
 			case xml.CharData:
 				text.Write(token)
 			}

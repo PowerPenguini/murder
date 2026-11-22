@@ -216,6 +216,9 @@ func TestALoginsResultIsReadHoweverItIsWritten(t *testing.T) {
 			`<ZalogujResult>&#101;y6nu6e2428xp3b434gx</ZalogujResult>`,
 			`<ZalogujResult>` + sid,
 			`<ZalogujResult><b>` + sid + `</b></ZalogujResult>`,
+			`<s:Envelope><ZalogujResult/></s:Envelope>` + sid,
+			`<s:Envelope><ZalogujResult/></s:Envelope><x>` + sid + `</x>`,
+			`<ZalogujResult/>` + sid,
 			`<ZalogujResponse>` + sid + `</ZalogujResponse>`,
 		},
 		500: {`<ZalogujResult>` + sid + `!</ZalogujResult>`},
@@ -260,5 +263,22 @@ func TestAnMTOMCallIsReadFromItsRootPart(t *testing.T) {
 	}
 	if !slices.Contains(manifest.RequestBodyTypes, "multipart/related") {
 		t.Fatal("the edge does not read an MTOM call")
+	}
+}
+
+// A login's XOP package is read from its one part; one with another part
+// beside it, which could hold the session, is withheld.
+func TestALoginsPackageIsOfOnePart(t *testing.T) {
+	const kind = `multipart/related; type="application/xop+xml"; start="<root>"; boundary="b"`
+	part := func(id, text string) string { return "--b\r\nContent-ID: <" + id + ">\r\n\r\n" + text + "\r\n" }
+	empty := `<s:Envelope><s:Body><ZalogujResult/></s:Body></s:Envelope>`
+	response := &pluginsdk.Response{Status: 200, Header: map[string][]string{"Content-Type": {kind}}}
+	one := part("root", empty) + "--b--\r\n"
+	if replaced, err := (&login{tenant: "acme"}).Replace(response, []byte(one), nil); err != nil || string(replaced) != one {
+		t.Fatalf("%s %v", replaced, err)
+	}
+	two := part("root", empty) + part("other", "ey6nu6e2428xp3b434gx") + "--b--\r\n"
+	if replaced, err := (&login{tenant: "acme"}).Replace(response, []byte(two), nil); err == nil {
+		t.Fatalf("passed as %s", replaced)
 	}
 }
