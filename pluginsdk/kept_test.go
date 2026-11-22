@@ -37,3 +37,25 @@ func TestKeptKeepsAShortBodyWholeAndALongOneByItsEnds(t *testing.T) {
 		t.Fatal("a field read from inside a string")
 	}
 }
+
+// A field cut where the head ends is read whole in the tail: the tail
+// goes on from the end of the head.
+func TestAFieldCutAtTheEndOfTheHeadIsReadInTheTail(t *testing.T) {
+	answer := `{"data":"` + strings.Repeat("x", keptWhole-len(`{"data":"`)-len(`","usage":`)) + `","usage":{"prompt_tokens":7,"completion_tokens":9}}`
+	var kept Kept
+	for chunk := []byte(answer); len(chunk) > 0; {
+		n := min(16<<10, len(chunk))
+		kept.Add(chunk[:n])
+		chunk = chunk[n:]
+	}
+	if _, ok := kept.Whole(); ok || !strings.HasSuffix(string(kept.Head()), `"usage":`) {
+		t.Fatalf("the head ends %q", kept.Head()[len(kept.Head())-20:])
+	}
+	var usage struct {
+		Prompt     int `json:"prompt_tokens"`
+		Completion int `json:"completion_tokens"`
+	}
+	if !LastField(kept.Tail(), "usage", &usage) || usage.Prompt != 7 || usage.Completion != 9 {
+		t.Fatalf("usage %+v", usage)
+	}
+}

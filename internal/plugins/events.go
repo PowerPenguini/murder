@@ -8,12 +8,12 @@ import (
 
 // eventStream passes server-sent events on, line by line, so each is
 // passed as soon as it came. A data line is shown to each, which may take
-// its event out; lines past maxLine pass unread. done is told once
-// whether the stream was read to its end.
+// its event out, or end the stream with an error; lines past maxLine pass
+// unread. done is told once whether the stream was read to its end.
 type eventStream struct {
 	body    io.ReadCloser
 	reader  *bufio.Reader
-	each    func([]byte) bool
+	each    func([]byte) (bool, error)
 	done    func(complete bool)
 	out     []byte
 	err     error
@@ -26,7 +26,7 @@ type eventStream struct {
 // event holds the whole answer.
 const maxLine = 16 << 20
 
-func newEventStream(body io.ReadCloser, each func([]byte) bool, done func(bool)) *eventStream {
+func newEventStream(body io.ReadCloser, each func([]byte) (bool, error), done func(bool)) *eventStream {
 	return &eventStream{body: body, reader: bufio.NewReaderSize(body, 32<<10), each: each, done: done}
 }
 
@@ -53,9 +53,14 @@ func (s *eventStream) fill() {
 			line, err = s.reader.ReadSlice('\n')
 			whole = append(whole, line...)
 		}
-		if err == bufio.ErrBufferFull {
-			// Past maxLine: passed on unread, to its end.
-			s.out, s.skip, s.err = whole, true, nil
+		if len(whole) > maxLine {
+			// Past maxLine, though it may end in what was read: passed on
+			// unread, to its end.
+			s.out, s.skip = whole, err == bufio.ErrBufferFull
+			if s.skip {
+				err = nil
+			}
+			s.err = err
 			return
 		}
 		line = whole
@@ -74,7 +79,12 @@ func (s *eventStream) fill() {
 		return
 	}
 	if data, ok := bytes.CutPrefix(trimmed, []byte("data:")); ok {
-		if !s.each(bytes.TrimPrefix(data, []byte(" "))) {
+		keep, err := s.each(bytes.TrimPrefix(data, []byte(" ")))
+		if err != nil {
+			s.err = err
+			return
+		}
+		if !keep {
 			s.dropped = true
 			return
 		}

@@ -239,6 +239,13 @@ func clonePlugin(p Plugin) Plugin {
 		manifest := *p.Manifest
 		manifest.Hosts = slices.Clone(manifest.Hosts)
 		manifest.Metrics = slices.Clone(manifest.Metrics)
+		manifest.RequestBodyTypes = slices.Clone(manifest.RequestBodyTypes)
+		if manifest.UI != nil {
+			ui := *manifest.UI
+			ui.Metrics = slices.Clone(ui.Metrics)
+			ui.Config = slices.Clone(ui.Config)
+			manifest.UI = &ui
+		}
 		p.Manifest = &manifest
 	}
 	return p

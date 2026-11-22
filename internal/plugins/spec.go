@@ -19,6 +19,7 @@ import (
 
 	"github.com/PowerPenguini/murder/internal/spec"
 	"github.com/PowerPenguini/murder/internal/strictyaml"
+	"gopkg.in/yaml.v3"
 )
 
 // KindContainer is the kind of every plugin: run in a container on each
@@ -125,9 +126,29 @@ func Parse(data []byte) (Spec, error) {
 func Decode(data []byte) (Spec, error) {
 	var spec Spec
 	if err := strictyaml.Decode(data, &spec); err != nil {
+		// A file of a kind Murder once ran itself, of the fields it took,
+		// is told what to write in its place.
+		var old struct {
+			Kind string `yaml:"kind"`
+		}
+		if yaml.Unmarshal(data, &old) == nil && formerKind(old.Kind) != "" {
+			return Spec{}, errors.New(formerKind(old.Kind))
+		}
 		return Spec{}, err
 	}
 	return spec.WithDefaults(), nil
+}
+
+// formerKind says what a plugin of a kind Murder once ran itself is now;
+// empty for another kind.
+func formerKind(kind string) string {
+	switch kind {
+	case "openai":
+		return "kind openai is now an image of Murder's: kind container, image ghcr.io/powerpenguini/murder-openai, its upstream and allow under config (docs/plugins.md)"
+	case "here":
+		return "kind here is now an image of Murder's: kind container, image ghcr.io/powerpenguini/murder-here (docs/plugins.md)"
+	}
+	return ""
 }
 
 // pinnedImage is how an installed plugin names its image: by registry
@@ -166,7 +187,7 @@ func (s Spec) validate(pinned bool) error {
 	switch s.Kind {
 	case KindContainer:
 	case "openai", "here":
-		problems = append(problems, fmt.Sprintf("kind %s is now an image of Murder's: kind container, image ghcr.io/powerpenguini/murder-%s (docs/plugins.md)", s.Kind, s.Kind))
+		problems = append(problems, formerKind(s.Kind))
 	default:
 		problems = append(problems, fmt.Sprintf("kind %q is not one of %s", s.Kind, strings.Join(Kinds, ", ")))
 	}
@@ -208,6 +229,11 @@ func (s Spec) ValidateWith(manifest *Manifest) error {
 	}
 	if manifest == nil {
 		return fmt.Errorf("image %s has no plugin's manifest", s.Image)
+	}
+	if manifest.UI != nil && len(manifest.UI.Config) > 0 {
+		if err := checkConfig(s.Config, manifest.UI.Config); err != nil {
+			return err
+		}
 	}
 	return ValidLimits(MetricsOf(s, manifest), s.Limits)
 }

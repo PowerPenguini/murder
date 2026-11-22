@@ -105,8 +105,13 @@ keys and limits of it, and is applied again from its image.
   for once the provider took it. A name of more than 64 characters, or
   with others than letters, digits and `._:/-*`, is counted as `other`.
 - It reads a JSON body of up to 16 MB, for its model and whether it
-  streams; a larger one is answered `413`. Audio and images to edit pass
-  as they come, at any size.
+  streams, by their names as written, as the provider reads them: a body
+  that writes `model`, `stream` or `stream_options` (or its
+  `include_usage`) twice, or in another case, is answered `400`. A longer
+  JSON body, as of files in base64, passes unread, its input estimated by
+  its length. Audio and images to edit pass as they come, at any size.
+- Its config is checked as it is applied: `upstream` an `https://`
+  address, and `allow` a list of a method and a path, as `POST /v1/batches`.
 - Answers come uncompressed, so the plugin can read them; they stream to
   the app as they come.
 
@@ -166,9 +171,13 @@ reports.
   know, as after its container was started again, a new image applied, or
   the tenant moved to another node, is none: BIR1 answers as for a
   session that ran out, and the client logs in again.
+- A login's answer that the plugin cannot read for sure, its result
+  written in a way it does not know, is withheld (`502`): it may hold
+  BIR1's session.
 - BIR1 answers only an envelope that names its own address in `wsa:To`.
   The plugin therefore writes every call again from what it read of the
-  tenant's, which is SOAP 1.2, as BIR1's answers are. Only BIR1's operations go on:
+  tenant's, which is SOAP 1.2, as BIR1's answers are, or the root part of
+  an MTOM call (`multipart/related`). Only BIR1's operations go on:
   `Zaloguj`, `Wyloguj`, `GetValue`, `DaneSzukajPodmioty`,
   `DanePobierzPelnyRaport` and `DanePobierzRaportZbiorczy`. Their
   parameters are checked: a NIP or KRS is 10 digits, a REGON 9 or 14, a
@@ -218,7 +227,7 @@ tenant of the node. The edge uses a container only once it says, on its
 socket, the manifest its image's label said. A new image is applied like
 any other change to the spec: the agent starts its container at once, and
 stops the old one two minutes later. A request still under way on it
-then, such as a long stream, passes on without what was left to count. An image that no longer counts a metric a tenant's own limit
+then, such as a long stream, is cut. An image that no longer counts a metric a tenant's own limit
 names is refused until that limit goes. A local image (`sha256:<id>`,
 with a note saying so) runs only where it is; push it to a registry for a
 cluster.
@@ -310,10 +319,12 @@ What the edge does around a container:
 - **The request.** The container sees the method, the path after the
   plugin's name, the query, the headers, the hosts it may send it to and
   the plugin's config. It sees the body too, up to the manifest's
-  `requestBody` (at most 16 MB; larger bodies are answered `413`), of the
-  media types `requestBodyTypes` names, or of any. A plugin that needs no
-  body reads none, and bodies of any size, or of another type, then pass as
-  they come. It never sees the tenant's
+  `requestBody` (at most 16 MB), of the media types `requestBodyTypes`
+  names, or of any. A longer body is answered `413`, or, for a manifest
+  with `passLongBodies`, passes on unread, the request saying
+  `bodyTooLong`, as openai passes files in base64 and estimates them by
+  their length. A plugin that needs no body reads none, and bodies of any
+  size, or of another type, then pass as they come. It never sees the tenant's
   credentials (`Authorization`, `X-Api-Key`, `Cookie` and the key's own
   header or parameter).
 - **Where it goes.** The container answers a URL, which must be
@@ -356,8 +367,7 @@ What the edge does around a container:
   most three bodies of 16 MB under way to it at once, two of one
   tenant's, chunks of answers and events counted with them, and waits up
   to a second for room before a request is answered `503`
-  (`murder_plugin_busy`), or an answer passes without what was left to
-  count. A meter keeps what it reads in little memory: `pluginsdk.Kept`
+  (`murder_plugin_busy`), or an answer it was reading is cut (below). A meter keeps what it reads in little memory: `pluginsdk.Kept`
   keeps a short answer whole, and of a long one its head and its tail,
   where JSON says its model and usage. A plugin in Go has `GOMEMLIMIT` set
   below its memory. The engine starts it again when it stops, as at
@@ -365,10 +375,15 @@ What the edge does around a container:
 - **Failures.** A container that fails, panics, runs out of time or does
   what it may not before the request goes on gets the request answered
   `502`; one not running yet, or that says another manifest, `503`. One
-  that fails after it went on lets the answer pass, without what was still
-  to count. That is a way past a hard limit for as long as the plugin
-  fails. The edge logs each failure and counts them in
+  that fails on an answer it reads, a chunk or an event, cuts the answer
+  there: the rest would pass uncounted, a way past a hard limit. It is
+  still told the answer ended, and counts what it was shown, or an
+  estimate. The edge logs each failure and counts them in
   `murder_plugin_failures_total`.
+- **Its config.** A manifest that names the fields of its config
+  (`ui.config`) has a spec's config checked against them as the plugin is
+  applied: no field it does not name, each `text` (the default) or a
+  `list` of texts, each matching its `pattern` if it has one.
 
 ### The interface, for other languages
 
@@ -407,11 +422,14 @@ The JSON, version 3:
 manifest  {"abi": 3, "name": "x", "version": "1.0.0", "hosts": ["api.x.example"],
            "key": {"header": "X-Key", "prefix": ""} | {"query": "key"} | {"body": true},
            "metrics": ["tokens"], "requestBody": 1048576, "requestBodyTypes": ["application/json"],
+           "passLongBodies": false,
            "ui": {"title", "description", "detail": "model",
                   "metrics": [{"name": "tokens", "label": "Tokens", "unit": "tokens"}],
-                  "config": [{"name": "allow", "label": "More endpoints", "help": "..."}]}}
+                  "config": [{"name": "allow", "label": "More endpoints", "help": "...",
+                              "type": "text" | "list", "pattern": "^(GET|POST) /"}]}}
 request   {"tenant", "plugin", "method", "path", "query", "header": {"Name": ["value"]},
-           "hosts": ["api.x.example"], "config": {...}, "keyMark": "murder-key-…", "bodyFollows": true}
+           "hosts": ["api.x.example"], "config": {...}, "keyMark": "murder-key-…",
+           "bodyFollows": true, "bodyTooLong": false}
            \n<the body>
 forward   {"url", "header": {...}, "drop": [...], "replaceBody": false,
            "detail": "", "meter": false, "replaceAnswer": false}

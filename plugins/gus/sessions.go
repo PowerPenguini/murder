@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"regexp"
 	"sync"
 	"time"
 
@@ -113,16 +114,34 @@ func (l *login) Body([]byte, *pluginsdk.Counter) bool                  { return 
 func (l *login) End(bool, *pluginsdk.Counter)                          {}
 
 func (l *login) Replace(r *pluginsdk.Response, body []byte, _ *pluginsdk.Counter) ([]byte, error) {
-	start := bytes.Index(body, []byte("<ZalogujResult>"))
-	end := bytes.Index(body, []byte("</ZalogujResult>"))
-	if r.Status != 200 || start < 0 || end < start {
-		// A fault, or a key BIR1 did not take (an empty result): no
-		// session to hide.
+	// Anything the plugin cannot read for sure withholds the answer: it
+	// may hold BIR1's session.
+	opened := resultOpen.FindAllIndex(body, -1)
+	found := result.FindAllSubmatch(body, -1)
+	switch {
+	case len(found) != len(opened) || len(found) > 1:
+		return nil, errors.New("BIR1's login answered a result the plugin cannot read")
+	case len(found) == 0 && r.Status == 200:
+		return nil, errors.New("BIR1's login answered success, and no result")
+	case len(found) == 0:
+		// A fault: no session to hide.
 		return body, nil
 	}
-	sid := string(body[start+len("<ZalogujResult>") : end])
+	sid := string(bytes.TrimSpace(found[0][1]))
+	if sid == "" {
+		// A key BIR1 did not take: an empty result.
+		return body, nil
+	}
 	if !sessionID.MatchString(sid) {
 		return nil, errors.New("BIR1's login answered a session the plugin cannot read")
 	}
 	return bytes.ReplaceAll(body, []byte(sid), []byte(known.open(l.tenant, sid))), nil
 }
+
+// A login's result, its element of any prefix and attributes: resultOpen
+// finds each that begins, result each the plugin reads, empty or holding
+// text alone.
+var (
+	resultOpen = regexp.MustCompile(`<(?:[A-Za-z_][\w.-]*:)?ZalogujResult\b`)
+	result     = regexp.MustCompile(`<(?:[A-Za-z_][\w.-]*:)?ZalogujResult\b[^<>]*?(?:/>|>([^<]*)</(?:[A-Za-z_][\w.-]*:)?ZalogujResult\s*>)`)
+)

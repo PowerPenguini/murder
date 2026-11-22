@@ -30,7 +30,10 @@ func (k *Kept) Add(chunk []byte) {
 			k.head = append(k.head, chunk...)
 			return
 		}
+		// The tail goes on from the end of the head: a field cut where
+		// the head ends is read whole in the tail.
 		k.long = true
+		k.tail = append(make([]byte, 0, 2*keptTail), k.head[max(len(k.head)-keptTail, 0):]...)
 	}
 	k.tail = append(k.tail, chunk...)
 	if len(k.tail) > 2*keptTail {

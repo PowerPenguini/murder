@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"mime"
 	"net/url"
 	"strconv"
@@ -45,8 +46,11 @@ var manifest = pluginsdk.Manifest{
 	Metrics: []string{metricTokens, metricInputTokens, metricOutputTokens, metricCachedTokens, metricEstimatedTokens},
 	// A JSON body is read, for its model and whether it streams; audio and
 	// images to edit pass on as they come.
+	// A longer one, as of images or files in base64, passes on unread, its
+	// tokens estimated by its length.
 	RequestBody:      16 << 20,
 	RequestBodyTypes: []string{"application/json"},
+	PassLongBodies:   true,
 	UI: &pluginsdk.UI{
 		Title:       "OpenAI",
 		Description: "OpenAI's API, or one that speaks it: tokens counted from each answer's usage, by the model that answered.",
@@ -60,8 +64,10 @@ var manifest = pluginsdk.Manifest{
 			{Name: "requests", Label: "Requests", Unit: "requests"},
 		},
 		Config: []pluginsdk.ConfigUI{
-			{Name: "upstream", Label: "Upstream", Help: "Where the API is, as https://api.groq.com/openai: one of the plugin's hosts, and a path. The first of its hosts if left out."},
-			{Name: "allow", Label: "More endpoints", Help: "Endpoints passed on beyond those whose use is counted, as POST /v1/batches: what they keep, every tenant reaches under the one key."},
+			{Name: "upstream", Label: "Upstream", Help: "Where the API is, as https://api.groq.com/openai: one of the plugin's hosts, and a path. The first of its hosts if left out.",
+				Pattern: `^https://[A-Za-z0-9.-]+(:443)?(/[^?#\s]*)?$`},
+			{Name: "allow", Label: "More endpoints", Help: "Endpoints passed on beyond those whose use is counted, as POST /v1/batches: what they keep, every tenant reaches under the one key.",
+				Type: "list", Pattern: `^(GET|HEAD|POST|PUT|PATCH|DELETE) /[^\s]*$`},
 		},
 	},
 }
@@ -126,20 +132,33 @@ func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
 	} else if length, err := strconv.ParseInt(r.Get("Content-Length"), 10, 64); err == nil {
 		m.size = length
 	}
-	var request struct {
-		Model         string          `json:"model"`
-		Stream        bool            `json:"stream"`
-		StreamOptions json.RawMessage `json:"stream_options"`
+	if r.BodyTooLong {
+		// Longer than the plugin reads: passed on unread, and estimated by
+		// its length.
+		m.size = max(m.size, manifest.RequestBody+1)
 	}
-	if r.Body != nil && json.Unmarshal(r.Body, &request) == nil {
-		m.model, m.stream = request.Model, request.Stream
+	// The fields are read as the provider reads them, by their names as
+	// written: one written twice, or in another case, could be read
+	// another way by the plugin than by the provider.
+	fields, isObject, err := fieldsOf(r.Body, "model", "stream", "stream_options")
+	if err != nil {
+		return nil, pluginsdk.Refuse(400, "%v", err)
+	}
+	if isObject {
+		_ = json.Unmarshal(fields["model"].value, &m.model)
+		m.stream = string(fields["stream"].value) == "true"
+		options, named := fields["stream_options"]
+		asked, err := askedUsage(options.value)
+		if err != nil {
+			return nil, pluginsdk.Refuse(400, "stream_options: %v", err)
+		}
 		// A streamed chat completion says what it used only if asked: it is
 		// asked, and the chunk that says it taken out of what the tenant
 		// gets, as the tenant did not ask.
-		if request.Stream && strings.HasSuffix(path, "chat/completions") && !askedUsage(request.StreamOptions) {
+		if m.stream && strings.HasSuffix(path, "chat/completions") && !asked {
 			// A body the edge would not send, past what the plugin reads,
 			// is sent as it was: its use is estimated.
-			if rewritten, ok := askUsage(r.Body, request.StreamOptions != nil); ok && len(rewritten) <= int(manifest.RequestBody) {
+			if rewritten := askUsage(r.Body, options, named); len(rewritten) <= int(manifest.RequestBody) {
 				to.Body, m.strip = rewritten, true
 			}
 		}
@@ -183,49 +202,128 @@ func allowed(endpoints []string, method, path string) bool {
 	return false
 }
 
-// askedUsage reports whether a request's stream_options ask for the usage.
-func askedUsage(options json.RawMessage) bool {
-	var asked struct {
-		IncludeUsage bool `json:"include_usage"`
-	}
-	return options != nil && json.Unmarshal(options, &asked) == nil && asked.IncludeUsage
+// askedUsage reports whether a request's stream_options ask for the
+// usage: include_usage, as written, is true.
+func askedUsage(options []byte) (bool, error) {
+	fields, _, err := fieldsOf(options, "include_usage")
+	return string(fields["include_usage"].value) == "true", err
 }
 
 // askUsage sets stream_options.include_usage in a request's body, keeping
-// the rest as it was. A body that names no stream_options gets them first,
-// as written: a long body is not read and written again.
-func askUsage(body []byte, named bool) ([]byte, bool) {
+// the rest as it was written: a long body is not read and written again.
+func askUsage(body []byte, options field, named bool) []byte {
 	if !named {
-		rest := bytes.TrimLeft(body, " \t\r\n")
-		if len(rest) == 0 || rest[0] != '{' {
-			return nil, false
+		open := bytes.IndexByte(body, '{') + 1
+		next := bytes.TrimLeft(body[open:], " \t\r\n")
+		insert := `"stream_options":{"include_usage":true}`
+		if len(next) > 0 && next[0] != '}' {
+			insert += ","
 		}
-		rest = rest[1:]
-		out := make([]byte, 0, len(body)+40)
-		out = append(out, `{"stream_options":{"include_usage":true}`...)
-		if next := bytes.TrimLeft(rest, " \t\r\n"); len(next) > 0 && next[0] != '}' {
-			out = append(out, ',')
+		return splice(body, open, open, insert)
+	}
+	inner, isObject, _ := fieldsOf(options.value, "include_usage")
+	switch {
+	case !isObject:
+		return splice(body, options.start, options.start+len(options.value), `{"include_usage":true}`)
+	case inner["include_usage"].value != nil:
+		at := options.start + inner["include_usage"].start
+		return splice(body, at, at+len(inner["include_usage"].value), "true")
+	}
+	open := options.start + bytes.IndexByte(options.value, '{') + 1
+	insert := `"include_usage":true`
+	if next := bytes.TrimLeft(body[open:], " \t\r\n"); len(next) > 0 && next[0] != '}' {
+		insert += ","
+	}
+	return splice(body, open, open, insert)
+}
+
+// splice is data with what is from start to end replaced with text.
+func splice(data []byte, start, end int, text string) []byte {
+	out := make([]byte, 0, len(data)-(end-start)+len(text))
+	return append(append(append(out, data[:start]...), text...), data[end:]...)
+}
+
+// field is a field's value in a JSON object, as written, and where it
+// starts.
+type field struct {
+	value []byte
+	start int
+}
+
+// fieldsOf reads the named fields of a JSON object, by their names as
+// written, as the provider reads them: a name the object writes twice, or
+// in another case, is refused. isObject is unset for data that is no JSON
+// object, which is passed on as it is.
+func fieldsOf(data []byte, names ...string) (fields map[string]field, isObject bool, err error) {
+	fields = map[string]field{}
+	if !json.Valid(data) {
+		return fields, false, nil
+	}
+	i := skipSpace(data, 0)
+	if data[i] != '{' {
+		return fields, false, nil
+	}
+	for i = skipSpace(data, i+1); data[i] != '}'; {
+		end := skipValue(data, i)
+		var name string
+		if err := json.Unmarshal(data[i:end], &name); err != nil {
+			return nil, true, err
 		}
-		return append(out, rest...), true
-	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(body, &fields) != nil {
-		return nil, false
-	}
-	options := map[string]json.RawMessage{}
-	if raw, ok := fields["stream_options"]; ok && string(raw) != "null" {
-		if json.Unmarshal(raw, &options) != nil {
-			return nil, false
+		i = skipSpace(data, skipSpace(data, end)+1) // past the colon
+		end = skipValue(data, i)
+		for _, want := range names {
+			switch {
+			case !strings.EqualFold(name, want):
+			case name != want:
+				return nil, true, fmt.Errorf("the body names %q: the field is %s, as written", name, want)
+			case fields[want].value != nil:
+				return nil, true, fmt.Errorf("the body names %s twice", want)
+			default:
+				fields[want] = field{value: data[i:end], start: i}
+			}
+		}
+		if i = skipSpace(data, end); data[i] == ',' {
+			i = skipSpace(data, i+1)
 		}
 	}
-	options["include_usage"] = json.RawMessage("true")
-	encoded, err := json.Marshal(options)
-	if err != nil {
-		return nil, false
+	return fields, true, nil
+}
+
+func skipSpace(data []byte, i int) int {
+	for i < len(data) && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n') {
+		i++
 	}
-	fields["stream_options"] = encoded
-	rewritten, err := json.Marshal(fields)
-	return rewritten, err == nil
+	return i
+}
+
+// skipValue is the end of the value of valid JSON that starts at i.
+func skipValue(data []byte, i int) int {
+	switch data[i] {
+	case '"':
+		for i++; data[i] != '"'; i++ {
+			if data[i] == '\\' {
+				i++
+			}
+		}
+		return i + 1
+	case '{', '[':
+		for depth := 0; ; i++ {
+			switch data[i] {
+			case '"':
+				i = skipValue(data, i) - 1
+			case '{', '[':
+				depth++
+			case '}', ']':
+				if depth--; depth == 0 {
+					return i + 1
+				}
+			}
+		}
+	}
+	for i < len(data) && !strings.ContainsRune(",}] \t\r\n", rune(data[i])) {
+		i++
+	}
+	return i
 }
 
 // usage is what an answer says it used: Chat Completions and Embeddings

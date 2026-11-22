@@ -369,6 +369,80 @@ func TestAContainerCountsWhatItReadsInTheAnswer(t *testing.T) {
 	}
 }
 
+// An answer whose metering fails on its way is cut, as the rest would
+// pass uncounted; the container is still told it ended, and counts what
+// it was shown.
+func TestAnAnswerWhoseMeteringFailsIsCutAndStillEnded(t *testing.T) {
+	for _, path := range []string{"/failbody", "/failevent"} {
+		w := newContainerFixture(t, func(rw http.ResponseWriter, r *http.Request) {
+			first, rest := "first", "boom, and what follows"
+			if r.URL.Path == "/failevent" {
+				rw.Header().Set("Content-Type", "text/event-stream")
+				first, rest = "data: first\n\n", "data: boom\n\ndata: what follows\n\n"
+			}
+			io.WriteString(rw, first)
+			rw.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+			io.WriteString(rw, rest)
+		}, nil)
+		response, body := w.get(t, "127.0.0.1", path)
+		w.upstream(t)
+		if response.StatusCode != http.StatusOK || !strings.Contains(body, "first") || strings.Contains(body, "follows") {
+			t.Errorf("%s: %d %q", path, response.StatusCode, body)
+		}
+		if got := w.used("bytes"); got != 5 {
+			t.Errorf("%s: %d bytes counted at the end, not the 5 shown", path, got)
+		}
+	}
+}
+
+// A config is checked, as a plugin is applied, against the fields its
+// manifest names: no other, each of its type, and of its pattern.
+func TestAConfigIsCheckedAgainstTheFieldsTheManifestNames(t *testing.T) {
+	manifest := Manifest{UI: &UI{Config: []ConfigUI{
+		{Name: "upstream", Pattern: `^https://`},
+		{Name: "allow", Type: ConfigList, Pattern: `^(GET|POST) /`},
+	}}}
+	spec := Spec{Kind: KindContainer, Image: testImage, Config: map[string]any{"upstream": "https://x.example", "allow": []any{"POST /v1/batches"}}}
+	if err := spec.ValidateWith(&manifest); err != nil {
+		t.Fatal(err)
+	}
+	for name, config := range map[string]map[string]any{
+		"a field it does not name": {"alow": []any{"POST /v1/batches"}},
+		"text for a list":          {"allow": "POST /v1/batches"},
+		"not of its pattern":       {"allow": []any{"POST/v1/batches"}},
+		"a list for text":          {"upstream": []any{"https://x.example"}},
+		"a number for text":        {"upstream": 1},
+	} {
+		spec.Config = config
+		if err := spec.ValidateWith(&manifest); err == nil {
+			t.Errorf("%s was taken", name)
+		}
+	}
+	// A manifest that names no fields takes any config.
+	if err := spec.ValidateWith(&Manifest{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []ConfigUI{{Name: "a", Type: "number"}, {Name: "a", Pattern: "("}} {
+		if (Manifest{ABI: ABI, Name: "x", Hosts: []string{"x.example"}, Key: KeyPlace{Header: "X-Key"}, UI: &UI{Config: []ConfigUI{bad}}}).Validate() == nil {
+			t.Errorf("%+v was taken", bad)
+		}
+	}
+}
+
+// A file of a kind Murder once ran itself, of the fields it took, is told
+// what to write in its place.
+func TestAFileOfAFormerKindSaysWhatItIsNow(t *testing.T) {
+	for file, want := range map[string]string{
+		"kind: openai\nupstream: https://api.groq.com/openai\nallow: [POST /v1/batches]\n": "image ghcr.io/powerpenguini/murder-openai, its upstream and allow under config",
+		"kind: here\nhosts: [geocode.search.hereapi.com]\n":                                "image ghcr.io/powerpenguini/murder-here",
+	} {
+		if _, err := Parse([]byte(file)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v", file, err)
+		}
+	}
+}
+
 func TestAContainerRewritesTheBodyItRead(t *testing.T) {
 	w := newContainerFixture(t, ok, nil)
 	request, _ := http.NewRequest(http.MethodPost, w.server.URL+"/p/rewrite", strings.NewReader("hello"))

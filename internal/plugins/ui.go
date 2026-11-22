@@ -3,6 +3,8 @@ package plugins
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -31,11 +33,64 @@ type MetricUI struct {
 }
 
 // ConfigUI is a field of a plugin's config: its name, a label and what it
-// is for.
+// is for, and what it takes: text, or a list of texts, each matching
+// Pattern if it names one. A manifest that names its config's fields has
+// a spec's config checked against them as the plugin is applied.
 type ConfigUI struct {
-	Name  string `json:"name"`
-	Label string `json:"label,omitempty"`
-	Help  string `json:"help,omitempty"`
+	Name    string `json:"name"`
+	Label   string `json:"label,omitempty"`
+	Help    string `json:"help,omitempty"`
+	Type    string `json:"type,omitempty"`
+	Pattern string `json:"pattern,omitempty"`
+}
+
+// The types of a field of config: text, the default, or a list of texts.
+const (
+	ConfigText = "text"
+	ConfigList = "list"
+)
+
+// checkConfig says what is wrong with a config, of fields a manifest
+// names: none it does not name, and each of its type and pattern.
+func checkConfig(config map[string]any, fields []ConfigUI) error {
+	var problems []string
+	for _, name := range slices.Sorted(maps.Keys(config)) {
+		i := slices.IndexFunc(fields, func(f ConfigUI) bool { return f.Name == name })
+		if i < 0 {
+			names := make([]string, len(fields))
+			for j, f := range fields {
+				names[j] = f.Name
+			}
+			problems = append(problems, fmt.Sprintf("config: the plugin takes no %s (it takes %s)", name, strings.Join(names, ", ")))
+			continue
+		}
+		field := fields[i]
+		pattern, _ := regexp.Compile(field.Pattern)
+		var texts []any
+		if field.Type == ConfigList {
+			list, ok := config[name].([]any)
+			if !ok {
+				problems = append(problems, fmt.Sprintf("config: %s is a list", name))
+				continue
+			}
+			texts = list
+		} else {
+			texts = []any{config[name]}
+		}
+		for _, value := range texts {
+			text, ok := value.(string)
+			switch {
+			case !ok:
+				problems = append(problems, fmt.Sprintf("config: %s takes text, not %v", name, value))
+			case field.Pattern != "" && !pattern.MatchString(text):
+				problems = append(problems, fmt.Sprintf("config: %s: %q is not as the plugin takes (%s)", name, text, field.Pattern))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // UIOf is how the panel shows a plugin: as its manifest says, every
@@ -117,6 +172,12 @@ func (u UI) validate(metrics []string) error {
 	for _, c := range u.Config {
 		if c.Name == "" || !printable(c.Name, 64) || !printable(c.Label, 48) || !printable(c.Help, 300) {
 			problems = append(problems, fmt.Sprintf("ui: config field %q: a name of at most 64 characters, a label of 48 and help of 300", c.Name))
+		}
+		if c.Type != "" && c.Type != ConfigText && c.Type != ConfigList {
+			problems = append(problems, fmt.Sprintf("ui: config field %s: type %q is %s or %s", c.Name, c.Type, ConfigText, ConfigList))
+		}
+		if _, err := regexp.Compile(c.Pattern); err != nil || len(c.Pattern) > 256 {
+			problems = append(problems, fmt.Sprintf("ui: config field %s: a pattern is a regular expression of at most 256 characters", c.Name))
 		}
 	}
 	if len(problems) > 0 {

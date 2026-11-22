@@ -306,32 +306,44 @@ type exchange struct {
 // as it comes: a body that says it is long takes no room it did not send.
 const bodyChunk = 256 << 10
 
-// readBodyUpTo reads a request's body of at most limit bytes.
-func (x *exchange) readBodyUpTo(r *http.Request, limit int) ([]byte, error) {
-	var body []byte
+// readBodyUpTo reads a request's body of at most limit bytes. A longer
+// one is refused, or, passLong, passed on unread: what was read of it
+// goes first, the rest as it comes, and tooLong says so.
+func (x *exchange) readBodyUpTo(r *http.Request, limit int, passLong bool) (body []byte, tooLong bool, err error) {
 	chunk := make([]byte, bodyChunk)
 	for {
 		if !x.proxy.reserve(x.tenant, bodyChunk) {
-			return nil, statusError{code: http.StatusServiceUnavailable, message: "the edge holds too many request bodies at once; try again"}
+			return nil, false, statusError{code: http.StatusServiceUnavailable, message: "the edge holds too many request bodies at once; try again"}
 		}
 		x.reserved += bodyChunk
 		n, err := io.ReadFull(r.Body, chunk)
 		body = append(body, chunk[:n]...)
 		if len(body) > limit {
-			return nil, statusError{code: http.StatusRequestEntityTooLarge, message: fmt.Sprintf("a body is at most %d MB", limit>>20)}
+			if !passLong {
+				return nil, false, statusError{code: http.StatusRequestEntityTooLarge, message: fmt.Sprintf("a body is at most %d MB", limit>>20)}
+			}
+			r.Body = readCloser{io.MultiReader(bytes.NewReader(body), r.Body), r.Body}
+			r.GetBody = nil
+			return nil, true, nil
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
-			return nil, statusError{code: http.StatusBadRequest, message: "the request's body could not be read"}
+			return nil, false, statusError{code: http.StatusBadRequest, message: "the request's body could not be read"}
 		}
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
-	return body, nil
+	return body, false, nil
+}
+
+// readCloser reads from one reader, and closes another.
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 // releaseBody gives the room for the request's body back.

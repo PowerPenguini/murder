@@ -51,8 +51,11 @@ type Manifest struct {
 	Metrics []string `json:"metrics,omitempty"`
 	// RequestBody is the most bytes of a request's body it reads, at most
 	// 16 MB; 0 reads none, and bodies pass on as they come. A larger body
-	// is refused (413).
+	// is refused (413), unless PassLongBodies.
 	RequestBody int64 `json:"requestBody,omitempty"`
+	// PassLongBodies has a body longer than RequestBody pass on unread, in
+	// place of refused: Request.Body is nil, and Request.BodyTooLong set.
+	PassLongBodies bool `json:"passLongBodies,omitempty"`
 	// RequestBodyTypes are the media types of the bodies it reads, as
 	// application/json; others pass on as they come, at any size, and
 	// Request.Body is nil. None reads a body of any type.
@@ -84,11 +87,16 @@ type MetricUI struct {
 }
 
 // ConfigUI is a field of the plugin's config: its name in the config, a
-// label, and what it is for.
+// label, and what it is for, and what it takes: Type text (the default)
+// or list, of texts, each matching Pattern if it names one. A manifest
+// that names its config's fields has a spec's config checked against
+// them as the plugin is applied: no other field, and each as it says.
 type ConfigUI struct {
-	Name  string `json:"name"`
-	Label string `json:"label,omitempty"`
-	Help  string `json:"help,omitempty"`
+	Name    string `json:"name"`
+	Label   string `json:"label,omitempty"`
+	Help    string `json:"help,omitempty"`
+	Type    string `json:"type,omitempty"`
+	Pattern string `json:"pattern,omitempty"`
 }
 
 // Key is where the key goes on a request: in a header, after a prefix, as
@@ -129,6 +137,9 @@ type Request struct {
 	// Body is the request's body, up to the manifest's RequestBody; nil
 	// for none, or when the manifest reads none or none of its type.
 	Body []byte `json:"-"`
+	// BodyTooLong says the body was longer than RequestBody, and passes on
+	// unread, for a manifest that has PassLongBodies.
+	BodyTooLong bool `json:"bodyTooLong,omitempty"`
 
 	ctx context.Context
 }

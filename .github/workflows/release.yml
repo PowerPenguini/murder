@@ -105,8 +105,11 @@ jobs:
         run: |
           owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
           printf '%s' "$GH_TOKEN" | skopeo login ghcr.io -u "$ACTOR" --password-stdin
+          # latest moves only for a release, not for a pre-release (v1.2.0-rc.1).
+          tags="$TAG"
+          case "$TAG" in *-*) ;; *) tags="$TAG latest" ;; esac
           for plugin in openai here gus; do
-            for tag in "$TAG" latest; do
+            for tag in $tags; do
               skopeo copy --all "oci-archive:images/murder-$plugin.tar" "docker://ghcr.io/$owner/murder-$plugin:$tag"
             done
           done

@@ -19,6 +19,9 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"regexp"
 	"slices"
 	"strings"
@@ -45,8 +48,10 @@ var manifest = pluginsdk.Manifest{
 	Key:     pluginsdk.Key{Body: true},
 	Metrics: []string{metricSearches, metricReports},
 	// A call is a short envelope, read to be written again.
-	RequestBody:      1 << 20,
-	RequestBodyTypes: []string{"application/soap+xml", "text/xml", "application/xml"},
+	RequestBody: 1 << 20,
+	// A client that writes MTOM sends its envelope as the root part of a
+	// multipart/related body.
+	RequestBodyTypes: []string{"application/soap+xml", "text/xml", "application/xml", "multipart/related"},
 	UI: &pluginsdk.UI{
 		Title:       "GUS REGON",
 		Description: "GUS's REGON database (BIR1): companies found by NIP, REGON or KRS, and their reports, with the operator's key; searches counted by what they search by, reports by name.",
@@ -153,7 +158,11 @@ func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
 	if r.Body == nil {
 		return nil, pluginsdk.Refuse(415, "a call to BIR1 is a SOAP envelope, of type application/soap+xml")
 	}
-	operation, c, err := read(r.Body)
+	data, err := envelopeOf(r.Get("Content-Type"), r.Body)
+	if err != nil {
+		return nil, pluginsdk.Refuse(400, "%v", err)
+	}
+	operation, c, err := read(data)
 	if err != nil {
 		return nil, pluginsdk.Refuse(400, "%v", err)
 	}
@@ -191,6 +200,32 @@ func forward(r *pluginsdk.Request) (*pluginsdk.Forward, error) {
 		to.Drop = []string{"Sid"}
 	}
 	return to, nil
+}
+
+// envelopeOf is the envelope of a call: its body, or the root part of an
+// MTOM call's, which holds it as XML (BIR1's parameters are all text: no
+// part is included in it).
+func envelopeOf(contentType string, body []byte) ([]byte, error) {
+	media, params, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.EqualFold(media, "multipart/related") {
+		return body, nil
+	}
+	parts := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	start := strings.Trim(params["start"], "<>")
+	for {
+		part, err := parts.NextRawPart()
+		if err != nil {
+			return nil, errors.New("the MTOM call has no root part that holds its envelope")
+		}
+		if start != "" && strings.Trim(part.Header.Get("Content-ID"), "<>") != start {
+			continue
+		}
+		root, err := io.ReadAll(part)
+		if err != nil {
+			return nil, errors.New("the MTOM call's root part cannot be read")
+		}
+		return root, nil
+	}
 }
 
 // read reads a tenant's envelope, of SOAP 1.2, as BIR1 speaks: the

@@ -697,3 +697,24 @@ func TestAContainersMetricsAreCountedAndHeld(t *testing.T) {
 		t.Fatalf("events %+v", events)
 	}
 }
+
+// A plugin read is a copy: what is done to its manifest is not done to the
+// state.
+func TestAPluginReadIsACopyOfItsManifest(t *testing.T) {
+	st, _ := openNew(t, options())
+	manifest := openAIManifest()
+	manifest.RequestBodyTypes = []string{"application/json"}
+	manifest.UI = &plugins.UI{Title: "OpenAI", Metrics: []plugins.MetricUI{{Name: "tokens"}}, Config: []plugins.ConfigUI{{Name: "allow"}}}
+	if _, _, err := st.PutPlugin("openai", openAISpec(), manifest, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	read, _ := st.Plugin("openai")
+	read.Manifest.RequestBodyTypes[0] = "text/plain"
+	read.Manifest.UI.Title = "changed"
+	read.Manifest.UI.Metrics[0].Name = "changed"
+	read.Manifest.UI.Config[0].Name = "changed"
+	again, _ := st.Plugin("openai")
+	if again.Manifest.RequestBodyTypes[0] != "application/json" || again.Manifest.UI.Title != "OpenAI" || again.Manifest.UI.Metrics[0].Name != "tokens" || again.Manifest.UI.Config[0].Name != "allow" {
+		t.Fatalf("the state changed: %+v %+v", again.Manifest.RequestBodyTypes, *again.Manifest.UI)
+	}
+}

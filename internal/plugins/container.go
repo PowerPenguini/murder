@@ -295,6 +295,9 @@ type (
 		KeyMark string `json:"keyMark,omitempty"`
 		// BodyFollows says the request's body follows the JSON.
 		BodyFollows bool `json:"bodyFollows,omitempty"`
+		// BodyTooLong says the body was longer than the manifest reads,
+		// and passes on unread.
+		BodyTooLong bool `json:"bodyTooLong,omitempty"`
 	}
 	moduleForward struct {
 		URL    string              `json:"url"`
@@ -391,7 +394,7 @@ var failure = statusError{code: http.StatusBadGateway, message: "the plugin's co
 func (h *containerHandler) fail(stage string, err error) {
 	h.failed = true
 	h.x.proxy.containerFailed(h.x.plugin)
-	h.x.proxy.log.Error("a plugin's container failed; what it was to count after is not counted", "plugin", h.x.plugin, "tenant", h.x.tenant, "stage", stage,
+	h.x.proxy.log.Error("a plugin's container failed: the request is refused, or its answer withheld or cut", "plugin", h.x.plugin, "tenant", h.x.tenant, "stage", stage,
 		"error", h.scrub(err.Error()))
 }
 
@@ -417,11 +420,13 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 	}
 	var body []byte
 	read := h.manifest.RequestBody > 0 && r.Body != nil && r.Body != http.NoBody && h.readsType(r.Header.Get("Content-Type"))
+	tooLong := false
 	if read {
 		var err error
-		if body, err = h.x.readBodyUpTo(r, int(h.manifest.RequestBody)); err != nil {
+		if body, tooLong, err = h.x.readBodyUpTo(r, int(h.manifest.RequestBody), h.manifest.PassLongBodies); err != nil {
 			return nil, err
 		}
+		read = !tooLong
 	}
 	header := r.Header.Clone()
 	for _, name := range append(slices.Clip(credentials), h.manifest.Key.Header) {
@@ -437,7 +442,7 @@ func (h *containerHandler) request(r *http.Request, rest string) (*url.URL, erro
 	if h.manifest.Key.Body {
 		mark = "murder-key-" + newSession()
 	}
-	input, err := json.Marshal(moduleRequest{Tenant: h.x.tenant, Plugin: h.x.plugin, Method: r.Method, Path: "/" + rest, Query: query, Header: header, Hosts: h.hosts, Config: h.x.spec.Config, KeyMark: mark, BodyFollows: read})
+	input, err := json.Marshal(moduleRequest{Tenant: h.x.tenant, Plugin: h.x.plugin, Method: r.Method, Path: "/" + rest, Query: query, Header: header, Hosts: h.hosts, Config: h.x.spec.Config, KeyMark: mark, BodyFollows: read, BodyTooLong: tooLong})
 	if err != nil {
 		return nil, err
 	}
@@ -736,19 +741,26 @@ func (h *containerHandler) replaceAnswer(response *http.Response) error {
 	return nil
 }
 
+// cut is what ends an answer whose metering failed on its way: the rest
+// would pass without being counted.
+var cut = errors.New("the plugin's container failed to meter the answer; the rest of it is cut")
+
 // event shows the container the data of one event of a stream; it
-// reports whether the event stays in the answer. Only the container's
-// answer takes it out: one that failed keeps every event.
-func (h *containerHandler) event(data []byte) bool {
+// reports whether the event stays in the answer. A container that fails
+// cuts the answer.
+func (h *containerHandler) event(data []byte) (bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.failed || h.ended {
-		return true
+	if h.failed {
+		return false, cut
+	}
+	if h.ended {
+		return true, nil
 	}
 	release, ok := h.container.hold(h.x.tenant, int64(len(data)), callBody)
 	if !ok {
 		h.fail("event", errors.New("its container had no room for the event in time: the tenant has too many under way"))
-		return true
+		return false, cut
 	}
 	answer, err := h.container.call(callBody, http.MethodPost, "/event", h.session, data, maxAnswer)
 	release()
@@ -762,9 +774,9 @@ func (h *containerHandler) event(data []byte) bool {
 	}
 	if err != nil {
 		h.fail("event", err)
-		return true
+		return false, cut
 	}
-	return said.Keep
+	return said.Keep, nil
 }
 
 // metered makes a call that answers counts, and counts them.
@@ -807,17 +819,21 @@ func (h *containerHandler) count(name string, metered moduleMetered) error {
 }
 
 // chunk shows the container a chunk of the answer's body; it reports
-// whether the container wants more.
-func (h *containerHandler) chunk(data []byte) bool {
+// whether the container wants more. A container that fails cuts the
+// answer.
+func (h *containerHandler) chunk(data []byte) (bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.failed || h.ended {
-		return false
+	if h.failed {
+		return false, cut
+	}
+	if h.ended {
+		return false, nil
 	}
 	release, ok := h.container.hold(h.x.tenant, int64(len(data)), callBody)
 	if !ok {
 		h.fail("body", errors.New("its container had no room for the answer in time: the tenant has too many under way"))
-		return false
+		return false, cut
 	}
 	answer, err := h.container.call(callBody, http.MethodPost, "/body", h.session, data, maxAnswer)
 	release()
@@ -831,24 +847,30 @@ func (h *containerHandler) chunk(data []byte) bool {
 	}
 	if err != nil {
 		h.fail("body", err)
-		return false
+		return false, cut
 	}
-	return said.More
+	return said.More, nil
 }
 
 // end tells the container the answer ended, its body read whole or not,
 // and counts what it says. A container that meters the request is told
-// so even when no body was read, so that it lets go of the request.
+// so even when no body was read, so that it lets go of the request, and
+// even when it failed on the way: it counts what it was shown, or an
+// estimate.
 func (h *containerHandler) end(complete bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.ended || h.failed || !h.meter {
+	if h.ended || !h.meter {
 		return
 	}
 	h.ended = true
-	input, _ := json.Marshal(moduleEnd{Complete: complete && h.reading})
+	input, _ := json.Marshal(moduleEnd{Complete: complete && h.reading && !h.failed})
 	if _, err := h.metered("/end", callEnd, input); err != nil {
-		h.fail("end", err)
+		if !h.failed {
+			h.fail("end", err)
+		} else {
+			h.x.proxy.log.Warn("a plugin's container that failed did not count the end of the answer", "plugin", h.x.plugin, "tenant", h.x.tenant, "error", h.scrub(err.Error()))
+		}
 	}
 }
 
@@ -865,7 +887,13 @@ type containerBody struct {
 func (b *containerBody) Read(buffer []byte) (int, error) {
 	n, err := b.body.Read(buffer)
 	if n > 0 && !b.enough {
-		b.enough = !b.h.chunk(buffer[:n])
+		more, failed := b.h.chunk(buffer[:n])
+		if failed != nil {
+			b.done = true
+			b.h.end(false)
+			return 0, failed
+		}
+		b.enough = !more
 	}
 	if err != nil && !b.done {
 		b.done = true
@@ -897,7 +925,7 @@ func (p *Proxy) WriteMetrics(out *metrics.Writer) {
 	if len(failures) == 0 {
 		return
 	}
-	out.Family("murder_plugin_failures_total", "counter", "How often a plugin's container failed, since the edge started: a request it failed before is answered 502, one after passes without what was left to count.")
+	out.Family("murder_plugin_failures_total", "counter", "How often a plugin's container failed, since the edge started: a request it failed before is answered 502, an answer it failed on is withheld or cut.")
 	for _, plugin := range slices.Sorted(maps.Keys(failures)) {
 		out.Sample("murder_plugin_failures_total", float64(failures[plugin]), "plugin", plugin)
 	}

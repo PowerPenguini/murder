@@ -63,8 +63,12 @@ type Manifest struct {
 	// metrics a plugin's limits may name.
 	Metrics []string `json:"metrics,omitempty"`
 	// RequestBody is the most bytes of a request's body it reads, at most
-	// MaxRequestBody; 0 reads none, and bodies pass on as they come.
+	// MaxRequestBody; 0 reads none, and bodies pass on as they come. A
+	// longer body is refused (413), unless PassLongBodies.
 	RequestBody int64 `json:"requestBody,omitempty"`
+	// PassLongBodies has a body longer than RequestBody pass on unread, in
+	// place of refused: the plugin is told so (BodyTooLong).
+	PassLongBodies bool `json:"passLongBodies,omitempty"`
 	// RequestBodyTypes are the media types of the bodies it reads, as
 	// application/json; others pass on as they come, at any size. None
 	// reads a body of any type.

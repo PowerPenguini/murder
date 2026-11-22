@@ -43,7 +43,7 @@ const GoMemoryLimit = "GOMEMLIMIT=224MiB"
 
 // Retire is how long a plugin's container is kept once its plugin went,
 // or runs another image, for the edge's requests to it to end: one still
-// under way then passes on without what was left to count.
+// under way then is cut.
 const Retire = 2 * time.Minute
 
 // Runtime is what the host needs of the container engine.

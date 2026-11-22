@@ -301,7 +301,8 @@ func TestAModelATenantMakesUpIsNoDetailOfItsOwn(t *testing.T) {
 }
 
 // A body of a type the plugin does not read passes on as it comes, at any
-// size; one of JSON it reads is held to what it reads.
+// size; so does one of JSON longer than it reads, as base64 files are,
+// which it passes unread (passLongBodies).
 func TestABodyOfAnotherTypePassesOnUnread(t *testing.T) {
 	var got int
 	w := newPluginFixture(t, "openai", Grant{}, func(rw http.ResponseWriter, r *http.Request) {
@@ -320,8 +321,8 @@ func TestABodyOfAnotherTypePassesOnUnread(t *testing.T) {
 		t.Fatalf("tokens %d", w.used("tokens"))
 	}
 	large := `{"model":"m","input":"` + strings.Repeat("x", MaxRequestBody) + `"}`
-	if response, _ := post(t, w, "/v1/embeddings", "application/json", large); response.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("JSON past what the plugin reads: %d", response.StatusCode)
+	if response, body := post(t, w, "/v1/embeddings", "application/json", large); response.StatusCode != 200 || got != len(large) {
+		t.Fatalf("JSON past what the plugin reads: %d %s, upstream got %d of %d bytes", response.StatusCode, body, got, len(large))
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -187,5 +188,74 @@ func TestSessionsAreBounded(t *testing.T) {
 	s.open("beta", "dddd")
 	if len(s.byToken) != 1 {
 		t.Fatalf("%d kept after an hour", len(s.byToken))
+	}
+}
+
+// A login's result is read whatever its element's prefix and attributes:
+// BIR1's session never passes; what the plugin cannot read for sure
+// withholds the answer.
+func TestALoginsResultIsReadHoweverItIsWritten(t *testing.T) {
+	const sid = "ey6nu6e2428xp3b434gx"
+	for _, answer := range []string{
+		`<a:ZalogujResult>` + sid + `</a:ZalogujResult>`,
+		`<ZalogujResult xmlns="http://CIS/BIR/PUBL/2014/07">` + sid + `</ZalogujResult>`,
+		`<b:ZalogujResult xmlns:b="x"> ` + sid + "\n</b:ZalogujResult >",
+	} {
+		body := []byte(`<s:Envelope><s:Body><ZalogujResponse>` + answer + `</ZalogujResponse></s:Body></s:Envelope>`)
+		replaced, err := (&login{tenant: "acme"}).Replace(&pluginsdk.Response{Status: 200}, body, nil)
+		if err != nil || strings.Contains(string(replaced), sid) {
+			t.Errorf("%s: %s %v", answer, replaced, err)
+		}
+	}
+	for status, answers := range map[int][]string{
+		200: {
+			`<ZalogujResult><![CDATA[` + sid + `]]></ZalogujResult>`,
+			`<ZalogujResult>` + sid + `</ZalogujResult><ZalogujResult>` + sid + `</ZalogujResult>`,
+			`<ZalogujResult>&#101;y6nu6e2428xp3b434gx</ZalogujResult>`,
+			`<ZalogujResult>` + sid,
+			`<ZalogujResponse>` + sid + `</ZalogujResponse>`,
+		},
+		500: {`<ZalogujResult>` + sid + `!</ZalogujResult>`},
+	} {
+		for _, answer := range answers {
+			if replaced, err := (&login{tenant: "acme"}).Replace(&pluginsdk.Response{Status: status}, []byte(answer), nil); err == nil {
+				t.Errorf("%d %s: passed as %s", status, answer, replaced)
+			}
+		}
+	}
+	// An empty result, of a key BIR1 did not take, and a fault, pass as
+	// they were.
+	for status, answer := range map[int]string{
+		200: `<ZalogujResponse><a:ZalogujResult></a:ZalogujResult></ZalogujResponse>`,
+		201: `<ZalogujResponse><ZalogujResult i:nil="true"/></ZalogujResponse>`,
+		500: `<s:Fault><s:Reason>no</s:Reason></s:Fault>`,
+	} {
+		if replaced, err := (&login{tenant: "acme"}).Replace(&pluginsdk.Response{Status: status}, []byte(answer), nil); err != nil || string(replaced) != answer {
+			t.Errorf("%d %s: %s %v", status, answer, replaced, err)
+		}
+	}
+}
+
+// A client that writes MTOM sends its envelope as the root part of a
+// multipart/related body: it is read from there.
+func TestAnMTOMCallIsReadFromItsRootPart(t *testing.T) {
+	envelope := soap12(`<ns:DaneSzukajPodmioty><ns:pParametryWyszukiwania><dat:Nip>5261040828</dat:Nip></ns:pParametryWyszukiwania></ns:DaneSzukajPodmioty>`)
+	body := "--b\r\nContent-ID: <other>\r\nContent-Type: application/octet-stream\r\n\r\nnot it\r\n" +
+		"--b\r\nContent-ID: <root@x>\r\nContent-Type: application/xop+xml; type=\"application/soap+xml\"\r\n\r\n" + string(envelope) + "\r\n--b--\r\n"
+	r := request([]byte(body))
+	r.Header = map[string][]string{"Content-Type": {`multipart/related; type="application/xop+xml"; boundary=b; start="<root@x>"; start-info="application/soap+xml"`}}
+	to, err := forward(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := to.Meter.(*meter); to.Detail != "DaneSzukajPodmioty" || m.detail != "nip" || m.amount != 1 {
+		t.Fatalf("%+v %+v", to, m)
+	}
+	r.Header["Content-Type"] = []string{`multipart/related; boundary=b; start="<none>"`}
+	if _, err := forward(r); err == nil {
+		t.Fatal("an MTOM call without its root part was taken")
+	}
+	if !slices.Contains(manifest.RequestBodyTypes, "multipart/related") {
+		t.Fatal("the edge does not read an MTOM call")
 	}
 }
