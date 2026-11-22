@@ -171,7 +171,10 @@ var sessionShape = regexp.MustCompile(`[A-Za-z0-9]{20,}`)
 func withNoSession(r *pluginsdk.Response, body []byte, token string) ([]byte, error) {
 	texts := [][]byte{body}
 	if envelope, err := envelopeOf(r.Get("Content-Type"), body); err == nil {
+		// An element's text is read whole, however it is cut: by CDATA,
+		// comments or instructions, as a client joins it.
 		decoder := xml.NewDecoder(bytes.NewReader(envelope))
+		var text []byte
 		for {
 			read, err := decoder.Token()
 			if err != nil {
@@ -179,13 +182,17 @@ func withNoSession(r *pluginsdk.Response, body []byte, token string) ([]byte, er
 			}
 			switch read := read.(type) {
 			case xml.CharData:
-				texts = append(texts, bytes.Clone(read))
+				text = append(text, read...)
 			case xml.StartElement:
+				texts, text = append(texts, text), nil
 				for _, attr := range read.Attr {
 					texts = append(texts, []byte(attr.Value))
 				}
+			case xml.EndElement:
+				texts, text = append(texts, text), nil
 			}
 		}
+		texts = append(texts, text)
 	}
 	for _, text := range texts {
 		for _, word := range sessionShape.FindAll(text, -1) {

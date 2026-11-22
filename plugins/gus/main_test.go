@@ -284,6 +284,8 @@ func TestALoginsPackageIsOfOnePart(t *testing.T) {
 		"--b\r\nContent-ID: <root>\r\nX-Sid: ey6nu6e2428xp3b434gx\r\n\r\n" + empty + "\r\n--b--\r\n",
 		part("root", `<s:Envelope a="ey6nu6e2428xp3b434gx"><ZalogujResult/></s:Envelope>`) + "--b--\r\n",
 		part("root", `<s:Envelope><x>&#101;y6nu6e2428xp3b434gx</x><ZalogujResult/></s:Envelope>`) + "--b--\r\n",
+		part("root", `<s:Envelope><x>ey6nu6e242<![CDATA[8xp3b434gx]]></x><ZalogujResult/></s:Envelope>`) + "--b--\r\n",
+		part("root", `<s:Envelope><x>ey6nu6e242<!-- -->8xp3b434gx</x><ZalogujResult/></s:Envelope>`) + "--b--\r\n",
 		part("root", `<s:Envelope><x>&#101;y6nu6e2428xp3b434gx</x><ZalogujResult>ey6nu6e2428xp3b434gx</ZalogujResult></s:Envelope>`) + "--b--\r\n",
 	} {
 		if replaced, err := (&login{tenant: "acme"}).Replace(response, []byte(bad), nil); err == nil {
